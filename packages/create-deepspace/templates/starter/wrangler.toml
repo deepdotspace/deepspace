@@ -1,0 +1,50 @@
+name = "__APP_NAME__"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+main = "worker.ts"
+
+[assets]
+directory = "dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/ws/*", "/internal/*", "/v1/*", "/_deepspace/*"]
+
+# The app's immutable identity (docs: app-identity). `name` above is just the
+# subdomain label the next deploy claims; this id never changes — data,
+# secrets, and collaborators all key to it. Renames are safe.
+[vars]
+DEEPSPACE_APP_ID = "__APP_ID__"
+APP_NAME = "__APP_NAME__"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AppRecordRoom", "AppYjsRoom", "AppCanvasRoom", "AppPresenceRoom", "AppCronRoom", "AppJobRoom"]
+
+[durable_objects]
+bindings = [
+  { name = "RECORD_ROOMS", class_name = "AppRecordRoom" },
+  { name = "YJS_ROOMS", class_name = "AppYjsRoom" },
+  { name = "CANVAS_ROOMS", class_name = "AppCanvasRoom" },
+  { name = "PRESENCE_ROOMS", class_name = "AppPresenceRoom" },
+  { name = "CRON_ROOMS", class_name = "AppCronRoom" },
+  { name = "JOB_ROOMS", class_name = "AppJobRoom" },
+]
+
+# For per-app resources (D1, KV, Vectorize, R2, Queues), set the id field to
+# "auto" — DeepSpace provisions and tears down with the deploy. Example:
+#
+# [[d1_databases]]
+# binding = "MY_DB"
+# database_name = "my-app-db"
+# database_id = "auto"
+#
+# Full reference (all binding types + companion fields):
+#   https://docs.deep.space
+
+# --- DeepSpace detected secrets (names only; values live in `npx deepspace secrets`) ---
+#   (none declared)
+# --- end DeepSpace detected secrets ---
+
+[dev]
+port = 8780
+inspector_port = 9237

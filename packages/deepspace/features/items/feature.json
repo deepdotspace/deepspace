@@ -1,0 +1,33 @@
+{
+  "id": "items",
+  "name": "Items",
+  "category": "data",
+  "description": "CRUD items with ownership, status toggling, and role-based access",
+  "details": "Reference implementation for basic CRUD with useQuery and useMutations. Items have owner-based permissions (own items editable, others read-only), active/archived status toggle, and role-based create access.",
+  "files": [
+    {
+      "src": "src/ItemsPage.tsx",
+      "dest": "src/pages/items.tsx"
+    },
+    {
+      "src": "src/items-schema.ts",
+      "dest": "src/schemas/items-schema.ts"
+    },
+    {
+      "src": "src/items-constants.ts",
+      "dest": "src/components/items/items-constants.ts"
+    }
+  ],
+  "schema": {
+    "exportName": "itemsSchema",
+    "importPath": "./schemas/items-schema",
+    "spreadOperator": false
+  },
+  "route": {
+    "path": "/items",
+    "protected": true
+  },
+  "requires": [],
+  "instructions": [],
+  "patterns": []
+}

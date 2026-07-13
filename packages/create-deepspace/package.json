@@ -1,0 +1,46 @@
+{
+  "name": "create-deepspace",
+  "version": "0.5.6",
+  "engines": {
+    "node": ">=22.15.0"
+  },
+  "description": "Create a new DeepSpace app",
+  "type": "module",
+  "bin": {
+    "create-deepspace": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "pnpm build && bash scripts/test-in-place.sh",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.2.0",
+    "cross-spawn": "^7.0.6"
+  },
+  "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://deep.space",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/deepdotspace/deepspace.git",
+    "directory": "packages/create-deepspace"
+  },
+  "bugs": {
+    "url": "https://github.com/deepdotspace/deepspace/issues"
+  },
+  "keywords": [
+    "deepspace",
+    "create",
+    "scaffold",
+    "cloudflare-workers"
+  ]
+}

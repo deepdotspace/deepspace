@@ -1,0 +1,19 @@
+{
+  "id": "sidebar",
+  "name": "Sidebar",
+  "category": "nav",
+  "description": "Collapsible left navigation sidebar with role-based filtering",
+  "details": "Animated sidebar with collapsed icon-only mode, expanded mode with labels and user chip, mobile overlay drawer, localStorage persistence, role-based nav filtering via useUser, and active state via react-router-dom.",
+  "files": [
+    {
+      "src": "src/AppSidebar.tsx",
+      "dest": "src/components/sidebar/AppSidebar.tsx"
+    }
+  ],
+  "requires": [],
+  "instructions": [
+    "Import AppSidebar and SidebarMobileHeader into your layout",
+    "Configure nav items array with paths, icons, and optional role restrictions"
+  ],
+  "patterns": []
+}

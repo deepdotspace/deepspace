@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<!--
+  Active theme is set on the <html> element below.
+  To switch themes, change `data-theme` to any id defined in src/themes.ts.
+  Color values per theme live in src/themes.css.
+-->
+<html lang="en" data-theme="slate">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="/favicon.ico" />
+    <title>DeepSpace App</title>
+    <!--
+      First-paint background, keyed to the data-theme attribute above.
+      Without this the browser paints white until the CSS bundle arrives —
+      a hard flash on the dark themes. Each value mirrors --color-background
+      in src/styles.css (slate) / src/themes.css; keep them in sync when
+      adding or editing themes.
+    -->
+    <style>
+      html { background-color: #0a0a0a; color-scheme: dark; }
+      html[data-theme="ink"] { background-color: #0d0a14; }
+      html[data-theme="aurora"] { background-color: #080a0e; }
+      html[data-theme="midnight"] { background-color: #0a0f1c; }
+      html[data-theme="forest"] { background-color: #1a2820; }
+      html[data-theme="ember"] { background-color: #0c0806; }
+      html[data-theme="graphite"] { background-color: #0c0c0d; }
+      html[data-theme="noir"] { background-color: #050505; }
+      html[data-theme="linen"] { background-color: #f8f7f5; color-scheme: light; }
+      html[data-theme="mist"] { background-color: #f1f5f9; color-scheme: light; }
+      html[data-theme="sand"] { background-color: #fffbf5; color-scheme: light; }
+      html[data-theme="bloom"] { background-color: #fff5f9; color-scheme: light; }
+      html[data-theme="paper"] { background-color: #ffffff; color-scheme: light; }
+      html[data-theme="lavender"] { background-color: #faf5ff; color-scheme: light; }
+      html[data-theme="citrus"] { background-color: #fefce8; color-scheme: light; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

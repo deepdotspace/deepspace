@@ -1,0 +1,33 @@
+{
+  "id": "tasks",
+  "name": "Tasks",
+  "category": "data",
+  "description": "Claimable task system with submissions, grading, and difficulty levels",
+  "details": "Task/challenge system demonstrating advanced schema features: unclaimed-or-own permissions for claiming, writableFields for restricting member updates, timestampTrigger for automatic timestamps, and admin grading workflow with pass/fail/excellent grades.",
+  "files": [
+    {
+      "src": "src/TasksPage.tsx",
+      "dest": "src/pages/tasks.tsx"
+    },
+    {
+      "src": "src/tasks-schema.ts",
+      "dest": "src/schemas/tasks-schema.ts"
+    },
+    {
+      "src": "src/tasks-constants.ts",
+      "dest": "src/components/tasks/tasks-constants.ts"
+    }
+  ],
+  "schema": {
+    "exportName": "challengesSchema",
+    "importPath": "./schemas/tasks-schema",
+    "spreadOperator": false
+  },
+  "route": {
+    "path": "/tasks",
+    "protected": true
+  },
+  "requires": [],
+  "instructions": [],
+  "patterns": []
+}

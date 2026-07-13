@@ -1,0 +1,50 @@
+{
+  "id": "testing",
+  "name": "Testing",
+  "category": "data",
+  "description": "E2E test page exercising RBAC and CRUD against RecordRoom",
+  "details": "Test infrastructure page used by Playwright e2e tests. Displays current role, creates/reads/updates/deletes test items, and verifies RBAC permission enforcement. Also installs cpu-burn and subrequest-burn server actions that intentionally exceed the dispatch worker's per-invocation limits — used by the e2e dispatch-limits spec to assert denial-of-wallet protection fires.",
+  "files": [
+    {
+      "src": "src/TestPage.tsx",
+      "dest": "src/pages/test.tsx"
+    },
+    {
+      "src": "src/test-schema.ts",
+      "dest": "src/schemas/test-schema.ts"
+    },
+    {
+      "src": "src/cpu-burn-action.ts",
+      "dest": "src/actions/cpu-burn.ts"
+    },
+    {
+      "src": "src/subrequest-burn-action.ts",
+      "dest": "src/actions/subrequest-burn.ts"
+    }
+  ],
+  "schema": {
+    "exportName": "testItemsSchema",
+    "importPath": "./schemas/test-schema",
+    "spreadOperator": false
+  },
+  "actions": [
+    {
+      "exportName": "cpuBurnAction",
+      "registerAs": "cpu-burn",
+      "importPath": "./cpu-burn"
+    },
+    {
+      "exportName": "subrequestBurnAction",
+      "registerAs": "subrequest-burn",
+      "importPath": "./subrequest-burn"
+    }
+  ],
+  "route": {
+    "path": "/test",
+    "protected": false
+  },
+  "requires": [],
+  "instructions": [],
+  "patterns": [],
+  "internal": true
+}

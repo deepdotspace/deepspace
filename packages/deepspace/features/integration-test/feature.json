@@ -1,0 +1,25 @@
+{
+  "id": "integration-test",
+  "name": "Integration Tester",
+  "category": "data",
+  "description": "Test page for exercising integration API endpoints",
+  "details": "Lets you call any integration endpoint (OpenAI, weather, search, etc.) and see the result. Used by Playwright tests to verify the full integration proxy flow.",
+  "files": [
+    {
+      "src": "src/IntegrationTestPage.tsx",
+      "dest": "src/pages/integration-test.tsx"
+    },
+    {
+      "src": "src/integration.spec.ts",
+      "dest": "tests/integration.spec.ts"
+    }
+  ],
+  "route": {
+    "path": "/integration-test",
+    "protected": false
+  },
+  "requires": [],
+  "instructions": [],
+  "patterns": [],
+  "internal": true
+}

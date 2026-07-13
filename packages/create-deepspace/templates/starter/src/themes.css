@@ -1,0 +1,376 @@
+/*
+ * Theme overrides — applied via <html data-theme="<id>">.
+ *
+ * Default values live in `styles.css` (@theme block, slate).
+ * Each block below overrides the same shadcn tokens for one theme.
+ *
+ * To add a theme:
+ *   1. Copy a block, rename the selector, change the colors. If the new
+ *      theme is light-on-light, also include `color-scheme: light;` so
+ *      native form controls (calendar icons, scrollbars) match.
+ *   2. Add an entry to `src/themes.ts` so it shows up in the typed catalog.
+ *   3. Add the theme's --color-background to the first-paint <style> block
+ *      in index.html so the pre-CSS frame matches (no white flash).
+ */
+
+/* ── Dark themes ──────────────────────────────────────────── */
+
+/* Ink — warm-deep dark, violet accent (premium design tools) */
+[data-theme="ink"] {
+  --color-background: #0d0a14;
+  --color-foreground: #ebe8f0;
+  --color-card: #1a141f;
+  --color-card-foreground: #ebe8f0;
+  --color-popover: #1a141f;
+  --color-popover-foreground: #ebe8f0;
+  --color-primary: #a78bfa;
+  --color-primary-foreground: #1a0a2e;
+  --color-secondary: #251f30;
+  --color-secondary-foreground: #ebe8f0;
+  --color-muted: #251f30;
+  --color-muted-foreground: #a39bb5;
+  --color-accent: #2d2538;
+  --color-accent-foreground: #ebe8f0;
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #ffffff;
+  --color-border: rgba(80, 68, 110, 0.5);
+  --color-input: rgba(80, 68, 110, 0.5);
+  --color-ring: #a78bfa;
+  --shadow-card: 0 1px 2px 0 rgba(20, 15, 30, 0.2);
+  --shadow-card-hover: 0 2px 8px 0 rgba(20, 15, 30, 0.24);
+}
+
+/* Aurora — deep space cyan on near-black (futuristic, AI, cyber) */
+[data-theme="aurora"] {
+  --color-background: #080a0e;
+  --color-foreground: #f0f4f8;
+  --color-card: #0f1620;
+  --color-card-foreground: #f0f4f8;
+  --color-popover: #0f1620;
+  --color-popover-foreground: #f0f4f8;
+  --color-primary: #22d3ee;
+  --color-primary-foreground: #03131a;
+  --color-secondary: #131c28;
+  --color-secondary-foreground: #f0f4f8;
+  --color-muted: #131c28;
+  --color-muted-foreground: #7d99b3;
+  --color-accent: #131c28;
+  --color-accent-foreground: #f0f4f8;
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #ffffff;
+  --color-border: rgba(40, 56, 72, 0.6);
+  --color-input: rgba(40, 56, 72, 0.6);
+  --color-ring: #22d3ee;
+  --shadow-card: 0 1px 2px 0 rgba(0, 0, 0, 0.2), 0 0 8px rgba(34, 211, 238, 0.02);
+  --shadow-card-hover: 0 2px 8px 0 rgba(0, 0, 0, 0.24), 0 0 16px rgba(34, 211, 238, 0.04);
+}
+
+/* Midnight — deep navy with sky-blue (data, finance, analytics) */
+[data-theme="midnight"] {
+  --color-background: #0a0f1c;
+  --color-foreground: #e6ecf5;
+  --color-card: #141b2c;
+  --color-card-foreground: #e6ecf5;
+  --color-popover: #141b2c;
+  --color-popover-foreground: #e6ecf5;
+  --color-primary: #60a5fa;
+  --color-primary-foreground: #0a0f1c;
+  --color-secondary: #131829;
+  --color-secondary-foreground: #e6ecf5;
+  --color-muted: #131829;
+  --color-muted-foreground: #94a3b8;
+  --color-accent: #1c2438;
+  --color-accent-foreground: #e6ecf5;
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #ffffff;
+  --color-border: rgba(60, 80, 115, 0.5);
+  --color-input: rgba(60, 80, 115, 0.5);
+  --color-ring: #60a5fa;
+  --shadow-card: 0 1px 2px 0 rgba(5, 10, 25, 0.2);
+  --shadow-card-hover: 0 2px 8px 0 rgba(5, 10, 25, 0.24);
+}
+
+/* Forest — deep green with sage accent (calm, focus, wellness) */
+[data-theme="forest"] {
+  --color-background: #1a2820;
+  --color-foreground: #e8f0ec;
+  --color-card: #243530;
+  --color-card-foreground: #e8f0ec;
+  --color-popover: #243530;
+  --color-popover-foreground: #e8f0ec;
+  --color-primary: #7ab396;
+  --color-primary-foreground: #0d1810;
+  --color-secondary: #2d4035;
+  --color-secondary-foreground: #e8f0ec;
+  --color-muted: #2d4035;
+  --color-muted-foreground: #9bb3a4;
+  --color-accent: #3a5045;
+  --color-accent-foreground: #e8f0ec;
+  --color-destructive: #f87171;
+  --color-destructive-foreground: #ffffff;
+  --color-border: rgba(61, 85, 69, 0.6);
+  --color-input: rgba(61, 85, 69, 0.6);
+  --color-ring: #7ab396;
+  --shadow-card: 0 1px 2px 0 rgba(8, 16, 12, 0.2);
+  --shadow-card-hover: 0 2px 8px 0 rgba(8, 16, 12, 0.24);
+}
+
+/* Ember — warm near-black, amber accent (creative, cozy nights) */
+[data-theme="ember"] {
+  --color-background: #0c0806;
+  --color-foreground: #f8f0e8;
+  --color-card: #1a1410;
+  --color-card-foreground: #f8f0e8;
+  --color-popover: #1a1410;
+  --color-popover-foreground: #f8f0e8;
+  --color-primary: #ea580c;
+  --color-primary-foreground: #fff7ed;
+  --color-secondary: #100c08;
+  --color-secondary-foreground: #f8f0e8;
+  --color-muted: #100c08;
+  --color-muted-foreground: #a89380;
+  --color-accent: #1c1410;
+  --color-accent-foreground: #f8f0e8;
+  --color-destructive: #dc2626;
+  --color-destructive-foreground: #ffffff;
+  --color-border: rgba(58, 40, 24, 0.6);
+  --color-input: rgba(58, 40, 24, 0.6);
+  --color-ring: #ea580c;
+  --shadow-card: 0 1px 2px 0 rgba(20, 8, 0, 0.22);
+  --shadow-card-hover: 0 2px 8px 0 rgba(20, 8, 0, 0.26);
+}
+
+/* Graphite — pure dark monochrome (minimalist) */
+[data-theme="graphite"] {
+  --color-background: #0c0c0d;
+  --color-foreground: #e5e5e5;
+  --color-card: #161617;
+  --color-card-foreground: #e5e5e5;
+  --color-popover: #161617;
+  --color-popover-foreground: #e5e5e5;
+  --color-primary: #fafafa;
+  --color-primary-foreground: #0a0a0a;
+  --color-secondary: #1c1c1d;
+  --color-secondary-foreground: #e5e5e5;
+  --color-muted: #1c1c1d;
+  --color-muted-foreground: #a1a1a1;
+  --color-accent: #232325;
+  --color-accent-foreground: #e5e5e5;
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #ffffff;
+  --color-border: rgba(64, 64, 68, 0.55);
+  --color-input: rgba(64, 64, 68, 0.55);
+  --color-ring: rgba(250, 250, 250, 0.4);
+  --shadow-card: 0 1px 2px 0 rgba(0, 0, 0, 0.18);
+  --shadow-card-hover: 0 2px 8px 0 rgba(0, 0, 0, 0.22);
+}
+
+/* Noir — true black with crimson accent (dramatic, cinematic) */
+[data-theme="noir"] {
+  --color-background: #050505;
+  --color-foreground: #f5f5f5;
+  --color-card: #121212;
+  --color-card-foreground: #f5f5f5;
+  --color-popover: #121212;
+  --color-popover-foreground: #f5f5f5;
+  --color-primary: #e11d48;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #1a1a1a;
+  --color-secondary-foreground: #f5f5f5;
+  --color-muted: #1a1a1a;
+  --color-muted-foreground: #999999;
+  --color-accent: #1f1416;
+  --color-accent-foreground: #f5f5f5;
+  --color-destructive: #f87171;
+  --color-destructive-foreground: #ffffff;
+  --color-border: rgba(80, 80, 80, 0.45);
+  --color-input: rgba(80, 80, 80, 0.45);
+  --color-ring: #e11d48;
+  --shadow-card: 0 1px 2px 0 rgba(0, 0, 0, 0.26), 0 0 0 1px rgba(225, 29, 72, 0.05);
+  --shadow-card-hover: 0 2px 8px 0 rgba(0, 0, 0, 0.30), 0 0 0 1px rgba(225, 29, 72, 0.10);
+}
+
+/* ── Light themes ─────────────────────────────────────────── */
+
+/* Linen — warm off-white with sky-blue (default light, docs/blogs) */
+[data-theme="linen"] {
+  color-scheme: light;
+  --color-background: #f8f7f5;
+  --color-foreground: #1c1917;
+  --color-card: #ffffff;
+  --color-card-foreground: #1c1917;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #1c1917;
+  --color-primary: #0284c7;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #f0eeeb;
+  --color-secondary-foreground: #1c1917;
+  --color-muted: #f0eeeb;
+  --color-muted-foreground: #78716c;
+  --color-accent: #e7e5e4;
+  --color-accent-foreground: #1c1917;
+  --color-destructive: #dc2626;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #e7e5e4;
+  --color-input: #e7e5e4;
+  --color-ring: #0284c7;
+  --shadow-card: 0 1px 2px 0 rgba(28, 25, 23, 0.024);
+  --shadow-card-hover: 0 2px 8px 0 rgba(28, 25, 23, 0.04);
+}
+
+/* Mist — cool pale slate (calm, meditation, wellness) */
+[data-theme="mist"] {
+  color-scheme: light;
+  --color-background: #f1f5f9;
+  --color-foreground: #0f172a;
+  --color-card: #ffffff;
+  --color-card-foreground: #0f172a;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #0f172a;
+  --color-primary: #475569;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #e2e8f0;
+  --color-secondary-foreground: #0f172a;
+  --color-muted: #e2e8f0;
+  --color-muted-foreground: #64748b;
+  --color-accent: #cbd5e1;
+  --color-accent-foreground: #0f172a;
+  --color-destructive: #dc2626;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #cbd5e1;
+  --color-input: #cbd5e1;
+  --color-ring: #475569;
+  --shadow-card: 0 1px 2px 0 rgba(15, 23, 42, 0.024);
+  --shadow-card-hover: 0 2px 8px 0 rgba(15, 23, 42, 0.04);
+}
+
+/* Sand — cream with terracotta accent (lifestyle, journaling) */
+[data-theme="sand"] {
+  color-scheme: light;
+  --color-background: #fffbf5;
+  --color-foreground: #1c1917;
+  --color-card: #ffffff;
+  --color-card-foreground: #1c1917;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #1c1917;
+  --color-primary: #c2410c;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #fef3c7;
+  --color-secondary-foreground: #1c1917;
+  --color-muted: #fef3c7;
+  --color-muted-foreground: #92400e;
+  --color-accent: #fde68a;
+  --color-accent-foreground: #1c1917;
+  --color-destructive: #dc2626;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #fde68a;
+  --color-input: #fde68a;
+  --color-ring: #c2410c;
+  --shadow-card: 0 1px 2px 0 rgba(146, 64, 14, 0.032);
+  --shadow-card-hover: 0 2px 8px 0 rgba(146, 64, 14, 0.048);
+}
+
+/* Bloom — pale rose with pink accent (friendly, social, creative) */
+[data-theme="bloom"] {
+  color-scheme: light;
+  --color-background: #fff5f9;
+  --color-foreground: #3d0e2a;
+  --color-card: #ffffff;
+  --color-card-foreground: #3d0e2a;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #3d0e2a;
+  --color-primary: #ec4899;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #fce7f3;
+  --color-secondary-foreground: #3d0e2a;
+  --color-muted: #fce7f3;
+  --color-muted-foreground: #9d174d;
+  --color-accent: #fbcfe8;
+  --color-accent-foreground: #3d0e2a;
+  --color-destructive: #dc2626;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #fbcfe8;
+  --color-input: #fbcfe8;
+  --color-ring: #ec4899;
+  --shadow-card: 0 1px 2px 0 rgba(236, 72, 153, 0.04);
+  --shadow-card-hover: 0 2px 8px 0 rgba(236, 72, 153, 0.056);
+}
+
+/* Paper — pure white with near-black (typography, reading, e-readers) */
+[data-theme="paper"] {
+  color-scheme: light;
+  --color-background: #ffffff;
+  --color-foreground: #0a0a0a;
+  --color-card: #fafafa;
+  --color-card-foreground: #0a0a0a;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #0a0a0a;
+  --color-primary: #171717;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #f5f5f5;
+  --color-secondary-foreground: #0a0a0a;
+  --color-muted: #f5f5f5;
+  --color-muted-foreground: #525252;
+  --color-accent: #e5e5e5;
+  --color-accent-foreground: #0a0a0a;
+  --color-destructive: #dc2626;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #e5e5e5;
+  --color-input: #e5e5e5;
+  --color-ring: #171717;
+  --shadow-card: 0 1px 2px 0 rgba(0, 0, 0, 0.016);
+  --shadow-card-hover: 0 2px 8px 0 rgba(0, 0, 0, 0.032);
+}
+
+/* Lavender — pale purple with mauve (romantic, fashion, lifestyle) */
+[data-theme="lavender"] {
+  color-scheme: light;
+  --color-background: #faf5ff;
+  --color-foreground: #4c1d95;
+  --color-card: #ffffff;
+  --color-card-foreground: #4c1d95;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #4c1d95;
+  --color-primary: #8b5cf6;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #f3e8ff;
+  --color-secondary-foreground: #4c1d95;
+  --color-muted: #f3e8ff;
+  --color-muted-foreground: #7e6e91;
+  --color-accent: #e9d5ff;
+  --color-accent-foreground: #4c1d95;
+  --color-destructive: #dc2626;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #e9d5ff;
+  --color-input: #e9d5ff;
+  --color-ring: #8b5cf6;
+  --shadow-card: 0 1px 2px 0 rgba(139, 92, 246, 0.04);
+  --shadow-card-hover: 0 2px 8px 0 rgba(139, 92, 246, 0.056);
+}
+
+/* Citrus — light cream with lime accent (energetic, fitness, youth) */
+[data-theme="citrus"] {
+  color-scheme: light;
+  --color-background: #fefce8;
+  --color-foreground: #1f2937;
+  --color-card: #ffffff;
+  --color-card-foreground: #1f2937;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #1f2937;
+  --color-primary: #65a30d;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #fef9c3;
+  --color-secondary-foreground: #1f2937;
+  --color-muted: #fef9c3;
+  --color-muted-foreground: #4d5c63;
+  --color-accent: #fde047;
+  --color-accent-foreground: #1f2937;
+  --color-destructive: #dc2626;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #fde68a;
+  --color-input: #fde68a;
+  --color-ring: #65a30d;
+  --shadow-card: 0 1px 2px 0 rgba(101, 163, 13, 0.04);
+  --shadow-card-hover: 0 2px 8px 0 rgba(101, 163, 13, 0.056);
+}
+

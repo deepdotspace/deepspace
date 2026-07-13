@@ -1,0 +1,96 @@
+{
+  "id": "docs",
+  "name": "Documents",
+  "category": "data",
+  "description": "Real-time collaborative document editing with Tiptap + Yjs",
+  "details": "Document library with folders & favorites. Collaborative editor built on Tiptap (ProseMirror) with Y.XmlFragment via @tiptap/extension-collaboration and live remote cursors via @tiptap/extension-collaboration-caret — buttery typing, no innerHTML rebuilds, no contenteditable quirks. Invite-only docs with viewer/editor roles: owner shares via an in-app dialog that resolves an email to a DeepSpace user. RBAC is enforced by the documents schema and the starter template's built-in Yjs route. Includes a one-shot migration shim that converts docs created with the legacy contenteditable editor (HTML stored in Y.Text('content')) into Tiptap on first open.",
+  "files": [
+    {
+      "src": "src/DocsListPage.tsx",
+      "dest": "src/pages/docs/index.tsx"
+    },
+    {
+      "src": "src/DocsEditorPage.tsx",
+      "dest": "src/pages/docs/[docId].tsx"
+    },
+    {
+      "src": "src/InviteDialog.tsx",
+      "dest": "src/pages/docs/InviteDialog.tsx"
+    },
+    {
+      "src": "src/use-yjs-room-with-awareness.ts",
+      "dest": "src/pages/docs/use-yjs-room-with-awareness.ts"
+    },
+    {
+      "src": "src/docs-ui.css",
+      "dest": "src/pages/docs/docs-ui.css"
+    },
+    {
+      "src": "src/docs-schema.ts",
+      "dest": "src/schemas/docs-schema.ts"
+    },
+    {
+      "src": "src/docs-library-types.ts",
+      "dest": "src/pages/docs/docs-library-types.ts"
+    },
+    {
+      "src": "src/docs-favorites.ts",
+      "dest": "src/pages/docs/docs-favorites.ts"
+    },
+    {
+      "src": "src/LibrarySidebar.tsx",
+      "dest": "src/pages/docs/LibrarySidebar.tsx"
+    },
+    {
+      "src": "src/DocsPresence.tsx",
+      "dest": "src/pages/docs/DocsPresence.tsx"
+    },
+    {
+      "src": "src/DocsOutlinePanel.tsx",
+      "dest": "src/pages/docs/DocsOutlinePanel.tsx"
+    },
+    {
+      "src": "src/editor/useDocEditor.ts",
+      "dest": "src/pages/docs/editor/useDocEditor.ts"
+    },
+    {
+      "src": "src/editor/DocEditorSurface.tsx",
+      "dest": "src/pages/docs/editor/DocEditorSurface.tsx"
+    },
+    {
+      "src": "src/editor/DocsTiptapToolbar.tsx",
+      "dest": "src/pages/docs/editor/DocsTiptapToolbar.tsx"
+    }
+  ],
+  "schema": {
+    "exportName": "docsCollections",
+    "importPath": "./schemas/docs-schema",
+    "spreadOperator": true
+  },
+  "route": {
+    "path": "/docs",
+    "protected": true
+  },
+  "requires": [],
+  "dependencies": {
+    "@tiptap/react": "^3.22.0",
+    "@tiptap/pm": "^3.22.0",
+    "@tiptap/starter-kit": "^3.22.0",
+    "@tiptap/extension-collaboration": "^3.22.0",
+    "@tiptap/extension-collaboration-caret": "^3.22.0",
+    "@tiptap/extension-placeholder": "^3.22.0",
+    "@tiptap/extension-typography": "^3.22.0",
+    "@tiptap/extension-text-align": "^3.22.0",
+    "@tiptap/extension-text-style": "^3.22.0",
+    "@tiptap/extension-color": "^3.22.0",
+    "@tiptap/extension-highlight": "^3.22.0",
+    "@tiptap/extension-subscript": "^3.22.0",
+    "@tiptap/extension-superscript": "^3.22.0",
+    "@tiptap/extension-task-list": "^3.22.0",
+    "@tiptap/extension-task-item": "^3.22.0"
+  },
+  "instructions": [
+    "Run `npm install` (or your package manager) to install the Tiptap dependencies that were just added to package.json — the editor imports @tiptap/react and friends, so the dev server will fail to resolve them otherwise."
+  ],
+  "patterns": []
+}

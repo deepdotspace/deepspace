@@ -1,0 +1,45 @@
+{
+  "id": "file-attachments",
+  "name": "File Attachments",
+  "category": "data",
+  "description": "File upload with inline previews for images, videos, audio, PDF, code, CSV, DOCX, XLSX",
+  "details": "Adds a file attachments collection backed by R2 storage with useR2Files. Includes two hooks: useMimeTypeDetection (magic-byte MIME detection + 11 file categories) and useFilePreview (centralized preview with dynamic imports for PDF.js, CodeMirror, PapaParse, docx-preview, ExcelJS). Members can upload and manage their own files, admins can manage all.",
+  "files": [
+    { "src": "src/attachments-schema.ts", "dest": "src/schemas/attachments-schema.ts" },
+    { "src": "src/attachments-constants.ts", "dest": "src/constants/attachments-constants.ts" },
+    { "src": "src/useMimeTypeDetection.ts", "dest": "src/hooks/useMimeTypeDetection.ts" },
+    { "src": "src/useFilePreview.ts", "dest": "src/hooks/useFilePreview.ts" },
+    { "src": "src/AttachmentsPage.tsx", "dest": "src/pages/attachments.tsx" }
+  ],
+  "schema": {
+    "exportName": "attachmentsSchema",
+    "importPath": "./schemas/attachments-schema",
+    "spreadOperator": false
+  },
+  "route": {
+    "path": "/attachments",
+    "protected": true
+  },
+  "requires": [],
+  "dependencies": {
+    "file-type": "^19.6.0",
+    "@uiw/react-codemirror": "^4.23.0",
+    "@codemirror/lang-javascript": "^6.2.2",
+    "@codemirror/theme-one-dark": "^6.1.2",
+    "papaparse": "^5.4.1",
+    "docx-preview": "^0.3.5",
+    "exceljs": "^4.4.0",
+    "pdfjs-dist": "^4.7.76"
+  },
+  "devDependencies": {
+    "@types/papaparse": "^5.3.0"
+  },
+  "instructions": [],
+  "patterns": [
+    "useMimeTypeDetection() → { detectMimeType, getFileCategory, getExtension, canPreview }",
+    "useFilePreview({ url, fileName, mimeType }) → { category, canPreview, textContent, csvData, codeEditorKit, xlsxData, ... }",
+    "useR2Files() → { upload, downloadFile, readFile, deleteFile, list, getUrl, isUploading }",
+    "File metadata stored in collection, binary stored in R2",
+    "Dynamic imports: PDF.js for PDF, CodeMirror for code, PapaParse for CSV, docx-preview for DOCX, ExcelJS for XLSX"
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "id": "topbar",
+  "name": "Topbar",
+  "category": "nav",
+  "description": "Horizontal top navigation bar with search, user menu, and notifications",
+  "details": "Configurable top navigation bar component with logo/brand area, horizontal nav links with active state, optional search input, user avatar dropdown menu, and notification bell with badge count.",
+  "files": [
+    {
+      "src": "src/Topbar.tsx",
+      "dest": "src/components/topbar/Topbar.tsx"
+    }
+  ],
+  "requires": [],
+  "instructions": [
+    "Import Topbar into your layout and configure navItems, logo, and user props"
+  ],
+  "patterns": []
+}

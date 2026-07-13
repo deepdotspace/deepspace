@@ -1,0 +1,32 @@
+{
+  "id": "cron",
+  "name": "Cron Heartbeat",
+  "category": "data",
+  "description": "Scheduled background tasks via the per-app CronRoom DO",
+  "details": "Reference implementation of a working cron job. Registers a 1-minute 'heartbeat' task in src/cron.ts (consumed by AppCronRoom at construction time). Each fire is logged to the DO's cron_history table; /cron-log subscribes via useCronMonitor and renders live history. Useful both as a working example and as the basis for the cron e2e spec.",
+  "files": [
+    {
+      "src": "src/cron.ts",
+      "dest": "src/cron.ts"
+    },
+    {
+      "src": "src/CronLogPage.tsx",
+      "dest": "src/pages/cron-log.tsx"
+    }
+  ],
+  "route": {
+    "path": "/cron-log",
+    "protected": false
+  },
+  "requires": [],
+  "instructions": [
+    "Deploy the app: npm run deploy",
+    "Within ~90s, visit /cron-log on the deployed app — you should see one new row per minute as the AppCronRoom alarm fires the heartbeat task.",
+    "Open the page on a desktop browser and look at devtools → Network → WS → /ws/cron/app:<APP_NAME> to see live cron.* protocol frames."
+  ],
+  "patterns": [
+    "Task config lives in code (src/cron.ts), not JSON. AppCronRoom validates at construction time.",
+    "Per-app CronRoom DO shards work; no global KV bottleneck. CPU is correctly attributed to the app owner via the tail-worker.",
+    "Heartbeat tasks (intervalMinutes: 1) are useful as low-cost liveness probes for cron infrastructure."
+  ]
+}

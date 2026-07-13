@@ -1,0 +1,309 @@
+/**
+ * Docs feature UI — derives palette from the host app's design tokens (--color-* on
+ * shadcn/Tailwind starters, --theme-* / --ui-* when DeepSpaceThemeProvider applies a theme).
+ * No separate light/dark block: inherits whatever the root provides (e.g. [data-theme] changes).
+ */
+
+.docs-feature-scope {
+  --docs-el-bg: var(--color-background, var(--theme-background, #fafafa));
+  --docs-el-surface: var(
+    --color-card,
+    var(--theme-library-card-bg, var(--theme-panel-bg, #ffffff))
+  );
+  --docs-el-text: var(--color-foreground, var(--theme-text, #1d1d1f));
+  --docs-el-muted: var(
+    --color-muted-foreground,
+    var(--theme-text-secondary, var(--theme-text-tertiary, #86868b))
+  );
+  --docs-el-accent: var(--color-primary, var(--theme-accent, var(--ui-accent, #3b82f6)));
+  --docs-el-line: var(--color-border, var(--theme-border, rgba(15, 23, 42, 0.12)));
+
+  --docs-el-selection: var(
+    --color-primary-muted,
+    color-mix(in srgb, var(--docs-el-accent) 22%, transparent)
+  );
+
+  --docs-editor-desk: var(
+    --color-muted,
+    var(
+      --theme-library-surface,
+      var(--theme-surface-solid, var(--theme-surface, var(--docs-el-bg)))
+    )
+  );
+  --docs-editor-paper: #ffffff;
+  --docs-editor-paper-text: #111111;
+  --docs-editor-paper-muted: #6b7280;
+  --docs-editor-paper-border: var(--docs-el-line);
+  --docs-editor-paper-shadow: var(
+    --shadow-card,
+    var(--ui-shadow-md, 0 4px 12px rgba(15, 23, 42, 0.08))
+  );
+}
+
+/*
+ * Editor text selection ("cursor highlight") is intentionally NOT themed:
+ *   - Background uses a stable blue so the selection always reads as a
+ *     selection — themes whose accent is yellow/red don't make selection
+ *     look like a highlighter mark.
+ *   - `color: inherit` is REQUIRED, not optional. Browsers (Chromium, Safari,
+ *     Firefox) all repaint selected text in their own default contrast color
+ *     — usually white — when you set a `::selection` background without an
+ *     explicit `color`. That's what made selected text turn white. Forcing
+ *     `color: inherit` keeps the underlying text in its own color (default
+ *     black on the paper, or whatever the user picked via the text-color
+ *     toolbar).
+ *   - `-webkit-text-fill-color: inherit` is the same fix for Safari, which
+ *     would otherwise still override `color` inside `::selection`.
+ */
+.docs-paged-editor .ProseMirror ::selection,
+.docs-paged-editor .ProseMirror::selection {
+  background-color: #6aa8f3;
+  color: inherit;
+  -webkit-text-fill-color: inherit;
+}
+
+.docs-editor-paper {
+  background-color: var(--docs-editor-paper);
+  border: 1px solid var(--docs-editor-paper-border);
+  box-shadow: var(--docs-editor-paper-shadow);
+}
+
+.docs-paged-editor-canvas {
+  background-color: var(--docs-editor-desk);
+}
+
+.docs-presence-avatar,
+.docs-presence-more {
+  align-items: center;
+  background-color: color-mix(in srgb, var(--docs-el-accent) 14%, var(--docs-el-surface));
+  border: 2px solid var(--docs-el-surface);
+  border-radius: 9999px;
+  color: var(--docs-el-text);
+  display: inline-flex;
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  height: 30px;
+  justify-content: center;
+  line-height: 1;
+  overflow: hidden;
+  width: 30px;
+}
+
+.docs-presence-more {
+  cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    color 160ms ease;
+}
+
+.docs-presence-more:hover {
+  background-color: color-mix(in srgb, var(--docs-el-accent) 22%, var(--docs-el-surface));
+  color: var(--docs-el-accent);
+}
+
+.docs-paged-page-padding {
+  --docs-pad-v: 0.42in;
+  --docs-pad-h: 0.38in;
+  padding: var(--docs-pad-v) var(--docs-pad-h);
+}
+
+@media (min-width: 640px) {
+  .docs-paged-page-padding {
+    --docs-pad-v: 0.55in;
+    --docs-pad-h: 0.65in;
+  }
+}
+
+@media (min-width: 1024px) {
+  .docs-paged-page-padding {
+    --docs-pad-v: 0.62in;
+    --docs-pad-h: 0.75in;
+  }
+}
+
+.docs-paged-editor-font {
+  font-size: 11pt;
+  line-height: 1.4;
+  color: var(--docs-editor-paper-text);
+}
+
+@media (max-width: 640px) {
+  .docs-paged-editor-font {
+    font-size: 16px;
+    line-height: 1.6;
+  }
+}
+
+/* Tiptap ProseMirror canvas */
+.docs-paged-editor .ProseMirror,
+.docs-paged-editor .tiptap.ProseMirror,
+.docs-paged-editor .docs-tiptap-editor {
+  outline: none;
+  min-height: 1.6em;
+  caret-color: #000;
+  color: var(--docs-editor-paper-text);
+}
+
+.docs-paged-editor .ProseMirror p,
+.docs-paged-editor .ProseMirror li,
+.docs-paged-editor .ProseMirror h1,
+.docs-paged-editor .ProseMirror h2,
+.docs-paged-editor .ProseMirror h3,
+.docs-paged-editor .ProseMirror h4,
+.docs-paged-editor .ProseMirror h5,
+.docs-paged-editor .ProseMirror h6 {
+  margin: 0 0 0.45em;
+}
+
+.docs-paged-editor .ProseMirror h1 {
+  font-size: 1.9em;
+  font-weight: 700;
+  line-height: 1.2;
+  margin-top: 0.2em;
+}
+.docs-paged-editor .ProseMirror h2 {
+  font-size: 1.5em;
+  font-weight: 700;
+  line-height: 1.25;
+  margin-top: 0.15em;
+}
+.docs-paged-editor .ProseMirror h3 {
+  font-size: 1.25em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.docs-paged-editor .ProseMirror blockquote {
+  border-left: 3px solid var(--docs-el-line);
+  margin: 0.5em 0;
+  padding: 0.1em 0.85em;
+  color: var(--docs-editor-paper-muted);
+}
+
+.docs-paged-editor .ProseMirror ul,
+.docs-paged-editor .ProseMirror ol {
+  padding-left: 1.4em;
+  margin: 0 0 0.45em;
+}
+
+.docs-paged-editor .ProseMirror ul[data-type='taskList'] {
+  list-style: none;
+  padding: 0;
+}
+
+.docs-paged-editor .ProseMirror ul[data-type='taskList'] li {
+  align-items: flex-start;
+  display: flex;
+  gap: 0.5em;
+}
+
+.docs-paged-editor .ProseMirror ul[data-type='taskList'] li > label {
+  flex: none;
+  margin-top: 0.25em;
+}
+
+.docs-paged-editor .ProseMirror hr {
+  border: none;
+  border-top: 1px solid var(--docs-el-line);
+  margin: 1em 0;
+}
+
+.docs-paged-editor .ProseMirror a {
+  color: var(--docs-el-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.docs-paged-editor .ProseMirror code {
+  background-color: color-mix(in srgb, var(--docs-el-muted) 14%, transparent);
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+  padding: 0.1em 0.3em;
+}
+
+.docs-paged-editor .ProseMirror mark,
+.docs-paged-editor .ProseMirror .docs-text-highlight {
+  background-color: #bfdbfe;
+  color: var(--docs-editor-paper-text);
+}
+
+.docs-paged-editor .ProseMirror mark *,
+.docs-paged-editor .ProseMirror .docs-text-highlight * {
+  color: var(--docs-editor-paper-text) !important;
+}
+
+/* Placeholder (from @tiptap/extension-placeholder) — applied to the first empty paragraph. */
+.docs-paged-editor .ProseMirror p.is-editor-empty:first-child::before {
+  color: var(--docs-editor-paper-muted);
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
+/* Soft page break: decoration spacer that fills the rest of the current page. */
+.docs-soft-page-break {
+  display: block;
+  flex: none;
+  width: 100%;
+  pointer-events: none;
+  user-select: none;
+}
+
+@media print {
+  .docs-soft-page-break {
+    display: none !important;
+  }
+}
+
+/* CollaborationCaret — remote cursor & label rendered by the extension. */
+.collaboration-carets__caret {
+  border-left: 1px solid var(--collaboration-caret-color, #2563eb);
+  border-right: 1px solid var(--collaboration-caret-color, #2563eb);
+  margin-left: -1px;
+  margin-right: -1px;
+  pointer-events: none;
+  position: relative;
+  word-break: normal;
+}
+
+.collaboration-carets__label {
+  border-radius: 3px;
+  color: #111111;
+  font-size: 11px;
+  font-weight: 600;
+  font-style: normal;
+  left: -1px;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  padding: 0.1em 0.35em;
+  position: absolute;
+  top: -1.4em;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.ProseMirror-yjs-selection,
+.collaboration-carets__selection {
+  border-radius: 1px;
+}
+
+/*
+ * Print: the on-screen editor inherits the host theme's foreground color via
+ * --docs-el-text (often a light gray on dark themes), but the print canvas is
+ * forced to white. Without this override, the printed page comes out blank.
+ */
+@media print {
+  .docs-paged-page-face {
+    background-color: #ffffff !important;
+  }
+  .docs-paged-editor {
+    color: var(--docs-editor-paper-text) !important;
+  }
+  .collaboration-carets__caret,
+  .collaboration-carets__label {
+    display: none !important;
+  }
+}

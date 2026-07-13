@@ -1,0 +1,62 @@
+{
+  "id": "landing",
+  "name": "Landing Page",
+  "category": "landing",
+  "description": "Animated landing page with hero, showcase, FAQ, CTA, and footer",
+  "details": "Full landing page shell with typewriter hero, scroll-triggered animations, glassmorphic cards, FAQ accordion, CTA section, and footer. Includes reusable primitives (Typewriter, ScrollReveal, GlassCard, BrowserMockup) and 9 optional section components.",
+  "files": [
+    {
+      "src": "src/LandingPage.tsx",
+      "dest": "src/pages/landing.tsx"
+    },
+    {
+      "src": "src/primitives.tsx",
+      "dest": "src/components/landing/primitives.tsx"
+    },
+    {
+      "src": "src/sections/FAQSection.tsx",
+      "dest": "src/components/landing/sections/FAQSection.tsx"
+    },
+    {
+      "src": "src/sections/FeaturesGridSection.tsx",
+      "dest": "src/components/landing/sections/FeaturesGridSection.tsx"
+    },
+    {
+      "src": "src/sections/HowItWorksSection.tsx",
+      "dest": "src/components/landing/sections/HowItWorksSection.tsx"
+    },
+    {
+      "src": "src/sections/LogoCloudSection.tsx",
+      "dest": "src/components/landing/sections/LogoCloudSection.tsx"
+    },
+    {
+      "src": "src/sections/ShowcaseSection.tsx",
+      "dest": "src/components/landing/sections/ShowcaseSection.tsx"
+    },
+    {
+      "src": "src/sections/StatsSection.tsx",
+      "dest": "src/components/landing/sections/StatsSection.tsx"
+    },
+    {
+      "src": "src/sections/TeamSection.tsx",
+      "dest": "src/components/landing/sections/TeamSection.tsx"
+    },
+    {
+      "src": "src/sections/TestimonialsSection.tsx",
+      "dest": "src/components/landing/sections/TestimonialsSection.tsx"
+    },
+    {
+      "src": "src/sections/VideoSection.tsx",
+      "dest": "src/components/landing/sections/VideoSection.tsx"
+    }
+  ],
+  "route": {
+    "path": "/landing",
+    "protected": false
+  },
+  "requires": [],
+  "instructions": [
+    "Configure APP_NAME, HERO_HEADLINE, HERO_SUBHEADLINE, FAQ_ITEMS etc. in LandingPage.tsx"
+  ],
+  "patterns": []
+}

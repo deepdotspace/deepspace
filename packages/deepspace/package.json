@@ -1,0 +1,139 @@
+{
+  "name": "deepspace",
+  "version": "0.5.6",
+  "engines": {
+    "node": ">=22.15.0"
+  },
+  "description": "DeepSpace SDK — build real-time collaborative apps on Cloudflare Workers",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "deepspace": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
+    }
+  },
+  "files": [
+    "dist",
+    "features",
+    "scripts"
+  ],
+  "scripts": {
+    "build": "tsup --clean",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "clean": "node ../../scripts/clean-artifacts.mjs dist --tsbuildinfo",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.2.0",
+    "better-auth": "1.6.23",
+    "citty": "^0.2.0",
+    "cross-spawn": "^7.0.6",
+    "esbuild": "^0.25.0",
+    "hono": "^4.6.0",
+    "jose": "^6.1.0",
+    "smol-toml": "^1.6.1",
+    "yjs": "^13.6.0",
+    "zod": "^4.3.6"
+  },
+  "peerDependencies": {
+    "@ai-sdk/anthropic": "^2.0.0",
+    "@ai-sdk/openai": "^2.0.0",
+    "@ai-sdk/openai-compatible": "^1.0.0",
+    "@playwright/test": ">=1.40.0",
+    "ai": "^5.0.0",
+    "clsx": ">=2.0.0",
+    "lucide-react": ">=0.400.0",
+    "react": "^18.0.0 || ^19.0.0",
+    "react-dom": "^18.0.0 || ^19.0.0",
+    "tailwind-merge": ">=2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@playwright/test": {
+      "optional": true
+    },
+    "ai": {
+      "optional": true
+    },
+    "@ai-sdk/anthropic": {
+      "optional": true
+    },
+    "@ai-sdk/openai": {
+      "optional": true
+    },
+    "@ai-sdk/openai-compatible": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    },
+    "clsx": {
+      "optional": true
+    },
+    "tailwind-merge": {
+      "optional": true
+    },
+    "lucide-react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@ai-sdk/anthropic": "^2.0.0",
+    "@ai-sdk/openai": "^2.0.0",
+    "@ai-sdk/openai-compatible": "^1.0.0",
+    "@cloudflare/workers-types": "^4.20241205.0",
+    "@playwright/test": "^1.59.1",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/cross-spawn": "^6.0.6",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "better-sqlite3": "^12.0.0",
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.38.0",
+    "lucide-react": "^1.7.0",
+    "react-router-dom": "^7.1.0",
+    "tailwind-merge": "^3.5.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0"
+  },
+  "keywords": [
+    "deepspace",
+    "cloudflare-workers",
+    "durable-objects",
+    "real-time",
+    "collaborative",
+    "sdk"
+  ],
+  "license": "Apache-2.0",
+  "homepage": "https://deep.space",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/deepdotspace/deepspace.git",
+    "directory": "packages/deepspace"
+  },
+  "bugs": {
+    "url": "https://github.com/deepdotspace/deepspace/issues"
+  }
+}

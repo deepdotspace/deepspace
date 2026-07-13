@@ -1,0 +1,33 @@
+{
+  "id": "leaderboard",
+  "name": "Leaderboard",
+  "category": "data",
+  "description": "Score-based leaderboard with categories, rankings, and admin editing",
+  "details": "Ranked leaderboard table with score submission, category filtering, medal badges for top 3, and admin score editing. Uses useQuery with ordering for real-time rankings and useMutations for CRUD.",
+  "files": [
+    {
+      "src": "src/LeaderboardPage.tsx",
+      "dest": "src/pages/leaderboard.tsx"
+    },
+    {
+      "src": "src/leaderboard-schema.ts",
+      "dest": "src/schemas/leaderboard-schema.ts"
+    },
+    {
+      "src": "src/leaderboard-constants.ts",
+      "dest": "src/components/leaderboard/leaderboard-constants.ts"
+    }
+  ],
+  "schema": {
+    "exportName": "leaderboardSchema",
+    "importPath": "./schemas/leaderboard-schema",
+    "spreadOperator": false
+  },
+  "route": {
+    "path": "/leaderboard",
+    "protected": true
+  },
+  "requires": [],
+  "instructions": [],
+  "patterns": []
+}

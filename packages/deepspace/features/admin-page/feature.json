@@ -1,0 +1,31 @@
+{
+  "id": "admin-page",
+  "name": "Admin Page",
+  "category": "data",
+  "description": "User management and app settings admin panel",
+  "details": "Admin-only page with user management (list users, change roles) and key-value settings CRUD. Uses useUsers for listing, setRole for role changes, and useQuery/useMutations for a settings collection.",
+  "files": [
+    {
+      "src": "src/AdminPage.tsx",
+      "dest": "src/pages/admin.tsx"
+    },
+    {
+      "src": "src/admin-schema.ts",
+      "dest": "src/schemas/admin-schema.ts"
+    }
+  ],
+  "schema": {
+    "exportName": "settingsSchema",
+    "importPath": "./schemas/admin-schema",
+    "spreadOperator": false
+  },
+  "route": {
+    "path": "/admin",
+    "protected": true
+  },
+  "requires": [],
+  "instructions": [
+    "This layers an admin-only /admin panel on top of the /settings page that every scaffold already ships (that shared src/schemas/admin-schema.ts is why it reports \"Exists (skipped)\" here). Add a nav entry for /admin; keep /settings for per-user settings."
+  ],
+  "patterns": []
+}

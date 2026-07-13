@@ -1,0 +1,41 @@
+{
+  "id": "ai-chat",
+  "name": "AI Chat",
+  "category": "assistant",
+  "description": "Embeddable AI chat panel with DO-backed conversation history",
+  "details": "ChatPanel (reusable component) and AiChatPage (full assistant page with conversation rail). Persists to ai-chats / ai-messages collections in the app's RecordRoom — no localStorage. Routes through the Vercel AI SDK proxy with Anthropic, OpenAI, and Cerebras. User-scoped via RBAC (read: 'own').",
+  "files": [
+    { "src": "src/ChatPanel.tsx", "dest": "src/components/ChatPanel.tsx" },
+    { "src": "src/AiChatPage.tsx", "dest": "src/pages/assistant.tsx" },
+    { "src": "src/ai-chat-schema.ts", "dest": "src/schemas/ai-chat-schema.ts" }
+  ],
+  "schema": {
+    "exportName": "aiChatSchemas",
+    "importPath": "./schemas/ai-chat-schema",
+    "spreadOperator": true
+  },
+  "route": {
+    "path": "/assistant",
+    "protected": true
+  },
+  "requires": [],
+  "dependencies": {
+    "react-markdown": "^9.0.0",
+    "remark-gfm": "^4.0.0",
+    "remark-breaks": "^4.0.0",
+    "rehype-highlight": "^7.0.0",
+    "highlight.js": "^11.10.0"
+  },
+  "instructions": [
+    "Embed ChatPanel standalone (without the conversation rail) for sidebar / modal / popover use. Pass `chatId={null}` to auto-create on first send; use `onChatCreated` to track the new id.",
+    "All chat data lives in the app's RecordRoom DO under the ai-chats and ai-messages collections. RBAC is enforced — users only see their own chats and messages.",
+    "The backend route POST /api/ai/chat takes { chatId, userMessageId, content, modelId? } and runs the full server-owned pipeline: load history, compact if needed, stream assistant, persist on finish.",
+    "Compaction (summarizing older history when the conversation grows large) is server-side and cached on the chat row. No client-side compaction logic."
+  ],
+  "patterns": [
+    "ChatPanel takes `chatId` (or null). Parent owns chat lifecycle (create / select / delete); pass `disabled` while a parent-driven create is in flight so the panel doesn't kick off its own auto-create.",
+    "ChatPanel's DEFAULT_MODELS and worker.ts's ALLOWED_MODELS must stay in sync — add entries to both when introducing a new model.",
+    "Compaction summary is stored on the ai-chats row (compactedSummary, compactedThroughId). The summarizer is user-billed by default; pass `makeDefaultSummarizer(c.env)` with no authToken in worker.ts to absorb the cost as the developer instead.",
+    "Tool execution is server-side and per-user RBAC-enforced (records.* tools see only what the caller would see). `stopWhen: stepCountIs(5)` caps tool-use rounds per turn."
+  ]
+}

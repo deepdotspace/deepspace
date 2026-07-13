@@ -1,0 +1,22 @@
+{
+  "id": "presence-test",
+  "name": "Presence Test",
+  "category": "data",
+  "description": "E2E test page for real-time presence tracking via PresenceRoom DO",
+  "details": "Test page used by Playwright e2e tests. Connects to a PresenceRoom scope and displays peers, state updates, and connection status with data-testid attributes.",
+  "files": [
+    {
+      "src": "src/PresenceTestPage.tsx",
+      "dest": "src/pages/presence-test.tsx"
+    }
+  ],
+  "schema": null,
+  "route": {
+    "path": "/presence-test",
+    "protected": false
+  },
+  "requires": [],
+  "instructions": [],
+  "patterns": [],
+  "internal": true
+}

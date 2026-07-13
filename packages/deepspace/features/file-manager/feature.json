@@ -1,0 +1,24 @@
+{
+  "id": "file-manager",
+  "name": "File Manager",
+  "category": "data",
+  "description": "Upload, browse, preview, and manage files with R2 storage",
+  "details": "Full file management UI using the useR2Files hook. Supports drag-and-drop upload, file listing with size and date, inline image preview, download, and delete. Files are scoped per-user via the platform worker's R2 storage.",
+  "files": [
+    {
+      "src": "src/FileManagerPage.tsx",
+      "dest": "src/pages/file-manager.tsx"
+    }
+  ],
+  "route": {
+    "path": "/file-manager",
+    "protected": true
+  },
+  "requires": [],
+  "instructions": [],
+  "patterns": [
+    "useR2Files() for upload, list, download, delete",
+    "Drag-and-drop file upload zone",
+    "Inline image preview with getUrl()"
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "id": "kanban",
+  "name": "Kanban Board",
+  "category": "display",
+  "description": "Drag-and-drop kanban board component with columns and cards",
+  "details": "Generic KanbanBoard component with drag-and-drop between columns, customizable card rendering, and a useKanban hook for state management. No schema needed -- it is a pure UI component that works with any data source.",
+  "files": [
+    {
+      "src": "src/Kanban.tsx",
+      "dest": "src/components/kanban/Kanban.tsx"
+    }
+  ],
+  "requires": [],
+  "instructions": [
+    "Import KanbanBoard and useKanban from 'src/components/kanban/Kanban' (adjust the relative path to match where you use it)"
+  ],
+  "patterns": []
+}
