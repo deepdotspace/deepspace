@@ -1,6 +1,6 @@
 {
   "name": "create-deepspace",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "engines": {
     "node": ">=22.15.0"
   },
@@ -11,7 +11,8 @@
   },
   "files": [
     "dist",
-    "templates"
+    "templates",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsup",
