@@ -29,6 +29,11 @@ const API_ERROR_HINTS: Record<string, string> = {
   user_not_found:
     'No DeepSpace user with that email. They need to log in to DeepSpace at least once ' +
     '(`deepspace login`, or sign in to any app) before they can be referenced by email.',
+  insufficient_credits:
+    'Out of credits. Inviting a new collaborator by email sends them a transactional ' +
+    'email billed to your account — top up your credits and try again.',
+  invite_email_failed:
+    'The invite email could not be sent. You were not charged — please try again in a moment.',
 }
 
 /** Exported for tests. One clean message for an escaped error. */

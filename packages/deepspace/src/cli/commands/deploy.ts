@@ -28,7 +28,7 @@ import {
   refreshSecretsCache,
   stripGeneratedSecretsCache,
 } from '../lib/secrets'
-import { mintAppId, readAppId, resolveOwnedAppId, writeAppId } from '../lib/app-identity'
+import { mintAppId, readAppId, resolveExistingAppId, writeAppId } from '../lib/app-identity'
 import {
   bindingManifestFromOutputConfig,
   validateBindingManifest,
@@ -278,6 +278,14 @@ export default defineCommand({
         'Deploy even though hand-edited .dev.vars secrets are absent from the store (they will NOT be deployed, and any a previous deploy set are dropped).',
       default: false,
     },
+    adopt: {
+      type: 'boolean',
+      description:
+        'Confirm adopting an existing app you can deploy but do not own (collaborator/admin ' +
+        'on-behalf) when wrangler.toml has no DEEPSPACE_APP_ID. Without this flag an ' +
+        'interactive prompt asks.',
+      default: false,
+    },
   },
   async run({ args }) {
     preflightNodeVersion('deploy')
@@ -335,18 +343,55 @@ export default defineCommand({
       process.exit(1)
     }
 
-    // A repo with no id yet ADOPTS the caller's existing app for this subdomain
-    // (e.g. a legacy app the platform registered during the app-identity
-    // cutover) instead of minting a fresh id that would collide with the
-    // existing route registration ("name … is taken by another app"). Only
-    // mints when the caller owns nothing at this name. Needs the token, so it
-    // runs after auth.
+    // A repo with no id yet ADOPTS the app already registered at this
+    // subdomain (e.g. a legacy app the platform registered during the
+    // app-identity cutover) instead of minting a fresh id that would collide
+    // with the existing route registration ("name … is taken by another
+    // app"). Adoption covers on-behalf deployers too — a collaborator or
+    // admin deploying a legacy repo they don't own. Mints only when nothing
+    // is registered here; fails up front when the name belongs to an app the
+    // caller can't deploy. Needs the token, so it runs after auth.
     if (!appId) {
-      const adopted = await resolveOwnedAppId(DEPLOY_URL, token, appName)
-      appId = adopted ?? mintAppId()
+      const existing = await resolveExistingAppId(DEPLOY_URL, token, appName)
+      if (existing.kind === 'taken') {
+        p.cancel(
+          `"${appName}" is taken by an app you don't have deploy access to. ` +
+            'Ask the owner to add you as a collaborator (`deepspace collaborators add`), ' +
+            'or pick a different `name` in wrangler.toml.',
+        )
+        process.exit(1)
+      }
+      // Adopting an app the caller does NOT own must be explicit: for an
+      // admin-tier account the access check passes for EVERY registered app,
+      // so a fresh project whose name collides with someone's legacy app
+      // would otherwise silently deploy over it on-behalf.
+      if (existing.kind === 'adopted' && !existing.owned && !args.adopt) {
+        if (!process.stdin.isTTY) {
+          // Piped/CI stdin: clack's confirm never resolves — fail loudly
+          // with the flag remedy instead (same idiom as --rename).
+          p.cancel(
+            `"${appName}" is an existing app owned by another account that you can deploy ` +
+              'on-behalf (collaborator/admin). Confirmation needs an interactive terminal — ' +
+              're-run with --adopt to deploy it, or pick a different `name` in wrangler.toml ' +
+              'if you meant a new app.',
+          )
+          process.exit(1)
+        }
+        const yes = await p.confirm({
+          message:
+            `"${appName}" is an existing app owned by another account that you can deploy ` +
+            'on-behalf (you are a collaborator or admin). Deploy it? ' +
+            '(Meant a new app? Pick a different `name` in wrangler.toml.)',
+        })
+        if (p.isCancel(yes) || !yes) {
+          p.cancel('Deploy cancelled.')
+          process.exit(1)
+        }
+      }
+      appId = existing.kind === 'adopted' ? existing.appId : mintAppId()
       writeAppId(appDir, appId, { wranglerEnv: envName })
       p.log.info(
-        adopted
+        existing.kind === 'adopted'
           ? `Adopted existing app id ${appId} for ${appName} — commit wrangler.toml.`
           : `Minted app id ${appId} — commit wrangler.toml.`,
       )
