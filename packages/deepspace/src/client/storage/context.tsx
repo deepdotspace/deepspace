@@ -20,7 +20,7 @@ import React, {
 } from 'react'
 import type { CollectionSchema } from '../../shared/types'
 import { useAuth, getAuthToken } from '../auth'
-import { debugLog } from '../debug'
+import { debugLog, isLocalDevHost } from '../debug'
 import { RecordStore } from './store'
 import { RecordSocket } from './record-socket'
 import { ScopeRegistryProvider } from './ScopeRegistry'
@@ -115,6 +115,8 @@ interface RecordProviderCoreProps {
   fetchUser: FetchUserProfile
   allowAnonymous?: boolean
   getAuthToken?: () => Promise<string | null>
+  onPermissionError?: (title: string, detail: string) => void
+  onValidationError?: (title: string, detail: string) => void
 }
 
 function RecordProviderCore({
@@ -124,6 +126,8 @@ function RecordProviderCore({
   fetchUser,
   allowAnonymous = false,
   getAuthToken: getAuthTokenProp,
+  onPermissionError: onPermissionErrorProp,
+  onValidationError: onValidationErrorProp,
 }: RecordProviderCoreProps): React.ReactElement {
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null)
   const [userProfileLoading, setUserProfileLoading] = useState(true)
@@ -142,6 +146,8 @@ function RecordProviderCore({
   const onValidationErrorRef = useRef<((title: string, detail: string) => void) | undefined>(
     undefined,
   )
+  onPermissionErrorRef.current = onPermissionErrorProp
+  onValidationErrorRef.current = onValidationErrorProp
 
   const storeRef = useRef<RecordStore>(new RecordStore())
   const socketRef = useRef<RecordSocket | null>(null)
@@ -407,6 +413,8 @@ interface RecordProviderAuthOnlyProps {
   fetchUser: FetchUserProfile
   allowAnonymous?: boolean
   getAuthToken?: () => Promise<string | null>
+  onPermissionError?: (title: string, detail: string) => void
+  onValidationError?: (title: string, detail: string) => void
 }
 
 function RecordProviderAuthOnly({
@@ -414,9 +422,27 @@ function RecordProviderAuthOnly({
   fetchUser,
   allowAnonymous = false,
   getAuthToken: getAuthTokenProp,
+  onPermissionError: onPermissionErrorProp,
+  onValidationError: onValidationErrorProp,
 }: RecordProviderAuthOnlyProps): React.ReactElement {
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null)
   const [userProfileLoading, setUserProfileLoading] = useState(true)
+
+  // Hold the latest app callbacks in refs and expose stable wrappers, so an
+  // inline arrow prop doesn't churn authValue (and every RecordScope under
+  // it) on each render. Mirrors RecordProviderCore.
+  const onPermissionErrorRef = useRef(onPermissionErrorProp)
+  onPermissionErrorRef.current = onPermissionErrorProp
+  const onValidationErrorRef = useRef(onValidationErrorProp)
+  onValidationErrorRef.current = onValidationErrorProp
+
+  const onPermissionError = useCallback((title: string, detail: string) => {
+    onPermissionErrorRef.current?.(title, detail)
+  }, [])
+
+  const onValidationError = useCallback((title: string, detail: string) => {
+    onValidationErrorRef.current?.(title, detail)
+  }, [])
 
   const refetchUserProfile = useCallback(async () => {
     try {
@@ -465,8 +491,18 @@ function RecordProviderAuthOnly({
       refetchUserProfile,
       allowAnonymous,
       getAuthToken: getAuthTokenProp,
+      onPermissionError,
+      onValidationError,
     }),
-    [userProfile, userProfileLoading, refetchUserProfile, allowAnonymous, getAuthTokenProp],
+    [
+      userProfile,
+      userProfileLoading,
+      refetchUserProfile,
+      allowAnonymous,
+      getAuthTokenProp,
+      onPermissionError,
+      onValidationError,
+    ],
   )
 
   return (
@@ -479,6 +515,102 @@ function RecordProviderAuthOnly({
 // ============================================================================
 // Main Entry Point
 // ============================================================================
+
+/**
+ * A server-rejected write, delivered to `RecordProvider`'s `onWriteError`.
+ * One structured object rather than positional strings so future rejection
+ * kinds (rate-limit, quota, dropped-while-offline) and correlation fields
+ * (collection, recordId, the raw server string) can be added without
+ * breaking the callback signature.
+ */
+export interface WriteError {
+  /** 'permission' — an RBAC denial; 'validation' — missing/immutable/invalid field or any other rejection. */
+  kind: 'permission' | 'validation'
+  /** Short human-readable summary, safe to show end users. */
+  title: string
+  /** Longer human-readable explanation; may be empty. */
+  detail: string
+}
+
+/**
+ * Default write-error handler. Optimistic mutations (`create`/`put`/`remove`)
+ * resolve before the server answers, so a denied or invalid write can only
+ * surface through `onWriteError` — if it's unhandled, the app looks like it
+ * worked while the server silently rejected. Never let that be fully silent:
+ * fall back to a loud console.error that says how to wire real UI.
+ *
+ * Deduped per unique message: a retry loop hammering the same denied write
+ * must not flood the console (or an agent's captured console output) with
+ * identical errors — the first occurrence carries all the information.
+ */
+const seenWriteErrors = new Set<string>()
+
+function defaultOnWriteError(error: WriteError): void {
+  // JSON key rather than string concatenation so delimiter characters in a
+  // title/detail can't collide two distinct errors into one dedupe entry.
+  const key = JSON.stringify([error.kind, error.title, error.detail])
+  if (seenWriteErrors.has(key)) return
+  // Bound the set so a pathological stream of distinct errors can't grow it
+  // forever; clearing just means an occasional repeat log, which is fine.
+  if (seenWriteErrors.size >= 100) seenWriteErrors.clear()
+  seenWriteErrors.add(key)
+  console.error(
+    `[deepspace] Write rejected — ${error.title}: ${error.detail}\n` +
+      `This error reached no UI. Pass onWriteError to <RecordProvider> (e.g. wire it to a toast) so users see rejected writes. (Further repeats of this error are suppressed.)`,
+  )
+}
+
+let warnedIgnoredSchemas = false
+let warnedSignedOutNull = false
+
+/**
+ * Test hook: reset the module-level dev-warning latches and the write-error
+ * dedupe set, so tests can assert warnings/errors fire from a clean slate.
+ * Not part of the public API surface.
+ */
+export function __resetDevWarningsForTests(): void {
+  seenWriteErrors.clear()
+  warnedIgnoredSchemas = false
+  warnedSignedOutNull = false
+}
+
+/**
+ * Rendered on localhost instead of the silent `null` when the user is signed
+ * out and `allowAnonymous` is off — the #1 "my page is blank and nothing says
+ * why" trap. Inline styles only: this must not depend on the app's CSS.
+ * Production keeps the old behavior (render nothing).
+ */
+function SignedOutDiagnostic(): React.ReactElement {
+  return (
+    <div
+      role="alert"
+      data-deepspace-diagnostic="signed-out"
+      style={{
+        margin: '24px auto',
+        maxWidth: 560,
+        padding: '16px 20px',
+        border: '1px solid #d97706',
+        borderRadius: 8,
+        background: '#fffbeb',
+        color: '#78350f',
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+        fontSize: 13,
+        lineHeight: 1.5,
+      }}
+    >
+      <strong>DeepSpace: nothing rendered because you're signed out.</strong>
+      <p style={{ margin: '8px 0 0' }}>
+        This page is inside a {'<RecordProvider>'} without <code>allowAnonymous</code>, which
+        renders nothing for signed-out visitors. Either add{' '}
+        <code>{'<RecordProvider allowAnonymous>'}</code> to show the page publicly, or require
+        sign-in before this point (e.g. a protected route / AuthGate).
+      </p>
+      <p style={{ margin: '8px 0 0', opacity: 0.8 }}>
+        This notice only appears on localhost — a deployed app renders nothing here.
+      </p>
+    </div>
+  )
+}
 
 /**
  * RecordProvider - Main entry point for storage.
@@ -507,10 +639,12 @@ function RecordProviderAuthOnly({
  */
 export function RecordProvider({
   roomId,
+  schemas,
   wsUrl,
   children,
   allowAnonymous = false,
   getAuthToken: getAuthTokenProp,
+  onWriteError = defaultOnWriteError,
 }: {
   roomId?: string
   /**
@@ -523,8 +657,24 @@ export function RecordProvider({
   children: ReactNode
   allowAnonymous?: boolean
   getAuthToken?: () => Promise<string | null>
+  /**
+   * Called when the server rejects a write. Optimistic mutations
+   * (`create`/`put`/`remove`) resolve before the server answers, so this
+   * callback is the only place a denied or invalid write surfaces — wire it
+   * to your toast/alert system and branch on `error.kind`. Defaults to a
+   * deduped console.error so rejections are never fully silent.
+   */
+  onWriteError?: (error: WriteError) => void
 }): React.ReactElement {
   const { isLoaded, isSignedIn } = useAuth()
+
+  if (schemas && roomId && isLocalDevHost() && !warnedIgnoredSchemas) {
+    warnedIgnoredSchemas = true
+    console.warn(
+      '[deepspace] RecordProvider received a `schemas` prop alongside `roomId`, but the single-scope provider ignores it — ' +
+        'schemas are resolved server-side in this mode. Remove the `schemas` prop, or adopt the multi-scope shape and pass schemas to <RecordScope>.',
+    )
+  }
 
   // Derive user profile from the JWT — no API call needed.
   // Returns null when not signed in (no error, no console spam).
@@ -558,10 +708,32 @@ export function RecordProvider({
     return <>{null}</>
   }
 
-  // Not signed in and not allowing anonymous — render nothing
+  // Not signed in and not allowing anonymous — render nothing in production.
+  // On localhost this is far more often a missing `allowAnonymous` than a
+  // deliberate auth gate, and a bare blank page gives no thread to pull, so
+  // dev gets a visible diagnostic instead.
   if (!isSignedIn && !allowAnonymous) {
+    if (isLocalDevHost()) {
+      if (!warnedSignedOutNull) {
+        warnedSignedOutNull = true
+        console.warn(
+          '[deepspace] RecordProvider rendered nothing: signed out and allowAnonymous is off. ' +
+            'Add `allowAnonymous` to show this page to signed-out visitors, or require sign-in before this point.',
+        )
+      }
+      return <SignedOutDiagnostic />
+    }
     return <>{null}</>
   }
+
+  // Adapt the public structured callback onto the two internal channels the
+  // socket layer dispatches (permission vs validation). Inline arrows are
+  // fine here: Core/AuthOnly hold them in refs behind stable wrappers, so
+  // their identity never reaches a dependency array.
+  const onPermissionError = (title: string, detail: string) =>
+    onWriteError({ kind: 'permission', title, detail })
+  const onValidationError = (title: string, detail: string) =>
+    onWriteError({ kind: 'validation', title, detail })
 
   if (roomId) {
     return (
@@ -571,6 +743,8 @@ export function RecordProvider({
         fetchUser={fetchUser}
         allowAnonymous={allowAnonymous}
         getAuthToken={getAuthTokenFn}
+        onPermissionError={onPermissionError}
+        onValidationError={onValidationError}
       >
         {children}
       </RecordProviderCore>
@@ -582,6 +756,8 @@ export function RecordProvider({
       fetchUser={fetchUser}
       allowAnonymous={allowAnonymous}
       getAuthToken={getAuthTokenFn}
+      onPermissionError={onPermissionError}
+      onValidationError={onValidationError}
     >
       {children}
     </RecordProviderAuthOnly>

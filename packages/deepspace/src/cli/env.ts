@@ -84,10 +84,12 @@ function readAppName(appDir: string, wranglerEnv?: string): string {
 
   // Refuse to proceed when the declared name doesn't already match the
   // canonical form. Otherwise the canonical name lands on deployed bindings
-  // and the registry, while the raw name persists in `[vars].APP_NAME` and
-  // client-side `SCOPE_ID = app:${APP_NAME}` — splitting the identity across
-  // surfaces. Failing here forces the dev to fix wrangler.toml once, after
-  // which every surface reads from the same source of truth.
+  // and the registry, while the raw name persists in `[vars].APP_NAME` —
+  // splitting the identity across surfaces. (Scope keys are unaffected:
+  // `SCOPE_ID = app:${APP_ID}` and the worker's `app:${env.DEEPSPACE_APP_ID}`
+  // derive from the immutable app id, not the name.) Failing here forces the
+  // dev to fix wrangler.toml once, after which every surface reads from the
+  // same source of truth.
   const rawName = wranglerEnv ? config.env?.[wranglerEnv]?.name : config.name
   if (rawName !== resolved.name) {
     const where = wranglerEnv ? `[env.${wranglerEnv}].name` : '`name`'

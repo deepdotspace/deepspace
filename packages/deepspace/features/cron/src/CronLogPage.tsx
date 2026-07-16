@@ -2,9 +2,9 @@
  * Cron Log Page
  *
  * Subscribes to the app's CronRoom via `useCronMonitor` and renders live
- * task state + execution history. The DO is keyed by `app:${APP_NAME}` so
- * a single shared CronRoom DO instance backs the whole app — same pattern
- * as RecordRoom.
+ * task state + execution history. The DO is keyed by `SCOPE_ID`
+ * (`app:${APP_ID}`) so a single shared CronRoom DO instance backs the
+ * whole app — same pattern as RecordRoom.
  *
  * Used both as a UI surface for verifying that scheduled tasks are firing
  * in production, and as the data source for the cron e2e spec at

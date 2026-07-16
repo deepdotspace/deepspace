@@ -12,7 +12,7 @@
  * apps importing from both ends don't get type collisions.
  *
  * @example
- * const { jobs, enqueue, getJob, cancel } = useJobs(`app:${APP_NAME}`)
+ * const { jobs, enqueue, getJob, cancel } = useJobs(SCOPE_ID) // `app:${APP_ID}`
  *
  * async function onClick() {
  *   const jobId = await enqueue('ai-summarize', { text })

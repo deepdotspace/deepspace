@@ -20,6 +20,7 @@ import { Outlet } from 'react-router-dom'
 import { DeepSpaceAuthProvider, useAuthStatus } from 'deepspace'
 import { RecordProvider, RecordScope } from 'deepspace'
 import Navigation from '../../components/Navigation'
+import { useToast } from '@/components/ui'
 import { APP_NAME, SCOPE_ID } from '../../constants'
 import { schemas } from '../../schemas'
 
@@ -51,13 +52,23 @@ export default function AppLayout() {
  */
 function AuthBoot({ children }: { children: ReactNode }) {
   const { isLoaded } = useAuthStatus()
+  // Record writes (`create`/`put`/`remove`) are optimistic — they resolve
+  // before the server answers, so a denied or invalid write only surfaces
+  // through onWriteError. Route rejections to toasts so they're never a
+  // silent no-op. Keep this wiring when customizing the layout.
+  const { error, warning } = useToast()
 
   if (!isLoaded) {
     return <div aria-busy="true" className="fixed inset-0 bg-background" />
   }
 
   return (
-    <RecordProvider allowAnonymous>
+    <RecordProvider
+      allowAnonymous
+      onWriteError={(e) =>
+        e.kind === 'permission' ? warning(e.title, e.detail) : error(e.title, e.detail)
+      }
+    >
       <RecordScope roomId={SCOPE_ID} schemas={schemas} appId={APP_NAME}>
         {children}
       </RecordScope>

@@ -8,7 +8,7 @@
 export interface ServerErrorInfo {
   title: string
   detail: string
-  /** True for RBAC/permission errors (shown as toasts). False for validation/other (shown in error overlay). */
+  /** True for RBAC/permission errors (routed to onPermissionError). False for validation/other (routed to onValidationError). */
   isPermissionError: boolean
 }
 

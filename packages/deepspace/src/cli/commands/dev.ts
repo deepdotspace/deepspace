@@ -37,6 +37,7 @@ import { ensureInstallReady } from '../lib/install-status'
 import { preflightNodeVersion, preflightWindowsWorkerd } from '../lib/preflight'
 import { removeMacosJunk } from '../lib/macos-junk'
 import { refreshSecretsCache } from '../lib/secrets'
+import { lintProjectSchemas, formatSchemaLintFindings } from '../lib/schema-lint'
 import { DEFAULT_PORT, resolvePort, checkPortAvailable } from '../lib/port'
 import {
   prepareWranglerEnvConfig,
@@ -151,6 +152,14 @@ export default defineCommand({
     })
 
     ensureInstallReady(appDir)
+
+    // Surface schema-lint findings in the terminal the developer is watching.
+    // The worker also warns at runtime, but only in the DO's console after a
+    // client connects — easy to miss, and these are shipping privacy bugs.
+    const lintFindings = await lintProjectSchemas(appDir)
+    if (lintFindings && lintFindings.length > 0) {
+      for (const line of formatSchemaLintFindings(lintFindings)) console.warn(line)
+    }
 
     let token: string
     try {

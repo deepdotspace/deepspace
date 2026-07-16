@@ -1,6 +1,6 @@
 {
   "name": "deepspace",
-  "version": "0.5.7",
+  "version": "0.6.1",
   "engines": {
     "node": ">=22.15.0"
   },
@@ -112,6 +112,7 @@
     "better-sqlite3": "^12.0.0",
     "clsx": "^2.1.1",
     "framer-motion": "^12.38.0",
+    "jsdom": "^29.1.1",
     "lucide-react": "^1.7.0",
     "react-router-dom": "^7.1.0",
     "tailwind-merge": "^3.5.0",
