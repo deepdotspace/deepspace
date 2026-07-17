@@ -95,6 +95,17 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
     return !!(this.env as { DEEPSPACE_DO_PERF?: unknown })?.DEEPSPACE_DO_PERF
   }
 
+  /**
+   * The HTTP debug API (`/api/debug/*`) runs arbitrary SQL and role changes
+   * with no auth of its own, so it is gated here at the DO's single ingress.
+   * Off unless a deployment opts in with `ALLOW_DEBUG_ROUTES=true`
+   * (`deepspace dev`/`test` set it automatically). Deployments holding shared
+   * data override this to always return false.
+   */
+  protected get debugRoutesEnabled(): boolean {
+    return (this.env as { ALLOW_DEBUG_ROUTES?: unknown })?.ALLOW_DEBUG_ROUTES === 'true'
+  }
+
   constructor(
     state: DurableObjectState,
     env: unknown,
@@ -142,6 +153,17 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
   // ============================================================================
 
   async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url)
+
+    // Internal control-plane endpoints (e.g. POST /internal/disconnect-sockets)
+    // are shared by every room type via BaseRoom. Handle them first — before
+    // the DB-init + WS path — since closing sockets needs no schema init.
+    // Only reachable via DO stub fetch from the app worker (see BaseRoom.fetch).
+    if (url.pathname.startsWith('/internal/')) {
+      const internal = await this.handleInternalRequest(request, url)
+      if (internal) return internal
+    }
+
     const fetchStart = Date.now()
     const isColdStart = this.freshConstruct
     const needsInit = !this.initPromise
@@ -150,10 +172,11 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
     await this.ensureInitialized()
     const initMs = Date.now() - fetchStart
 
-    const url = new URL(request.url)
-
     // HTTP API endpoints (tools, debug, etc.)
     if (url.pathname.startsWith('/api/')) {
+      if (url.pathname.startsWith('/api/debug/') && !this.debugRoutesEnabled) {
+        return new Response('Not Found', { status: 404 })
+      }
       return handleApiRequest(this.createHandlerContext(), request, url)
     }
 

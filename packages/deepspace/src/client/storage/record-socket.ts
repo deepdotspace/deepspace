@@ -179,6 +179,13 @@ export class RecordSocket {
 
     ws.onmessage = (event) => this.handleMessage(event)
 
+    // Code-agnostic on purpose: EVERY close reconnects, including clean/1000
+    // and server-initiated 1012 ('state-refresh', sent by
+    // BaseRoom.disconnectAllSockets after an out-of-band server-side write).
+    // We must NOT special-case "clean" closes as terminal — that would strand
+    // a client on stale data after the server kicked it to force a resync.
+    // The reconnect's onopen re-subscribes every active query, so fresh
+    // QUERY_RESULTs replace the stale store contents (full resync).
     ws.onclose = () => {
       config.log?.('disconnected', config.roomId)
       config.listeners.onStatus('disconnected')

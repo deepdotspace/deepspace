@@ -10,6 +10,8 @@
  * - Raw SQLite access via this.sql
  * - Broadcast helpers: broadcast(), sendTo()
  * - HTTP fetch handler with WebSocket upgrade detection
+ * - Internal control-plane endpoint: POST /internal/disconnect-sockets
+ *   (force every client to reconnect and resync after out-of-band writes)
  *
  * Subclasses implement lifecycle hooks:
  *   onConnect, onMessage, onBinaryMessage, onDisconnect, onRequest, onAlarm
@@ -58,6 +60,15 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
 
+    // Internal control-plane endpoints. These are reachable ONLY via a DO stub
+    // fetch from the app worker's own server-side code (same trust model as the
+    // `/api/tools/execute` surface) — the app worker's public `/ws/:roomId`
+    // proxy forwards only `/ws/*` paths, so a browser can never reach
+    // `/internal/*` through it. Do NOT add a public app-worker route that
+    // forwards arbitrary paths to a room DO.
+    const internal = await this.handleInternalRequest(request, url)
+    if (internal) return internal
+
     // WebSocket upgrade
     if (request.headers.get('Upgrade') === 'websocket') {
       return this.handleWebSocketUpgrade(request, url)
@@ -69,6 +80,46 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
     }
 
     return new Response('Not Found', { status: 404 })
+  }
+
+  // ==========================================================================
+  // Internal Control-Plane Endpoints
+  // ==========================================================================
+
+  /**
+   * Handle built-in `/internal/*` control-plane routes shared by every room
+   * type. Returns a `Response` if the request was an internal route, or `null`
+   * to let the caller continue normal dispatch.
+   *
+   * Currently:
+   * - `POST /internal/disconnect-sockets` — close every live WebSocket so
+   *   clients reconnect and resync. Optional JSON body `{ code?, reason? }`
+   *   overrides the defaults (1012 / 'state-refresh'). Responds with
+   *   `{ success: true, closed: <n> }`.
+   *
+   * See the security note on `fetch()`: this path is only reachable via DO
+   * stub fetch from the app worker, never from the public internet.
+   */
+  protected async handleInternalRequest(
+    request: Request,
+    url: URL
+  ): Promise<Response | null> {
+    if (
+      request.method === 'POST' &&
+      url.pathname === '/internal/disconnect-sockets'
+    ) {
+      let options: { code?: number; reason?: string } | undefined
+      try {
+        const text = await request.text()
+        if (text) options = JSON.parse(text) as { code?: number; reason?: string }
+      } catch {
+        // Malformed/empty body → fall back to defaults.
+      }
+      const closed = this.disconnectAllSockets(options)
+      return Response.json({ success: true, closed })
+    }
+
+    return null
   }
 
   // ==========================================================================
@@ -214,6 +265,44 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
    */
   protected getWebSockets(): WebSocket[] {
     return this.state.getWebSockets()
+  }
+
+  /**
+   * Force every connected client to reconnect and resync by closing all live
+   * WebSockets. Returns the number of sockets closed.
+   *
+   * Use this after an **out-of-band, server-side write** to the room's records
+   * — an admin import route, a migration script, a cron job, or a server
+   * action — that connected clients have no way to learn about. Without it, a
+   * browser tab holding stale in-memory state keeps operating on (and may
+   * autosave over) data that changed underneath it. Closing the socket makes
+   * the client SDK reconnect and pull fresh query results.
+   *
+   * The default close code is 1012 ("service restart") with reason
+   * 'state-refresh'. The DeepSpace client treats *any* close as a reconnect
+   * trigger (it does not special-case clean/1000 closes), so on reconnect it
+   * re-subscribes every active query and receives fresh `QUERY_RESULT`s —
+   * `useQuery` consumers see the new data without re-subscribing.
+   *
+   * Each close is guarded so one already-closing socket can't abort the sweep.
+   *
+   * @param options.code   WebSocket close code (default 1012).
+   * @param options.reason WebSocket close reason (default 'state-refresh').
+   * @returns the number of sockets that were closed.
+   */
+  disconnectAllSockets(options?: { code?: number; reason?: string }): number {
+    const code = options?.code ?? 1012
+    const reason = options?.reason ?? 'state-refresh'
+    let closed = 0
+    for (const ws of this.state.getWebSockets()) {
+      try {
+        ws.close(code, reason)
+        closed++
+      } catch {
+        // Socket already closing/closed — skip it, keep sweeping the rest.
+      }
+    }
+    return closed
   }
 
   /**

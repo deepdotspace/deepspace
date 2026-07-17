@@ -22,7 +22,7 @@ class FakeWebSocket {
   sentBinary: Uint8Array[] = []
   onopen: (() => void) | null = null
   onmessage: ((event: { data: unknown }) => void) | null = null
-  onclose: (() => void) | null = null
+  onclose: ((event?: { code?: number; reason?: string }) => void) | null = null
   onerror: (() => void) | null = null
 
   constructor(readonly url: string) {
@@ -47,6 +47,12 @@ class FakeWebSocket {
 
   serverMessage(type: string, payload: unknown): void {
     this.onmessage?.({ data: JSON.stringify({ type, payload }) })
+  }
+
+  /** Simulate a server-initiated close with a specific code (e.g. 1012). */
+  serverClose(code: number, reason = ''): void {
+    this.readyState = 3
+    this.onclose?.({ code, reason })
   }
 
   serverDrop(): void {
@@ -297,6 +303,43 @@ describe('close', () => {
     h.ws().serverDrop()
     await vi.advanceTimersByTimeAsync(1000)
     expect(FakeWebSocket.instances).toHaveLength(4)
+  })
+
+  it('server-initiated 1012 close reconnects and fully resubscribes (state-refresh)', async () => {
+    // Mirrors BaseRoom.disconnectAllSockets kicking a client after an
+    // out-of-band write: the close code must NOT be treated as terminal — the
+    // client reconnects and re-subscribes so fresh QUERY_RESULTs replace the
+    // stale store contents.
+    const h = makeSocket()
+    h.socket.registerSubscription('sub-1', QUERY_KEY)
+    await h.socket.connect()
+    h.ws().serverOpen()
+    // Complete the handshake so the backoff counter is at 0 (next delay = 1s).
+    h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+
+    h.ws().serverClose(1012, 'state-refresh')
+    expect(h.store.resetToLoading).toHaveBeenCalledWith(QUERY_KEY)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(FakeWebSocket.instances).toHaveLength(2) // reconnected
+
+    // The reconnected socket re-subscribes every active query on open.
+    h.ws().serverOpen()
+    expect(h.ws().sentOfType(MSG.SUBSCRIBE)).toHaveLength(1)
+  })
+
+  it('a clean 1000 close is NOT terminal — it still reconnects', async () => {
+    // Guards against a future regression where someone special-cases
+    // wasClean/1000 as "do not reconnect": a server that closes cleanly to
+    // force a resync must still bring the client back.
+    const h = makeSocket()
+    await h.socket.connect()
+    h.ws().serverOpen()
+
+    h.ws().serverClose(1000, 'normal')
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(FakeWebSocket.instances).toHaveLength(2)
   })
 
   it('disconnect() cancels the scheduled reconnect and resets backoff', async () => {

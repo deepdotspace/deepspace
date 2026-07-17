@@ -105,19 +105,21 @@ const DEFAULT_PROMPTS = [
   'List my collections',
 ]
 
-// Mirrors the allowlist in the scaffolded worker.ts. Sonnet 4.6 is the
-// default — balanced cost/capability with the same 1M-token context as
-// Opus 4.7 at ~3x lower price. Within each provider we list flagship → cheap
-// so the picker shows the most capable option first when a user opens it.
-// Override by passing your own `models` prop.
+// Mirrors the allowlist in the scaffolded ai/chat-routes.ts. Sonnet 5 is the
+// default — balanced cost/capability with the same 1M-token context as Opus
+// at a lower price. Within each provider we list default → premium → cheap
+// so the picker shows the recommended option first when a user opens it.
+// Override by passing your own `models` prop — apps scaffolded before this
+// lineup must either update their ALLOWED_MODELS to match or pass the models
+// they allowlist, otherwise the worker rejects the picker's ids with a 400.
 const DEFAULT_MODELS: ModelOption[] = [
-  { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', provider: 'Anthropic' },
-  { id: 'claude-opus-4-7',   label: 'Claude Opus 4.7',   provider: 'Anthropic' },
-  { id: 'claude-haiku-4-5',  label: 'Claude Haiku 4.5',  provider: 'Anthropic' },
-  { id: 'gpt-5.4',           label: 'GPT-5.4',           provider: 'OpenAI' },
-  { id: 'gpt-5.4-mini',      label: 'GPT-5.4 mini',      provider: 'OpenAI' },
-  { id: 'gpt-5.4-nano',      label: 'GPT-5.4 nano',      provider: 'OpenAI' },
-  { id: 'gpt-oss-120b',      label: 'GPT-OSS 120B',      provider: 'Cerebras' },
+  { id: 'claude-sonnet-5',  label: 'Claude Sonnet 5',  provider: 'Anthropic' },
+  { id: 'claude-opus-4-8',  label: 'Claude Opus 4.8',  provider: 'Anthropic' },
+  { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', provider: 'Anthropic' },
+  { id: 'gpt-5.6-terra',    label: 'GPT-5.6 Terra',    provider: 'OpenAI' },
+  { id: 'gpt-5.6-sol',      label: 'GPT-5.6 Sol',      provider: 'OpenAI' },
+  { id: 'gpt-5.6-luna',     label: 'GPT-5.6 Luna',     provider: 'OpenAI' },
+  { id: 'gpt-oss-120b',     label: 'GPT-OSS 120B',     provider: 'Cerebras' },
 ]
 
 // ============================================================================

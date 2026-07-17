@@ -17,7 +17,7 @@
  *   const jwt = c.req.header('Authorization')!.slice(7)
  *   const tools = await composioTools(c.env, { toolkit: 'gmail', authToken: jwt })
  *   const ai = createDeepSpaceAI(c.env, 'anthropic', { authToken: jwt })
- *   const result = streamText({ model: ai('claude-sonnet-4-6'), prompt, tools })
+ *   const result = streamText({ model: ai('claude-sonnet-5'), prompt, tools })
  *
  * Merge with your own tools: `tools: { ...buildTools(executor), ...composio }`.
  */

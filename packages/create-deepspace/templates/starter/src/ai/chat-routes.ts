@@ -50,25 +50,32 @@ type ResolveAuth = (req: Request, env: Env) => Promise<VerifyResult | null>
 // without a code change. Pin to a snapshot if you need reproducible behavior.
 const ALLOWED_MODELS: Record<string, 'anthropic' | 'openai' | 'cerebras'> = {
   // Anthropic — covers premium ($5/$25), balanced ($3/$15), cheap ($1/$5).
-  'claude-opus-4-7':    'anthropic',
-  'claude-sonnet-4-6':  'anthropic',
+  'claude-opus-4-8':    'anthropic',
+  'claude-sonnet-5':    'anthropic',
   'claude-haiku-4-5':   'anthropic',
-  // OpenAI — chat-completions-compatible only. gpt-5.4-pro exists in the
-  // typed model union BUT is Responses-API-only (returns "not a chat model"
-  // on /v1/chat/completions). Same restriction applies to o1/o3 today; if
+  // OpenAI — chat-completions-compatible only. The `-pro` variants
+  // (gpt-5.4-pro, gpt-5.5-pro) are Responses-API-only (return "not a chat
+  // model" on /v1/chat/completions). Same restriction applies to o1/o3; if
   // we want them, the proxy needs Responses-API support. Until then keep
   // the picker to chat-completions-compatible variants.
+  'gpt-5.6-sol':        'openai',
+  'gpt-5.6-terra':      'openai',
+  'gpt-5.6-luna':       'openai',
+  // Cerebras — only `gpt-oss-120b` is on the production tier (~3000 tok/s);
+  // preview models (qwen-3-235b, glm-4.7) are explicitly not for production.
+  'gpt-oss-120b':       'cerebras',
+  // Prior generation — not in the picker, but still served and priced, so
+  // saved picks and custom clients keep working instead of 400ing.
+  'claude-sonnet-4-6':  'anthropic',
+  'claude-opus-4-7':    'anthropic',
   'gpt-5.4':            'openai',
   'gpt-5.4-mini':       'openai',
   'gpt-5.4-nano':       'openai',
-  // Cerebras — only `gpt-oss-120b` is on the production tier today
-  // (~3000 tok/s). `llama3.1-8b` deprecates 2026-05; preview models
-  // (qwen-3-235b, glm-4.7) are explicitly not for production use.
-  'gpt-oss-120b':       'cerebras',
 }
-// Sonnet 4.6 is the balanced default — capable enough for most tool-using
-// turns, ~3x cheaper than Opus, and the same 1M-token context.
-const DEFAULT_MODEL = 'claude-sonnet-4-6'
+// Sonnet 5 is the balanced default — capable enough for most tool-using
+// turns, cheaper than Opus (intro $2/$10 per MTok through 2026-08-31,
+// then $3/$15), and the same 1M-token context.
+const DEFAULT_MODEL = 'claude-sonnet-5'
 
 function recordRoomStub(env: Env): DurableObjectStub {
   return env.RECORD_ROOMS.get(env.RECORD_ROOMS.idFromName(`app:${env.APP_NAME}`))
@@ -265,6 +272,14 @@ export function registerAiChatRoutes(
       system: systemText,
       messages,
       tools,
+      // GPT-5.x on /v1/chat/completions rejects function tools unless
+      // reasoning_effort is 'none' ("Function tools with reasoning_effort
+      // are not supported ... use /v1/responses or set reasoning_effort to
+      // 'none'"). All allowlisted OpenAI models accept 'none'; other
+      // providers ignore the openai namespace.
+      ...(ALLOWED_MODELS[usedModelId] === 'openai'
+        ? { providerOptions: { openai: { reasoningEffort: 'none' as const } } }
+        : {}),
       // Cap the multi-step tool loop at 5 model calls. v4's `maxSteps: 5` shape;
       // v5 expresses the same thing as a `stopWhen` predicate.
       stopWhen: stepCountIs(5),

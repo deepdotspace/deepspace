@@ -286,10 +286,10 @@ app.all('/api/auth/*', async (c) => {
 // Debug proxy → app's RecordRoom DO
 //
 // Forwards /api/debug/* (set-role, sql, query, records, user-role, status)
-// to the DO's debug handler. The DO ships these endpoints unconditionally,
-// so we gate the proxy on env.ALLOW_DEBUG_ROUTES === "true". OFF by default:
-// `deepspace dev`/`deepspace test` auto-enable it locally, and a deployed app
-// with nothing set returns 404 here.
+// to the DO's debug handler. Both this proxy and the DO gate on
+// env.ALLOW_DEBUG_ROUTES === "true", so debug is OFF by default at both
+// layers: `deepspace dev`/`deepspace test` auto-enable it locally, and a
+// deployed app with nothing set returns 404 here (and in the DO).
 //
 // To enable /api/debug/* on a DEPLOYED environment (staging, admin cleanup):
 //     npx deepspace secrets set ALLOW_DEBUG_ROUTES=true   # in that env's config
@@ -297,9 +297,9 @@ app.all('/api/auth/*', async (c) => {
 // Turn it back off with `npx deepspace secrets delete ALLOW_DEBUG_ROUTES` and
 // redeploy. `deepspace secrets` is the single way to set anything that becomes
 // worker env (the remote store is the source of truth); `.dev.vars` is only a
-// local dev cache and is not deployed. The DO's debug handler has NO auth —
-// anyone who can reach this route can read and mutate any record. Turn it on
-// deliberately.
+// local dev cache and is not deployed. The debug handler has no auth of its
+// own once reached: anyone who can reach it can read and mutate any record,
+// so enable it deliberately.
 // ---------------------------------------------------------------------------
 
 app.all('/api/debug/*', async (c) => {
