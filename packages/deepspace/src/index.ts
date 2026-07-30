@@ -27,3 +27,11 @@ export * from './client/ai-stream'
 export * from './client/status'
 export * from './client/subscriptions'
 export * from './client/charges'
+// Opt-in client-side error reporter. Only the reporter API is public; the
+// shared wire contract (marker, caps, normalizer) stays internal — just the
+// report type is re-exported for callers of `reportClientError`.
+export * from './client/errors'
+export type { ClientErrorReport, ClientErrorKind } from './shared/client-errors'
+// `deepspace logs` wire DTO + the whitelisted key set — shared with the
+// dashboard, the CLI, and the platform reader so the four never drift.
+export * from './shared/log-events'

@@ -14,8 +14,9 @@
  *   create-deepspace my-app --local /path/to/deepspace-sdk
  */
 
-import { existsSync, readdirSync, readFileSync, writeFileSync, cpSync, mkdirSync, openSync, closeSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, openSync, closeSync, statSync } from 'node:fs'
 import { join, resolve, dirname, basename, extname } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { execSync } from 'node:child_process'
 import spawn from 'cross-spawn'
@@ -31,23 +32,89 @@ const TEMPLATES_DIR = join(__dirname, '..', 'templates')
 const SKILLS_INSTALLER_PKG = 'skills@latest'
 const SKILL_REPO = 'deepdotspace/deepspace-skill'
 
+// Templates are assembled from a shared `templates/base/` plus a per-template
+// overlay `templates/<name>/`. Adding a template = adding an overlay directory
+// with a `template.json` — no edit here. `base` has no template.json, so it is
+// never itself selectable.
+const BASE_TEMPLATE_DIR = join(TEMPLATES_DIR, 'base')
+const DEFAULT_TEMPLATE = 'starter'
+
+interface TemplateMeta {
+  name: string
+  description: string
+  dependencies?: Record<string, string>
+}
+
+/** Read one overlay's template.json, or null if the dir has none. */
+function readTemplateMeta(name: string): TemplateMeta | null {
+  const metaPath = join(TEMPLATES_DIR, name, 'template.json')
+  if (!existsSync(metaPath)) return null
+  const meta = JSON.parse(readFileSync(metaPath, 'utf-8')) as TemplateMeta
+  return { ...meta, name }
+}
+
+/** All selectable templates, default first, then alphabetical. */
+function listTemplates(): TemplateMeta[] {
+  const metas: TemplateMeta[] = []
+  for (const entry of readdirSync(TEMPLATES_DIR, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === 'base') continue
+    const meta = readTemplateMeta(entry.name)
+    if (meta) metas.push(meta)
+  }
+  return metas.sort((a, b) =>
+    a.name === DEFAULT_TEMPLATE ? -1 : b.name === DEFAULT_TEMPLATE ? 1 : a.name.localeCompare(b.name),
+  )
+}
+
+/**
+ * Assemble a template into `destDir`: copy the shared base, then lay the
+ * overlay on top (overlay wins). `template.json` is metadata, not a shipped
+ * file, so it is skipped. Dependency merging happens later, against the
+ * scaffolded app's package.json.
+ */
+function assembleTemplate(name: string, destDir: string): void {
+  cpSync(BASE_TEMPLATE_DIR, destDir, { recursive: true })
+  const overlayDir = join(TEMPLATES_DIR, name)
+  for (const entry of readdirSync(overlayDir)) {
+    if (entry === 'template.json') continue
+    cpSync(join(overlayDir, entry), join(destDir, entry), { recursive: true })
+  }
+}
+
 function parseArgs(argv: string[]): {
   appName?: string
   local?: string
+  template?: string
   help: boolean
   version: boolean
   interactive: boolean
+  /** First bad flag (unknown option, or a value flag with no value). */
+  invalid?: string
 } {
   let appName: string | undefined
   let local: string | undefined
+  let template: string | undefined
   let help = false
   let version = false
   let interactive = false
+  let invalid: string | undefined
 
-  for (let i = 2; i < argv.length; i++) {
+  // Value flags accept both `--flag value` and `--flag=value`. A missing or
+  // unknown flag must ERROR, never silently fall through — `--template=x` and
+  // a bare `--template` used to scaffold the default template with exit 0.
+  let i = 2
+  const flagValue = (a: string): string | undefined => {
+    const eq = a.indexOf('=')
+    return eq === -1 ? argv[++i] : a.slice(eq + 1)
+  }
+  for (; i < argv.length; i++) {
     const a = argv[i]
-    if (a === '--local') {
-      local = argv[++i]
+    if (a === '--local' || a.startsWith('--local=')) {
+      local = flagValue(a)
+      if (!local) invalid ??= '--local requires a value'
+    } else if (a === '--template' || a === '-t' || a.startsWith('--template=') || a.startsWith('-t=')) {
+      template = flagValue(a)
+      if (!template) invalid ??= '--template requires a value'
     } else if (a === '--help' || a === '-h') {
       help = true
     } else if (a === '--version' || a === '-v') {
@@ -56,10 +123,12 @@ function parseArgs(argv: string[]): {
       interactive = true
     } else if (!a.startsWith('-')) {
       appName = a
+    } else {
+      invalid ??= `Unknown option '${a}'`
     }
   }
 
-  return { appName, local, help, version, interactive }
+  return { appName, local, template, help, version, interactive, invalid }
 }
 
 function printHelp(): void {
@@ -78,11 +147,16 @@ ARGUMENTS
 OPTIONS
   -h, --help          Show this help and exit.
   -v, --version       Print the create-deepspace version and exit.
+  -t, --template <name>
+                      Template to scaffold from (default: ${DEFAULT_TEMPLATE}).
   -i, --interactive   Prompt for missing values instead of erroring.
                       (Default behavior is non-interactive — designed for agents.)
       --local <path>  Use a local SDK monorepo checkout instead of the
                       published deepspace package. Requires a built
                       <path>/packages/deepspace/dist/.
+
+TEMPLATES
+${listTemplates().map((t) => `  ${t.name.padEnd(10)}${t.description}`).join('\n')}
 
 IN-PLACE SCAFFOLDING
   The target dir may already exist if it is "near-empty" — only these
@@ -100,6 +174,10 @@ IN-PLACE SCAFFOLDING
 EXAMPLES
   # From a parent directory, create a new dir:
   npm create deepspace@latest my-app
+
+  # Pick a template (note the \`--\` when going through npm create):
+  npx create-deepspace my-app --template copilot
+  npm create deepspace@latest my-app -- --template copilot
 
   # From inside an existing (near-empty) repo, scaffold in place:
   cd my-app && npm create deepspace@latest my-app
@@ -249,6 +327,14 @@ async function main() {
     process.exit(0)
   }
 
+  // Bad flags fail fast. Silently ignoring them is worse than erroring: a
+  // mis-spelled `--template=copilot` would otherwise scaffold the default
+  // starter template and exit 0, hiding the mistake until the app is opened.
+  if (args.invalid) {
+    console.error(`create-deepspace: ${args.invalid} (see --help)`)
+    process.exit(1)
+  }
+
   // No app name and not opting into interactive mode → print usage and bail.
   // Default-non-interactive is intentional: this CLI is invoked by agents far
   // more than humans, and an interactive prompt that hangs forever on a piped
@@ -275,6 +361,25 @@ async function main() {
   } else if (appName !== '.') {
     const error = validateAppName(appName)
     if (error) { p.cancel(error); process.exit(1) }
+  }
+
+  // Resolve the template. Explicit flag wins; interactive mode offers the
+  // picker; otherwise the default — so the bare command never prompts.
+  const templates = listTemplates()
+  let template: string = args.template ?? DEFAULT_TEMPLATE
+  if (args.template && !templates.some((t) => t.name === args.template)) {
+    p.cancel(
+      `Unknown template '${args.template}'. Available: ${templates.map((t) => t.name).join(', ')}`,
+    )
+    process.exit(1)
+  }
+  if (!args.template && args.interactive) {
+    const result = await p.select({
+      message: 'Which template?',
+      options: templates.map((t) => ({ value: t.name, label: t.name, hint: t.description })),
+    })
+    if (p.isCancel(result)) { p.cancel('Cancelled'); process.exit(0) }
+    template = result as string
   }
 
   // Two ways to scaffold in-place into an existing near-empty directory:
@@ -354,32 +459,40 @@ async function main() {
     process.exit(1)
   }
 
-  // Copy template
+  // Copy template. Templates are assembled from templates/base/ + the
+  // per-template overlay, so we stage the assembly in a temp dir and copy
+  // THAT into the app dir. Per-entry copy so pre-existing user files are
+  // never clobbered: on a name collision (e.g. an existing CLAUDE.md) the
+  // user's file wins and the template version lands alongside as
+  // <name>.deepspace<ext>. Collisions are only reachable for allowlisted
+  // entries — anything else already refused.
   const s = createSpinner()
-  const templateDir = join(TEMPLATES_DIR, 'starter')
-  if (!existsSync(templateDir)) {
-    p.cancel('Starter template not found — this is a bug in create-deepspace')
+  const overlayMeta = readTemplateMeta(template)
+  if (!existsSync(BASE_TEMPLATE_DIR) || !overlayMeta) {
+    p.cancel(`Template '${template}' is not installed correctly — this is a bug in create-deepspace`)
     process.exit(1)
   }
 
-  s.start(isInPlace ? 'Scaffolding into existing repo' : 'Copying template')
-  // Copy per top-level entry so pre-existing files are never clobbered: on a
-  // name collision (e.g. an existing CLAUDE.md) the user's file wins and the
-  // template version lands alongside as <name>.deepspace<ext>. Collisions are
-  // only reachable for allowlisted entries — anything else already refused.
+  s.start(isInPlace ? `Scaffolding into existing repo (${template} template)` : `Copying ${template} template`)
   mkdirSync(appDir, { recursive: true })
+  const staging = mkdtempSync(join(tmpdir(), 'deepspace-template-'))
   const preserved: string[] = []
-  for (const entry of readdirSync(templateDir)) {
-    const src = join(templateDir, entry)
-    const dest = join(appDir, entry)
-    if (existsSync(dest)) {
-      const ext = extname(entry)
-      const alongside = `${basename(entry, ext)}.deepspace${ext}`
-      cpSync(src, join(appDir, alongside), { recursive: true })
-      preserved.push(`Kept existing ${entry} — template version written to ${alongside}`)
-    } else {
-      cpSync(src, dest, { recursive: true })
+  try {
+    assembleTemplate(template, staging)
+    for (const entry of readdirSync(staging)) {
+      const src = join(staging, entry)
+      const dest = join(appDir, entry)
+      if (existsSync(dest)) {
+        const ext = extname(entry)
+        const alongside = `${basename(entry, ext)}.deepspace${ext}`
+        cpSync(src, join(appDir, alongside), { recursive: true })
+        preserved.push(`Kept existing ${entry} — template version written to ${alongside}`)
+      } else {
+        cpSync(src, dest, { recursive: true })
+      }
     }
+  } finally {
+    rmSync(staging, { recursive: true, force: true })
   }
 
   // .gitignore is not included in templates (npm strips it), so generate it
@@ -420,6 +533,13 @@ async function main() {
   pkg.version = '0.0.1'
   pkg.private = true
   delete pkg.files
+
+  // Merge the template overlay's extra dependencies. The base package.json is
+  // the shared floor; a template declares only what it adds (e.g. copilot's
+  // markdown renderer) in its template.json, keeping the base single-sourced.
+  if (overlayMeta.dependencies) {
+    pkg.dependencies = { ...pkg.dependencies, ...overlayMeta.dependencies }
+  }
 
   // Rewrite workspace:* deps to published versions. Template uses workspace:*
   // so monorepo contributors see the canonical pnpm/bun signal; users get real versions.

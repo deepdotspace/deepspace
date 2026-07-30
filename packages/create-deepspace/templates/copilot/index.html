@@ -22,6 +22,15 @@
       html[data-theme="paper"] { background-color: #ffffff; color-scheme: light; }
       /* Add one line per theme you create, mirroring its --color-background. */
     </style>
+    <!-- Pre-paint theme boot: honor the sidebar ThemeToggle's persisted
+         choice (localStorage['ui-theme']) before the first frame, so
+         reloads don't flash the default theme. -->
+    <script>
+      try {
+        var t = localStorage.getItem('ui-theme')
+        if (t) document.documentElement.setAttribute('data-theme', t)
+      } catch (e) { /* private mode — keep the default */ }
+    </script>
   </head>
   <body>
     <div id="root"></div>

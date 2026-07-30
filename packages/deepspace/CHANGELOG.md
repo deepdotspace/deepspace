@@ -1,5 +1,19 @@
 # deepspace
 
+## 0.7.0
+
+### Minor Changes
+
+- Client-side error reporting (opt-in) for `deepspace logs`. Browser JS errors never invoke the Worker, so they never reached Workers Logs. New `installClientErrorReporter()` (client) hooks `window` 'error'/'unhandledrejection' and forwards each to the app's own Worker via `registerClientErrorRoute(app)` (`POST /_deepspace/client-errors`), which logs them so they appear in `deepspace logs` and the dashboard tagged `CLIENT`. Also exports `reportClientError()` for React error boundaries. Off by default (no starter wiring); anonymous ingestion is size-capped, deduped, and throttled, and — because the route runs in the tenant's own Worker — a browser can only ever write to its own app's log stream.
+
+  Also exports the `deepspace logs` wire DTO as a single source of truth (`AppLogEvent`, `AppLogsResponse`, `LogLevel`, `LOG_LEVELS`, `APP_LOG_EVENT_KEYS`) from both `deepspace` and `deepspace/worker`, so the CLI, dashboard, and platform reader share one definition instead of hand-mirrored copies. The client-error module's public surface is limited to the user-facing entry points — `installClientErrorReporter` / `reportClientError` (from `deepspace`) and `registerClientErrorRoute` / `handleClientErrorReport` / `CLIENT_LOG_MARKER` (from `deepspace/worker`), plus the `ClientErrorReport` type; the wire-protocol internals are no longer exported. (Those internals were only ever exported by this same, still-unreleased feature, so no released consumer is affected — this stays a `minor`.)
+
+- New `deepspace logs` command: read a deployed app's production logs (console output, request summaries, exceptions with stacks) from Workers Logs — no Cloudflare dashboard needed. Defaults to the last 15 minutes; `--follow` tails by polling (~3s), `--since/--level/--search/--limit` narrow the window, `--json` emits NDJSON for agents. Logs appear within ~1 minute of a request and are retained for 7 days.
+- Rework the scaffolder around a clean starter and a template system.
+  - The starter template is rebuilt on a Base UI-backed primitive kit (Dialog/Modal, Select, DropdownMenu, Popover, Tooltip, Tabs, and form controls) with a minimal, unopinionated shell, so scaffolded apps start from a neutral base and design their own look.
+  - `npx create-deepspace` now assembles apps from a shared base plus per-template overlays. Choose a template with `--template <name>` (or `-i` for an interactive picker); `starter` remains the default.
+  - New `copilot` template: a three-panel shell (collapsible sidebar, a main content panel, and an AI chat dock) with light and dark themes.
+
 ## 0.6.2
 
 ### Patch Changes

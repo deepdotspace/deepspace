@@ -1,5 +1,18 @@
 # create-deepspace
 
+## 0.7.0
+
+### Minor Changes
+
+- Rework the scaffolder around a clean starter and a template system.
+  - The starter template is rebuilt on a Base UI-backed primitive kit (Dialog/Modal, Select, DropdownMenu, Popover, Tooltip, Tabs, and form controls) with a minimal, unopinionated shell, so scaffolded apps start from a neutral base and design their own look.
+  - `npx create-deepspace` now assembles apps from a shared base plus per-template overlays. Choose a template with `--template <name>` (or `-i` for an interactive picker); `starter` remains the default.
+  - New `copilot` template: a three-panel shell (collapsible sidebar, a main content panel, and an AI chat dock) with light and dark themes.
+
+### Patch Changes
+
+- Condense the scaffolded CLAUDE.md (starter and copilot templates) to a lightweight pointer at the deepspace skill — the single source of truth for agent instructions. The removed sections (build workflow, static vs dynamic pages, UI placeholder rules) all live in the skill's SKILL.md and references; CLAUDE.md keeps the skill-loading block, a short "About this project" (including which template the app was scaffolded from), and "Project commands".
+
 ## 0.6.2
 
 ### Patch Changes

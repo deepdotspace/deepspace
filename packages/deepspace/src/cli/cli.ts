@@ -25,6 +25,7 @@ import deploy from './commands/deploy'
 import undeploy from './commands/undeploy'
 import whoami from './commands/whoami'
 import apps from './commands/apps'
+import logs from './commands/logs'
 import usage from './commands/usage'
 import add from './commands/add'
 import domain from './commands/domain'
@@ -98,6 +99,7 @@ const main = defineCommand({
     logout,
     whoami,
     apps,
+    logs,
     usage,
     dev,
     kill,

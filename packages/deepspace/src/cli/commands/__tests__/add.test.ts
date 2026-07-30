@@ -8,18 +8,18 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, cpSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { isDeepSpaceApp } from '../add'
+import { assembleTemplate } from './template-assembly'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // __tests__ → commands → cli → src → <package root>
 const PKG_ROOT = resolve(here, '..', '..', '..', '..')
 const SCRIPT = resolve(PKG_ROOT, 'scripts', 'add-feature.cjs')
-const STARTER = resolve(PKG_ROOT, '..', 'create-deepspace', 'templates', 'starter')
 
 /** Run the installer from a throwaway cwd (never an installed project). */
 function runScript(args: string[]) {
@@ -35,11 +35,11 @@ function runScript(args: string[]) {
   }
 }
 
-/** A throwaway copy of the starter template — a real DeepSpace app to install into. */
+/** A throwaway starter app (base + starter overlay) — a real DeepSpace app to install into. */
 function makeApp(): { dir: string; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), 'ds-addapp-'))
   const dir = join(root, 'app')
-  cpSync(STARTER, dir, { recursive: true })
+  assembleTemplate('starter', dir)
   return { dir, cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
 
