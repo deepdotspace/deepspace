@@ -3,14 +3,7 @@ import type { RecordData } from 'deepspace'
 import { useMutations, useQuery, useUser } from 'deepspace'
 import { Mail, ShieldCheck, UserMinus, Users } from 'lucide-react'
 import { Modal, useToast } from '@/components/ui'
-
-export interface InviteDialogDocumentFields {
-  title: string
-  ownerId: string
-  collaborators?: string
-  editors?: string
-  folderId?: string
-}
+import { parseDocsIdList, type DocsDocumentFields, type InviteAclDiff } from './docs-library-types'
 
 interface UserFields {
   email?: string
@@ -20,25 +13,10 @@ interface UserFields {
 
 type InviteRole = 'viewer' | 'editor'
 
-/**
- * Diff that resulted from an InviteDialog save. The editor page rebroadcasts
- * this over the doc's presence channel so the affected peer gets the change
- * even when the docs schema's `read: 'collaborator'` rule prevents the
- * `documents` record update from reaching a now-removed user.
- */
-export interface InviteAclDiff {
-  /** Users dropped from `collaborators` entirely. */
-  removedUserIds: string[]
-  /** Users who lost the editor role but remain collaborators (now viewers). */
-  demotedUserIds: string[]
-  /** Existing collaborators who gained the editor role. */
-  promotedUserIds: string[]
-}
-
 interface InviteDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  doc: RecordData<InviteDialogDocumentFields>
+  doc: RecordData<DocsDocumentFields>
   isOwner: boolean
   /**
    * Called after a save mutation that changed the ACL. The parent uses it to
@@ -47,16 +25,6 @@ interface InviteDialogProps {
    * can react immediately instead of waiting for the next refresh.
    */
   onAclChange?: (diff: InviteAclDiff) => void
-}
-
-function parseIds(raw: string | undefined): string[] {
-  if (!raw) return []
-  try {
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []
-  } catch {
-    return []
-  }
 }
 
 function uniqueIds(ids: string[]): string[] {
@@ -75,14 +43,17 @@ function initialsFor(name: string): string {
 export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: InviteDialogProps) {
   const { user } = useUser()
   const { records: users } = useQuery<UserFields>('users')
-  const { put } = useMutations<InviteDialogDocumentFields>('documents')
+  const { put } = useMutations<DocsDocumentFields>('documents')
   const toast = useToast()
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<InviteRole>('editor')
   const [saving, setSaving] = useState(false)
 
-  const collaborators = useMemo(() => parseIds(doc.data.collaborators), [doc.data.collaborators])
-  const editors = useMemo(() => parseIds(doc.data.editors), [doc.data.editors])
+  const collaborators = useMemo(
+    () => parseDocsIdList(doc.data.collaborators),
+    [doc.data.collaborators],
+  )
+  const editors = useMemo(() => parseDocsIdList(doc.data.editors), [doc.data.editors])
 
   const ownerRecord = useMemo(
     () => users.find((u) => u.recordId === doc.data.ownerId),
@@ -100,8 +71,8 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
   if (!isOwner) return null
 
   const saveAccess = async (nextCollaborators: string[], nextEditors: string[]) => {
-    const prevCollaborators = parseIds(doc.data.collaborators)
-    const prevEditors = parseIds(doc.data.editors)
+    const prevCollaborators = parseDocsIdList(doc.data.collaborators)
+    const prevEditors = parseDocsIdList(doc.data.editors)
     const nextCollabList = uniqueIds(nextCollaborators)
     const nextCollabSet = new Set(nextCollabList)
     const nextEditorList = uniqueIds(nextEditors).filter((id) => nextCollabSet.has(id))
@@ -181,7 +152,7 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
 
   return (
     <Modal open={open} onClose={() => onOpenChange(false)} size="lg" className="docs-feature-scope">
-      <Modal.Header onClose={() => onOpenChange(false)}>
+      <Modal.Header>
         <Modal.Title>Share document</Modal.Title>
         <Modal.Description>
           Invite DeepSpace users by the email address on their account.

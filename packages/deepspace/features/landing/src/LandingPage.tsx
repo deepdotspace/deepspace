@@ -111,20 +111,6 @@ function useLandingCSS() {
 }
 
 // ============================================================================
-// Landing page "seen" flag
-// ============================================================================
-
-const LANDING_SEEN_KEY = 'app-landing-seen'
-
-export function hasSeenLanding(): boolean {
-  try { return localStorage.getItem(LANDING_SEEN_KEY) === 'true' } catch { return false }
-}
-
-export function markLandingSeen(): void {
-  try { localStorage.setItem(LANDING_SEEN_KEY, 'true') } catch { /* storage unavailable (private mode/quota): non-critical */ }
-}
-
-// ============================================================================
 // Configuration
 // ============================================================================
 
@@ -265,7 +251,7 @@ function LandingNav({ isScrolled, scrollRoot }: {
             })}
             <div className="h-px bg-foreground/[0.08] my-1" />
             <button
-              onClick={() => { markLandingSeen(); navigate('/home') }}
+              onClick={() => navigate('/home')}
               className="px-4 py-2.5 rounded-xl text-sm font-medium text-left text-primary hover:bg-foreground/[0.08] transition-colors"
             >
               Get Started
@@ -298,7 +284,7 @@ function LandingNav({ isScrolled, scrollRoot }: {
                 )
               })}
             </div>
-            <Button size="sm" onClick={() => { markLandingSeen(); navigate('/home') }} className="hidden md:inline-flex">
+            <Button size="sm" onClick={() => navigate('/home')} className="hidden md:inline-flex">
               Get Started
             </Button>
             <button className="md:hidden transition-colors text-muted-foreground hover:text-foreground" onClick={() => setMobileOpen(prev => !prev)} aria-label="Toggle menu">
@@ -377,7 +363,7 @@ function HeroSection() {
           </motion.p>
 
           <motion.div initial={{ opacity: 0, y: 20 }} animate={typewriterDone ? { opacity: 1, y: 0 } : { opacity: 0, y: 20 }} transition={{ duration: 0.7, delay: 0.15, ease: [0.25, 0.4, 0.25, 1] }} className="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4">
-            <Button size="lg" onClick={() => { markLandingSeen(); navigate('/home') }} className="min-w-[180px] group">
+            <Button size="lg" onClick={() => navigate('/home')} className="min-w-[180px] group">
               Get Started
               <ArrowRight className="w-4 h-4 ml-2 transition-transform group-hover:translate-x-1" />
             </Button>
@@ -509,7 +495,7 @@ function CTASection() {
               <h2 className="text-3xl sm:text-4xl md:text-5xl font-bold text-foreground leading-tight tracking-[-0.02em]">Ready to get started?</h2>
               <p className="mt-5 text-muted-foreground text-lg max-w-md mx-auto leading-relaxed">Jump in and start exploring. No setup required.</p>
               <div className="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4">
-                <Button size="lg" onClick={() => { markLandingSeen(); navigate('/home') }} className="min-w-[200px] group">
+                <Button size="lg" onClick={() => navigate('/home')} className="min-w-[200px] group">
                   Launch App
                   <ArrowRight className="w-4 h-4 ml-2 transition-transform group-hover:translate-x-1" />
                 </Button>

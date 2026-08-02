@@ -16,7 +16,10 @@ import { apiWorkerFetch, type ApiWorkerEnv } from './proxies'
 export interface CronContext {
   /** RecordRoom data access (queries the DO directly via tools API) */
   records: {
-    query(collection: string, opts?: { where?: Record<string, unknown>; limit?: number }): Promise<unknown[]>
+    query(
+      collection: string,
+      opts?: { where?: Record<string, unknown>; limit?: number },
+    ): Promise<unknown[]>
     create(collection: string, data: Record<string, unknown>): Promise<unknown>
     update(collection: string, recordId: string, data: Record<string, unknown>): Promise<unknown>
     delete(collection: string, recordId: string): Promise<unknown>
@@ -55,7 +58,7 @@ interface CronEnv extends ApiWorkerEnv {
 export function buildCronContext(
   env: CronEnv,
   ownerUserId: string,
-  roomId = 'default'
+  roomId = 'default',
 ): CronContext {
   // Get the RecordRoom DO stub for direct internal calls
   const roomIdObj = env.RECORD_ROOMS.idFromName(roomId)
@@ -63,16 +66,18 @@ export function buildCronContext(
 
   /** Execute a tool call against the RecordRoom's tools API */
   async function executeTool(tool: string, params: Record<string, unknown>): Promise<unknown> {
-    const response = await room.fetch(new Request('https://internal/api/tools/execute', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-User-Id': ownerUserId,
-        'X-App-Action': 'true',
-      },
-      body: JSON.stringify({ tool, params }),
-    }))
-    const result = await response.json() as { success: boolean; data?: unknown; error?: string }
+    const response = await room.fetch(
+      new Request('https://internal/api/tools/execute', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Id': ownerUserId,
+          'X-App-Action': 'true',
+        },
+        body: JSON.stringify({ tool, params }),
+      }),
+    )
+    const result = (await response.json()) as { success: boolean; data?: unknown; error?: string }
     if (!result.success) {
       throw new Error(`RecordRoom tool ${tool} failed: ${result.error || 'Unknown error'}`)
     }
@@ -104,7 +109,7 @@ export function buildCronContext(
       if (!env.APP_OWNER_JWT) {
         throw new Error(
           'integrations.call requires env.APP_OWNER_JWT. Deployed apps receive ' +
-            'this automatically; in dev, `deepspace dev` writes it into .dev.vars.',
+            'this automatically; in dev, `deepspace dev start` writes it into .dev.vars.',
         )
       }
       // The api-worker's /api/integrations route is path-shaped as

@@ -14,14 +14,12 @@ import { MessageList } from '../components/messaging/chat/MessageList'
 
 interface ChatPageProps {
   schemas?: CollectionSchema[]
-  appId?: string
   channelName?: string
   className?: string
 }
 
 export default function ChatPage({
   schemas = messagingSchemas,
-  appId = '',
   channelName = 'general',
   className,
 }: ChatPageProps) {
@@ -72,7 +70,7 @@ export default function ChatPage({
   return (
     <div className={`flex flex-col h-full ${className ?? ''}`} data-testid="chat-page">
       <ChatHeader channelId={channelId} />
-      <RecordScope roomId={`chat:${channelId}`} schemas={schemas} appId={appId}>
+      <RecordScope roomId={`chat:${channelId}`} schemas={schemas}>
         <MessageList channelId={channelId} />
       </RecordScope>
     </div>

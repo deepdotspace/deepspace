@@ -1,24 +1,18 @@
 /**
  * useFilePreview — Centralized file preview hook with dynamic imports.
  *
- * Mirrors the main app's pattern:
- * - Image, video, audio, PDF → native browser elements (no extra deps)
- * - Code/text → CodeMirror (dynamically imported)
- * - CSV → PapaParse (dynamically imported)
- * - DOCX → docx-preview (dynamically imported)
- * - XLSX → ExcelJS (dynamically imported)
+ * Native image/video/audio need no loader. PDF, code/text, CSV, DOCX, and
+ * XLSX load their parser or renderer only when selected.
  *
  * Heavy libraries are only loaded when needed, keeping the base bundle small.
  *
  * @example
  * ```tsx
- * const { PreviewComponent, isLoading, error } = useFilePreview({
+ * const preview = useFilePreview({
  *   url: 'https://...',
  *   fileName: 'report.csv',
  *   mimeType: 'text/csv',
  * })
- *
- * return <PreviewComponent />
  * ```
  */
 
@@ -80,7 +74,6 @@ export interface XlsxSheet {
 
 export interface XlsxData {
   sheets: XlsxSheet[]
-  activeSheet: number
 }
 
 // ============================================================================
@@ -128,56 +121,56 @@ export function useFilePreview({ url, fileName, mimeType }: FilePreviewInput): F
   const [docxModule, setDocxModule] = useState<typeof import('docx-preview') | null>(null)
   const [pdfPages, setPdfPages] = useState<HTMLCanvasElement[] | null>(null)
 
-  // Load preview content based on category
   useEffect(() => {
-    if (!previewable || !url) return
-
-    // Native browser previews (image, video, audio) don't need fetching
-    // PDF uses PDF.js now (rendered to canvas) to avoid iframe sandbox issues
-    if (category === 'image' || category === 'video' || category === 'audio') {
-      return
-    }
-
     const controller = new AbortController()
-    let cancelled = false
+    const { signal } = controller
+    const needsContent = previewable
+      && !!url
+      && category !== 'image'
+      && category !== 'video'
+      && category !== 'audio'
 
-    setIsLoading(true)
+    // Clear every result before deciding whether this category needs an
+    // asynchronous loader. Without this reset, switching from a failed or
+    // loading document to a native image/video/audio preview retains the old
+    // error/loading state and hides the native preview indefinitely.
+    setIsLoading(needsContent)
     setError(null)
     setTextContent(null)
     setCsvData(null)
+    setCodeEditorKit(null)
     setXlsxData(null)
     setDocxData(null)
     setDocxModule(null)
     setPdfPages(null)
 
+    if (!needsContent) return () => controller.abort()
+
     async function loadPreview() {
       try {
         if (category === 'pdf') {
-          await loadPdfPreview(url, controller.signal, cancelled, setPdfPages, setError)
+          await loadPdfPreview(url, signal, setPdfPages)
         } else if (category === 'code' || category === 'text') {
-          await loadCodePreview(url, fileName, controller.signal, cancelled, setTextContent, setCodeEditorKit)
+          await loadCodePreview(url, fileName, signal, setTextContent, setCodeEditorKit)
         } else if (extension === 'csv' || extension === 'tsv') {
-          await loadCsvPreview(url, controller.signal, cancelled, setCsvData)
+          await loadCsvPreview(url, signal, setCsvData)
         } else if (extension === 'docx') {
-          await loadDocxPreview(url, controller.signal, cancelled, setDocxData, setDocxModule)
+          await loadDocxPreview(url, signal, setDocxData, setDocxModule)
         } else if (extension === 'xlsx' || extension === 'xls') {
-          await loadXlsxPreview(url, controller.signal, cancelled, setXlsxData)
+          await loadXlsxPreview(url, signal, setXlsxData)
         }
       } catch (err) {
-        if (!cancelled && !(err instanceof DOMException && err.name === 'AbortError')) {
+        if (!signal.aborted && !(err instanceof DOMException && err.name === 'AbortError')) {
           setError(err instanceof Error ? err.message : 'Failed to load preview')
         }
       } finally {
-        if (!cancelled) setIsLoading(false)
+        if (!signal.aborted) setIsLoading(false)
       }
     }
 
-    loadPreview()
+    void loadPreview()
 
-    return () => {
-      cancelled = true
-      controller.abort()
-    }
+    return () => controller.abort()
   }, [url, fileName, mimeType, category, extension, previewable])
 
   return {
@@ -209,7 +202,6 @@ async function loadCodePreview(
   url: string,
   fileName: string,
   signal: AbortSignal,
-  cancelled: boolean,
   setTextContent: (v: string) => void,
   setCodeEditorKit: (v: CodeEditorKit) => void,
 ) {
@@ -220,11 +212,11 @@ async function loadCodePreview(
     import('@codemirror/theme-one-dark').catch(() => null),
   ])
 
-  if (cancelled) return
+  if (signal.aborted) return
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
 
   const text = await response.text()
-  if (cancelled) return
+  if (signal.aborted) return
 
   // Pretty-print minified JSON before handing it to CodeMirror. Files like
   // `package-lock.json` or build manifests are often shipped as one long
@@ -266,7 +258,6 @@ async function loadCodePreview(
 async function loadCsvPreview(
   url: string,
   signal: AbortSignal,
-  cancelled: boolean,
   setCsvData: (v: FilePreviewResult['csvData']) => void,
 ) {
   const [response, Papa] = await Promise.all([
@@ -274,11 +265,11 @@ async function loadCsvPreview(
     import('papaparse'),
   ])
 
-  if (cancelled) return
+  if (signal.aborted) return
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
 
   const text = await response.text()
-  if (cancelled) return
+  if (signal.aborted) return
 
   const result = Papa.default.parse<string[]>(text, { skipEmptyLines: true })
   const allRows = result.data
@@ -298,7 +289,6 @@ async function loadCsvPreview(
 async function loadDocxPreview(
   url: string,
   signal: AbortSignal,
-  cancelled: boolean,
   setDocxData: (v: ArrayBuffer) => void,
   setDocxModule: (v: typeof import('docx-preview')) => void,
 ) {
@@ -307,11 +297,11 @@ async function loadDocxPreview(
     import('docx-preview'),
   ])
 
-  if (cancelled) return
+  if (signal.aborted) return
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
 
   const arrayBuffer = await response.arrayBuffer()
-  if (cancelled) return
+  if (signal.aborted) return
 
   setDocxData(arrayBuffer)
   setDocxModule(docxPreviewModule)
@@ -320,7 +310,6 @@ async function loadDocxPreview(
 async function loadXlsxPreview(
   url: string,
   signal: AbortSignal,
-  cancelled: boolean,
   setXlsxData: (v: XlsxData) => void,
 ) {
   const [response, ExcelJSModule] = await Promise.all([
@@ -328,16 +317,16 @@ async function loadXlsxPreview(
     import('exceljs'),
   ])
 
-  if (cancelled) return
+  if (signal.aborted) return
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
 
   const arrayBuffer = await response.arrayBuffer()
-  if (cancelled) return
+  if (signal.aborted) return
 
   const ExcelJS = (ExcelJSModule as { default?: typeof import('exceljs') }).default ?? ExcelJSModule
   const workbook = new ExcelJS.Workbook()
   await workbook.xlsx.load(arrayBuffer)
-  if (cancelled) return
+  if (signal.aborted) return
 
   // Bounded recursion: a malformed XLSX could in theory produce
   // `{result: {result: {result: ...}}}` chains that blow the stack.
@@ -384,7 +373,7 @@ async function loadXlsxPreview(
     return { name: ws.name, headers, rows, truncated }
   })
 
-  setXlsxData({ sheets, activeSheet: 0 })
+  setXlsxData({ sheets })
 }
 
 // ============================================================================
@@ -429,45 +418,42 @@ async function loadPdfJs(): Promise<typeof import('pdfjs-dist')> {
 async function loadPdfPreview(
   url: string,
   signal: AbortSignal,
-  cancelled: boolean,
   setPdfPages: (v: HTMLCanvasElement[]) => void,
-  setError: (v: string) => void,
 ) {
+  const pdfjsLib = await loadPdfJs()
+  if (signal.aborted) return
+
+  const response = await fetch(url, { signal })
+  if (signal.aborted) return
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+
+  const arrayBuffer = await response.arrayBuffer()
+  if (signal.aborted) return
+
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
   try {
-    const pdfjsLib = await loadPdfJs()
-    if (cancelled) return
-
-    const response = await fetch(url, { signal })
-    if (cancelled) return
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-
-    const arrayBuffer = await response.arrayBuffer()
-    if (cancelled) return
-
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
-    if (cancelled) return
-
     const canvases: HTMLCanvasElement[] = []
     const SCALE = 1.5
 
     for (let i = 1; i <= pdf.numPages; i++) {
-      if (cancelled) return
+      if (signal.aborted) return
       const page = await pdf.getPage(i)
+      if (signal.aborted) return
       const viewport = page.getViewport({ scale: SCALE })
 
       const canvas = document.createElement('canvas')
       canvas.width = viewport.width
       canvas.height = viewport.height
 
-      const ctx = canvas.getContext('2d')!
+      const ctx = canvas.getContext('2d')
+      if (!ctx) throw new Error('Canvas rendering is not available')
       await page.render({ canvasContext: ctx, viewport }).promise
+      if (signal.aborted) return
       canvases.push(canvas)
     }
 
-    if (!cancelled) setPdfPages(canvases)
-  } catch (err) {
-    if (!cancelled && !(err instanceof DOMException && err.name === 'AbortError')) {
-      setError(err instanceof Error ? err.message : 'Failed to load PDF')
-    }
+    setPdfPages(canvases)
+  } finally {
+    await pdf.destroy()
   }
 }

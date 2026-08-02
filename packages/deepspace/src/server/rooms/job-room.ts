@@ -239,6 +239,11 @@ export abstract class JobRoom<
 
   protected async onAlarm(): Promise<void> {
     this.ensureInitialized()
+    // A recycled isolate can leave a recently-started row in `running`.
+    // Initialization arms a recovery alarm for the exact stale boundary;
+    // re-check here so that row becomes runnable even if no request wakes the
+    // room in the meantime.
+    this.recoverStuckRunning()
     await this.drainDueJobs()
     this.pruneExpired()
     this.scheduleNextAlarm()
@@ -617,7 +622,7 @@ export abstract class JobRoom<
   // ==========================================================================
 
   private scheduleNextAlarm(): void {
-    const row = this.sql
+    const queued = this.sql
       .exec(
         `SELECT next_run_at FROM jobs
           WHERE status = 'queued'
@@ -626,12 +631,29 @@ export abstract class JobRoom<
       )
       .toArray()[0] as { next_run_at: string | null } | undefined
 
-    if (!row) return
-
     const now = Date.now()
-    const target = row.next_run_at ? Math.max(now, new Date(row.next_run_at).getTime()) : now
+    const targets: number[] = []
+    if (queued) {
+      const queuedAt = queued.next_run_at ? new Date(queued.next_run_at).getTime() : now
+      targets.push(Number.isFinite(queuedAt) ? Math.max(now, queuedAt) : now)
+    }
+
+    const running = this.sql
+      .exec(
+        `SELECT started_at FROM jobs
+          WHERE status = 'running'
+          ORDER BY started_at ASC
+          LIMIT 1`,
+      )
+      .toArray()[0] as { started_at: string | null } | undefined
+    if (running) {
+      const startedAt = running.started_at ? new Date(running.started_at).getTime() : Number.NaN
+      targets.push(Number.isFinite(startedAt) ? Math.max(now, startedAt + RUNNING_STALE_MS) : now)
+    }
+
+    if (targets.length === 0) return
     // 50ms floor so we don't thrash the alarm with sub-tick re-arms.
-    this.state.storage.setAlarm(Math.max(target, now + 50))
+    this.state.storage.setAlarm(Math.max(Math.min(...targets), now + 50))
   }
 
   private recoverStuckRunning(): void {
@@ -639,7 +661,7 @@ export abstract class JobRoom<
     const stuck = this.sql
       .exec(
         `SELECT id, attempts, max_attempts FROM jobs
-          WHERE status = 'running' AND started_at < ?`,
+          WHERE status = 'running' AND (started_at IS NULL OR started_at <= ?)`,
         cutoff,
       )
       .toArray() as { id: string; attempts: number; max_attempts: number }[]
@@ -819,4 +841,3 @@ function safeStringify(value: unknown): string {
     return JSON.stringify({ __unserializable__: String(value) })
   }
 }
-

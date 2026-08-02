@@ -58,7 +58,7 @@ import {
   handleYjsBinaryMessage,
   handleApiRequest,
 } from '../handlers'
-import { SYSTEM_COLLECTION_SCHEMAS, broadcastAwarenessRemoval } from '../handlers/yjs'
+import { SYSTEM_COLLECTION_SCHEMAS, handleYjsDisconnect } from '../handlers/yjs'
 
 /**
  * RecordRoom configuration options
@@ -79,8 +79,6 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
   private initPromise: Promise<void> | null = null
   /** Yjs docs loaded in memory (key: collection:recordId:fieldName) */
   private yjsDocs: Map<YjsDocKey, Y.Doc> = new Map()
-  /** Next Yjs client ID counter */
-  private nextYjsClientId = 1
   /** Owner user ID — gets admin role automatically */
   private ownerUserId: string | null
   /** True until the first fetch() completes — detects hibernation wake-up */
@@ -99,7 +97,7 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
    * The HTTP debug API (`/api/debug/*`) runs arbitrary SQL and role changes
    * with no auth of its own, so it is gated here at the DO's single ingress.
    * Off unless a deployment opts in with `ALLOW_DEBUG_ROUTES=true`
-   * (`deepspace dev`/`test` set it automatically). Deployments holding shared
+   * (`deepspace dev start`/`test run` set it automatically). Deployments holding shared
    * data override this to always return false.
    */
   protected get debugRoutesEnabled(): boolean {
@@ -290,8 +288,12 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
         return
       }
 
-      let migrated = 0
-      let skipped = 0
+      const prepared: Array<{ sql: string; params: unknown[] }> = []
+      const blocked = {
+        missingSchema: 0,
+        invalidData: 0,
+        targetConflict: 0,
+      }
 
       for (const row of rows) {
         const r = row as {
@@ -305,7 +307,7 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
         const schema = this.schemaRegistry.get(r.collection)
 
         if (!schema || !schema.columns) {
-          skipped++
+          blocked.missingSchema++
           continue
         }
 
@@ -323,20 +325,24 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
           .exec(`SELECT 1 FROM "${tbl}" WHERE _row_id = ?`, r.record_id)
           .toArray()
         if (existing.length > 0) {
-          skipped++
+          blocked.targetConflict++
           continue
         }
 
-        let data: Record<string, unknown>
+        let data: unknown
         try {
-          data = JSON.parse(r.data) as Record<string, unknown>
+          data = JSON.parse(r.data)
         } catch {
-          skipped++
+          blocked.invalidData++
+          continue
+        }
+        if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+          blocked.invalidData++
           continue
         }
 
         const columns = schema.columns.map(resolveColumn)
-        const colValues = dataToColumnValues(data, columns)
+        const colValues = dataToColumnValues(data as Record<string, unknown>, columns)
 
         const colIds = Object.keys(colValues)
         const allCols = [
@@ -355,22 +361,37 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
           ...colIds.map((c) => colValues[c]),
         ]
 
-        this.sql.exec(
-          `INSERT INTO "${tbl}" (${allCols.join(', ')}) VALUES (${placeholders})`,
-          ...params,
-        )
-        migrated++
+        prepared.push({
+          sql: `INSERT INTO "${tbl}" (${allCols.join(', ')}) VALUES (${placeholders})`,
+          params,
+        })
       }
 
-      if (migrated > 0 || skipped > 0) {
-        console.log(
-          `[RecordRoom] Migrated ${migrated} records from document-mode, ${skipped} skipped`,
+      const blockedCount = blocked.missingSchema + blocked.invalidData + blocked.targetConflict
+      if (blockedCount > 0) {
+        console.error(
+          `[RecordRoom] Legacy records migration blocked; no records migrated and the records table was retained for retry ` +
+            `(${blockedCount} blocked: ${blocked.missingSchema} missing schema, ` +
+            `${blocked.invalidData} invalid data, ${blocked.targetConflict} target conflict)`,
         )
+        return
       }
 
-      this.sql.exec(`DROP TABLE IF EXISTS records`)
+      this.state.storage.transactionSync(() => {
+        for (const record of prepared) {
+          this.sql.exec(record.sql, ...record.params)
+        }
+        this.sql.exec(`DROP TABLE IF EXISTS records`)
+      })
+
+      console.log(
+        `[RecordRoom] Migrated ${prepared.length} records from document-mode; legacy records table removed`,
+      )
     } catch (error) {
-      console.error(`[RecordRoom] Records table migration error:`, error)
+      console.error(
+        `[RecordRoom] Legacy records migration failed; no records migrated and the records table was retained for retry:`,
+        error,
+      )
     }
   }
 
@@ -434,7 +455,6 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
         role: registeredUser.role,
         subscriptions: [],
         yjsSubscriptions: [],
-        yjsClientId: this.nextYjsClientId++,
       }
 
       this.send(ws, { type: MSG.USER_INFO, payload: registeredUser })
@@ -452,7 +472,6 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
         role: ROLE_ANONYMOUS,
         subscriptions: [],
         yjsSubscriptions: [],
-        yjsClientId: this.nextYjsClientId++,
       }
 
       this.send(ws, {
@@ -533,14 +552,14 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
     try {
       const attachment = ws.deserializeAttachment() as ConnectionAttachment | null
       if (attachment) {
-        broadcastAwarenessRemoval(this.createYjsContext(), attachment)
+        handleYjsDisconnect(this.createYjsContext(), ws, attachment)
       }
     } catch {
       /* best-effort */
     }
   }
 
-  async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
+  async webSocketError(_ws: WebSocket, error: unknown): Promise<void> {
     console.error(`[RecordRoom] webSocketError:`, error)
   }
 
@@ -598,7 +617,7 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
         break
 
       case MSG.YJS_LEAVE:
-        handleYjsLeave(ws, attachment, payload as YjsLeavePayload)
+        handleYjsLeave(yjsCtx, ws, attachment, payload as YjsLeavePayload)
         break
 
       case MSG.LIST_SCHEMAS:

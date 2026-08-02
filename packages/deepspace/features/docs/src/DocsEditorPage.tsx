@@ -15,112 +15,31 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate, useRouteError, isRouteErrorResponse } from 'react-router-dom'
-import {
-  useUser,
-  useQuery,
-  useMutations,
-  usePresenceRoom,
-  getUserColor,
-  type PresencePeerClient,
-} from 'deepspace'
+import { getUserColor, useMutations, useQuery, useUser, useYjsRoom } from 'deepspace'
 import { ArrowLeft, AlertTriangle, List as ListIcon, RefreshCw, Share2 } from 'lucide-react'
 import { Badge } from '@/components/ui'
 import { type Editor, useEditorState } from '@tiptap/react'
-import { useYjsRoomWithAwareness } from './use-yjs-room-with-awareness'
 import { useDocEditor } from './editor/useDocEditor'
 import { DocEditorSurface, PAGE_HEIGHT_PX, PAGE_WIDTH_PX } from './editor/DocEditorSurface'
 import { DocsTiptapToolbar } from './editor/DocsTiptapToolbar'
 import { DocsOutlinePanel, DOCUMENT_OUTLINE_WIDTH_PX, type OutlineEntry } from './DocsOutlinePanel'
-import { DocsPresence, type DocsPresenceParticipant } from './DocsPresence'
-import { InviteDialog, type InviteAclDiff } from './InviteDialog'
+import { DocsPresence } from './DocsPresence'
+import { InviteDialog } from './InviteDialog'
+import type { DocsDocumentFields } from './docs-library-types'
+import {
+  useDocsEditorPresence,
+  useDocsPresenceAccess,
+  type AccessChangeKind,
+} from './use-docs-presence-access'
 import './docs-ui.css'
-
-interface DocumentFields {
-  title: string
-  ownerId: string
-  collaborators?: string
-  editors?: string
-  folderId?: string
-}
 
 const CANVAS_ZOOM_KEY = 'deepspace-docs-editor-canvas-zoom'
 const OUTLINE_OPEN_KEY = 'deepspace-docs-editor-outline-open'
 const KEYBOARD_ZOOM_STEP = 0.1
-const TYPING_IDLE_MS = 1600
-const TYPING_STALE_MS = 5000
-/** Re-broadcast presence so clients who connect later still see existing viewers. */
-const PRESENCE_HEARTBEAT_MS = 25_000
 const DOC_NOT_FOUND_GRACE_MS = 450
 
 function normalizeZoom(z: number): number {
   return Math.min(2, Math.max(0.5, Math.round(z * 1000) / 1000))
-}
-
-function parseIdList(raw: string | undefined): string[] {
-  if (!raw) return []
-  try {
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []
-  } catch {
-    return []
-  }
-}
-
-function peerToDocsParticipant(p: PresencePeerClient): DocsPresenceParticipant {
-  const state = p.state
-  const mode: DocsPresenceParticipant['mode'] = state.mode === 'view' ? 'view' : 'edit'
-  const lastTypedAt = typeof state.lastTypedAt === 'number' ? state.lastTypedAt : undefined
-  const participant: DocsPresenceParticipant = {
-    clientId: 0,
-    userId: p.userId,
-    name: p.userName?.trim() || p.userEmail?.trim() || 'Guest',
-    mode,
-    typing: state.typing === true,
-    isSelf: false,
-  }
-  if (p.userEmail) participant.email = p.userEmail
-  if (p.userImageUrl) participant.imageUrl = p.userImageUrl
-  if (lastTypedAt != null) participant.lastTypedAt = lastTypedAt
-  return participant
-}
-
-function sortDocsPresenceParticipants(
-  a: DocsPresenceParticipant,
-  b: DocsPresenceParticipant,
-): number {
-  if (a.isSelf !== b.isSelf) return a.isSelf ? -1 : 1
-  if (a.mode !== b.mode) return a.mode === 'edit' ? -1 : 1
-  return a.name.localeCompare(b.name)
-}
-
-interface DocsPresenceSelfUser {
-  id: string
-  name?: string | null
-  email?: string | null
-  imageUrl?: string | null
-}
-
-function buildDocsPresence(
-  peers: PresencePeerClient[],
-  self: DocsPresenceSelfUser | null | undefined,
-  presenceAsEditMode: boolean,
-): DocsPresenceParticipant[] {
-  if (!self) {
-    return [...peers.map(peerToDocsParticipant)].sort(sortDocsPresenceParticipants)
-  }
-
-  const selfRow: DocsPresenceParticipant = {
-    clientId: 0,
-    userId: self.id,
-    name: self.name?.trim() || self.email?.trim() || 'You',
-    mode: presenceAsEditMode ? 'edit' : 'view',
-    isSelf: true,
-  }
-  if (self.email) selfRow.email = self.email
-  if (self.imageUrl) selfRow.imageUrl = self.imageUrl
-
-  const others = peers.filter((p) => p.userId !== self.id).map(peerToDocsParticipant)
-  return [selfRow, ...others].sort(sortDocsPresenceParticipants)
 }
 
 function InlineTitle({
@@ -189,8 +108,6 @@ function InlineTitle({
     />
   )
 }
-
-type AccessChangeKind = 'downgrade' | 'upgrade' | 'revoked'
 
 /**
  * Full-screen overlay shown to the second user when the owner changes their
@@ -357,7 +274,7 @@ export default function DocsEditorPage() {
   const navigate = useNavigate()
   const { user } = useUser()
 
-  const { records: documents, status } = useQuery<DocumentFields>('documents', {
+  const { records: documents, status } = useQuery<DocsDocumentFields>('documents', {
     orderBy: 'createdAt',
     orderDir: 'desc',
   })
@@ -367,7 +284,7 @@ export default function DocsEditorPage() {
     [documents, docId],
   )
 
-  const { put } = useMutations<DocumentFields>('documents')
+  const { put } = useMutations<DocsDocumentFields>('documents')
 
   /**
    * `'content'` is kept as the field name only so legacy-doc migration can
@@ -382,18 +299,25 @@ export default function DocsEditorPage() {
     canWrite,
     writeAuthResolved,
     awareness,
-  } = useYjsRoomWithAwareness(docId ?? 'noop', 'content')
+  } = useYjsRoom(docId ?? 'noop', 'content')
 
-  const presenceScopeId = docId ? `doc:${docId}` : '_'
+  const presenceAccess = useDocsPresenceAccess({
+    docId,
+    document: selectedDoc,
+    user,
+    yjsCanWrite: canWrite,
+    writeAuthResolved,
+  })
   const {
-    peers: presencePeers,
-    connected: presenceConnected,
-    updateState: updatePresenceState,
-  } = usePresenceRoom(presenceScopeId)
+    isOwner,
+    effectiveRole,
+    effectiveCanWrite,
+    showReadOnlyDocUx,
+    accessChangeKind,
+    handleAclChange,
+  } = presenceAccess
 
   const [inviteOpen, setInviteOpen] = useState(false)
-  const typingRef = useRef(false)
-  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const [canvasZoom, setCanvasZoom] = useState(() => {
     if (typeof window === 'undefined') return 1
@@ -451,101 +375,6 @@ export default function DocsEditorPage() {
     }
   }, [outlineOpen])
 
-  // Permissions ----------------------------------------------------------------
-  const isOwner = selectedDoc?.data.ownerId === user?.id
-  const collaboratorIds = useMemo(
-    () => parseIdList(selectedDoc?.data.collaborators),
-    [selectedDoc?.data.collaborators],
-  )
-  const editorIds = useMemo(
-    () => parseIdList(selectedDoc?.data.editors),
-    [selectedDoc?.data.editors],
-  )
-  const effectiveRole: 'owner' | 'editor' | 'viewer' | 'none' = !user
-    ? 'none'
-    : isOwner
-      ? 'owner'
-      : editorIds.includes(user.id)
-        ? 'editor'
-        : collaboratorIds.includes(user.id)
-          ? 'viewer'
-          : 'none'
-  const policyCanEdit = effectiveRole === 'owner' || effectiveRole === 'editor'
-
-  /**
-   * Snapshot of the *first* concrete role this peer saw for this `docId`,
-   * plus the wall-clock instant when we captured it. We can't trust
-   * `effectiveRole` alone to detect "the owner just removed me" because
-   * role transitions (none → editor on initial fetch, editor → viewer on
-   * demote, viewer → none on remove) all flow through the same `none`
-   * value before/after `selectedDoc` resolves. The role tells us
-   * downgrade/upgrade vs. still-loading; the timestamp lets us ignore
-   * stale `aclSignal` presence updates from before we joined.
-   */
-  const [initialRole, setInitialRole] = useState<typeof effectiveRole | null>(null)
-  const sessionStartedAtRef = useRef<number | null>(null)
-  useEffect(() => {
-    setInitialRole(null)
-    sessionStartedAtRef.current = null
-  }, [docId])
-  useEffect(() => {
-    if (initialRole) return
-    if (!selectedDoc || !user) return
-    if (effectiveRole === 'none') return
-    setInitialRole(effectiveRole)
-    sessionStartedAtRef.current = Date.now()
-  }, [initialRole, selectedDoc, user, effectiveRole])
-
-  /**
-   * Latched permission-change event delivered over presence. The owner
-   * publishes an `aclSignal` payload after every InviteDialog save; peers
-   * watch the owner's presence state and freeze the first signal addressed
-   * to them. This is the only mechanism that reaches a *removed* user,
-   * since the docs schema's `read: 'collaborator'` rule means the
-   * documents-record update with the new collaborators list is filtered
-   * out of their RecordRoom subscription — the kicked client would
-   * otherwise keep its stale role indefinitely and let the user keep
-   * typing until they refresh.
-   */
-  type DetectedAclEvent = { kind: AccessChangeKind; at: number }
-  const [detectedAclEvent, setDetectedAclEvent] = useState<DetectedAclEvent | null>(null)
-  useEffect(() => {
-    setDetectedAclEvent(null)
-  }, [docId])
-
-  const accessChangeKind: AccessChangeKind | null = useMemo(() => {
-    // Latched presence-derived revoke always wins — it's the only signal
-    // that reaches a peer whose record subscription was filtered out.
-    if (detectedAclEvent?.kind === 'revoked') return 'revoked'
-
-    // Local-record-derived transitions cover the cases where the
-    // documents record still propagates (downgrade / upgrade). They
-    // need an initial concrete role to compare against; without one
-    // we fall through to whatever presence latched.
-    if (initialRole && initialRole !== 'owner') {
-      if (effectiveRole === 'none') return 'revoked'
-      if (initialRole === 'editor' && effectiveRole === 'viewer') return 'downgrade'
-      if (initialRole === 'viewer' && effectiveRole === 'editor') return 'upgrade'
-    }
-
-    return detectedAclEvent?.kind ?? null
-  }, [initialRole, effectiveRole, detectedAclEvent])
-  const accessLocked = accessChangeKind !== null
-
-  /**
-   * Once the owner revokes/downgrades, we hard-stop further writes from this
-   * peer even if Yjs/server auth hasn't caught up yet. Combined with the
-   * blocking overlay below, this prevents the "removed user can still type
-   * until refresh" window described in the report.
-   */
-  const writesLockedByAcl = accessLocked && accessChangeKind !== 'upgrade'
-  const effectiveCanWrite = canWrite && policyCanEdit && !writesLockedByAcl
-  /** Collaborator viewers always see read-only chrome; editors/owners only after Yjs auth resolves and denies write. */
-  const showReadOnlyDocUx =
-    effectiveRole === 'viewer' || (policyCanEdit && writeAuthResolved && !canWrite)
-  const presenceAsEditMode =
-    policyCanEdit && !(writeAuthResolved && !canWrite) && !writesLockedByAcl
-
   // Tiptap editor --------------------------------------------------------------
   const userName = user?.name?.trim() || user?.email?.trim() || 'Guest'
   const userColor = useMemo(() => getUserColor(user?.id ?? 'anon'), [user?.id])
@@ -590,135 +419,13 @@ export default function DocsEditorPage() {
     })
   }, [editor, synced, effectiveCanWrite, doc, legacyText])
 
-  // Presence -------------------------------------------------------------------
-  const presenceParticipants = useMemo(
-    () => buildDocsPresence(presencePeers, user ?? undefined, presenceAsEditMode),
-    [presencePeers, user, presenceAsEditMode],
-  )
-
-  const publishPresence = useCallback(
-    (typingFlag: boolean) => {
-      if (!selectedDoc || !user || !synced) return
-      updatePresenceState({
-        mode: presenceAsEditMode ? 'edit' : 'view',
-        typing: typingFlag,
-        ...(typingFlag ? { lastTypedAt: Date.now() } : {}),
-      })
-    },
-    [presenceAsEditMode, selectedDoc, synced, updatePresenceState, user],
-  )
-
-  /**
-   * Permission-change fan-out via presence.
-   *
-   * The owner publishes a one-shot `aclSignal` payload after every
-   * InviteDialog save. The PresenceRoom server merges incoming state into
-   * each peer's record, so this field rides alongside the existing
-   * `mode`/`typing`/`lastTypedAt` fields without clobbering them. We
-   * intentionally route through presence rather than the documents record
-   * because the docs schema's `read: 'collaborator'` rule prevents a
-   * just-removed user from seeing the new record state — presence is the
-   * only channel still wired to them at the moment of revocation.
-   */
-  const handleAclChange = useCallback(
-    (diff: InviteAclDiff) => {
-      if (!isOwner) return
-      updatePresenceState({
-        aclSignal: {
-          at: Date.now(),
-          removed: diff.removedUserIds,
-          demoted: diff.demotedUserIds,
-          promoted: diff.promotedUserIds,
-        },
-      })
-    },
-    [isOwner, updatePresenceState],
-  )
-
-  /**
-   * Latch the first relevant `aclSignal` we see from the owner's presence
-   * peer. We compare its `at` against `sessionStartedAtRef` so refreshing
-   * into a doc whose owner already published a signal doesn't immediately
-   * trip the overlay — only signals emitted *after* this session began
-   * count. Once latched we keep the value: even if the owner disconnects
-   * and their presence peer vanishes, the overlay must persist.
-   */
-  useEffect(() => {
-    if (!user || !selectedDoc) return
-    if (detectedAclEvent) return
-    const start = sessionStartedAtRef.current
-    if (start == null) return
-    const ownerId = selectedDoc.data.ownerId
-    if (user.id === ownerId) return
-    const ownerPeer = presencePeers.find((p) => p.userId === ownerId)
-    if (!ownerPeer) return
-
-    const rawSignal = (ownerPeer.state as Record<string, unknown>).aclSignal
-    if (!rawSignal || typeof rawSignal !== 'object') return
-    const signal = rawSignal as {
-      at?: unknown
-      removed?: unknown
-      demoted?: unknown
-      promoted?: unknown
-    }
-    if (typeof signal.at !== 'number' || signal.at <= start) return
-
-    const includes = (list: unknown): boolean =>
-      Array.isArray(list) && list.some((id) => id === user.id)
-
-    if (includes(signal.removed)) {
-      setDetectedAclEvent({ kind: 'revoked', at: signal.at })
-    } else if (includes(signal.demoted)) {
-      setDetectedAclEvent({ kind: 'downgrade', at: signal.at })
-    } else if (includes(signal.promoted)) {
-      setDetectedAclEvent({ kind: 'upgrade', at: signal.at })
-    }
-  }, [presencePeers, user, selectedDoc, detectedAclEvent])
-
-  // Typing flag — driven by Tiptap's `update` event (debounced idle reset).
-  useEffect(() => {
-    if (!editor) return
-    const onUpdate = () => {
-      if (!effectiveCanWrite) return
-      typingRef.current = true
-      publishPresence(true)
-      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current)
-      typingTimeoutRef.current = setTimeout(() => {
-        typingRef.current = false
-        publishPresence(false)
-      }, TYPING_IDLE_MS)
-    }
-    editor.on('update', onUpdate)
-    return () => {
-      editor.off('update', onUpdate)
-      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current)
-    }
-  }, [editor, effectiveCanWrite, publishPresence])
-
-  // Initial presence + heartbeat so late joiners still see existing viewers.
-  useEffect(() => {
-    publishPresence(typingRef.current)
-  }, [publishPresence, presenceConnected])
-
-  useEffect(() => {
-    if (!synced || !selectedDoc || !user) return
-    const id = window.setInterval(() => publishPresence(typingRef.current), PRESENCE_HEARTBEAT_MS)
-    return () => clearInterval(id)
-  }, [synced, selectedDoc, user, publishPresence])
-
-  // Typing names from presence (stale-aware).
-  const typingNames = useMemo(() => {
-    const names: string[] = []
-    const seen = new Set<string>()
-    for (const p of presenceParticipants) {
-      if (p.isSelf || !p.typing) continue
-      if (p.lastTypedAt != null && Date.now() - p.lastTypedAt >= TYPING_STALE_MS) continue
-      if (seen.has(p.name)) continue
-      seen.add(p.name)
-      names.push(p.name)
-    }
-    return names
-  }, [presenceParticipants])
+  const { participants: presenceParticipants, typingNames } = useDocsEditorPresence({
+    editor,
+    document: selectedDoc,
+    user,
+    synced,
+    access: presenceAccess,
+  })
 
   // Outline --------------------------------------------------------------------
   const outlineEntries = useOutlineEntries(editor)

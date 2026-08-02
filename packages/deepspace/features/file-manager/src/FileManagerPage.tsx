@@ -209,7 +209,7 @@ function PreviewModal({ file, imageUrl, onClose }: PreviewModalProps) {
 
   return (
     <Modal open={!!file} onClose={onClose} size="lg">
-      <Modal.Header onClose={onClose}>
+      <Modal.Header>
         <Modal.Title>{name}</Modal.Title>
       </Modal.Header>
       <Modal.Body>

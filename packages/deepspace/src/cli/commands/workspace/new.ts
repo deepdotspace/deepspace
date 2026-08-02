@@ -1,0 +1,147 @@
+import * as p from '@clack/prompts'
+import { isAbsolute, join, resolve } from 'node:path'
+import { findAppDir } from '../../lib/app-context'
+import { mintUlid } from '../../lib/app-identity'
+import { defineDeepspaceCommand, Refusal } from '../../lib/command'
+import { resolveCommit } from '../../lib/git/repository'
+import { workspaceBranchName } from '../../lib/workspace-id'
+import { ensureSpaceRemote } from '../../lib/vc-remote'
+import { mintIdempotencyKey } from '../../lib/repo-api'
+import { createSpinner } from '../../lib/spinner'
+import { fetchTrunk } from './analysis'
+import { materializeWorkspaceWorktree } from './local'
+import { APP_ARG, resolveTarget } from './runtime'
+
+export const newWorkspaceCommand = defineDeepspaceCommand({
+  meta: { name: 'new', description: 'Create a workspace: server-side ref + local worktree' },
+  args: {
+    task: {
+      type: 'string',
+      alias: 't',
+      // NOT citty-required: a missing required arg makes citty print human
+      // usage text even under --json. Validated in run() for a JSON refusal.
+      description: 'What this workspace is for (shown to every collaborator/agent; required)',
+      required: false,
+    },
+    base: {
+      type: 'string',
+      description: 'Base revision (default: the cloud repo trunk tip)',
+      required: false,
+    },
+    dir: {
+      type: 'string',
+      description: 'Worktree directory (default: .deepspace/ws/<id>)',
+      required: false,
+    },
+    app: APP_ARG,
+  },
+  async run({ args }) {
+    const task = typeof args.task === 'string' ? args.task.trim() : ''
+    if (!task) {
+      throw new Refusal(
+        'A workspace needs a task — pass -t "<what this workspace is for>" (it is shown to every collaborator and agent).',
+        'invalid_task',
+      )
+    }
+    const baseArg = typeof args.base === 'string' ? args.base.trim() : ''
+    // Validate an explicit --base before auth: it is a local input error.
+    if (baseArg) {
+      const baseDir = findAppDir()
+      if (baseDir && !resolveCommit(baseDir, baseArg)) {
+        throw new Refusal(
+          `--base ${String(args.base)} does not resolve to a local commit.`,
+          'invalid_base',
+        )
+      }
+    }
+    const spinner = args.json ? null : createSpinner()
+    spinner?.start('Preparing workspace…')
+    const { appDir, appId, token, api } = await resolveTarget(
+      typeof args.app === 'string' ? args.app : undefined,
+    )
+    spinner?.message('Creating workspace…')
+    ensureSpaceRemote(appDir, appId)
+
+    // Prefer the requested revision, then cloud trunk, then local HEAD for an empty cloud repo.
+    let baseOid: string | null = null
+    const refs = await api.getRefs()
+    if (baseArg) {
+      baseOid = resolveCommit(appDir, baseArg)
+      if (!baseOid) {
+        spinner?.stop('Base not found.')
+        throw new Refusal(
+          `--base ${String(args.base)} does not resolve to a local commit.`,
+          'invalid_base',
+        )
+      }
+    } else {
+      const trunk = refs?.head ? refs.refs.find((ref) => ref.name === refs.head) : undefined
+      if (trunk) {
+        baseOid = trunk.oid
+        if (!resolveCommit(appDir, baseOid)) fetchTrunk(appDir, token, refs!.head)
+        if (!resolveCommit(appDir, baseOid)) {
+          spinner?.stop('Base not fetchable.')
+          throw new Refusal(
+            `Could not fetch the trunk tip ${baseOid.slice(0, 10)} from the cloud repo. Retry; if it persists, report it with \`deepspace feedback\`.`,
+            'fetch_failed',
+          )
+        }
+      } else {
+        baseOid = resolveCommit(appDir, 'HEAD')
+        if (!baseOid) {
+          spinner?.stop('No base.')
+          throw new Refusal(
+            'The repo has no commits yet — commit first, then create a workspace.',
+            'no_commits',
+          )
+        }
+      }
+    }
+
+    const id = `ws_${mintUlid()}`
+    const branch = workspaceBranchName(id)
+    const { view } = await api.createWorkspace({
+      workspaceId: id,
+      task,
+      baseOid,
+      idempotencyKey: mintIdempotencyKey(),
+    })
+
+    const dirInput = typeof args.dir === 'string' ? args.dir.trim() : ''
+    const dirArg = dirInput || join('.deepspace', 'ws', id.slice(3).toLowerCase())
+    const dir = isAbsolute(dirArg) ? dirArg : resolve(appDir, dirArg)
+    let provisioned: string[] = []
+    try {
+      provisioned = materializeWorkspaceWorktree(appDir, dir, branch, baseOid)
+    } catch (error) {
+      spinner?.stop('Worktree failed.')
+      const reason = error instanceof Error ? error.message : String(error)
+      throw new Refusal(
+        `Workspace ${id} was created in the cloud, but the local worktree could not be set up: ${reason} — attach it with \`deepspace workspace attach ${id} <dir>\` (or drop it: \`deepspace workspace drop ${id}\`).`,
+        'worktree_setup_failed',
+        { extra: { workspaceId: id, ref: view.workspace.ref, baseOid } },
+      )
+    }
+
+    spinner?.stop(`Workspace ${id} created.`)
+    if (!args.json) {
+      if (provisioned.length > 0)
+        p.log.info(`Linked from the main checkout: ${provisioned.join(', ')}`)
+      p.log.info(`Work in: cd ${dir}`)
+      p.log.info(
+        `Then: commit as usual, \`deepspace workspace sync\` to publish, \`deepspace workspace land\` when done.`,
+      )
+    }
+    return {
+      data: {
+        workspaceId: id,
+        appId,
+        ref: view.workspace.ref,
+        baseOid,
+        branch,
+        dir,
+        provisioned,
+      },
+    }
+  },
+})

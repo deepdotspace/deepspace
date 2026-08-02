@@ -1,16 +1,30 @@
 /**
- * deepspace login
+ * deepspace auth login
  *
  * Opens the browser to sign in with GitHub or Google.
  * CLI polls the auth worker until login is complete.
  *
- *   deepspace login                          # browser-based OAuth
- *   deepspace login --email x --password y   # non-interactive (discouraged: argv leaks)
- *   echo "$PW" | deepspace login --email x --password-stdin   # password via stdin
- *   DEEPSPACE_EMAIL=x DEEPSPACE_PASSWORD=y deepspace login    # via env
+ *   deepspace auth login                          # browser-based OAuth
+ *   deepspace auth login --email x --password y   # non-interactive (discouraged: argv leaks)
+ *   echo "$PW" | deepspace auth login --email x --password-stdin   # password via stdin
+ *   DEEPSPACE_EMAIL=x DEEPSPACE_PASSWORD=y deepspace auth login    # via env
+ *
+ * `--json` (from the command runtime, lib/command.ts) matters more here than
+ * anywhere else: login is the FIRST command an agent runs, and until now it
+ * had no machine surface at all. Two rules keep it usable:
+ *
+ *   1. `--json` is an explicit machine signal, so it also means "non-
+ *      interactive" for credential resolution — $DEEPSPACE_EMAIL/$DEEPSPACE_
+ *      PASSWORD are consulted even from a pty. (The guard against ambient
+ *      DEEPSPACE_* hijacking a HUMAN `deepspace auth login` is untouched: a
+ *      human doesn't pass --json.)
+ *   2. The browser flow polls for up to TEN MINUTES. Entering it from a
+ *      machine caller with nowhere to click is a silent hang, so `--json`
+ *      without credentials and without a TTY refuses immediately
+ *      (`interactive_required`) instead.
  */
 
-import { defineCommand } from 'citty'
+import { credentialPaths } from '../auth'
 import { writeFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -20,12 +34,14 @@ import * as p from '@clack/prompts'
 import { createSpinner } from '../lib/spinner'
 import { DASHBOARD_URL, PLATFORM_URLS } from '../env'
 import { exchangeSession, SESSION_COOKIE } from '../session'
+import { decodeJwtPayload } from '../jwt'
 import { openBrowser } from '../lib/open-browser'
+import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 
 const AUTH_URL = process.env.DEEPSPACE_AUTH_URL ?? PLATFORM_URLS.auth
 const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
 
-export default defineCommand({
+export default defineDeepspaceCommand({
   meta: {
     name: 'login',
     description: 'Log in to your DeepSpace account',
@@ -48,16 +64,17 @@ export default defineCommand({
     },
   },
   async run({ args }) {
+    const json = args.json
     // Non-interactive mode for CI/agents. Password from --password-stdin
     // (safest), $DEEPSPACE_PASSWORD, or --password (discouraged — visible in
     // `ps`/shell history); email from --email or $DEEPSPACE_EMAIL. The env vars
-    // are consulted ONLY when stdin is non-interactive, so ambient
-    // DEEPSPACE_* in a dev shell can't hijack an interactive `deepspace login`
-    // into a password login as a different identity.
-    const interactive = Boolean(process.stdin.isTTY)
+    // are consulted ONLY when stdin is non-interactive (or --json was asked
+    // for), so ambient DEEPSPACE_* in a dev shell can't hijack an interactive
+    // `deepspace auth login` into a password login as a different identity.
+    const interactive = Boolean(process.stdin.isTTY) && !json
     const { email, password } = resolveLoginCredentials({
-      emailArg: args.email,
-      passwordArg: args.password,
+      emailArg: args.email as string | undefined,
+      passwordArg: args.password as string | undefined,
       envEmail: interactive ? undefined : process.env.DEEPSPACE_EMAIL,
       envPassword: interactive ? undefined : process.env.DEEPSPACE_PASSWORD,
       passwordStdin: args['password-stdin'] ? readPasswordFromStdin() : undefined,
@@ -67,22 +84,35 @@ export default defineCommand({
 
     const decision = loginModeDecision({ email, password, passwordIntent })
     if (decision.mode === 'error') {
-      console.error(decision.message)
-      process.exit(1)
+      throw new Refusal(decision.message, decision.code)
     }
     if (decision.mode === 'password') {
-      console.log(`Signing in as ${email}...`)
-      await doEmailLogin(email as string, password as string)
-      console.log('Logged in')
-      return
+      if (!json) console.log(`Signing in as ${email}...`)
+      const who = await doEmailLogin(email as string, password as string)
+      if (!json) {
+        console.log(`Logged in as ${who.email} (${who.userId})`)
+        console.log(`Dashboard: ${DASHBOARD_URL}`)
+      }
+      return { data: { email: who.email, userId: who.userId } }
     }
     // decision.mode === 'oauth' → fall through to the browser flow below.
 
+    // The browser flow polls for up to ten minutes. --json is the machine
+    // signal on its own — a caller running under a pty (stdout IS a TTY) would
+    // otherwise fall through and hang for ten minutes. Refuse for ANY --json
+    // caller, or any non-TTY, with the flags that actually work.
+    if (json || !process.stdout.isTTY) {
+      throw new Refusal(
+        'Browser login needs an interactive terminal. Use --email with --password-stdin (or $DEEPSPACE_EMAIL/$DEEPSPACE_PASSWORD).',
+        'interactive_required',
+      )
+    }
+
     // Browser-based OAuth flow
-    p.intro('DeepSpace Login')
+    if (!json) p.intro('DeepSpace Login')
 
     const s = createSpinner()
-    s.start('Creating login session...')
+    if (!json) s.start('Creating login session...')
 
     // PKCE: generate a random verifier and send only its SHA-256 hash to the
     // server. The verifier never leaves this process, so the loginUrl alone
@@ -96,19 +126,25 @@ export default defineCommand({
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code_challenge: codeChallenge }),
     })
+    // The runtime stops any live spinner before it renders a refusal, so these
+    // throws don't need to unwind the spinner themselves.
     if (!sessionRes.ok) {
-      s.stop('Failed')
-      p.cancel('Could not create login session')
-      process.exit(1)
+      throw new Refusal(
+        `Could not create login session (${sessionRes.status})`,
+        'login_session_failed',
+        { action: cliAction('deepspace', 'auth', 'login') },
+      )
     }
     const sessionData = (await sessionRes.json()) as {
       sessionId?: string
       loginUrl?: string
     }
     if (!sessionData.sessionId || !sessionData.loginUrl) {
-      s.stop('Failed')
-      p.cancel('Could not create login session')
-      process.exit(1)
+      throw new Refusal(
+        'Could not create login session — the auth server returned no session id or login url.',
+        'login_session_failed',
+        { action: cliAction('deepspace', 'auth', 'login') },
+      )
     }
 
     const { sessionId, loginUrl } = sessionData as {
@@ -116,33 +152,47 @@ export default defineCommand({
       loginUrl: string
     }
 
-    s.stop('Opening browser...')
-    p.log.info(`If the browser doesn't open, visit:\n  ${loginUrl}`)
+    if (!json) {
+      s.stop('Opening browser...')
+      p.log.info(`If the browser doesn't open, visit:\n  ${loginUrl}`)
+    }
 
     // 2. Open browser
     openBrowser(loginUrl)
 
     // 3. Poll for completion
-    s.start('Waiting for authentication...')
+    if (!json) s.start('Waiting for authentication...')
     const result = await pollForCompletion(sessionId, codeVerifier)
 
     if (!result) {
-      s.stop('Timed out')
-      p.cancel('Login timed out. Run `deepspace login` to try again.')
-      process.exit(1)
+      throw new Refusal('Login timed out. Run `deepspace auth login` to try again.', 'login_timeout', {
+        action: cliAction('deepspace', 'auth', 'login'),
+      })
     }
 
     // 4. Store credentials + provision the billing profile (see provisionProfile)
     storeCredentials(result.sessionToken, result.jwt)
     await provisionProfile(result.jwt)
 
-    s.stop('Authenticated')
-    p.log.success(`Logged in as ${result.name ?? result.email}`)
-    p.note(
-      `Manage your account, deployed apps, billing, and subscription\nplans on the web dashboard:\n\n  ${DASHBOARD_URL}`,
-      'Dashboard',
-    )
-    p.outro('Done')
+    // Report the same identity fields the password path does, so an agent
+    // never has to follow login with `whoami` to learn who it became.
+    let userId = '(unknown)'
+    try {
+      userId = decodeJwtPayload<{ sub?: string }>(result.jwt).sub ?? userId
+    } catch {
+      // A malformed JWT is the session's problem, not login's — keep going.
+    }
+
+    if (!json) {
+      s.stop('Authenticated')
+      p.log.success(`Logged in as ${result.name ?? result.email}`)
+      p.note(
+        `Manage your account, deployed apps, billing, and subscription\nplans on the web dashboard:\n\n  ${DASHBOARD_URL}`,
+        'Dashboard',
+      )
+      p.outro('Done')
+    }
+    return { data: { email: result.email, userId } }
   },
 })
 
@@ -174,38 +224,40 @@ export function resolveLoginCredentials(opts: {
  * incomplete credential set (missing email, or an EMPTY password — e.g. an
  * empty `--password-stdin` in CI) becomes an `error`, not a silent fall-through
  * to the browser OAuth flow (which would hang ~10 min in a headless pipeline).
- * Pure for testing.
+ * `code` is the machine slug the refusal carries. Pure for testing.
  */
 export function loginModeDecision(opts: {
   email?: string
   password?: string
   passwordIntent: boolean
-}): { mode: 'password' } | { mode: 'oauth' } | { mode: 'error'; message: string } {
+}): { mode: 'password' } | { mode: 'oauth' } | { mode: 'error'; message: string; code: string } {
   if (opts.email && opts.password) return { mode: 'password' }
   if (!opts.passwordIntent) return { mode: 'oauth' }
   if (!opts.email) {
     return {
       mode: 'error',
+      code: 'missing_email',
       message: 'Non-interactive login needs an email: --email <you@example.com> (or $DEEPSPACE_EMAIL).',
     }
   }
   return {
     mode: 'error',
+    code: 'missing_password',
     message:
       'Non-interactive login needs a non-empty password: --password-stdin, $DEEPSPACE_PASSWORD, or --password.',
   }
 }
 
 /**
- * Read a password piped on stdin (one trailing newline stripped). Errors on a
+ * Read a password piped on stdin (one trailing newline stripped). Refuses on a
  * TTY, where reading stdin would block forever waiting for EOF.
  */
 function readPasswordFromStdin(): string {
   if (process.stdin.isTTY) {
-    console.error(
-      '--password-stdin expects the password piped on stdin, e.g. `printf %s "$PW" | deepspace login --email you@x.com --password-stdin`.',
+    throw new Refusal(
+      '--password-stdin expects the password piped on stdin, e.g. `printf %s "$PW" | deepspace auth login --email you@x.com --password-stdin`.',
+      'password_stdin_needs_pipe',
     )
-    process.exit(1)
   }
   return readFileSync(0, 'utf-8').replace(/\r?\n$/, '')
 }
@@ -262,8 +314,12 @@ async function pollForCompletion(
 function storeCredentials(sessionToken: string, jwt: string) {
   const dir = join(homedir(), '.deepspace')
   mkdirSync(dir, { recursive: true, mode: 0o700 })
-  writeFileSync(join(dir, 'session'), sessionToken, { mode: 0o600 })
-  writeFileSync(join(dir, 'token'), jwt, { mode: 0o600 })
+  // Per-plane paths: a staging login must not overwrite the production
+  // session (that clobber surfaced as a bogus "Session expired" on the next
+  // prod command).
+  const { sessionPath, tokenPath } = credentialPaths(AUTH_URL)
+  writeFileSync(sessionPath, sessionToken, { mode: 0o600 })
+  writeFileSync(tokenPath, jwt, { mode: 0o600 })
 }
 
 /**
@@ -294,7 +350,10 @@ function base64url(bytes: Buffer): string {
 
 // ── Email/password login (for test accounts and CI) ────────────────
 
-async function doEmailLogin(email: string, password: string): Promise<void> {
+async function doEmailLogin(
+  email: string,
+  password: string,
+): Promise<{ email: string; userId: string }> {
   const res = await fetch(`${AUTH_URL}/api/auth/sign-in/email`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: AUTH_URL },
@@ -321,4 +380,13 @@ async function doEmailLogin(email: string, password: string): Promise<void> {
 
   storeCredentials(sessionToken, jwt)
   await provisionProfile(jwt)
+  // The user id is the fact `whoami --json` reports as `userId`; surface it at
+  // login too so an agent never has to re-run whoami to learn who it became.
+  let userId = '(unknown)'
+  try {
+    userId = decodeJwtPayload<{ sub?: string }>(jwt).sub ?? userId
+  } catch {
+    // A malformed JWT is the session's problem, not login's — keep going.
+  }
+  return { email, userId }
 }

@@ -45,8 +45,8 @@ type ResolveAuth = (req: Request, env: Env) => Promise<VerifyResult | null>
 // watch worker logs — reasoning/thinking models occasionally surface chunk
 // types we don't handle yet (we ignore them silently in `applyStreamAction`).
 //
-// IDs use stable aliases (`claude-opus-4-7`) rather than dated snapshots
-// (`claude-opus-4-7-20260101`) so a provider's bug-fix release lands here
+// IDs use stable aliases (`claude-opus-4-8`) rather than dated snapshots
+// (`claude-opus-4-8-20260715`) so a provider's bug-fix release lands here
 // without a code change. Pin to a snapshot if you need reproducible behavior.
 const ALLOWED_MODELS: Record<string, 'anthropic' | 'openai' | 'cerebras'> = {
   // Anthropic — covers premium ($5/$25), balanced ($3/$15), cheap ($1/$5).
@@ -64,13 +64,6 @@ const ALLOWED_MODELS: Record<string, 'anthropic' | 'openai' | 'cerebras'> = {
   // Cerebras — only `gpt-oss-120b` is on the production tier (~3000 tok/s);
   // preview models (qwen-3-235b, glm-4.7) are explicitly not for production.
   'gpt-oss-120b':       'cerebras',
-  // Prior generation — not in the picker, but still served and priced, so
-  // saved picks and custom clients keep working instead of 400ing.
-  'claude-sonnet-4-6':  'anthropic',
-  'claude-opus-4-7':    'anthropic',
-  'gpt-5.4':            'openai',
-  'gpt-5.4-mini':       'openai',
-  'gpt-5.4-nano':       'openai',
 }
 // Sonnet 5 is the balanced default — capable enough for most tool-using
 // turns, cheaper than Opus (intro $2/$10 per MTok through 2026-08-31,
@@ -184,22 +177,21 @@ export function registerAiChatRoutes(
       return c.json({ error: 'Chat not found' }, 404)
     }
 
-    // Load history WITHOUT writing the new user row yet — both user and
-    // assistant rows are persisted together inside `onFinish` (transactional).
-    // If `streamText` errors or the client navigates away, nothing persists,
-    // so the DB never accumulates orphan user rows from failed retries.
+    // Load history before writing this turn. `onFinish` later writes user then
+    // assistant as separate DO operations; the ordering is intentional, but
+    // it is not atomic.
     const history = await loadMessages(stub, chatId, auth.userId)
     // Carry `parts` through so compaction can truncate stale tool results AND
     // turnsToCoreMessages can rebuild assistant tool-call/tool-result pairs.
     const rawTurns: ChatTurn[] = history.map((m) => ({
-      id: m.id,
+      id: m.recordId,
       role: m.role,
       content: m.content,
       parts: m.parts,
     }))
 
-    // Append the in-flight user message in memory so the LLM sees it; the
-    // actual DO write happens in onFinish (transactional with the assistant).
+    // Append the in-flight user message in memory so the LLM sees it; its DO
+    // write is the first persistence operation in `onFinish`.
     // Then dedup consecutive user messages — defense-in-depth for legacy
     // chats with orphan user rows AND for the rare case where a prior turn's
     // user-write succeeded but the assistant-write failed both retries.
@@ -283,12 +275,10 @@ export function registerAiChatRoutes(
       ...(ALLOWED_MODELS[usedModelId] === 'openai'
         ? { providerOptions: { openai: { reasoningEffort: 'none' as const } } }
         : {}),
-      // Cap the multi-step tool loop at 5 model calls. v4's `maxSteps: 5` shape;
-      // v5 expresses the same thing as a `stopWhen` predicate.
+      // Cap the multi-step tool loop at five model calls.
       stopWhen: stepCountIs(5),
-      // Propagate the request's AbortSignal so when the client navigates away
-      // mid-stream the AI provider call is cancelled and onFinish is skipped —
-      // no orphan rows persist, no wasted tokens.
+      // Cancel provider and tool work with the request. If at least one step
+      // completed, AI SDK still calls `onFinish`; a zero-step abort skips it.
       abortSignal: c.req.raw.signal,
       onError: ({ error }) => {
         console.error('[ai-chat] streamText error:', error)
@@ -300,14 +290,13 @@ export function registerAiChatRoutes(
           return
         }
 
-        // Persist user + assistant + metadata together. onFinish fires on stream
-        // end (success or post-step abort once at least one step has run); for an
-        // abort with zero steps no rows persist. This is the single transactional
-        // write point for the turn. Order matters: user FIRST so chronological
-        // reads are correct, then assistant. If user-write exhausts retries we
-        // ABORT the assistant write — otherwise we'd persist an assistant row
-        // with no preceding user row, breaking the invariant relied on by the
-        // dedup + turnsToCoreMessages loop on the next turn.
+        // Persist user → assistant → metadata as independent writes, not a
+        // transaction. `onFinish` runs after normal completion and after an
+        // abort with at least one completed step. Order matters: user FIRST so
+        // chronological reads are correct, then assistant. If user-write
+        // exhausts retries we ABORT the assistant write — otherwise we'd persist
+        // an assistant row with no preceding user row, breaking the invariant
+        // relied on by the dedup + turnsToCoreMessages loop on the next turn.
         const writeWithRetry = async (label: string, fn: () => Promise<unknown>): Promise<boolean> => {
           try { await fn(); return true } catch (err) {
             console.error(`[ai-chat] ${label} failed, retrying once:`, err)

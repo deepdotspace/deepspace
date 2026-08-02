@@ -93,30 +93,6 @@
 
   /* Animations */
   --animate-pulse-glow: pulse-glow 2s ease-in-out infinite;
-
-  /* Backward-compatibility aliases */
-  --color-surface: var(--color-background);
-  --color-surface-elevated: var(--color-card);
-  --color-surface-overlay: var(--color-muted);
-  --color-surface-input: rgba(30, 41, 59, 0.6);
-  --color-content: var(--color-foreground);
-  --color-content-secondary: var(--color-muted-foreground);
-  --color-content-muted: #64748b;
-  --color-content-inverse: #0f172a;
-  --color-border-strong: rgba(71, 85, 105, 0.5);
-  --color-border-focus: var(--color-ring);
-  --color-primary-hover: #6d7bf5;
-  --color-primary-muted: rgba(129, 140, 248, 0.2);
-  --color-primary-border: rgba(129, 140, 248, 0.3);
-  --color-danger: var(--color-destructive);
-  --color-danger-muted: rgba(239, 68, 68, 0.2);
-  --color-danger-border: rgba(239, 68, 68, 0.4);
-  --color-success-muted: rgba(16, 185, 129, 0.2);
-  --color-success-border: rgba(16, 185, 129, 0.4);
-  --color-warning-muted: rgba(245, 158, 11, 0.2);
-  --color-warning-border: rgba(245, 158, 11, 0.4);
-  --color-info-muted: rgba(59, 130, 246, 0.2);
-  --color-info-border: rgba(59, 130, 246, 0.4);
 }
 
 /* Theme override blocks live in `themes.css` — imported above. */

@@ -31,9 +31,16 @@ AI chat dock) — the shell is the app's layout and stays; see the skill's
 ## Project commands
 
 ```sh
-npx deepspace login        # authenticate with app.space
-npx deepspace dev          # local dev server (vite + miniflare)
+npx deepspace auth login   # authenticate with app.space
+npx deepspace dev start    # local dev server (vite + miniflare)
 npx deepspace deploy       # deploy to <app>.app.space
+npx deepspace push         # publish committed code to the app's cloud repo
 npx deepspace add --list   # list optional features (messaging, etc.)
 npx deepspace add <feature>
 ```
+
+Use the DeepSpace cloud repo as the default version control; no external Git
+host is required. Start parallel work with
+`npx deepspace workspace new -t "<task>"`, commit normally, then run
+`npx deepspace workspace sync` and `npx deepspace workspace land`. The `space`
+Git remote is installed by the first DeepSpace push/pull/deploy command.

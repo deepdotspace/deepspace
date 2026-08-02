@@ -6,6 +6,8 @@
   "details": "ChatPanel (reusable component) and AiChatPage (full assistant page with conversation rail). Persists to ai-chats / ai-messages collections in the app's RecordRoom — no localStorage. Routes through the Vercel AI SDK proxy with Anthropic, OpenAI, and Cerebras. User-scoped via RBAC (read: 'own').",
   "files": [
     { "src": "src/ChatPanel.tsx", "dest": "src/components/ChatPanel.tsx" },
+    { "src": "src/ChatPanel.messages.tsx", "dest": "src/components/ChatPanel.messages.tsx" },
+    { "src": "src/ChatPanel.stream.ts", "dest": "src/components/ChatPanel.stream.ts" },
     { "src": "src/AiChatPage.tsx", "dest": "src/pages/assistant.tsx" },
     { "src": "src/ai-chat-schema.ts", "dest": "src/schemas/ai-chat-schema.ts" }
   ],

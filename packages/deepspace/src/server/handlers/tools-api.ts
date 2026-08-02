@@ -24,7 +24,14 @@ import type { YjsDocKey } from '../../shared/types'
 import { executeQuery, type SubscriptionContext } from './subscriptions'
 import { getRecord, putRecord, deleteRecord, readRecord, type RecordContext } from './records'
 import { getUser, getAllUsers, registerUser } from './users'
-import { getOrCreateYjsDoc, broadcastYjsUpdate, getYjsDocKey, SYSTEM_COLLECTIONS, type YjsContext } from './yjs'
+import {
+  getOrCreateYjsDoc,
+  unloadYjsDocIfUnused,
+  broadcastYjsUpdate,
+  getYjsDocKey,
+  SYSTEM_COLLECTIONS,
+  type YjsContext,
+} from './yjs'
 import { canRead, canUpdate } from '../schemas/registry'
 
 export interface ToolsApiContext extends SubscriptionContext {
@@ -127,9 +134,9 @@ async function handleToolExecute(
     }
   }
 
-  // Yjs tools need async execution — handle before sync dispatch
+  // Yjs tools have a dedicated dispatcher because they need Yjs-specific context.
   if (tool.startsWith('yjs.')) {
-    const result = await executeYjsTool(ctx, tool, params, userId, userRole)
+    const result = executeYjsTool(ctx, tool, params, userId, userRole)
     const status = result.success ? 200 : (result.error?.includes('not found') ? 404 : 400)
     return Response.json(result, { status, headers: CORS_HEADERS })
   }
@@ -337,16 +344,28 @@ function buildYjsCtx(ctx: ToolsApiContext): YjsContext {
   }
 }
 
-/**
- * Execute a Yjs tool (yjs.list, yjs.getText, yjs.setText).
- */
-async function executeYjsTool(
+/** Use a cached document for one synchronous operation, then release it if idle. */
+function withYjsDoc<T>(
+  ctx: YjsContext,
+  docKey: YjsDocKey,
+  operation: (doc: Y.Doc) => T,
+): T {
+  const doc = getOrCreateYjsDoc(ctx, docKey)
+  try {
+    return operation(doc)
+  } finally {
+    unloadYjsDocIfUnused(ctx, docKey)
+  }
+}
+
+/** Execute a Yjs tool (yjs.list, yjs.getText, yjs.setText). */
+function executeYjsTool(
   ctx: ToolsApiContext,
   toolName: string,
   params: Record<string, unknown>,
   userId: string,
   userRole: string
-): Promise<ToolResult> {
+): ToolResult {
   switch (toolName) {
     case 'yjs.list': {
       const rows = ctx.sql.exec(
@@ -378,23 +397,23 @@ async function executeYjsTool(
 
       const docKey = getYjsDocKey(collection, recordId, fieldName)
       const yjsCtx = buildYjsCtx(ctx)
-      const doc = await getOrCreateYjsDoc(yjsCtx, docKey)
+      return withYjsDoc(yjsCtx, docKey, doc => {
+        const ytext = doc.getText(fieldName)
+        const text = ytext.toString()
 
-      const ytext = doc.getText(fieldName)
-      const text = ytext.toString()
-
-      const sharedTypes: Record<string, string> = {}
-      for (const [key, type] of doc.share) {
-        if (type instanceof Y.Text) {
-          sharedTypes[key || '(default)'] = `Y.Text (${type.length} chars)`
-        } else if (type instanceof Y.Map) {
-          sharedTypes[key] = `Y.Map (${(type as Y.Map<unknown>).size} entries)`
-        } else if (type instanceof Y.Array) {
-          sharedTypes[key] = `Y.Array (${(type as Y.Array<unknown>).length} items)`
+        const sharedTypes: Record<string, string> = {}
+        for (const [key, type] of doc.share) {
+          if (type instanceof Y.Text) {
+            sharedTypes[key || '(default)'] = `Y.Text (${type.length} chars)`
+          } else if (type instanceof Y.Map) {
+            sharedTypes[key] = `Y.Map (${(type as Y.Map<unknown>).size} entries)`
+          } else if (type instanceof Y.Array) {
+            sharedTypes[key] = `Y.Array (${(type as Y.Array<unknown>).length} items)`
+          }
         }
-      }
 
-      return { success: true, data: { docKey, text, sharedTypes } }
+        return { success: true, data: { docKey, text, sharedTypes } }
+      })
     }
 
     case 'yjs.setText': {
@@ -411,26 +430,27 @@ async function executeYjsTool(
 
       const docKey = getYjsDocKey(collection, recordId, fieldName)
       const yjsCtx = buildYjsCtx(ctx)
-      const doc = await getOrCreateYjsDoc(yjsCtx, docKey)
+      return withYjsDoc(yjsCtx, docKey, doc => {
+        const ytext = doc.getText(fieldName)
+        let capturedUpdate: Uint8Array | null = null
+        const updateHandler = (update: Uint8Array) => { capturedUpdate = update }
+        doc.on('update', updateHandler)
 
-      const ytext = doc.getText(fieldName)
+        try {
+          doc.transact(() => {
+            ytext.delete(0, ytext.length)
+            ytext.insert(0, text)
+          })
+        } finally {
+          doc.off('update', updateHandler)
+        }
 
-      let capturedUpdate: Uint8Array | null = null
-      const updateHandler = (update: Uint8Array) => { capturedUpdate = update }
-      doc.on('update', updateHandler)
+        if (capturedUpdate) {
+          broadcastYjsUpdate(yjsCtx, docKey, capturedUpdate, null)
+        }
 
-      doc.transact(() => {
-        ytext.delete(0, ytext.length)
-        ytext.insert(0, text)
+        return { success: true, data: { docKey, length: text.length } }
       })
-
-      doc.off('update', updateHandler)
-
-      if (capturedUpdate) {
-        broadcastYjsUpdate(yjsCtx, docKey, capturedUpdate, null)
-      }
-
-      return { success: true, data: { docKey, length: text.length } }
     }
 
     default:

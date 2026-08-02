@@ -11,7 +11,7 @@
  *      in deployed apps.
  *
  *   2. **HTTPS URL** (`env.API_WORKER_URL` / `env.PLATFORM_WORKER_URL`) — the
- *      fallback used in local development. `deepspace dev` writes these
+ *      fallback used in local development. `deepspace dev start` writes these
  *      into `.dev.vars`, which `wrangler dev` exposes as env vars. Service
  *      bindings don't work cross-process under `wrangler dev` for SDK apps,
  *      so the URL is the only working path in dev.
@@ -29,7 +29,7 @@
  * History: a previous in-tree helper folded the binding/URL fallback into
  * the AI module's `resolveTransport`. Inline call sites in the starter
  * template (integrations, files, debug) used `c.env.X.fetch(...)` directly,
- * which broke `npx deepspace dev` for any app calling those routes — the
+ * which broke `npx deepspace dev start` for any app calling those routes — the
  * binding is undefined locally, so the fetch threw. These helpers
  * standardize on the same shape `resolveTransport` had, so every upstream
  * call works in both dev and prod.
@@ -60,9 +60,7 @@ export interface AuthWorkerEnv {
   AUTH_WORKER_URL?: string
 }
 
-type Transport =
-  | { kind: 'binding'; fetcher: Fetcher }
-  | { kind: 'url'; baseUrl: string }
+type Transport = { kind: 'binding'; fetcher: Fetcher } | { kind: 'url'; baseUrl: string }
 
 /**
  * Resolve the api-worker transport. Exported for the AI helper, which
@@ -77,7 +75,7 @@ export function resolveApiTransport(env: ApiWorkerEnv): Transport {
   throw new Error(
     'apiWorkerFetch: neither env.API_WORKER nor env.API_WORKER_URL is set. ' +
       'Add a [[services]] binding in wrangler.toml for production, or let ' +
-      '`deepspace dev` write API_WORKER_URL into .dev.vars for local development.',
+      '`deepspace dev start` write API_WORKER_URL into .dev.vars for local development.',
   )
 }
 
@@ -89,7 +87,7 @@ function resolvePlatformTransport(env: PlatformWorkerEnv): Transport {
   throw new Error(
     'platformWorkerFetch: neither env.PLATFORM_WORKER nor env.PLATFORM_WORKER_URL ' +
       'is set. Add a [[services]] binding in wrangler.toml for production, or let ' +
-      '`deepspace dev` write PLATFORM_WORKER_URL into .dev.vars for local development.',
+      '`deepspace dev start` write PLATFORM_WORKER_URL into .dev.vars for local development.',
   )
 }
 
@@ -193,7 +191,7 @@ export function authWorkerFetch(
 ): Promise<Response> {
   if (!env.AUTH_WORKER_URL) {
     throw new Error(
-      'authWorkerFetch: env.AUTH_WORKER_URL is not set. `deepspace dev` should ' +
+      'authWorkerFetch: env.AUTH_WORKER_URL is not set. `deepspace dev start` should ' +
         'write this into .dev.vars; for production, set it as a wrangler var or secret.',
     )
   }

@@ -18,14 +18,18 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { parse as parseToml } from 'smol-toml'
+import { InputError } from './cli-errors'
 
-export const APP_ID_RE = /^(app_[0-9A-HJKMNP-TV-Z]{26}|[a-z0-9][a-z0-9_-]{0,63})$/
+// Single source: the shared registry client owns the id shape. Import-then-
+// re-export (not a bare `export from`) because line ~151 uses it locally too.
+import { APP_ID_RE } from '../../server/utils/registry-client'
+export { APP_ID_RE }
 
 const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 
-/** Mint a fresh app id: `app_` + 26-char ULID (48-bit ms timestamp + 80
- *  random bits, Crockford base32). */
-export function mintAppId(now = Date.now()): string {
+/** A 26-char ULID (48-bit ms timestamp + 80 random bits, Crockford base32) —
+ *  the id shape shared by app ids (`app_…`) and workspace ids (`ws_…`). */
+export function mintUlid(now = Date.now()): string {
   let ts = ''
   let t = now
   for (let i = 0; i < 10; i++) {
@@ -45,7 +49,12 @@ export function mintAppId(now = Date.now()): string {
       rs += CROCKFORD[(acc >> bits) & 31]
     }
   }
-  return `app_${ts}${rs}`.slice(0, 30)
+  return `${ts}${rs}`.slice(0, 26)
+}
+
+/** Mint a fresh app id: `app_` + 26-char ULID. */
+export function mintAppId(now = Date.now()): string {
+  return `app_${mintUlid(now)}`
 }
 
 /** Outcome of looking for an app already registered at this name. */
@@ -132,10 +141,11 @@ export function readAppId(cwd: string = process.cwd(), wranglerEnv?: string): st
     cfg = parseToml(readFileSync(wranglerPath, 'utf-8')) as WranglerVars
   } catch (err) {
     // A corrupt wrangler.toml must NOT read as "no id yet" — callers would
-    // tell the user to run `deepspace init` (a lie) or mint a SECOND id
+    // tell the user to run `deepspace app init` (a lie) or mint a SECOND id
     // into the broken file. Surface the real problem.
-    throw new Error(
+    throw new InputError(
       `Could not parse ${wranglerPath}: ${err instanceof Error ? err.message : String(err)}`,
+      'invalid_config',
     )
   }
   const vars = wranglerEnv ? cfg.env?.[wranglerEnv]?.vars : cfg.vars
@@ -147,7 +157,7 @@ export function readAppId(cwd: string = process.cwd(), wranglerEnv?: string): st
  * Write DEEPSPACE_APP_ID into wrangler.toml, text-preserving: appended to the
  * existing `[vars]` / `[env.<name>.vars]` block, or the block is created.
  * Refuses to overwrite an existing id unless `force` — identity is immutable;
- * a new id means a new app (`deepspace init --new-id`).
+ * a new id means a new app (`deepspace app init --new-id`).
  */
 export function writeAppId(
   cwd: string,
@@ -189,14 +199,4 @@ export function writeAppId(
     src = src.trimEnd() + `\n\n${header}\n${line}\n`
   }
   writeFileSync(wranglerPath, src)
-}
-
-/** Read the app id or fail with the actionable next step. */
-export function requireAppId(cwd: string = process.cwd(), wranglerEnv?: string): string {
-  const id = readAppId(cwd, wranglerEnv)
-  if (id) return id
-  const where = wranglerEnv ? `[env.${wranglerEnv}.vars]` : '[vars]'
-  throw new Error(
-    `wrangler.toml has no DEEPSPACE_APP_ID in ${where}. Run \`deepspace init\` to mint one (existing deployed apps get theirs from the migration backfill — see the app-identity runbook).`,
-  )
 }

@@ -10,11 +10,20 @@ export default defineConfig([
     dts: true,
     sourcemap: true,
     external: [
-      'react', 'react-dom', 'react/jsx-runtime',
-      'better-auth', 'better-auth/react', 'better-auth/client/plugins',
-      'jose', 'yjs', 'hono', 'zustand',
-      'lucide-react', 'framer-motion', 'react-router-dom',
-      'clsx', 'tailwind-merge',
+      'react',
+      'react-dom',
+      'react/jsx-runtime',
+      'better-auth',
+      'better-auth/react',
+      'better-auth/client/plugins',
+      'jose',
+      'yjs',
+      'hono',
+      'lucide-react',
+      'framer-motion',
+      'react-router-dom',
+      'clsx',
+      'tailwind-merge',
     ],
     esbuildOptions(options) {
       options.jsx = 'automatic'
@@ -27,10 +36,17 @@ export default defineConfig([
     dts: true,
     sourcemap: true,
     external: [
-      'better-auth', 'better-auth/plugins',
-      'jose', 'yjs', 'hono',
-      'ai', '@ai-sdk/anthropic', '@ai-sdk/openai', '@ai-sdk/openai-compatible',
-      /^cloudflare:.*/, /^node:.*/,
+      'better-auth',
+      'better-auth/plugins',
+      'jose',
+      'yjs',
+      'hono',
+      'ai',
+      '@ai-sdk/anthropic',
+      '@ai-sdk/openai',
+      '@ai-sdk/openai-compatible',
+      /^cloudflare:.*/,
+      /^node:.*/,
     ],
     esbuildOptions(options) {
       options.alias = alias
@@ -45,6 +61,14 @@ export default defineConfig([
     esbuildOptions(options) {
       options.alias = alias
     },
+  },
+  {
+    // `add` imports this exact entry from the target app's installed SDK so
+    // feature mutations always use that app-pinned catalog and installer.
+    entry: { 'feature-installer': 'src/cli/commands/feature-installer.ts' },
+    format: ['esm'],
+    sourcemap: true,
+    external: [/^node:.*/],
   },
   {
     entry: { testing: 'src/testing/index.ts' },
@@ -66,10 +90,17 @@ export default defineConfig([
     dts: true,
     sourcemap: true,
     external: [
-      'better-auth', 'better-auth/plugins',
-      'jose', 'yjs', 'hono',
-      'ai', '@ai-sdk/anthropic', '@ai-sdk/openai', '@ai-sdk/openai-compatible',
-      /^cloudflare:.*/, /^node:.*/,
+      'better-auth',
+      'better-auth/plugins',
+      'jose',
+      'yjs',
+      'hono',
+      'ai',
+      '@ai-sdk/anthropic',
+      '@ai-sdk/openai',
+      '@ai-sdk/openai-compatible',
+      /^cloudflare:.*/,
+      /^node:.*/,
     ],
     esbuildOptions(options) {
       options.alias = alias

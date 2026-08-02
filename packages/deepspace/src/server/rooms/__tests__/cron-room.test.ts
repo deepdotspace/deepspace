@@ -1,36 +1,8 @@
-/**
- * CronRoom unit tests — cron-expression parsing, DST-aware next-fire,
- * and the pause→broadcastStatus message-handler chain.
- *
- * The cron-expression and validateTask blocks target the pure helpers,
- * covering the two axes a misconfigured deploy can fail on:
- *
- *   1. The parser refuses bad expressions at construction time, so a
- *      typo in src/cron.ts surfaces as a constructor throw rather than
- *      a silently mis-firing alarm.
- *
- *   2. nextCronFire walks UTC and shifts to the configured IANA zone
- *      via Intl.DateTimeFormat for each candidate, so DST transitions
- *      (spring-forward / fall-back) don't double-fire or skip.
- *
- * The pause-then-status block exercises the WS message handler
- * end-to-end against a better-sqlite3-backed SqlStorage shim (same
- * shim style as collection-table-migration.test.ts). It locks in the
- * contract that `useCronMonitor.pause(taskName)` flips `paused=1` in
- * cron_tasks AND triggers a CRON_STATUS broadcast — without that, the
- * monitor UI would silently fail to update for other connected
- * clients after a pause.
- */
+/** CronRoom Durable Object state, execution, and authorization tests. */
 
 import { describe, it, expect } from 'vitest'
 import Database from 'better-sqlite3'
-import {
-  parseCronExpression,
-  nextCronFire,
-  validateTask,
-  CronRoom,
-  type CronRoomConfig,
-} from '../cron-room'
+import { CronRoom, type CronRoomConfig } from '../cron-room'
 import { MSG } from '../../../shared/protocol/constants'
 import { ROLES } from '../../../shared/roles'
 import type { UserAttachment } from '../base-room'
@@ -39,61 +11,9 @@ import type { ServerMessage } from '../../../shared/protocol/messages'
 // BaseRoom's constructor calls `new WebSocketRequestResponsePair('ping', 'pong')`
 // which only exists in the workerd runtime. Vitest runs under node, so stub
 // the constructor with a no-op class so we can instantiate a CronRoom.
-;(globalThis as { WebSocketRequestResponsePair?: unknown }).WebSocketRequestResponsePair ??=
-  class { constructor(_req: string, _resp: string) {} }
-
-describe('parseCronExpression', () => {
-  it('parses a simple every-minute expression', () => {
-    const parsed = parseCronExpression('* * * * *')
-    expect(parsed.minute.size).toBe(60)
-    expect(parsed.hour.size).toBe(24)
-    expect(parsed.dayOfMonth.size).toBe(31)
-    expect(parsed.month.size).toBe(12)
-    expect(parsed.dayOfWeek.size).toBe(7)
-  })
-
-  it('parses ranges, lists, and step expressions', () => {
-    const parsed = parseCronExpression('0 9-17 * * 1-5')
-    expect(Array.from(parsed.minute)).toEqual([0])
-    expect(Array.from(parsed.hour).sort((a, b) => a - b)).toEqual([9, 10, 11, 12, 13, 14, 15, 16, 17])
-    expect(Array.from(parsed.dayOfWeek).sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5])
-  })
-
-  it('throws on the wrong number of fields', () => {
-    expect(() => parseCronExpression('* * * *')).toThrow(/5 fields/)
-    expect(() => parseCronExpression('* * * * * *')).toThrow(/5 fields/)
-  })
-
-  it('throws on out-of-range literals', () => {
-    expect(() => parseCronExpression('60 * * * *')).toThrow(/minute/)
-    expect(() => parseCronExpression('* 25 * * *')).toThrow(/hour/)
-    expect(() => parseCronExpression('* * 0 * *')).toThrow(/day-of-month/)
-  })
-
-  it('throws on non-numeric garbage', () => {
-    expect(() => parseCronExpression('foo * * * *')).toThrow()
-  })
-})
-
-describe('nextCronFire', () => {
-  it('finds the next minute boundary that matches', () => {
-    // 9 AM UTC weekdays. Reference: Tue 2026-04-28 at 08:50 UTC.
-    const from = new Date('2026-04-28T08:50:00Z')
-    const next = nextCronFire('0 9 * * 1-5', 'UTC', from)
-    expect(next?.toISOString()).toBe('2026-04-28T09:00:00.000Z')
-  })
-
-  it('handles DST spring-forward in America/New_York (skips 2 AM)', () => {
-    // Spring-forward 2026-03-08: 02:00 EST jumps to 03:00 EDT — 2 AM
-    // doesn't exist on the wall clock that day, so a "0 2 * * *" task
-    // should fire on the NEXT day at 2 AM EDT instead.
-    const from = new Date('2026-03-08T05:00:00Z') // 00:00 EST
-    const next = nextCronFire('0 2 * * *', 'America/New_York', from)
-    expect(next).not.toBeNull()
-    // The next 2 AM EDT after the skip is 2026-03-09 02:00 EDT = 06:00 UTC.
-    expect(next?.toISOString()).toBe('2026-03-09T06:00:00.000Z')
-  })
-})
+;(globalThis as { WebSocketRequestResponsePair?: unknown }).WebSocketRequestResponsePair ??= class {
+  constructor(_req: string, _resp: string) {}
+}
 
 // ---------------------------------------------------------------------------
 // SqlStorage shim over better-sqlite3 (mirrors collection-table-migration.test)
@@ -166,9 +86,10 @@ function makeState(db: Database.Database): { state: DurableObjectState; alarms: 
 class TestCronRoom extends CronRoom {
   public broadcasts: ServerMessage[] = []
   public sent: ServerMessage[] = []
+  public executed: string[] = []
 
-  protected onTask(): void {
-    // unused in this test
+  protected onTask(taskName: string): void {
+    this.executed.push(taskName)
   }
 
   // Override BaseRoom.broadcast — the test runs without real WebSockets,
@@ -220,12 +141,33 @@ class TestCronRoom extends CronRoom {
   // Read-only peek at cron_tasks for assertions.
   public pausedState(db: Database.Database, name: string): number {
     return (
-      db.prepare(`SELECT paused FROM cron_tasks WHERE name = ?`).get(name) as
-        | { paused: number }
-        | undefined
-    )?.paused ?? -1
+      (
+        db.prepare(`SELECT paused FROM cron_tasks WHERE name = ?`).get(name) as
+          | { paused: number }
+          | undefined
+      )?.paused ?? -1
+    )
   }
 }
+
+describe('CronRoom configuration boundary', () => {
+  it('rejects an invalid schedule before creating scheduler tables', () => {
+    const db = new Database(':memory:')
+    const { state } = makeState(db)
+
+    expect(
+      () =>
+        new TestCronRoom(
+          state,
+          {},
+          {
+            tasks: [{ name: 'bad-cron', schedule: '* * * *', timezone: 'UTC' }],
+          },
+        ),
+    ).toThrow(/5 fields/)
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()).toEqual([])
+  })
+})
 
 describe('CronRoom message handlers', () => {
   it('CRON_PAUSE flips paused=1 and broadcasts CRON_STATUS', async () => {
@@ -238,7 +180,9 @@ describe('CronRoom message handlers', () => {
     room.init()
 
     // Sanity: task is unpaused on construction.
-    const beforeRow = db.prepare(`SELECT paused FROM cron_tasks WHERE name = ?`).get('heartbeat') as { paused: number }
+    const beforeRow = db
+      .prepare(`SELECT paused FROM cron_tasks WHERE name = ?`)
+      .get('heartbeat') as { paused: number }
     expect(beforeRow.paused).toBe(0)
 
     // Drive the message handler with a CRON_PAUSE frame, exactly as the
@@ -246,7 +190,9 @@ describe('CronRoom message handlers', () => {
     await room.dispatch({ type: MSG.CRON_PAUSE, payload: { taskName: 'heartbeat' } })
 
     // Side effect 1: the row is now paused.
-    const afterRow = db.prepare(`SELECT paused FROM cron_tasks WHERE name = ?`).get('heartbeat') as { paused: number }
+    const afterRow = db
+      .prepare(`SELECT paused FROM cron_tasks WHERE name = ?`)
+      .get('heartbeat') as { paused: number }
     expect(afterRow.paused).toBe(1)
 
     // Side effect 2: a CRON_STATUS broadcast went out so other connected
@@ -254,49 +200,36 @@ describe('CronRoom message handlers', () => {
     expect(room.broadcasts).toHaveLength(1)
     const status = room.broadcasts[0]
     expect(status.type).toBe(MSG.CRON_STATUS)
-    const statusPayload = status.payload as { tasks: { name: string; paused: boolean }[]; recentHistory: unknown[] }
-    const heartbeat = statusPayload.tasks.find(t => t.name === 'heartbeat')
+    const statusPayload = status.payload as {
+      tasks: { name: string; paused: boolean }[]
+      recentHistory: unknown[]
+    }
+    const heartbeat = statusPayload.tasks.find((t) => t.name === 'heartbeat')
     expect(heartbeat?.paused).toBe(true)
   })
-})
 
-describe('validateTask', () => {
-  it('accepts a valid interval task', () => {
-    expect(() => validateTask({ name: 'heartbeat', intervalMinutes: 1 })).not.toThrow()
-  })
+  it('rejects an unknown manual task before invoking application code or writing history', async () => {
+    const db = new Database(':memory:')
+    const { state } = makeState(db)
+    const room = new TestCronRoom(
+      state,
+      {},
+      {
+        tasks: [{ name: 'heartbeat', intervalMinutes: 1 }],
+      },
+    )
+    room.init()
 
-  it('accepts a valid cron task', () => {
-    expect(() => validateTask({ name: 'daily', schedule: '0 9 * * *', timezone: 'America/New_York' })).not.toThrow()
-  })
+    await room.dispatch({ type: MSG.CRON_TRIGGER, payload: { taskName: 'not-configured' } })
 
-  it('rejects ambiguous configs (both interval and schedule)', () => {
-    expect(() =>
-      validateTask({ name: 'bad', intervalMinutes: 5, schedule: '0 * * * *', timezone: 'UTC' }),
-    ).toThrow(/cannot mix/)
-  })
-
-  it('rejects missing schedule/interval', () => {
-    expect(() => validateTask({ name: 'empty' })).toThrow(/either intervalMinutes or schedule/)
-  })
-
-  it('rejects schedule without timezone', () => {
-    expect(() => validateTask({ name: 'tz-missing', schedule: '0 9 * * *' })).toThrow()
-  })
-
-  it('rejects malformed cron expression at validation time', () => {
-    expect(() =>
-      validateTask({ name: 'bad-cron', schedule: '* * * *', timezone: 'UTC' }),
-    ).toThrow(/5 fields/)
-  })
-
-  it('rejects bad task names', () => {
-    expect(() => validateTask({ name: 'BadName', intervalMinutes: 1 })).toThrow()
-    expect(() => validateTask({ name: 'with space', intervalMinutes: 1 })).toThrow()
-  })
-
-  it('rejects out-of-range intervalMinutes', () => {
-    expect(() => validateTask({ name: 'too-low', intervalMinutes: 0 })).toThrow()
-    expect(() => validateTask({ name: 'too-high', intervalMinutes: 99999 })).toThrow()
+    expect(room.executed).toEqual([])
+    expect(
+      (db.prepare('SELECT COUNT(*) AS count FROM cron_history').get() as { count: number }).count,
+    ).toBe(0)
+    expect(room.sent).toContainEqual({
+      type: MSG.ERROR,
+      payload: { error: 'Unknown cron task: not-configured' },
+    })
   })
 })
 
@@ -318,7 +251,7 @@ describe('CronRoom.onConnect emits AUTH frame to client', () => {
   it('sends {canWrite:true} to a member', () => {
     const room = makeRoom()
     room.connect({ userId: 'm', userName: '', userEmail: '', role: ROLES.MEMBER })
-    const auth = room.sent.find(m => m.type === MSG.AUTH)
+    const auth = room.sent.find((m) => m.type === MSG.AUTH)
     expect(auth).toBeDefined()
     expect((auth?.payload as { canWrite: boolean }).canWrite).toBe(true)
   })
@@ -326,7 +259,7 @@ describe('CronRoom.onConnect emits AUTH frame to client', () => {
   it('sends {canWrite:false} to a viewer', () => {
     const room = makeRoom()
     room.connect({ userId: 'v', userName: '', userEmail: '', role: ROLES.VIEWER })
-    const auth = room.sent.find(m => m.type === MSG.AUTH)
+    const auth = room.sent.find((m) => m.type === MSG.AUTH)
     expect(auth).toBeDefined()
     expect((auth?.payload as { canWrite: boolean }).canWrite).toBe(false)
   })
@@ -334,7 +267,7 @@ describe('CronRoom.onConnect emits AUTH frame to client', () => {
   it('sends {canWrite:false} to anonymous (no role)', () => {
     const room = makeRoom()
     room.connect({ userId: 'anon', userName: '', userEmail: '' })
-    const auth = room.sent.find(m => m.type === MSG.AUTH)
+    const auth = room.sent.find((m) => m.type === MSG.AUTH)
     expect(auth).toBeDefined()
     expect((auth?.payload as { canWrite: boolean }).canWrite).toBe(false)
   })
@@ -344,29 +277,48 @@ describe('CronRoom.onConnect computes canWrite from role', () => {
   function makeRoom(): TestCronRoom {
     const db = new Database(':memory:')
     const { state } = makeState(db)
-    const room = new TestCronRoom(state, {}, {
-      tasks: [{ name: 'heartbeat', intervalMinutes: 1 }],
-    })
+    const room = new TestCronRoom(
+      state,
+      {},
+      {
+        tasks: [{ name: 'heartbeat', intervalMinutes: 1 }],
+      },
+    )
     room.init()
     return room
   }
 
   it('grants canWrite to members and admins', () => {
     const room = makeRoom()
-    const m = room.connect({ userId: 'm', userName: '', userEmail: '', role: ROLES.MEMBER }) as
-      UserAttachment & { canWrite: boolean }
-    const a = room.connect({ userId: 'a', userName: '', userEmail: '', role: ROLES.ADMIN }) as
-      UserAttachment & { canWrite: boolean }
+    const m = room.connect({
+      userId: 'm',
+      userName: '',
+      userEmail: '',
+      role: ROLES.MEMBER,
+    }) as UserAttachment & { canWrite: boolean }
+    const a = room.connect({
+      userId: 'a',
+      userName: '',
+      userEmail: '',
+      role: ROLES.ADMIN,
+    }) as UserAttachment & { canWrite: boolean }
     expect(m.canWrite).toBe(true)
     expect(a.canWrite).toBe(true)
   })
 
   it('denies canWrite to viewers and anonymous', () => {
     const room = makeRoom()
-    const v = room.connect({ userId: 'v', userName: '', userEmail: '', role: ROLES.VIEWER }) as
-      UserAttachment & { canWrite: boolean }
-    const anon = room.connect({ userId: 'anon-x', userName: '', userEmail: '' }) as
-      UserAttachment & { canWrite: boolean }
+    const v = room.connect({
+      userId: 'v',
+      userName: '',
+      userEmail: '',
+      role: ROLES.VIEWER,
+    }) as UserAttachment & { canWrite: boolean }
+    const anon = room.connect({
+      userId: 'anon-x',
+      userName: '',
+      userEmail: '',
+    }) as UserAttachment & { canWrite: boolean }
     expect(v.canWrite).toBe(false)
     expect(anon.canWrite).toBe(false)
   })
@@ -374,18 +326,29 @@ describe('CronRoom.onConnect computes canWrite from role', () => {
 
 describe('CronRoom mutation gating', () => {
   const viewer: UserAttachment = {
-    userId: 'v', userName: 'V', userEmail: '', role: ROLES.VIEWER, canWrite: false,
+    userId: 'v',
+    userName: 'V',
+    userEmail: '',
+    role: ROLES.VIEWER,
+    canWrite: false,
   }
   const anon: UserAttachment = {
-    userId: 'anon-y', userName: '', userEmail: '', canWrite: false,
+    userId: 'anon-y',
+    userName: '',
+    userEmail: '',
+    canWrite: false,
   }
 
   function setup(): { room: TestCronRoom; db: Database.Database } {
     const db = new Database(':memory:')
     const { state } = makeState(db)
-    const room = new TestCronRoom(state, {}, {
-      tasks: [{ name: 'heartbeat', intervalMinutes: 1 }],
-    })
+    const room = new TestCronRoom(
+      state,
+      {},
+      {
+        tasks: [{ name: 'heartbeat', intervalMinutes: 1 }],
+      },
+    )
     room.init()
     return { room, db }
   }
@@ -397,7 +360,7 @@ describe('CronRoom mutation gating', () => {
     await room.dispatch({ type: MSG.CRON_PAUSE, payload: { taskName: 'heartbeat' } }, viewer)
 
     expect(room.pausedState(db, 'heartbeat')).toBe(0) // still unpaused
-    expect(room.broadcasts.filter(m => m.type === MSG.CRON_STATUS)).toHaveLength(0)
+    expect(room.broadcasts.filter((m) => m.type === MSG.CRON_STATUS)).toHaveLength(0)
   })
 
   it('CRON_PAUSE from anonymous does NOT flip paused', async () => {
@@ -412,7 +375,9 @@ describe('CronRoom mutation gating', () => {
     // set fails loudly here.
     const { room, db } = setup()
     await room.dispatch({ type: MSG.CRON_TRIGGER, payload: { taskName: 'heartbeat' } }, viewer)
-    const historyCount = (db.prepare(`SELECT COUNT(*) as n FROM cron_history`).get() as { n: number }).n
+    const historyCount = (
+      db.prepare(`SELECT COUNT(*) as n FROM cron_history`).get() as { n: number }
+    ).n
     expect(historyCount).toBe(0)
   })
 
@@ -437,7 +402,11 @@ describe('CronRoom read-only operations remain open', () => {
     room.init()
 
     const viewer: UserAttachment = {
-      userId: 'v', userName: '', userEmail: '', role: ROLES.VIEWER, canWrite: false,
+      userId: 'v',
+      userName: '',
+      userEmail: '',
+      role: ROLES.VIEWER,
+      canWrite: false,
     }
     await room.dispatch({ type: MSG.CRON_TASKS, payload: {} }, viewer)
 
@@ -445,8 +414,8 @@ describe('CronRoom read-only operations remain open', () => {
     // Asserting both halves: presence of the expected reply AND absence of
     // the deny path. If a future refactor accidentally adds CRON_TASKS to
     // CRON_WRITE_TYPES, both assertions fail loudly.
-    const tasksReply = room.sent.find(m => m.type === MSG.CRON_TASKS)
+    const tasksReply = room.sent.find((m) => m.type === MSG.CRON_TASKS)
     expect(tasksReply).toBeDefined()
-    expect(room.sent.some(m => m.type === MSG.ERROR)).toBe(false)
+    expect(room.sent.some((m) => m.type === MSG.ERROR)).toBe(false)
   })
 })

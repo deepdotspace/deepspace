@@ -1,5 +1,5 @@
 /**
- * deepspace test-accounts
+ * deepspace test accounts
  *
  * Manage test accounts for local development and CI.
  * Test accounts use @deepspace.test emails and are clearly
@@ -8,13 +8,13 @@
  * Credentials are saved to ~/.deepspace/test-accounts.json (0600)
  * so they persist across projects and sessions.
  *
- *   deepspace test-accounts create --email bot@deepspace.test --password Pass123!
- *   deepspace test-accounts list
- *   deepspace test-accounts delete --email bot@deepspace.test
- *   deepspace test-accounts delete --id <id>
- *   deepspace test-accounts clear                # delete all (with confirm)
- *   deepspace test-accounts clear --label e2e    # delete only label=e2e
- *   deepspace test-accounts clear --yes          # skip confirm (CI)
+ *   deepspace test accounts create --email bot@deepspace.test --password Pass123!
+ *   deepspace test accounts list
+ *   deepspace test accounts delete --email bot@deepspace.test
+ *   deepspace test accounts delete --id <id>
+ *   deepspace test accounts clear                # delete all (with confirm)
+ *   deepspace test accounts clear --label e2e    # delete only label=e2e
+ *   deepspace test accounts clear --yes          # skip confirm (CI)
  */
 
 import { defineCommand } from 'citty'
@@ -24,6 +24,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { ensureToken, SESSION_PATH } from '../auth'
 import { PLATFORM_URLS } from '../env'
+import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 
 const SESSION_COOKIE = '__Secure-better-auth.session_token'
 
@@ -99,7 +100,7 @@ async function deleteRemote(id: string): Promise<void> {
 
 // ── Subcommands ────────────────────────────────────────────────────
 
-const create = defineCommand({
+const create = defineDeepspaceCommand({
   meta: {
     name: 'create',
     description: 'Create a test account',
@@ -154,8 +155,7 @@ const create = defineCommand({
     }
 
     if (!res.ok || !data.id) {
-      console.error(`Failed: ${data.error ?? 'Unknown error'}`)
-      process.exit(1)
+      throw new Refusal(`Failed: ${data.error ?? 'Unknown error'}`, 'test_account_create_failed')
     }
 
     const account = data as {
@@ -170,68 +170,103 @@ const create = defineCommand({
     const accounts = loadAccounts()
     accounts.push({
       id: account.id,
-      email: args.email,
-      password: args.password,
+      email: args.email as string,
+      password: args.password as string,
       userId: account.userId,
-      name: args.name,
+      name: args.name as string | undefined,
       label: account.label,
       createdAt: account.createdAt,
     })
     saveAccounts(accounts)
 
-    console.log(`Created test account:`)
-    console.log(`  ID:       ${account.id}`)
-    console.log(`  Email:    ${account.email}`)
-    console.log(`  Password: ${args.password}`)
-    console.log(`  UserID:   ${account.userId}`)
-    if (account.label) console.log(`  Label:    ${account.label}`)
-    console.log(`\nSaved to ${ACCOUNTS_PATH}`)
+    if (!args.json) {
+      console.log(`Created test account:`)
+      console.log(`  ID:       ${account.id}`)
+      console.log(`  Email:    ${account.email}`)
+      console.log(`  Password: ${args.password}`)
+      console.log(`  UserID:   ${account.userId}`)
+      if (account.label) console.log(`  Label:    ${account.label}`)
+      console.log(`\nSaved to ${ACCOUNTS_PATH}`)
+    }
+
+    return {
+      data: {
+        id: account.id,
+        email: account.email,
+        // The password is already echoed on the human path and stored 0600 in
+        // ACCOUNTS_PATH — withholding it from --json would only force scripts
+        // to parse the file themselves.
+        password: args.password,
+        userId: account.userId,
+        label: account.label ?? null,
+        createdAt: account.createdAt,
+        savedTo: ACCOUNTS_PATH,
+      },
+    }
   },
 })
 
-const list = defineCommand({
+const list = defineDeepspaceCommand({
   meta: {
     name: 'list',
     description: 'List your test accounts',
   },
-  async run() {
+  async run({ args }) {
     await ensureToken()
 
     let remote: RemoteAccount[]
     try {
       remote = await fetchRemoteAccounts()
     } catch (err) {
-      console.error(`Failed: ${(err as Error).message}`)
-      process.exit(1)
-    }
-
-    if (remote.length === 0) {
-      console.log(
-        'No test accounts. Create one with: deepspace test-accounts create --email <email> --password <password>',
-      )
-      return
+      throw new Refusal(`Failed: ${(err as Error).message}`, 'test_accounts_list_failed')
     }
 
     // Merge with local credentials (passwords are only stored locally)
     const local = loadAccounts()
     const localByEmail = new Map(local.map((a) => [a.email, a]))
 
-    console.log(`Test accounts (${remote.length}/10):\n`)
-    for (const a of remote) {
-      const stored = localByEmail.get(a.email)
-      const date = new Date(a.createdAt).toLocaleDateString()
-      console.log(`  ${a.email}${a.label ? ` (${a.label})` : ''}`)
-      console.log(`    ID: ${a.id}  UserID: ${a.userId}  Created: ${date}`)
-      if (stored?.password) {
-        console.log(`    Password: ${stored.password}`)
-      } else {
-        console.log(`    Password: (not saved locally)`)
+    if (remote.length === 0) {
+      if (!args.json) {
+        console.log(
+          'No test accounts. Create one with: deepspace test accounts create --email <email> --password <password>',
+        )
       }
+      return { data: { accounts: [], count: 0, limit: 10 } }
+    }
+
+    if (!args.json) {
+      console.log(`Test accounts (${remote.length}/10):\n`)
+      for (const a of remote) {
+        const stored = localByEmail.get(a.email)
+        const date = new Date(a.createdAt).toLocaleDateString()
+        console.log(`  ${a.email}${a.label ? ` (${a.label})` : ''}`)
+        console.log(`    ID: ${a.id}  UserID: ${a.userId}  Created: ${date}`)
+        if (stored?.password) {
+          console.log(`    Password: ${stored.password}`)
+        } else {
+          console.log(`    Password: (not saved locally)`)
+        }
+      }
+    }
+
+    return {
+      data: {
+        accounts: remote.map((a) => ({
+          id: a.id,
+          email: a.email,
+          userId: a.userId,
+          label: a.label,
+          createdAt: a.createdAt,
+          password: localByEmail.get(a.email)?.password ?? null,
+        })),
+        count: remote.length,
+        limit: 10,
+      },
     }
   },
 })
 
-const del = defineCommand({
+const del = defineDeepspaceCommand({
   meta: {
     name: 'delete',
     description: 'Delete a test account by --email or --id',
@@ -250,12 +285,10 @@ const del = defineCommand({
   },
   async run({ args }) {
     if (!args.email && !args.id) {
-      console.error('Provide --email <email> or --id <id>.')
-      process.exit(1)
+      throw new Refusal('Provide --email <email> or --id <id>.', 'missing_argument')
     }
     if (args.email && args.id) {
-      console.error('Provide either --email or --id, not both.')
-      process.exit(1)
+      throw new Refusal('Provide either --email or --id, not both.', 'conflicting_arguments')
     }
 
     await ensureToken()
@@ -268,13 +301,13 @@ const del = defineCommand({
       try {
         remote = await fetchRemoteAccounts()
       } catch (err) {
-        console.error(`Failed: ${(err as Error).message}`)
-        process.exit(1)
+        throw new Refusal(`Failed: ${(err as Error).message}`, 'test_accounts_list_failed')
       }
       const match = remote.find((a) => a.email === targetEmail)
       if (!match) {
-        console.error(`No test account with email ${targetEmail}.`)
-        process.exit(1)
+        throw new Refusal(`No test account with email ${targetEmail}.`, 'test_account_not_found', {
+          action: cliAction('deepspace', 'test', 'accounts', 'list'),
+        })
       }
       targetId = match.id
     }
@@ -282,8 +315,7 @@ const del = defineCommand({
     try {
       await deleteRemote(targetId!)
     } catch (err) {
-      console.error(`Failed: ${(err as Error).message}`)
-      process.exit(1)
+      throw new Refusal(`Failed: ${(err as Error).message}`, 'test_account_delete_failed')
     }
 
     // Remove from local store
@@ -292,11 +324,14 @@ const del = defineCommand({
     )
     saveAccounts(accounts)
 
-    console.log(`Test account deleted${targetEmail ? `: ${targetEmail}` : `: ${targetId}`}`)
+    if (!args.json) {
+      console.log(`Test account deleted${targetEmail ? `: ${targetEmail}` : `: ${targetId}`}`)
+    }
+    return { data: { deleted: true, id: targetId ?? null, email: targetEmail ?? null } }
   },
 })
 
-const clear = defineCommand({
+const clear = defineDeepspaceCommand({
   meta: {
     name: 'clear',
     description: 'Delete all your test accounts (or those matching --label)',
@@ -314,27 +349,36 @@ const clear = defineCommand({
     },
   },
   async run({ args }) {
+    const label = args.label as string | undefined
     await ensureToken()
 
     let remote: RemoteAccount[]
     try {
       remote = await fetchRemoteAccounts()
     } catch (err) {
-      console.error(`Failed: ${(err as Error).message}`)
-      process.exit(1)
+      throw new Refusal(`Failed: ${(err as Error).message}`, 'test_accounts_list_failed')
     }
 
-    const targets = args.label ? remote.filter((a) => a.label === args.label) : remote
+    const targets = label ? remote.filter((a) => a.label === label) : remote
 
     if (targets.length === 0) {
-      const suffix = args.label ? ` with label '${args.label}'` : ''
-      console.log(`No test accounts${suffix} to delete.`)
-      return
+      const suffix = label ? ` with label '${label}'` : ''
+      if (!args.json) console.log(`No test accounts${suffix} to delete.`)
+      return { data: { deleted: 0, requested: 0, failures: [] } }
     }
 
     if (!args.yes) {
-      const subject = args.label
-        ? `${targets.length} test account(s) labeled '${args.label}'`
+      // p.confirm needs a TTY it can prompt on. A `--json` caller is a script by
+      // definition, so prompting would block forever with nothing on stdout —
+      // refuse with the flag that resolves it instead of hanging.
+      if (args.json) {
+        throw new Refusal(
+          'Deleting test accounts needs confirmation. Pass --yes to confirm non-interactively.',
+          'confirmation_required',
+        )
+      }
+      const subject = label
+        ? `${targets.length} test account(s) labeled '${label}'`
         : `all ${targets.length} test account(s)`
       const confirmed = await p.confirm({
         message: `Delete ${subject}? This is not reversible.`,
@@ -342,7 +386,7 @@ const clear = defineCommand({
       })
       if (p.isCancel(confirmed) || !confirmed) {
         console.log('Cancelled.')
-        return
+        return { data: { deleted: 0, requested: targets.length, cancelled: true, failures: [] } }
       }
     }
 
@@ -363,12 +407,18 @@ const clear = defineCommand({
     )
     saveAccounts(loadAccounts().filter((a) => !deletedIds.has(a.id)))
 
-    console.log(`Deleted ${ok}/${targets.length} test account(s).`)
     if (failures.length > 0) {
-      console.error(`\nFailed:`)
-      for (const f of failures) console.error(`  ${f.email}: ${f.error}`)
-      process.exit(1)
+      // A partial delete still failed overall — carry the per-account reasons
+      // in the refusal so --json reports them instead of only the count.
+      throw new Refusal(
+        `Deleted ${ok}/${targets.length} test account(s).\nFailed:\n` +
+          failures.map((f) => `  ${f.email}: ${f.error}`).join('\n'),
+        'test_account_delete_failed',
+        { extra: { deleted: ok, requested: targets.length, failures } },
+      )
     }
+    if (!args.json) console.log(`Deleted ${ok}/${targets.length} test account(s).`)
+    return { data: { deleted: ok, requested: targets.length, failures: [] } }
   },
 })
 

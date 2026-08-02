@@ -8,36 +8,71 @@
 // Schema Types
 // ============================================================================
 
-export type PermissionRule = boolean | 'own' | 'unclaimed-or-own' | 'collaborator' | 'team' | 'access' | 'published' | 'shared'
+export type ColumnInterpretation =
+  | { kind: 'plain' }
+  | { kind: 'currency'; symbol: string; decimals: number }
+  | { kind: 'date'; format?: string }
+  | { kind: 'datetime'; format?: string }
+  | { kind: 'boolean'; trueLabel?: string; falseLabel?: string }
+  | { kind: 'percent'; decimals?: number }
+  | { kind: 'select'; options: string[] }
+  | { kind: 'multiselect'; options: string[] }
+  | { kind: 'url' }
+  | { kind: 'email' }
+  | { kind: 'json' }
+  | { kind: 'reference'; targetTable: string; displayColumn: string }
 
-export interface SchemaPermissions {
-  read: PermissionRule
-  create: PermissionRule
-  update: PermissionRule
-  delete: PermissionRule
+export interface ColumnDefinition {
+  /** Stable ID override (survives renames). Falls back to `col_{name}`. */
+  id?: string
+  name: string
+  storage: 'number' | 'text'
+  interpretation: ColumnInterpretation | string
+  expression?: string
+  userBound?: boolean
+  immutable?: boolean
+  required?: boolean
+  default?: unknown
+  timestampTrigger?: { field: string; value?: unknown }
+}
+
+export type PermissionLevel =
+  | boolean
+  | 'own'
+  | 'unclaimed-or-own'
+  | 'collaborator'
+  | 'team'
+  | 'access'
+  | 'published'
+  | 'shared'
+
+export interface RolePermissions {
+  read: PermissionLevel
+  /** Create has no existing record to evaluate, so it is an explicit grant. */
+  create: boolean
+  update: PermissionLevel
+  delete: PermissionLevel
+  /** If set, only these columns can be updated by this role. */
   writableFields?: string[]
 }
 
 export interface CollectionSchema {
   name: string
-  columns: Array<{
-    name: string
-    storage: string
-    interpretation: string | Record<string, unknown>
-    id?: string
-    expression?: string
-    userBound?: boolean
-    immutable?: boolean
-    required?: boolean
-    default?: unknown
-    timestampTrigger?: { field: string; value?: unknown }
-  }>
+  /** Every collection is stored in typed SQL columns. */
+  columns: ColumnDefinition[]
+  /** Composite uniqueness constraint (for example `['userId', 'taskId']`). */
   uniqueOn?: string[]
-  permissions: Record<string, SchemaPermissions>
+  /** Ownership column; defaults to the row creator. */
   ownerField?: string
+  /** Column containing a JSON array of collaborator user ids. */
   collaboratorsField?: string
+  /** Column containing the team id used by team permission rules. */
   teamField?: string
+  /** A string is public when equal to `public`; an object supplies an exact value. */
   visibilityField?: string | { field: string; value: unknown }
+  /** Permissions per role; `*` is the catch-all role. */
+  permissions: Record<string, RolePermissions>
+  /** Default role assigned on the `users` collection. */
   defaultRole?: string
 }
 
@@ -74,19 +109,6 @@ export interface YjsSubscription {
 // NOTE: `ConnectionAttachment` and `HandlerContext` are defined in
 // `../protocol/types.ts` (they depend on CF Workers / Yjs imports). Import
 // them from `@/shared/protocol/types` rather than from here.
-
-// ============================================================================
-// Record Types
-// ============================================================================
-
-export interface RecordRow {
-  collection: string
-  record_id: string
-  data: string
-  created_by: string
-  created_at: string
-  updated_at: string
-}
 
 export interface RecordResult {
   recordId: string
@@ -137,23 +159,6 @@ export interface YjsLeavePayload {
   collection: string
   recordId: string
   fieldName: string
-}
-
-// ============================================================================
-// Cron Types
-// ============================================================================
-
-export interface CronTask {
-  name: string
-  intervalMinutes?: number
-  schedule?: string
-  timezone?: string
-  lastRun: number
-}
-
-export interface CronConfig {
-  ownerUserId: string
-  tasks: CronTask[]
 }
 
 // ============================================================================

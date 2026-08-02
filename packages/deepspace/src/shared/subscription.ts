@@ -25,9 +25,10 @@ export interface PlanPrice {
 }
 
 /**
- * Plan shape returned by `/api/subscriptions/me` and consumed directly by
- * `<PricingTable plans={sub.plans}>`. Fields beyond slug/rank are optional so
- * a free tier (no prices, no trial) doesn't need to fabricate them.
+ * Plan shape returned by `/api/subscriptions/me` and consumed by
+ * `<PricingTable plans={sub.plans} onSelect={...}>`. Fields beyond slug/rank
+ * are optional so a free tier (no prices, no trial) doesn't need to fabricate
+ * them.
  */
 export interface PlanInfo {
   slug: string

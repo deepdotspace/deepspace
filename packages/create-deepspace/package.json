@@ -1,6 +1,6 @@
 {
   "name": "create-deepspace",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "engines": {
     "node": ">=22.15.0"
   },
@@ -16,7 +16,8 @@
   ],
   "scripts": {
     "build": "tsup",
-    "test": "pnpm build && bash scripts/test-in-place.sh",
+    "test": "vitest run",
+    "test:in-place": "pnpm build && bash scripts/test-in-place.sh",
     "prepublishOnly": "pnpm build"
   },
   "dependencies": {
@@ -26,7 +27,8 @@
   "devDependencies": {
     "@types/cross-spawn": "^6.0.6",
     "tsup": "^8.3.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0"
   },
   "license": "Apache-2.0",
   "homepage": "https://deep.space",

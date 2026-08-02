@@ -1,0 +1,369 @@
+/**
+ * Pull's local integration decisions, as pure/exported helpers:
+ *   - divergedMergeAdvice: branch-relative merge advice (`git merge` always
+ *     merges INTO the checked-out branch).
+ *   - workspaceBranchPullRefusal: a ws/<id> branch integrates trunk by MERGE,
+ *     never a plain pull.
+ *   - worktreeHoldingBranch: pull must not move a branch ref that another linked
+ *     worktree has checked out (real-git).
+ */
+
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import pull, {
+  divergedMergeAdvice,
+  workspaceBranchPullRefusal,
+  worktreeHoldingBranch,
+} from '../pull'
+import { listWorktrees } from '../../lib/git/repository'
+import * as appContext from '../../lib/app-context'
+import * as authModule from '../../auth'
+import * as appTargetModule from '../../lib/app-target'
+import * as repoApiModule from '../../lib/repo-api'
+import * as vcRemoteModule from '../../lib/vc-remote'
+import type { RemoteRefsResult } from '../../lib/repo-api'
+
+const git = (cwd: string, args: string[]): string =>
+  execFileSync('git', args, { cwd, encoding: 'utf-8' })
+
+// A valid ws/<ulid> branch (Crockford base32: no I/L/O/U).
+const WS_BRANCH = 'ws/01hq9j8k7m6n5p4r3s2t1v0w9x'
+const APP_ID = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
+
+let repo: string | undefined
+afterEach(() => {
+  vi.restoreAllMocks()
+  if (repo) rmSync(repo, { recursive: true, force: true })
+  repo = undefined
+})
+
+function makeRepo(branch = 'main'): string {
+  const dir = mkdtempSync(join(tmpdir(), 'ds-pull-'))
+  git(dir, ['init', '-q', '-b', branch])
+  git(dir, ['config', 'user.email', 't@t'])
+  git(dir, ['config', 'user.name', 't'])
+  writeFileSync(join(dir, 'f.txt'), 'initial\n')
+  git(dir, ['add', '-A'])
+  git(dir, ['commit', '-q', '-m', 'initial'])
+  return dir
+}
+
+function commitObject(cwd: string, parent: string, message: string): string {
+  const tree = git(cwd, ['rev-parse', `${parent}^{tree}`]).trim()
+  return git(cwd, ['commit-tree', tree, '-p', parent, '-m', message]).trim()
+}
+
+function mockPullService(
+  remote: RemoteRefsResult | null,
+  fetchedRefs: Record<string, string> = {},
+): void {
+  vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+  vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
+  vi.spyOn(vcRemoteModule, 'ensureSpaceRemote').mockReturnValue('https://example.invalid/repo')
+  vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
+    getRefs: vi.fn().mockResolvedValue(remote),
+  } as never)
+  vi.spyOn(vcRemoteModule, 'runGitRemote').mockImplementation((cwd, _token, args) => {
+    const refspec = args.at(-1) ?? ''
+    const destination = refspec.split(':').at(-1) ?? ''
+    const oid = fetchedRefs[destination]
+    if (oid) git(cwd, ['update-ref', destination, oid])
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), status: 0 }
+  })
+}
+
+function remoteRefs(branch: string, oid: string, head = 'main'): RemoteRefsResult {
+  return {
+    head: `refs/heads/${head}`,
+    refs: [
+      {
+        name: `refs/heads/${branch}`,
+        oid,
+        updatedAt: '2026-08-02T00:00:00.000Z',
+        updatedBy: 'tester',
+      },
+    ],
+  }
+}
+
+async function runPullJson(args: Record<string, unknown>, appDir = process.cwd()) {
+  const logs: string[] = []
+  const exits: number[] = []
+  vi.spyOn(appContext, 'findAppDir').mockReturnValue(appDir)
+  vi.spyOn(console, 'log').mockImplementation((line?: unknown) => logs.push(String(line)))
+  vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+    exits.push(code ?? 0)
+    throw new Error(`exit:${code ?? 0}`)
+  }) as never)
+  const command = pull as unknown as {
+    run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+  }
+
+  await command.run({ args: { ...args, json: true } }).catch((error: unknown) => {
+    if (!(error instanceof Error) || !error.message.startsWith('exit:')) throw error
+  })
+  return { output: JSON.parse(logs[0]) as Record<string, unknown>, exits }
+}
+
+describe('shared pull command boundary', () => {
+  it('renders a pre-network invalid branch as JSON and exit 1', async () => {
+    const { output, exits } = await runPullJson({ branch: '   ' })
+    expect(output).toMatchObject({ ok: false, code: 'invalid_branch' })
+    expect(output).not.toHaveProperty('action')
+    expect(exits).toEqual([1])
+  })
+})
+
+describe('divergedMergeAdvice', () => {
+  // The interpolated branch is shell-quoted: a "run this" line is
+  // human-facing, and Git allows branch names with $(), ;, &, and spaces.
+  it('advises a bare merge when the pulled branch IS checked out', () => {
+    expect(divergedMergeAdvice('main', true)).toBe("git merge refs/remotes/space/'main'")
+  })
+
+  it('advises checkout-then-merge when the pulled branch has no checkout', () => {
+    expect(divergedMergeAdvice('feature', false)).toBe(
+      "git checkout 'feature' && git merge refs/remotes/space/'feature'",
+    )
+  })
+
+  it('shell-quotes a branch name carrying shell metacharacters (no expansion on copy-paste)', () => {
+    // A branch name Git accepts but a shell would otherwise expand/mis-parse.
+    const nasty = '$(rm -rf ~);drop&'
+    expect(divergedMergeAdvice(nasty, true)).toBe(
+      "git merge refs/remotes/space/'$(rm -rf ~);drop&'",
+    )
+    // An embedded single quote is escaped the POSIX way, so the command stays
+    // one literal argument.
+    expect(divergedMergeAdvice("a'b", false)).toBe(
+      "git checkout 'a'\\''b' && git merge refs/remotes/space/'a'\\''b'",
+    )
+  })
+})
+
+describe('workspaceBranchPullRefusal', () => {
+  it('returns null for an ordinary branch (no behavior change)', () => {
+    expect(workspaceBranchPullRefusal('main', 'main')).toBeNull()
+    expect(workspaceBranchPullRefusal(null, 'main')).toBeNull()
+  })
+
+  it('refuses a workspace branch and identifies the trunk to fetch and merge', () => {
+    const r = workspaceBranchPullRefusal(WS_BRANCH, 'main')
+    expect(r).not.toBeNull()
+    expect(r!.code).toBe('workspace_branch')
+    expect(r!.trunk).toBe('main')
+    expect(r!.error).toContain('MERGE')
+  })
+
+  it('falls back to main when the trunk name is unknown', () => {
+    const r = workspaceBranchPullRefusal(WS_BRANCH, null)
+    expect(r!.trunk).toBe('main')
+  })
+})
+
+describe('worktreeHoldingBranch (pull cross-worktree guard)', () => {
+  it('finds a linked worktree holding the branch, and ignores the caller itself', () => {
+    repo = makeRepo()
+    // A linked worktree with `feature` checked out elsewhere.
+    const wtDir = join(repo, 'wt-feature')
+    git(repo, ['worktree', 'add', '-q', '-b', 'feature', wtDir])
+    const worktrees = listWorktrees(repo)
+
+    // From the MAIN checkout (on main), `feature` is held by the linked worktree.
+    const held = worktreeHoldingBranch(worktrees, 'feature', repo)
+    expect(held).toBeTruthy()
+    expect(realpathSync(held!)).toBe(realpathSync(wtDir))
+    // `main` lives only in the main checkout — asking from there finds no OTHER holder.
+    expect(worktreeHoldingBranch(worktrees, 'main', repo)).toBeNull()
+    // A branch nobody has checked out.
+    expect(worktreeHoldingBranch(worktrees, 'ghost', repo)).toBeNull()
+  })
+})
+
+describe('pull recovery target and checkout', () => {
+  it('preserves the resolved app and selected branch when the cloud repo is absent', async () => {
+    const branch = 'feature/selected'
+    repo = makeRepo(branch)
+    mockPullService(null)
+
+    const { output, exits } = await runPullJson({ app: 'selected-app', branch }, repo)
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'no_cloud_repo',
+      action: {
+        cwd: repo,
+        argv: ['deepspace', 'push', '--app', APP_ID, '--branch', branch],
+      },
+    })
+    expect(exits).toEqual([1])
+  })
+
+  it('reruns a fast-forward from the worktree that owns the selected branch', async () => {
+    const branch = 'feature/selected'
+    repo = makeRepo()
+    const worktree = join(repo, 'wt-feature')
+    git(repo, ['worktree', 'add', '-q', '-b', branch, worktree])
+    writeFileSync(join(worktree, 'local.txt'), 'local\n')
+    git(worktree, ['add', '-A'])
+    git(worktree, ['commit', '-q', '-m', 'local'])
+    const localOid = git(worktree, ['rev-parse', 'HEAD']).trim()
+    const remoteOid = commitObject(repo, localOid, 'remote advance')
+    const trackingRef = `refs/remotes/space/${branch}`
+    mockPullService(remoteRefs(branch, remoteOid), { [trackingRef]: remoteOid })
+
+    const { output, exits } = await runPullJson({ app: 'selected-app', branch }, repo)
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'branch_in_worktree',
+      status: 'fetched_only_worktree',
+      appId: APP_ID,
+      branch,
+      worktreePath: realpathSync(worktree),
+      action: {
+        cwd: realpathSync(worktree),
+        argv: ['deepspace', 'pull', '--app', APP_ID, '--branch', branch],
+      },
+    })
+    expect(exits).toEqual([2])
+  })
+
+  it('merges a divergent selected branch in the worktree that owns it', async () => {
+    const branch = 'feature/selected'
+    repo = makeRepo()
+    const baseOid = git(repo, ['rev-parse', 'HEAD']).trim()
+    const worktree = join(repo, 'wt-feature')
+    git(repo, ['worktree', 'add', '-q', '-b', branch, worktree])
+    writeFileSync(join(worktree, 'local.txt'), 'local\n')
+    git(worktree, ['add', '-A'])
+    git(worktree, ['commit', '-q', '-m', 'local'])
+    const remoteOid = commitObject(repo, baseOid, 'remote divergence')
+    const trackingRef = `refs/remotes/space/${branch}`
+    mockPullService(remoteRefs(branch, remoteOid), { [trackingRef]: remoteOid })
+
+    const { output, exits } = await runPullJson({ app: 'selected-app', branch }, repo)
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'diverged',
+      status: 'fetched_only_diverged',
+      appId: APP_ID,
+      branch,
+      worktreePath: realpathSync(worktree),
+      action: {
+        cwd: realpathSync(worktree),
+        argv: ['git', 'merge', trackingRef],
+      },
+    })
+    expect(exits).toEqual([2])
+  })
+
+  it('leaves a divergent selected branch actionless when its owning worktree is dirty', async () => {
+    const branch = 'feature/selected'
+    repo = makeRepo()
+    const baseOid = git(repo, ['rev-parse', 'HEAD']).trim()
+    const worktree = join(repo, 'wt-feature')
+    git(repo, ['worktree', 'add', '-q', '-b', branch, worktree])
+    writeFileSync(join(worktree, 'local.txt'), 'local\n')
+    git(worktree, ['add', '-A'])
+    git(worktree, ['commit', '-q', '-m', 'local'])
+    writeFileSync(join(worktree, 'uncommitted.txt'), 'keep me\n')
+    const remoteOid = commitObject(repo, baseOid, 'remote divergence')
+    const trackingRef = `refs/remotes/space/${branch}`
+    mockPullService(remoteRefs(branch, remoteOid), { [trackingRef]: remoteOid })
+
+    const { output, exits } = await runPullJson({ app: 'selected-app', branch }, repo)
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'diverged',
+      status: 'fetched_only_diverged',
+      appId: APP_ID,
+      branch,
+      worktreePath: realpathSync(worktree),
+    })
+    expect(output).not.toHaveProperty('action')
+    expect(output).not.toHaveProperty('actionRequired')
+    expect(output.error).toContain('is dirty')
+    expect(exits).toEqual([1])
+  })
+
+  it('emits checkout as the prerequisite when no worktree owns a divergent branch', async () => {
+    const branch = 'feature/selected'
+    repo = makeRepo()
+    const baseOid = git(repo, ['rev-parse', 'HEAD']).trim()
+    git(repo, ['switch', '-q', '-c', branch])
+    writeFileSync(join(repo, 'local.txt'), 'local\n')
+    git(repo, ['add', '-A'])
+    git(repo, ['commit', '-q', '-m', 'local'])
+    git(repo, ['switch', '-q', 'main'])
+    const remoteOid = commitObject(repo, baseOid, 'remote divergence')
+    const trackingRef = `refs/remotes/space/${branch}`
+    mockPullService(remoteRefs(branch, remoteOid), { [trackingRef]: remoteOid })
+
+    const { output, exits } = await runPullJson({ app: 'selected-app', branch }, repo)
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'diverged',
+      status: 'fetched_only_diverged',
+      appId: APP_ID,
+      branch,
+      action: { cwd: repo, argv: ['git', 'checkout', branch] },
+    })
+    expect(output).not.toHaveProperty('worktreePath')
+    expect(exits).toEqual([2])
+  })
+
+  it('merges trunk in the worktree that owns an explicitly selected workspace branch', async () => {
+    repo = makeRepo()
+    const trunkOid = git(repo, ['rev-parse', 'HEAD']).trim()
+    const worktree = join(repo, 'wt-workspace')
+    git(repo, ['worktree', 'add', '-q', '-b', WS_BRANCH, worktree])
+    const trackingRef = 'refs/remotes/space/main'
+    mockPullService(remoteRefs('main', trunkOid), { [trackingRef]: trunkOid })
+
+    const { output, exits } = await runPullJson({ app: 'selected-app', branch: WS_BRANCH }, repo)
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'workspace_branch',
+      appId: APP_ID,
+      branch: WS_BRANCH,
+      worktreePath: realpathSync(worktree),
+      action: {
+        cwd: realpathSync(worktree),
+        argv: ['git', 'merge', trackingRef],
+      },
+    })
+    expect(exits).toEqual([2])
+  })
+
+  it('does not offer a workspace merge while its owning worktree is dirty', async () => {
+    repo = makeRepo()
+    const trunkOid = git(repo, ['rev-parse', 'HEAD']).trim()
+    const worktree = join(repo, 'wt-workspace')
+    git(repo, ['worktree', 'add', '-q', '-b', WS_BRANCH, worktree])
+    writeFileSync(join(worktree, 'uncommitted.txt'), 'keep me\n')
+    const trackingRef = 'refs/remotes/space/main'
+    mockPullService(remoteRefs('main', trunkOid), { [trackingRef]: trunkOid })
+
+    const { output, exits } = await runPullJson({ app: 'selected-app', branch: WS_BRANCH }, repo)
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'workspace_branch',
+      appId: APP_ID,
+      branch: WS_BRANCH,
+      worktreePath: realpathSync(worktree),
+    })
+    expect(output).not.toHaveProperty('action')
+    expect(output).not.toHaveProperty('actionRequired')
+    expect(output.error).toContain('is dirty')
+    expect(exits).toEqual([1])
+  })
+})

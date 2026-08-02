@@ -71,13 +71,16 @@ export type ScopedR2Handler = (
  * the canonical, UTF-8-safe form that modern browsers prefer.
  */
 function contentDisposition(originalName: string): string {
-  // Strip control characters (CR/LF/NUL/etc.), backslash, and double-quote
-  // so the legacy `filename=` value can't break out of its quoted token.
-  // eslint-disable-next-line no-control-regex
-  const safe = originalName.replace(/[\x00-\x1f\x7f"\\]/g, '_') || 'download'
-  // encodeURIComponent already escapes CR/LF/quote — no further escaping
-  // needed for the modern `filename*` form.
-  const encoded = encodeURIComponent(originalName)
+  // The legacy `filename=` value must be ASCII as well as header-safe; Fetch
+  // implementations may reject raw Unicode header bytes. `filename*` carries
+  // the exact UTF-8 name for modern clients.
+  const safe = originalName.replace(/[^\x20-\x7e]|["\\]/g, '_') || 'download'
+  // encodeURIComponent leaves five characters that RFC 5987 does not admit
+  // in an attr-char value, so escape those too.
+  const encoded = encodeURIComponent(originalName).replace(
+    /[!'()*]/g,
+    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+  )
   return `inline; filename="${safe}"; filename*=UTF-8''${encoded}`
 }
 
@@ -90,6 +93,11 @@ function sanitizeSubpath(raw: string): string | null {
   const segments = raw.split('/')
   if (segments.some((s) => s === '..' || s === '.')) return null
   return raw
+}
+
+/** Encode an R2 key for use as URL path segments while preserving hierarchy. */
+function encodeKeyPath(key: string): string {
+  return key.split('/').map(encodeURIComponent).join('/')
 }
 
 /**
@@ -147,9 +155,15 @@ export function createScopedR2Handler(config: ScopedR2Config): ScopedR2Handler {
   return async (request, url, bucket, auth) => {
     // url.pathname preserves percent-encoding (e.g. spaces → %20), but R2
     // keys are stored with raw characters. Decode so the lookup matches.
-    const subpathRaw = decodeURIComponent(
-      url.pathname.replace('/api/files', '').replace(/^\//, ''),
-    )
+    let subpathRaw: string
+    try {
+      subpathRaw = decodeURIComponent(url.pathname.replace('/api/files', '').replace(/^\//, ''))
+    } catch {
+      return Response.json(
+        { error: 'Invalid path encoding' },
+        { status: 400, headers: CORS_HEADERS },
+      )
+    }
 
     // Sanitize — reject traversal attempts
     const subpath = sanitizeSubpath(subpathRaw)
@@ -160,26 +174,15 @@ export function createScopedR2Handler(config: ScopedR2Config): ScopedR2Handler {
       )
     }
 
-    // Resolve prefix from scope.
-    //
-    // The default scope depends on the operation:
-    //   - Reading a specific key (GET /api/files/<key>) defaults to 'app',
-    //     so unauthenticated callers — including plain <img src> tags — can
-    //     fetch files under the public app-scope prefix without sending an
-    //     Authorization header. Authed callers can still pass `?scope=self`
-    //     explicitly to constrain access to their own user prefix.
-    //   - Everything else (upload, list, delete) defaults to 'self', the
-    //     per-user prefix.
-    //
-    // App-scope (`apps/<app>/`) is documented as publicly readable; cross-
-    // app isolation is enforced upstream by the bucket prefix the embedder
-    // returns from `resolvePrefix`. User-scope keys live nested under
-    // `apps/<app>/users/<id>/` and remain reachable via the public app-scope
-    // read — the keys themselves are unguessable (timestamp + random) so
-    // this matches the "public read" model documented in the starter.
-    const isKeyedGet = subpath !== '' && request.method === 'GET'
-    const defaultScope = isKeyedGet ? 'app' : 'self'
-    const scope = url.searchParams.get('scope') || defaultScope
+    // Every operation defaults to per-user storage. Public app-scope reads
+    // must say `?scope=app`; upload/list responses preserve that selector in
+    // their URLs. This is load-bearing because user keys are nested below the
+    // app prefix — treating every keyed GET as app scope exposed known private
+    // keys anonymously.
+    const scope = url.searchParams.get('scope') || 'self'
+    if (scope !== 'self' && scope !== 'app') {
+      return Response.json({ error: 'Invalid scope' }, { status: 400, headers: CORS_HEADERS })
+    }
     const result = config.resolvePrefix(scope, { userId: auth.userId, url })
 
     if (!result.prefix) {
@@ -198,12 +201,12 @@ export function createScopedR2Handler(config: ScopedR2Config): ScopedR2Handler {
           { status: 401, headers: CORS_HEADERS },
         )
       }
-      return handleUpload(request, url, bucket, prefix, auth.userId)
+      return handleUpload(request, url, bucket, prefix, auth.userId, scope)
     }
 
     // ── List ────────────────────────────────────────────────────────────
     if (!subpath && request.method === 'GET') {
-      return handleList(bucket, prefix, url)
+      return handleList(bucket, prefix, url, scope)
     }
 
     // ── Download ────────────────────────────────────────────────────────
@@ -214,7 +217,7 @@ export function createScopedR2Handler(config: ScopedR2Config): ScopedR2Handler {
           { status: 403, headers: CORS_HEADERS },
         )
       }
-      return handleDownload(bucket, subpath)
+      return handleDownload(bucket, subpath, scope)
     }
 
     // ── Delete ──────────────────────────────────────────────────────────
@@ -249,6 +252,7 @@ async function handleUpload(
   bucket: R2Bucket,
   prefix: string,
   userId: string | null,
+  scope: string,
 ): Promise<Response> {
   try {
     const contentType = request.headers.get('content-type') || ''
@@ -327,37 +331,48 @@ async function handleUpload(
       },
     })
 
-    const fileUrl = `${url.origin}/api/files/${key}`
+    const fileUrl = new URL(`/api/files/${encodeKeyPath(key)}`, url.origin)
+    fileUrl.searchParams.set('scope', scope)
     return Response.json(
-      { success: true, key, url: fileUrl, name: fileName },
+      { success: true, key, url: fileUrl.toString(), name: fileName },
       { headers: CORS_HEADERS },
     )
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Upload failed'
     console.error('[handleUpload] Error:', msg, err instanceof Error ? err.stack : '')
-    return Response.json(
-      { error: msg },
-      { status: 500, headers: CORS_HEADERS },
-    )
+    return Response.json({ error: msg }, { status: 500, headers: CORS_HEADERS })
   }
 }
 
-async function handleList(bucket: R2Bucket, prefix: string, url: URL): Promise<Response> {
+async function handleList(
+  bucket: R2Bucket,
+  prefix: string,
+  url: URL,
+  scope: string,
+): Promise<Response> {
   const userPrefix = url.searchParams.get('prefix') || ''
   const listPrefix = `${prefix}${userPrefix}`
   const limit = parseInt(url.searchParams.get('limit') || '100', 10)
   const listed = await bucket.list({ prefix: listPrefix, limit })
-  const files = listed.objects.map((obj) => ({
-    key: obj.key,
-    size: obj.size,
-    uploaded: obj.uploaded.toISOString(),
-    url: `${url.origin}/api/files/${obj.key}`,
-    ...obj.customMetadata,
-  }))
+  const files = listed.objects.map((obj) => {
+    const fileUrl = new URL(`/api/files/${encodeKeyPath(obj.key)}`, url.origin)
+    fileUrl.searchParams.set('scope', scope)
+    return {
+      key: obj.key,
+      size: obj.size,
+      uploaded: obj.uploaded.toISOString(),
+      url: fileUrl.toString(),
+      ...obj.customMetadata,
+    }
+  })
   return Response.json({ files, truncated: listed.truncated }, { headers: CORS_HEADERS })
 }
 
-async function handleDownload(bucket: R2Bucket, key: string): Promise<Response> {
+async function handleDownload(
+  bucket: R2Bucket,
+  key: string,
+  scope: 'self' | 'app',
+): Promise<Response> {
   const object = await bucket.get(key)
   if (!object) {
     return Response.json({ error: 'File not found' }, { status: 404, headers: CORS_HEADERS })
@@ -365,7 +380,10 @@ async function handleDownload(bucket: R2Bucket, key: string): Promise<Response> 
   const headers = new Headers()
   headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream')
   headers.set('X-Content-Type-Options', 'nosniff')
-  headers.set('Cache-Control', 'public, max-age=31536000, immutable')
+  headers.set(
+    'Cache-Control',
+    scope === 'app' ? 'public, max-age=31536000, immutable' : 'private, no-store',
+  )
   headers.set('Access-Control-Allow-Origin', '*')
   if (object.customMetadata?.originalName) {
     headers.set('Content-Disposition', contentDisposition(object.customMetadata.originalName))

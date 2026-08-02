@@ -1,9 +1,9 @@
 /**
- * deepspace usage
+ * deepspace app usage
  *
  * Shows the logged-in user's credit balance, quota headroom, and
  * per-integration spend — the CLI view of the dashboard's billing page.
- * Agents driving `deepspace invoke` pay per call; this is how they check
+ * Agents driving `deepspace integrations invoke` pay per call; this is how they check
  * the balance without a browser.
  *
  * Units: credits are the billing unit (100 credits = $1) and can be
@@ -12,13 +12,17 @@
  * billing period; the per-integration table is a fixed 30-day window
  * (server-side).
  *
- * `--json` emits the raw /api/usage/summary response for scripts.
+ * `--json` emits the /api/usage/summary response for scripts, inside the
+ * standard `{ ok, … }` envelope.
+ *
+ * Defined with the command runtime (lib/command.ts): `--json`, the envelope,
+ * the slug, and the exit codes come from there, not from this file.
  */
 
-import { defineCommand } from 'citty'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS, DASHBOARD_URL } from '../env'
 import { apiFetch } from '../lib/api'
+import { defineDeepspaceCommand } from '../lib/command'
 
 const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
 
@@ -118,26 +122,18 @@ export function renderSummary(summary: UsageSummary): string {
   return lines.join('\n')
 }
 
-export default defineCommand({
+export default defineDeepspaceCommand({
   meta: {
     name: 'usage',
     description: 'Show credit balance, quota headroom, and per-integration spend',
-  },
-  args: {
-    json: {
-      type: 'boolean',
-      description: 'Emit the raw usage summary as JSON instead of human output',
-      default: false,
-    },
   },
   async run({ args }) {
     const token = await ensureToken()
     const summary = await apiFetch<UsageSummary>(API_URL, token, '/api/usage/summary')
 
-    if (args.json) {
-      process.stdout.write(JSON.stringify(summary, null, 2) + '\n')
-      return
-    }
-    console.log(renderSummary(summary))
+    if (!args.json) console.log(renderSummary(summary))
+    // No `next`: reading the balance is terminal — topping up happens in the
+    // dashboard, which the human output already links.
+    return { data: { ...summary } }
   },
 })

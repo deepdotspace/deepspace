@@ -1,3 +1,4 @@
+import { Refusal } from './command'
 import { execSync } from 'node:child_process'
 import { sync as spawnSync } from 'cross-spawn'
 
@@ -23,8 +24,9 @@ export function ensurePlaywright(appDir: string) {
   })
 
   if (result.status !== 0) {
-    console.error('\nPlaywright install failed. On Linux, system libs may be missing. Try:')
-    console.error('  sudo npx playwright install --with-deps chromium')
-    process.exit(1)
+    throw new Refusal(
+      'Playwright install failed. On Linux, system libs may be missing. Try: sudo npx playwright install --with-deps chromium',
+      'playwright_install_failed',
+    )
   }
 }

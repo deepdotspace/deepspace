@@ -34,9 +34,6 @@ export interface UseAuthProfileReadyOptions extends UseAuthStatusOptions {
   requireUser?: boolean
 }
 
-/** @deprecated Use `UseAuthProfileReadyOptions` instead. */
-export type UseAuthReadyOptions = UseAuthProfileReadyOptions
-
 export function useAuthStatus(options: UseAuthStatusOptions = {}) {
   const auth = useAuth()
   const status = deriveLoadState({
@@ -76,9 +73,6 @@ export function useAuthProfileReady(options: UseAuthProfileReadyOptions = {}) {
     isReady: status === 'ready',
   }
 }
-
-/** @deprecated Use `useAuthStatus` for auth-only UI or `useAuthProfileReady` for profile-backed UI. */
-export const useAuthReady = useAuthProfileReady
 
 export type AsyncResourceStatus = 'idle' | 'loading' | 'ready' | 'error'
 export type PagedResourceStatus = AsyncResourceStatus

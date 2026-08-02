@@ -3,8 +3,8 @@
  * separate browser contexts and the app distinguishes them.
  *
  * Pre-create the test accounts once (counted against your 10-cap):
- *   npx deepspace test-accounts create --email collab-a@deepspace.test --password TestPass123! --name "Collab A"
- *   npx deepspace test-accounts create --email collab-b@deepspace.test --password TestPass123! --name "Collab B"
+ *   npx deepspace test accounts create --email collab-a@deepspace.test --password TestPass123! --name "Collab A"
+ *   npx deepspace test accounts create --email collab-b@deepspace.test --password TestPass123! --name "Collab B"
  *
  * The `users` fixture handles sign-in caching (per-account storageState
  * persisted to `~/.deepspace/playwright-states/`), context creation, and

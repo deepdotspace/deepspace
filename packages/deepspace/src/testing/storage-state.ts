@@ -85,7 +85,7 @@ async function signInAndSaveState(
       throw new Error(
         `Sign-in failed for ${account.email}. Check the password is current; ` +
           `if the account was deleted on the server, re-create with ` +
-          `\`deepspace test-accounts create\`.`,
+          `\`deepspace test accounts create\`.`,
       )
     }
     await ctx.storageState({ path: outPath })

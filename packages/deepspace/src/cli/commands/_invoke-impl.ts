@@ -1,31 +1,27 @@
 /**
- * Shared implementation for `deepspace invoke` and `deepspace integrations *`.
+ * Implementation for `deepspace integrations list`, `info`, and `invoke`.
  *
  * The CLI invokes platform integrations as the currently logged-in user
- * (the same identity shown by `deepspace whoami`). That user is billed.
+ * (the same identity shown by `deepspace auth whoami`). That user is billed.
  *
  * This module is the single source of truth for:
  *   - listing the integration catalog
  *   - showing per-endpoint info (schema + example body)
  *   - making the actual POST call
  *
- * Both `commands/invoke.ts` (top-level alias) and `commands/integrations.ts`
- * (namespaced subcommands) delegate here so the behavior never drifts.
- *
- * Why `flushAndExit` is used (only on the --json paths):
- * Large JSON outputs (the full catalog is ~78KB) exceed the OS pipe buffer,
- * and libuv flushes piped writes asynchronously — a plain `process.exit()`
- * would truncate stdout for any downstream consumer that JSON.parses it
- * (jq, file redirects, agent scripts, the e2e tests). So on the --json
- * paths we wait for stdout to drain before exiting. See flushAndExit().
- *
- * Human-mode paths don't need this: they return / process.exit() normally.
+ * This module is NOT a citty command, so it does not wrap itself in the
+ * command runtime. Instead every `run*` here RETURNS a {@link CommandResult}
+ * and throws a {@link Refusal} — exactly what a `defineDeepspaceCommand` body
+ * produces — so the command definitions can let the runtime own the envelope,
+ * the slug, the `Next:` line, and the exit code.
+ * Nothing in here prints an envelope or calls process.exit.
  */
 
 import { readFileSync } from 'node:fs'
 import * as p from '@clack/prompts'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
+import { cliAction, Refusal, type CommandResult } from '../lib/command'
 
 const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
 const DEFAULT_TIMEOUT_MS = 120_000
@@ -65,17 +61,36 @@ export interface ListArgs {
  */
 function parseTarget(target: string): { integration: string; endpoint: string } {
   if (!target || typeof target !== 'string') {
-    throw new Error(
+    throw new Refusal(
       "Missing target. Expected '<integration>/<endpoint>' (e.g. 'openai/chat-completion').",
+      'missing_target',
+      { action: cliAction('deepspace', 'integrations', 'list') },
     )
   }
   const parts = target.split('/')
   if (parts.length !== 2 || !parts[0] || !parts[1]) {
-    throw new Error(
+    throw new Refusal(
       `Bad target '${target}'. Expected '<integration>/<endpoint>' (e.g. 'openai/chat-completion').`,
+      'bad_target',
+      { action: cliAction('deepspace', 'integrations', 'list') },
     )
   }
   return { integration: parts[0], endpoint: parts[1] }
+}
+
+/**
+ * Parse the `integrations invoke --timeout` value in milliseconds.
+ */
+export function parseTimeout(raw: unknown): number | undefined {
+  if (raw == null) return undefined
+  const timeout = Number(raw)
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    throw new Refusal(
+      `Invalid --timeout '${String(raw)}'. Must be a positive number of milliseconds.`,
+      'invalid_timeout',
+    )
+  }
+  return timeout
 }
 
 /**
@@ -85,7 +100,7 @@ function parseTarget(target: string): { integration: string; endpoint: string } 
  */
 function resolveBody(opts: { body?: string; bodyFile?: string }): string {
   if (opts.body != null && opts.bodyFile != null) {
-    throw new Error('Pass either --body or --body-file, not both.')
+    throw new Refusal('Pass either --body or --body-file, not both.', 'conflicting_body_args')
   }
 
   let raw: string
@@ -102,27 +117,9 @@ function resolveBody(opts: { body?: string; bodyFile?: string }): string {
     JSON.parse(raw)
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'invalid JSON'
-    throw new Error(`Body is not valid JSON: ${msg}`)
+    throw new Refusal(`Body is not valid JSON: ${msg}`, 'invalid_body_json')
   }
   return raw
-}
-
-/**
- * Exit the process after stdout has drained.
- *
- * Used only on --json paths. Plain `process.exit()` truncates piped stdout
- * for outputs larger than the pipe buffer (~64KB on macOS) —
- * `integrations --json | jq` would lose data because libuv flushes
- * asynchronously.
- *
- * The pattern: schedule a zero-byte write so its callback fires only
- * after all prior writes have been flushed, then exit from the callback.
- * Returns a Promise that never resolves so the caller can `await` it.
- */
-function flushAndExit(code: number): Promise<never> {
-  return new Promise<never>(() => {
-    process.stdout.write('', () => process.exit(code))
-  })
 }
 
 async function fetchCatalog(opts: { summary?: boolean } = {}): Promise<Catalog> {
@@ -132,7 +129,7 @@ async function fetchCatalog(opts: { summary?: boolean } = {}): Promise<Catalog> 
   const url = opts.summary ? `${API_URL}/api/integrations?summary=1` : `${API_URL}/api/integrations`
   const res = await fetch(url)
   if (!res.ok) {
-    throw new Error(`Failed to fetch integration catalog (${res.status})`)
+    throw new Refusal(`Failed to fetch integration catalog (${res.status})`, 'catalog_unavailable')
   }
   return (await res.json()) as Catalog
 }
@@ -191,45 +188,41 @@ export function shouldConfirmCost(opts: {
 }
 
 /**
- * `deepspace integrations` (default action) / `--list`
+ * `deepspace integrations list`
  * Prints the catalog grouped by integration.
  */
-export async function runList(args: ListArgs): Promise<void> {
+export async function runList(args: ListArgs): Promise<CommandResult> {
   const catalog = await fetchCatalog({ summary: true })
-
-  if (args.json) {
-    process.stdout.write(JSON.stringify(catalog) + '\n')
-    await flushAndExit(0)
-  }
-
   const names = Object.keys(catalog.integrations).sort()
-  if (names.length === 0) {
-    console.log('No integrations available.')
-    return
-  }
 
-  for (const name of names) {
-    console.log(name)
-    const endpoints = [...catalog.integrations[name]].sort((a, b) =>
-      a.endpoint.localeCompare(b.endpoint),
-    )
-    const widest = Math.max(...endpoints.map((e) => e.endpoint.length))
-    for (const ep of endpoints) {
-      const pad = ep.endpoint.padEnd(widest)
-      const cost = formatCurrency(ep.billing.baseCost, ep.billing.currency)
-      console.log(`  ${pad}  ${ep.billing.model.padEnd(12)} ${cost}`)
+  if (!args.json) {
+    if (names.length === 0) {
+      console.log('No integrations available.')
+    } else {
+      for (const name of names) {
+        console.log(name)
+        const endpoints = [...catalog.integrations[name]].sort((a, b) =>
+          a.endpoint.localeCompare(b.endpoint),
+        )
+        const widest = Math.max(...endpoints.map((e) => e.endpoint.length))
+        for (const ep of endpoints) {
+          const pad = ep.endpoint.padEnd(widest)
+          const cost = formatCurrency(ep.billing.baseCost, ep.billing.currency)
+          console.log(`  ${pad}  ${ep.billing.model.padEnd(12)} ${cost}`)
+        }
+        console.log()
+      }
     }
-    console.log()
   }
 
-  console.log("Run 'deepspace integrations info <integration>/<endpoint>' for the request schema.")
+  return { data: catalog as unknown as Record<string, unknown> }
 }
 
 /**
- * `deepspace integrations info <target>` / `--info`
+ * `deepspace integrations info <target>`
  * Prints the schema + example body for a single endpoint.
  */
-export async function runInfo(args: InfoArgs): Promise<void> {
+export async function runInfo(args: InfoArgs): Promise<CommandResult> {
   const { integration, endpoint } = parseTarget(args.target)
   const catalog = await fetchCatalog()
   const info = findEndpoint(catalog, integration, endpoint)
@@ -238,36 +231,41 @@ export async function runInfo(args: InfoArgs): Promise<void> {
     const available = catalog.integrations[integration]
     if (!available) {
       const names = Object.keys(catalog.integrations).sort().join(', ')
-      throw new Error(`Unknown integration '${integration}'. Available: ${names}`)
+      throw new Refusal(`Unknown integration '${integration}'. Available: ${names}`, 'unknown_integration', {
+        action: cliAction('deepspace', 'integrations', 'list'),
+      })
     }
     const endpoints = available.map((e) => e.endpoint).join(', ')
-    throw new Error(`Unknown endpoint '${endpoint}' for '${integration}'. Available: ${endpoints}`)
+    throw new Refusal(
+      `Unknown endpoint '${endpoint}' for '${integration}'. Available: ${endpoints}`,
+      'unknown_endpoint',
+      { action: cliAction('deepspace', 'integrations', 'list') },
+    )
   }
 
-  if (args.json) {
-    process.stdout.write(JSON.stringify(info) + '\n')
-    await flushAndExit(0)
+  if (!args.json) {
+    console.log(`${integration}/${endpoint}`)
+    console.log(
+      `  billing: ${formatCurrency(info.billing.baseCost, info.billing.currency)} ${billingUnit(info.billing.model)}`,
+    )
+    console.log()
+    console.log('Input schema:')
+    console.log(
+      info.inputSchema ? JSON.stringify(info.inputSchema, null, 2) : '  (no schema registered)',
+    )
+    console.log()
+    console.log('Example body:')
+    console.log(info.example ? JSON.stringify(info.example, null, 2) : '  (no example available)')
   }
 
-  console.log(`${integration}/${endpoint}`)
-  console.log(
-    `  billing: ${formatCurrency(info.billing.baseCost, info.billing.currency)} ${billingUnit(info.billing.model)}`,
-  )
-  console.log()
-  console.log('Input schema:')
-  console.log(
-    info.inputSchema ? JSON.stringify(info.inputSchema, null, 2) : '  (no schema registered)',
-  )
-  console.log()
-  console.log('Example body:')
-  console.log(info.example ? JSON.stringify(info.example, null, 2) : '  (no example available)')
+  return { data: info as unknown as Record<string, unknown> }
 }
 
 /**
- * `deepspace invoke <target>` / `deepspace integrations invoke <target>`
+ * `deepspace integrations invoke <target>`
  * Performs the actual integration call.
  */
-export async function runInvoke(args: InvokeArgs): Promise<void> {
+export async function runInvoke(args: InvokeArgs): Promise<CommandResult> {
   const { integration, endpoint } = parseTarget(args.target)
   const body = resolveBody({ body: args.body, bodyFile: args.bodyFile })
   const timeoutMs = args.timeout ?? DEFAULT_TIMEOUT_MS
@@ -275,7 +273,7 @@ export async function runInvoke(args: InvokeArgs): Promise<void> {
   // FEAT-13: this fires a PAID call billed to the logged-in user. On a fully
   // interactive terminal, confirm the cost first (unless --yes or --json).
   // Gate on BOTH streams: p.confirm reads stdin and draws to stdout, so a piped
-  // stdin (e.g. `echo {} | deepspace invoke … --body-file -`) must never reach
+  // stdin (e.g. `echo {} | deepspace integrations invoke … --body-file -`) must never reach
   // the prompt — it would hang waiting for input that can't come.
   const interactive = isInteractive(process.stdin, process.stdout)
   if (!args.json && !args.yes && interactive) {
@@ -304,7 +302,9 @@ export async function runInvoke(args: InvokeArgs): Promise<void> {
       })
       if (p.isCancel(ok) || !ok) {
         p.cancel('Cancelled — no call made.')
-        process.exit(0)
+        // Declining a paid call is a success, not a refusal: nothing was
+        // billed and there is nothing to retry.
+        return { data: { cancelled: true, integration, endpoint } }
       }
     }
   }
@@ -314,7 +314,9 @@ export async function runInvoke(args: InvokeArgs): Promise<void> {
     jwt = await ensureToken()
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    throw new Error(msg)
+    throw new Refusal(msg, 'not_authenticated', {
+      action: cliAction('deepspace', 'auth', 'login'),
+    })
   }
 
   const controller = new AbortController()
@@ -334,9 +336,9 @@ export async function runInvoke(args: InvokeArgs): Promise<void> {
     })
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(`Request timed out after ${timeoutMs}ms`)
+      throw new Refusal(`Request timed out after ${timeoutMs}ms`, 'request_timeout')
     }
-    throw new Error(err instanceof Error ? err.message : 'Request failed')
+    throw new Refusal(err instanceof Error ? err.message : 'Request failed', 'request_failed')
   } finally {
     clearTimeout(timer)
   }
@@ -346,33 +348,42 @@ export async function runInvoke(args: InvokeArgs): Promise<void> {
   try {
     payload = (await res.json()) as Record<string, unknown>
   } catch {
-    throw new Error(`Request failed (${res.status}) with non-JSON response`)
-  }
-
-  if (args.json) {
-    process.stdout.write(JSON.stringify(payload) + '\n')
-    await flushAndExit(payload?.success === false || !res.ok ? 1 : 0)
+    throw new Refusal(`Request failed (${res.status}) with non-JSON response`, 'invalid_response')
   }
 
   const ok = payload?.success !== false && res.ok
   if (ok) {
-    const data = 'data' in payload ? payload.data : payload
-    console.log(JSON.stringify(data, null, 2))
-    console.error(`\n✓ ${integration}/${endpoint} (${elapsed}ms)`)
-    return
+    if (!args.json) {
+      const data = 'data' in payload ? payload.data : payload
+      console.log(JSON.stringify(data, null, 2))
+      console.error(`\n✓ ${integration}/${endpoint} (${elapsed}ms)`)
+    }
+    // The server payload is the machine result, but it is NOT an envelope —
+    // hand it to the runtime as `data` so it goes out as `{ ok, …payload }`
+    // like every other command instead of passing through unnormalized.
+    return { data: payload }
   }
 
-  // Error path
+  // Error path. The issue list is part of the message (the human line must
+  // carry every fact --json does) and rides along in the envelope via `extra`.
   const errMsg = (payload.error as string) ?? `Request failed (${res.status})`
-  console.error(`✗ ${integration}/${endpoint} (${res.status}, ${elapsed}ms): ${errMsg}`)
+  // No `✗` prefix: the runtime renders the failure marker, and it would read
+  // as `■ ✗ …` (and land in the `--json` `error` string) if we kept ours.
+  const lines = [`${integration}/${endpoint} (${res.status}, ${elapsed}ms): ${errMsg}`]
   if (Array.isArray(payload.issues)) {
     for (const issue of payload.issues as Array<{ path?: string[]; message: string }>) {
       const path = issue.path?.length ? issue.path.join('.') : '(root)'
-      console.error(`  - ${path}: ${issue.message}`)
+      lines.push(`  - ${path}: ${issue.message}`)
     }
   }
-  if (res.status === 401) {
-    console.error("\nHint: run 'deepspace login' to authenticate.")
-  }
-  process.exit(1)
+  // Prefer the server's own slug so an agent branches on the same code the API
+  // returns; fall back to a stable generic one.
+  const code = typeof payload.code === 'string' ? payload.code : 'integration_call_failed'
+  // `error` would only restate the message the runtime already renders.
+  const rest = { ...payload }
+  delete rest.error
+  throw new Refusal(lines.join('\n'), code, {
+    ...(res.status === 401 ? { action: cliAction('deepspace', 'auth', 'login') } : {}),
+    extra: rest,
+  })
 }

@@ -6,7 +6,7 @@
 
 The DeepSpace SDK — build real-time collaborative apps on Cloudflare Workers.
 Bundles auth, real-time data subscriptions, RBAC, messaging, file storage,
-collaborative editing (Yjs), and zero-config deployment behind two imports.
+collaborative editing (Yjs), and zero-config deployment behind four imports.
 
 The fastest way to start is to scaffold a full app rather than wire the SDK up
 by hand:
@@ -27,24 +27,30 @@ npm install deepspace
 
 ## Entry points
 
-The package has two entry points:
+The package has four supported import paths:
 
 - **`deepspace`** — the React client SDK (hooks, providers, auth, storage,
   messaging, theme). Runs in the browser.
 - **`deepspace/worker`** — the Cloudflare Worker runtime (`RecordRoom`, schemas,
   JWT verification, HMAC auth). Runs in your app's Worker.
+- **`deepspace/server`** — app-server helpers for actions, billing, and room
+  handlers.
+- **`deepspace/testing`** — Playwright fixtures for multi-user tests.
 
 ## Minimal usage
 
 Client — wrap your app and subscribe to a collection:
 
 ```tsx
-import { RecordProvider, useQuery } from 'deepspace'
+import { RecordProvider, RecordScope, useQuery } from 'deepspace'
+import { schemas } from './schemas'
 
 function App() {
   return (
-    <RecordProvider roomId="my-app">
-      <Tasks />
+    <RecordProvider allowAnonymous>
+      <RecordScope roomId="app:my-app" schemas={schemas}>
+        <Tasks />
+      </RecordScope>
     </RecordProvider>
   )
 }
@@ -78,10 +84,18 @@ export class MyRoom extends RecordRoom {}
 The package ships a `deepspace` binary for local dev and deployment:
 
 ```bash
-npx deepspace login      # authenticate
-npx deepspace dev        # run locally
+npx deepspace auth login # authenticate
+npx deepspace dev start  # run locally
 npx deepspace deploy     # deploy to *.app.space
 ```
+
+Committed app source can also use DeepSpace's Git-native cloud remote.
+`deepspace push` publishes the current branch and `deepspace clone <app>`
+checks it out; both configure a `space` remote and credential helper, so normal
+`git fetch space` and `git push space` work afterward. Commands support
+`--json` for agents. See the
+[repository guide](https://github.com/deepdotspace/deepspace/blob/main/docs/platform/repo-store-git.md)
+for workspaces, releases, and rollback.
 
 ## Debugging
 
@@ -91,4 +105,4 @@ env binding on your Worker to emit per-connection `[DO Perf]` timing logs.
 
 ## License
 
-MIT
+Apache-2.0

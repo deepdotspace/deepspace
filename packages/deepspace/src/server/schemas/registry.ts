@@ -4,42 +4,25 @@
  * All collections use typed SQL columns. No document-mode / fields-based storage.
  */
 
+import type {
+  CollectionSchema,
+  ColumnDefinition,
+  ColumnInterpretation,
+  PermissionLevel,
+  RolePermissions,
+} from '../../shared/types'
+
+export type {
+  CollectionSchema,
+  ColumnDefinition,
+  ColumnInterpretation,
+  PermissionLevel,
+  RolePermissions,
+} from '../../shared/types'
+
 // ============================================================================
 // Column Definitions
 // ============================================================================
-
-export type ColumnInterpretation =
-  | { kind: 'plain' }
-  | { kind: 'currency'; symbol: string; decimals: number }
-  | { kind: 'date'; format?: string }
-  | { kind: 'datetime'; format?: string }
-  | { kind: 'boolean'; trueLabel?: string; falseLabel?: string }
-  | { kind: 'percent'; decimals?: number }
-  | { kind: 'select'; options: string[] }
-  | { kind: 'multiselect'; options: string[] }
-  | { kind: 'url' }
-  | { kind: 'email' }
-  | { kind: 'json' }
-  | { kind: 'reference'; targetTable: string; displayColumn: string }
-
-export interface ColumnDefinition {
-  /** Stable ID override (survives renames). Falls back to `col_{name}`. */
-  id?: string
-  name: string
-  storage: 'number' | 'text'
-  interpretation: ColumnInterpretation | string
-  expression?: string
-  /** Auto-populate with current user ID on create. */
-  userBound?: boolean
-  /** Cannot be changed after initial creation. */
-  immutable?: boolean
-  /** Must be provided on create (non-null). */
-  required?: boolean
-  /** Default value if not provided on create. */
-  default?: unknown
-  /** Auto-set ISO timestamp when the named field changes (optionally to a specific value). */
-  timestampTrigger?: { field: string; value?: unknown }
-}
 
 export interface ResolvedColumn {
   id: string
@@ -191,57 +174,6 @@ export function buildTableSelect(collectionName: string, columns: ResolvedColumn
     }
   }
   return `SELECT ${parts.join(', ')} FROM "${tbl}"`
-}
-
-// ============================================================================
-// Permissions
-// ============================================================================
-
-export type PermissionLevel =
-  | boolean
-  | 'own'
-  | 'unclaimed-or-own'
-  | 'collaborator'
-  | 'team'
-  | 'access'
-  | 'published'
-  | 'shared'
-
-export interface RolePermissions {
-  read: PermissionLevel
-  create: boolean
-  update: PermissionLevel
-  delete: PermissionLevel
-  /** If set, only these columns can be updated by this role. */
-  writableFields?: string[]
-}
-
-// ============================================================================
-// Collection Schema
-// ============================================================================
-
-export interface CollectionSchema {
-  name: string
-  /** Column definitions — every collection is stored in a typed SQL table. */
-  columns: ColumnDefinition[]
-  /** Composite uniqueness constraint (e.g., ['userId', 'taskId']). */
-  uniqueOn?: string[]
-  /** Column name used for ownership checks (default: `_created_by`). */
-  ownerField?: string
-  /** Column containing JSON array of collaborator user IDs. */
-  collaboratorsField?: string
-  /** Column containing team ID for team-based access. */
-  teamField?: string
-  /**
-   * Column controlling per-record read visibility.
-   * String: visible when `data[field] === 'public'`.
-   * Object: visible when `data[field] === value`.
-   */
-  visibilityField?: string | { field: string; value: unknown }
-  /** Permissions per role. Use '*' for a catch-all fallback. */
-  permissions: Record<string, RolePermissions>
-  /** Default role for new users (only on 'users' collection). */
-  defaultRole?: string
 }
 
 export interface User {

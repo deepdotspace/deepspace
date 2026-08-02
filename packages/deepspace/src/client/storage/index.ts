@@ -6,7 +6,6 @@
 
 // Providers
 export { RecordProvider, useRecordContext } from './context'
-export type { WriteError } from './context'
 export { RecordScope } from './RecordScope'
 export { ScopeRegistryProvider } from './ScopeRegistry'
 export type { ScopeEntry } from './ScopeRegistry'
@@ -54,7 +53,7 @@ export type {
   UserKarma,
   RoomUser,
   RecordProviderProps,
-  FetchUserProfile,
+  WriteError,
 } from './types'
 
 // Yjs protocol (advanced)

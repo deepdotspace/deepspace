@@ -29,7 +29,7 @@ export function debugLog(...args: unknown[]): void {
 }
 
 /**
- * True when the page is served from a local dev host (`deepspace dev` binds
+ * True when the page is served from a local dev host (`deepspace dev start` binds
  * localhost). Gates developer-facing diagnostics that must never render for
  * real visitors on a deployed app. Hostname-based rather than a build-time
  * env because the SDK is prebuilt — it can't see the consuming app's

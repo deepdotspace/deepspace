@@ -18,10 +18,7 @@
   --docs-el-accent: var(--color-primary, var(--theme-accent, var(--ui-accent, #3b82f6)));
   --docs-el-line: var(--color-border, var(--theme-border, rgba(15, 23, 42, 0.12)));
 
-  --docs-el-selection: var(
-    --color-primary-muted,
-    color-mix(in srgb, var(--docs-el-accent) 22%, transparent)
-  );
+  --docs-el-selection: color-mix(in srgb, var(--docs-el-accent) 22%, transparent);
 
   --docs-editor-desk: var(
     --color-muted,

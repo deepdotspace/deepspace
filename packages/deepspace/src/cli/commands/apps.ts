@@ -1,18 +1,22 @@
 /**
- * deepspace apps
+ * deepspace app list
  *
  * Lists every app registered to the logged-in user — deployed or not — with
  * its id, live URL, and deploy state. This is the answer to "which app do I
  * undeploy?" when the deploy quota message names an id you've lost track of,
  * and the discovery surface for a second checkout / lost app dir.
  *
- * `--json` emits the raw entries for scripts.
+ * `--json` emits the entries for scripts, under `apps` in the standard
+ * `{ ok, … }` envelope.
+ *
+ * Defined with the command runtime (lib/command.ts): `--json`, the envelope,
+ * the slug, and the exit codes come from there, not from this file.
  */
 
-import { defineCommand } from 'citty'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { apiFetch } from '../lib/api'
+import { defineDeepspaceCommand } from '../lib/command'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
@@ -26,37 +30,30 @@ interface AppEntry {
   url: string | null
 }
 
-export default defineCommand({
+export default defineDeepspaceCommand({
   meta: {
     name: 'apps',
     description: 'List your apps (deployed and registered)',
-  },
-  args: {
-    json: {
-      type: 'boolean',
-      description: 'Emit JSON instead of human output',
-      default: false,
-    },
   },
   async run({ args }) {
     const token = await ensureToken()
     const { apps } = await apiFetch<{ apps: AppEntry[] }>(DEPLOY_URL, token, '/api/apps')
 
-    if (args.json) {
-      process.stdout.write(JSON.stringify(apps, null, 2) + '\n')
-      return
+    if (!args.json) {
+      if (!apps.length) {
+        console.log('No apps yet. Create one with `npx create-deepspace <name>` and `deepspace deploy`.')
+      } else {
+        const nameWidth = Math.max(4, ...apps.map((a) => (a.name ?? '—').length))
+        const idWidth = Math.max(6, ...apps.map((a) => a.appId.length))
+        console.log(`${'NAME'.padEnd(nameWidth)}  ${'APP ID'.padEnd(idWidth)}  URL`)
+        for (const a of apps) {
+          const url = a.url ?? '(not deployed)'
+          console.log(`${(a.name ?? '—').padEnd(nameWidth)}  ${a.appId.padEnd(idWidth)}  ${url}`)
+        }
+      }
     }
-    if (!apps.length) {
-      console.log('No apps yet. Create one with `npx create-deepspace <name>` and `deepspace deploy`.')
-      return
-    }
-
-    const nameWidth = Math.max(4, ...apps.map((a) => (a.name ?? '—').length))
-    const idWidth = Math.max(6, ...apps.map((a) => a.appId.length))
-    console.log(`${'NAME'.padEnd(nameWidth)}  ${'APP ID'.padEnd(idWidth)}  URL`)
-    for (const a of apps) {
-      const url = a.url ?? '(not deployed)'
-      console.log(`${(a.name ?? '—').padEnd(nameWidth)}  ${a.appId.padEnd(idWidth)}  ${url}`)
-    }
+    // No `next`: a listing is terminal — which app you act on, and how, is the
+    // caller's choice.
+    return { data: { apps } }
   },
 })

@@ -1,6 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Badge, Button, EmptyState, SearchInput, cn } from '@/components/ui'
+import { Button, EmptyState, SearchInput, cn } from '@/components/ui'
 import { Loader2 } from 'lucide-react'
+import {
+  createRecentStorageKey,
+  readRecentSearches,
+  rememberRecentItem,
+  rememberRecentQuery,
+  type RecentSearchEntry,
+} from './search-model'
+
+const recentQueryMarker = Symbol('recent-query')
 
 export interface SearchItem {
   id: string
@@ -13,12 +22,14 @@ export interface SearchItem {
   disabled?: boolean
 }
 
-export interface HighlightedPart {
-  text: string
-  match: boolean
+interface RecentQueryItem extends SearchItem {
+  [recentQueryMarker]: string
 }
 
-export type SearchResultRenderer<T extends SearchItem = SearchItem> = (item: T, query: string) => ReactNode
+export type SearchResultRenderer<T extends SearchItem = SearchItem> = (
+  item: T,
+  query: string,
+) => ReactNode
 
 interface SearchBaseProps<T extends SearchItem = SearchItem> {
   query: string
@@ -57,115 +68,6 @@ export interface InlineSearchProps<T extends SearchItem = SearchItem> extends Se
   maxResultsHeightClassName?: string
 }
 
-export interface UseSearchIndexOptions<T> {
-  items: T[]
-  query: string
-  getText: (item: T) => Array<string | number | null | undefined>
-  limit?: number
-}
-
-export function useSearchIndex<T>({ items, query, getText, limit = 20 }: UseSearchIndexOptions<T>): T[] {
-  return useMemo(() => {
-    const normalizedQuery = normalize(query)
-    if (!normalizedQuery) return items.slice(0, limit)
-
-    const scored = items
-      .map((item, index) => {
-        const haystack = getText(item)
-          .filter((value): value is string | number => value !== null && value !== undefined)
-          .map(String)
-          .join(' ')
-        const score = scoreText(haystack, normalizedQuery)
-        return { item, index, score }
-      })
-      .filter((entry) => entry.score > 0)
-      .sort((a, b) => b.score - a.score || a.index - b.index)
-
-    return scored.slice(0, limit).map((entry) => entry.item)
-  }, [getText, items, limit, query])
-}
-
-export function getHighlightedParts(text: string, query: string): HighlightedPart[] {
-  const normalizedQuery = normalize(query)
-  if (!text || !normalizedQuery) return [{ text, match: false }]
-
-  const normalizedText = text.toLowerCase()
-  const parts: HighlightedPart[] = []
-  let cursor = 0
-  let index = normalizedText.indexOf(normalizedQuery)
-
-  while (index !== -1) {
-    if (index > cursor) {
-      parts.push({ text: text.slice(cursor, index), match: false })
-    }
-    parts.push({ text: text.slice(index, index + normalizedQuery.length), match: true })
-    cursor = index + normalizedQuery.length
-    index = normalizedText.indexOf(normalizedQuery, cursor)
-  }
-
-  if (cursor < text.length) {
-    parts.push({ text: text.slice(cursor), match: false })
-  }
-
-  return parts.length > 0 ? parts : [{ text, match: false }]
-}
-
-export interface UseAsyncSearchOptions<T> {
-  query: string
-  search: (query: string) => Promise<T[]>
-  minLength?: number
-  delayMs?: number
-}
-
-export function useAsyncSearch<T>({
-  query,
-  search,
-  minLength = 2,
-  delayMs = 250,
-}: UseAsyncSearchOptions<T>) {
-  const [items, setItems] = useState<T[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const requestId = useRef(0)
-
-  useEffect(() => {
-    const trimmed = query.trim()
-    requestId.current += 1
-    const current = requestId.current
-
-    if (trimmed.length < minLength) {
-      setItems([])
-      setLoading(false)
-      setError(null)
-      return
-    }
-
-    setLoading(true)
-    setError(null)
-
-    const timer = window.setTimeout(() => {
-      search(trimmed)
-        .then((results) => {
-          if (requestId.current !== current) return
-          setItems(results)
-          setError(null)
-        })
-        .catch((err) => {
-          if (requestId.current !== current) return
-          setItems([])
-          setError(err instanceof Error ? err.message : 'Search failed')
-        })
-        .finally(() => {
-          if (requestId.current === current) setLoading(false)
-        })
-    }, delayMs)
-
-    return () => window.clearTimeout(timer)
-  }, [delayMs, minLength, query, search])
-
-  return { items, loading, error }
-}
-
 export function SearchOverlay<T extends SearchItem = SearchItem>({
   open,
   onOpenChange,
@@ -193,29 +95,49 @@ export function SearchOverlay<T extends SearchItem = SearchItem>({
 }: SearchOverlayProps<T>) {
   const panelRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
-  const [recentItems, setRecentItems] = useState<SearchItem[]>([])
-  const resolvedRecentStorageKey = recentStorageKey ?? createRecentStorageKey(title, placeholder, triggerLabel)
+  const [recentSearches, setRecentSearches] = useState<RecentSearchEntry[]>([])
+  const resolvedRecentStorageKey =
+    recentStorageKey ?? createRecentStorageKey(title, placeholder, triggerLabel)
+  const recentItems = useMemo(() => {
+    const itemsById = new Map(items.map((item) => [item.id, item]))
+    return recentSearches.flatMap((recent, index): SearchItem[] => {
+      if (recent.kind === 'query') {
+        const queryItem: RecentQueryItem = {
+          id: `deepspace-recent-query:${index}`,
+          title: recent.query,
+          subtitle: 'Search query',
+          group: 'Recent',
+          keywords: [recent.query],
+          [recentQueryMarker]: recent.query,
+        }
+        return [queryItem]
+      }
+
+      const item = itemsById.get(recent.itemId)
+      return item ? [{ ...item, group: 'Recent' }] : []
+    })
+  }, [items, recentSearches])
   const showRecents = showRecentSearches && query.trim() === '' && recentItems.length > 0
-  const visibleItems = showRecents
-    ? recentItems.map((item) => ({ ...item, group: 'Recent' }))
-    : items
+  const visibleItems: SearchItem[] = showRecents ? recentItems : items
   const canSubmitSearch = Boolean(onSearchSubmit && query.trim())
 
   function submitSearch(rawQuery: string) {
     const trimmed = rawQuery.trim()
     if (!trimmed || !onSearchSubmit) return
-    const nextRecentItems = writeRecentSearchQuery(resolvedRecentStorageKey, trimmed, maxRecentItems)
-    setRecentItems(nextRecentItems)
+    if (showRecentSearches) {
+      setRecentSearches(rememberRecentQuery(resolvedRecentStorageKey, trimmed, maxRecentItems))
+    }
     onSearchSubmit(trimmed)
     onOpenChange(false)
   }
 
   useEffect(() => {
     if (!open) return
-    window.setTimeout(() => inputRef.current?.focus(), 0)
+    const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 0)
     if (showRecentSearches) {
-      setRecentItems(readRecentSearchItems(resolvedRecentStorageKey, maxRecentItems))
+      setRecentSearches(readRecentSearches(resolvedRecentStorageKey, maxRecentItems))
     }
+    return () => window.clearTimeout(focusTimer)
   }, [maxRecentItems, open, resolvedRecentStorageKey, showRecentSearches])
 
   useEffect(() => {
@@ -238,16 +160,24 @@ export function SearchOverlay<T extends SearchItem = SearchItem>({
       </Button>
 
       {open && (
-        <div className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm px-3 py-4 sm:py-16" data-testid="search-overlay">
+        <div
+          className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm px-3 py-4 sm:py-16"
+          data-testid="search-overlay"
+        >
           <div
             ref={panelRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={title}
             className="mx-auto flex max-h-[min(720px,calc(100vh-2rem))] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl"
           >
             <div className="border-b border-border p-4">
               <div className="mb-3 flex items-start justify-between gap-4">
                 <div>
                   <h2 className="text-lg font-semibold text-foreground">{title}</h2>
-                  {description && <p className="mt-1 text-sm text-muted-foreground">{description}</p>}
+                  {description && (
+                    <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+                  )}
                 </div>
                 <Button type="button" variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
                   Close
@@ -280,14 +210,24 @@ export function SearchOverlay<T extends SearchItem = SearchItem>({
               items={visibleItems}
               query={showRecents ? '' : query}
               onSelect={(item) => {
-                if (showRecents && isRecentSearchQueryItem(item)) {
-                  onQueryChange(item.title)
-                  submitSearch(item.title)
+                if (showRecents) {
+                  if (isRecentQueryItem(item)) {
+                    onQueryChange(item[recentQueryMarker])
+                    submitSearch(item[recentQueryMarker])
+                    return
+                  }
+
+                  const currentItem = items.find((candidate) => candidate.id === item.id)
+                  if (!currentItem) return
+                  onSelect(currentItem)
+                  onOpenChange(false)
                   return
                 }
-                if (!showRecents) {
-                  const nextRecentItems = writeRecentSearchItem(resolvedRecentStorageKey, item, maxRecentItems)
-                  setRecentItems(nextRecentItems)
+
+                if (showRecentSearches) {
+                  setRecentSearches(
+                    rememberRecentItem(resolvedRecentStorageKey, item.id, maxRecentItems),
+                  )
                 }
                 onSelect(item as T)
                 onOpenChange(false)
@@ -298,9 +238,21 @@ export function SearchOverlay<T extends SearchItem = SearchItem>({
               emptyTitle={emptyTitle}
               emptyDescription={emptyDescription}
               onSubmitQuery={onSearchSubmit ? submitSearch : undefined}
-              renderTitle={renderTitle as SearchResultRenderer<SearchItem> | undefined}
-              renderSubtitle={renderSubtitle as SearchResultRenderer<SearchItem> | undefined}
-              renderDescription={renderDescription as SearchResultRenderer<SearchItem> | undefined}
+              renderTitle={
+                showRecents
+                  ? undefined
+                  : (renderTitle as SearchResultRenderer<SearchItem> | undefined)
+              }
+              renderSubtitle={
+                showRecents
+                  ? undefined
+                  : (renderSubtitle as SearchResultRenderer<SearchItem> | undefined)
+              }
+              renderDescription={
+                showRecents
+                  ? undefined
+                  : (renderDescription as SearchResultRenderer<SearchItem> | undefined)
+              }
             />
           </div>
         </div>
@@ -347,7 +299,11 @@ export function InlineSearch<T extends SearchItem = SearchItem>({
   return (
     <div ref={wrapperRef} className={cn('relative', className)} data-testid="inline-search">
       {dimContent && showPanel && (
-        <div className="fixed inset-0 z-30 bg-background/50 backdrop-blur-[2px]" aria-hidden="true" data-testid="inline-search-dimmer" />
+        <div
+          className="fixed inset-0 z-30 bg-background/50 backdrop-blur-[2px]"
+          aria-hidden="true"
+          data-testid="inline-search-dimmer"
+        />
       )}
 
       <div className="relative z-40">
@@ -374,10 +330,13 @@ export function InlineSearch<T extends SearchItem = SearchItem>({
         />
 
         {showPanel && (
-          <div className={cn(
-            'absolute left-0 right-0 top-full z-50 mt-2 overflow-hidden rounded-xl border border-border bg-card shadow-xl',
-            maxResultsHeightClassName
-          )} data-testid="inline-search-panel">
+          <div
+            className={cn(
+              'absolute left-0 right-0 top-full z-50 mt-2 overflow-hidden rounded-xl border border-border bg-card shadow-xl',
+              maxResultsHeightClassName,
+            )}
+            data-testid="inline-search-panel"
+          >
             <SearchPanel
               items={items}
               query={query}
@@ -485,7 +444,10 @@ function SearchPanel<T extends SearchItem = SearchItem>({
       tabIndex={-1}
     >
       {loading ? (
-        <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground" data-testid="search-loading">
+        <div
+          className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground"
+          data-testid="search-loading"
+        >
           <Loader2 className="h-4 w-4 animate-spin" />
           Searching...
         </div>
@@ -556,7 +518,7 @@ export function SearchResultList<T extends SearchItem = SearchItem>({
                   className={cn(
                     'flex w-full items-start justify-between gap-3 rounded-lg px-3 py-3 text-left transition-colors',
                     active ? 'bg-primary/10 text-foreground' : 'hover:bg-muted/70',
-                    item.disabled && 'cursor-not-allowed opacity-50'
+                    item.disabled && 'cursor-not-allowed opacity-50',
                   )}
                   data-testid="search-result"
                   data-active={active ? 'true' : 'false'}
@@ -576,7 +538,9 @@ export function SearchResultList<T extends SearchItem = SearchItem>({
                       </span>
                     )}
                   </span>
-                  {item.meta && <span className="shrink-0 text-xs text-muted-foreground">{item.meta}</span>}
+                  {item.meta && (
+                    <span className="shrink-0 text-xs text-muted-foreground">{item.meta}</span>
+                  )}
                 </button>
               )
             })}
@@ -585,97 +549,6 @@ export function SearchResultList<T extends SearchItem = SearchItem>({
       ))}
     </div>
   )
-}
-
-export function toSearchItem(item: SearchItem): SearchItem {
-  return item
-}
-
-function createRecentStorageKey(title: string, placeholder: string, triggerLabel: string) {
-  const scope = [title, placeholder, triggerLabel]
-    .map((value) => value.trim().toLowerCase())
-    .find(Boolean) ?? 'search'
-  const normalizedScope = scope.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'search'
-  return `deepspace:search-bar:recent:${normalizedScope}`
-}
-
-function readRecentSearchItems(storageKey: string, maxItems: number): SearchItem[] {
-  try {
-    const raw = window.localStorage.getItem(storageKey)
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed
-      .filter(isStoredSearchItem)
-      .slice(0, maxItems)
-      .map((item) => ({ ...item, group: 'Recent' }))
-  } catch {
-    return []
-  }
-}
-
-function writeRecentSearchItem(storageKey: string, item: SearchItem, maxItems: number): SearchItem[] {
-  const recentItem = toStoredSearchItem(item)
-  const next = [
-    recentItem,
-    ...readRecentSearchItems(storageKey, maxItems).filter((existing) => existing.id !== recentItem.id),
-  ].slice(0, maxItems)
-
-  try {
-    window.localStorage.setItem(storageKey, JSON.stringify(next))
-  } catch {
-    // Ignore storage failures; search should still work without persistence.
-  }
-
-  return next.map((storedItem) => ({ ...storedItem, group: 'Recent' }))
-}
-
-function writeRecentSearchQuery(storageKey: string, query: string, maxItems: number): SearchItem[] {
-  const recentItem = toStoredSearchQuery(query)
-  const next = [
-    recentItem,
-    ...readRecentSearchItems(storageKey, maxItems).filter((existing) => existing.id !== recentItem.id),
-  ].slice(0, maxItems)
-
-  try {
-    window.localStorage.setItem(storageKey, JSON.stringify(next))
-  } catch {
-    // Ignore storage failures; search should still work without persistence.
-  }
-
-  return next.map((storedItem) => ({ ...storedItem, group: 'Recent' }))
-}
-
-function toStoredSearchItem(item: SearchItem): SearchItem {
-  return {
-    id: item.id,
-    title: item.title,
-    subtitle: item.subtitle,
-    description: item.description,
-    group: 'Recent',
-    keywords: item.keywords,
-    disabled: item.disabled,
-  }
-}
-
-function toStoredSearchQuery(query: string): SearchItem {
-  return {
-    id: `search-query:${normalize(query)}`,
-    title: query,
-    subtitle: 'Search query',
-    group: 'Recent',
-    keywords: [query],
-  }
-}
-
-function isRecentSearchQueryItem(item: SearchItem) {
-  return item.id.startsWith('search-query:')
-}
-
-function isStoredSearchItem(value: unknown): value is SearchItem {
-  if (!value || typeof value !== 'object') return false
-  const candidate = value as Partial<SearchItem>
-  return typeof candidate.id === 'string' && typeof candidate.title === 'string'
 }
 
 function groupItems<T extends SearchItem>(items: T[]): Array<[string, T[]]> {
@@ -688,23 +561,6 @@ function groupItems<T extends SearchItem>(items: T[]): Array<[string, T[]]> {
   return Array.from(groups.entries())
 }
 
-function normalize(value: string) {
-  return value.trim().toLowerCase()
-}
-
-function scoreText(value: string, query: string) {
-  const text = normalize(value)
-  if (!text || !query) return 0
-  if (text === query) return 100
-  if (text.startsWith(query)) return 80
-  if (text.includes(` ${query}`)) return 60
-  if (text.includes(query)) return 40
-
-  const terms = query.split(/\s+/).filter(Boolean)
-  if (terms.length > 1 && terms.every((term) => text.includes(term))) return 20
-  return 0
-}
-
-export function ResultCountBadge({ count }: { count: number }) {
-  return <Badge variant="secondary" size="sm">{count} results</Badge>
+function isRecentQueryItem(item: SearchItem): item is RecentQueryItem {
+  return recentQueryMarker in item
 }

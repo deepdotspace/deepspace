@@ -1,5 +1,5 @@
 /**
- * deepspace library [publish|unpublish] [options]
+ * deepspace app library [publish|unpublish] [options]
  *
  * Manage entries in the DeepSpace community library (lives at
  * deepdotspace-site.app.space by default; override with --library-app
@@ -11,12 +11,18 @@
  * checking the deploy worker's `/api/apps` registry) before writing
  * the row, so publishing another user's app is rejected server-side.
  *
+ * Defined with the command runtime (lib/command.ts). That fixes this file's
+ * long-standing deviation: both subcommands used to write their `--json`
+ * envelope to STDERR (and the success envelope as the server's raw
+ * `{success,data}` blob). It is now a single-line `{ ok, … }` document on
+ * STDOUT, like every other command.
+ *
  * Usage:
- *   deepspace library publish                                 (uses wrangler.toml)
- *   deepspace library publish --app my-cool-app --name "My Cool App"
- *   deepspace library publish --description "..." --category Productivity
- *   deepspace library publish --tags utility,ai --visibility unlisted
- *   deepspace library unpublish <handle>
+ *   deepspace app library publish                                 (uses wrangler.toml)
+ *   deepspace app library publish --app my-cool-app --name "My Cool App"
+ *   deepspace app library publish --description "..." --category Productivity
+ *   deepspace app library publish --tags utility,ai --visibility unlisted
+ *   deepspace app library unpublish <handle>
  */
 
 import { defineCommand } from 'citty'
@@ -26,11 +32,15 @@ import { parse as parseToml } from 'smol-toml'
 import * as p from '@clack/prompts'
 
 import { ensureToken } from '../auth'
+import { parseAppArg } from '../lib/app-target'
 import { resolveAppName } from '../../server/rooms/app-name'
+import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 
 const DEFAULT_LIBRARY_APP = 'deepdotspace-site'
 
-const publish = defineCommand({
+const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined)
+
+const publish = defineDeepspaceCommand({
   meta: {
     name: 'publish',
     description: 'Publish the current app to the DeepSpace library',
@@ -81,57 +91,53 @@ const publish = defineCommand({
       description: `Target library app subdomain (default: ${DEFAULT_LIBRARY_APP})`,
       required: false,
     },
-    json: {
-      type: 'boolean',
-      description: 'Print only the JSON response (machine-readable)',
-      default: false,
-    },
   },
   async run({ args }) {
-    const json = !!args.json
+    const json = args.json
     const intro = (s: string) => { if (!json) p.intro(s) }
     const info = (s: string) => { if (!json) p.log.info(s) }
-    const die = (msg: string) => {
-      if (json) console.error(JSON.stringify({ ok: false, error: msg }))
-      else p.cancel(msg)
-      process.exit(1)
-    }
 
     intro('Publishing to the DeepSpace library')
 
-    let appName = typeof args.app === 'string' && args.app.trim() ? args.app.trim() : undefined
+    // An explicit blank --app must error, not silently fall back to the cwd app.
+    const appErr = parseAppArg(str(args.app)).error
+    if (appErr) throw new Refusal(appErr, 'invalid_app')
+    let appName = str(args.app)?.trim()
     if (!appName) {
-      const appDir = resolve(typeof args.dir === 'string' && args.dir ? args.dir : '.')
+      const appDir = resolve(str(args.dir) ?? '.')
       const wranglerPath = join(appDir, 'wrangler.toml')
       if (!existsSync(wranglerPath)) {
-        return die("No --app provided and no wrangler.toml found. Either pass --app <name> or run from your app's directory.")
+        throw new Refusal(
+          "No --app provided and no wrangler.toml found. Either pass --app <name> or run from your app's directory.",
+          'not_in_app_repo',
+        )
       }
       const cfg = parseToml(readFileSync(wranglerPath, 'utf-8')) as { name?: string }
       const nameRes = resolveAppName(cfg.name)
-      if (!nameRes.ok) return die(`wrangler.toml: ${nameRes.reason}`)
+      if (!nameRes.ok) throw new Refusal(`wrangler.toml: ${nameRes.reason}`, 'invalid_config')
       appName = nameRes.name
     }
     info(`App: ${appName}`)
 
-    const visibility = (args.visibility ?? 'public') as string
+    const visibility = (str(args.visibility) ?? 'public') as string
     if (!['public', 'private', 'unlisted'].includes(visibility)) {
-      return die("--visibility must be 'public', 'unlisted', or 'private'.")
+      throw new Refusal("--visibility must be 'public', 'unlisted', or 'private'.", 'invalid_visibility')
     }
 
-    const tags = typeof args.tags === 'string' && args.tags
-      ? args.tags.split(',').map((t) => t.trim()).filter(Boolean)
+    const tags = str(args.tags)
+      ? String(args.tags).split(',').map((t) => t.trim()).filter(Boolean)
       : undefined
 
-    const libraryApp = typeof args['library-app'] === 'string' && args['library-app']
-      ? args['library-app']
-      : DEFAULT_LIBRARY_APP
+    const libraryApp = str(args['library-app']) ?? DEFAULT_LIBRARY_APP
     const libraryHost = process.env.DEEPSPACE_LIBRARY_HOST ?? `https://${libraryApp}.app.space`
 
     let token: string
     try {
       token = await ensureToken()
     } catch (err) {
-      return die(err instanceof Error ? err.message : String(err))
+      throw new Refusal(err instanceof Error ? err.message : String(err), 'not_authenticated', {
+        action: cliAction('deepspace', 'auth', 'login'),
+      })
     }
 
     const payload: Record<string, unknown> = {
@@ -156,7 +162,10 @@ const publish = defineCommand({
         body: JSON.stringify(payload),
       })
     } catch (err) {
-      return die(`Network error reaching ${url}: ${err instanceof Error ? err.message : String(err)}`)
+      throw new Refusal(
+        `Network error reaching ${url}: ${err instanceof Error ? err.message : String(err)}`,
+        'network_error',
+      )
     }
 
     const body = await res.text()
@@ -164,25 +173,31 @@ const publish = defineCommand({
     try {
       parsed = JSON.parse(body)
     } catch {
-      return die(`Server returned non-JSON (${res.status}): ${body.slice(0, 400)}`)
-    }
-
-    if (json) {
-      console.log(JSON.stringify(parsed))
-      process.exit(parsed.success ? 0 : 1)
+      throw new Refusal(`Server returned non-JSON (${res.status}): ${body.slice(0, 400)}`, 'invalid_response')
     }
 
     if (!parsed.success) {
-      return die(parsed.error ?? `Publish failed (HTTP ${res.status}).`)
+      throw new Refusal(parsed.error ?? `Publish failed (HTTP ${res.status}).`, 'publish_failed')
     }
 
-    p.log.success(`Published ${appName} as ${parsed.data?.templateHandle} (v${parsed.data?.version})`)
-    if (parsed.data?.url) p.log.message(parsed.data.url)
-    p.outro('Done')
+    if (!json) {
+      p.log.success(`Published ${appName} as ${parsed.data?.templateHandle} (v${parsed.data?.version})`)
+      if (parsed.data?.url) p.log.message(parsed.data.url)
+      p.outro('Done')
+    }
+    return {
+      data: {
+        appName,
+        templateHandle: parsed.data?.templateHandle ?? null,
+        url: parsed.data?.url ?? null,
+        version: parsed.data?.version ?? null,
+        visibility,
+      },
+    }
   },
 })
 
-const unpublish = defineCommand({
+const unpublish = defineDeepspaceCommand({
   meta: {
     name: 'unpublish',
     description: 'Remove a library entry (owner or admin only)',
@@ -198,29 +213,21 @@ const unpublish = defineCommand({
       description: `Target library app subdomain (default: ${DEFAULT_LIBRARY_APP})`,
       required: false,
     },
-    json: {
-      type: 'boolean',
-      description: 'Print only the JSON response',
-      default: false,
-    },
   },
   async run({ args }) {
-    const json = !!args.json
-    const die = (msg: string) => {
-      if (json) console.error(JSON.stringify({ ok: false, error: msg }))
-      else p.cancel(msg)
-      process.exit(1)
-    }
+    const json = args.json
     if (!json) p.intro('Unpublishing library entry')
 
     let token: string
-    try { token = await ensureToken() } catch (err) {
-      return die(err instanceof Error ? err.message : String(err))
+    try {
+      token = await ensureToken()
+    } catch (err) {
+      throw new Refusal(err instanceof Error ? err.message : String(err), 'not_authenticated', {
+        action: cliAction('deepspace', 'auth', 'login'),
+      })
     }
 
-    const libraryApp = typeof args['library-app'] === 'string' && args['library-app']
-      ? args['library-app']
-      : DEFAULT_LIBRARY_APP
+    const libraryApp = str(args['library-app']) ?? DEFAULT_LIBRARY_APP
     const libraryHost = process.env.DEEPSPACE_LIBRARY_HOST ?? `https://${libraryApp}.app.space`
 
     const res = await fetch(`${libraryHost}/api/actions/library.unpublish`, {
@@ -230,13 +237,20 @@ const unpublish = defineCommand({
     })
     const body = await res.text()
     let parsed: { success?: boolean; error?: string; data?: { templateHandle?: string } }
-    try { parsed = JSON.parse(body) } catch {
-      return die(`Server returned non-JSON (${res.status}): ${body.slice(0, 400)}`)
+    try {
+      parsed = JSON.parse(body)
+    } catch {
+      throw new Refusal(`Server returned non-JSON (${res.status}): ${body.slice(0, 400)}`, 'invalid_response')
     }
-    if (json) { console.log(JSON.stringify(parsed)); process.exit(parsed.success ? 0 : 1) }
-    if (!parsed.success) return die(parsed.error ?? `HTTP ${res.status}`)
-    p.log.success(`Unpublished ${parsed.data?.templateHandle}`)
-    p.outro('Done')
+    if (!parsed.success) {
+      throw new Refusal(parsed.error ?? `HTTP ${res.status}`, 'unpublish_failed')
+    }
+    if (!json) {
+      p.log.success(`Unpublished ${parsed.data?.templateHandle}`)
+      p.outro('Done')
+    }
+    // Terminal: nothing follows an unpublish.
+    return { data: { templateHandle: parsed.data?.templateHandle ?? String(args.handle) } }
   },
 })
 

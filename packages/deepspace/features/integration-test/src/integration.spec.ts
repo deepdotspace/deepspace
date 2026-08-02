@@ -6,7 +6,7 @@
  * signs in as a pre-created test account via the `users` fixture (from
  * deepspace/testing), which handles sign-in caching, context creation,
  * and cleanup. Create at least one test account first:
- *   npx deepspace test-accounts create --email integ@deepspace.test --password TestPass123! --name "Integration Tester"
+ *   npx deepspace test accounts create --email integ@deepspace.test --password TestPass123! --name "Integration Tester"
  */
 import { test, expect } from 'deepspace/testing'
 

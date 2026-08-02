@@ -22,8 +22,11 @@ import { defineCommand } from 'citty'
 import { readFileSync } from 'node:fs'
 import { ensureToken } from '../auth'
 import { decodeJwtPayload } from '../jwt'
-import { PLATFORM_URLS, writeDevVars } from '../env'
+import { PLATFORM_URLS } from '../env'
 import { findAppDir } from '../lib/app-context'
+import { writeDevVars } from '../lib/dev-vars'
+import { parseAppArg } from '../lib/app-target'
+import { InputError, renderCliError } from '../lib/cli-errors'
 import { readAppId, APP_ID_RE } from '../lib/app-identity'
 import { dedupePositionals } from '../lib/citty-args'
 import {
@@ -68,6 +71,11 @@ const COMMON_ARGS = {
     description: 'wrangler.toml [env.<name>] slot — selects that env’s app id and config',
     required: false,
   },
+  json: {
+    type: 'boolean' as const,
+    description: 'Emit a single-line JSON result for scripts/agents',
+    default: false,
+  },
 }
 
 interface Target {
@@ -82,9 +90,13 @@ async function resolveTarget(args: {
   env?: string
 }): Promise<Target> {
   const wranglerEnv = args.env?.trim() || undefined
+  // An explicit blank --app must not silently fall back to the current dir's app
+  // — secrets are written to the target app, so a wrong target leaks/overwrites.
+  const { error: appErr } = parseAppArg(args.app)
+  if (appErr) throw new InputError(appErr, 'invalid_app')
   let appId = args.app?.trim()
   if (appId && !APP_ID_RE.test(appId)) {
-    throw new Error(`Invalid app id "${appId}" — expected app_<26 chars>.`)
+    throw new InputError(`Invalid app id "${appId}" — expected app_<26 chars>.`, 'invalid_app_id')
   }
   if (!appId) {
     const appDir = findAppDir()
@@ -94,13 +106,15 @@ async function resolveTarget(args: {
       // If the slot is missing but a top-level app id exists, the user almost
       // certainly wanted to pick a *config*, not an env — point them at `-c`.
       if (wranglerEnv && appDir && readAppId(appDir, undefined)) {
-        throw new Error(
+        throw new InputError(
           `No app id for env "${wranglerEnv}" — wrangler.toml has no [env.${wranglerEnv}] block with its own DEEPSPACE_APP_ID. ` +
             `To target the "${wranglerEnv}" config on this app, use \`-c ${wranglerEnv}\` instead of \`--env ${wranglerEnv}\`.`,
+          'no_app_id_for_env',
         )
       }
-      throw new Error(
-        'No app id. Run from an app directory whose wrangler.toml carries DEEPSPACE_APP_ID (`deepspace init` mints one), or pass --app <appId>.',
+      throw new InputError(
+        'No app id. Run from an app directory whose wrangler.toml carries DEEPSPACE_APP_ID (`deepspace app init` mints one), or pass --app <appId>.',
+        'not_in_app_repo',
       )
     }
   }
@@ -110,8 +124,20 @@ async function resolveTarget(args: {
 }
 
 function fail(err: unknown): never {
-  console.error(err instanceof Error ? err.message : String(err))
-  process.exit(1)
+  // Route through the shared renderer so `secrets` obeys the output contract
+  // like every other command: `--json` gets the {ok,code,error} envelope on
+  // stdout, the human path gets the message with its slug appended.
+  renderCliError(err)
+}
+
+/**
+ * A success result on the contract. Under `--json` it is the single
+ * `{ ok: true, … }` line; otherwise it runs the human callback. Wires the
+ * success paths that used to print prose regardless of `--json`.
+ */
+function ok(json: boolean, data: Record<string, unknown>, human: () => void): void {
+  if (json) console.log(JSON.stringify({ ok: true, ...data }))
+  else human()
 }
 
 /**
@@ -131,9 +157,9 @@ function warnIfDebugRoutesEnabled(secrets: Record<string, string>): boolean {
 }
 
 const APPLY_HINT = 'Run `deepspace deploy` to apply — secrets take effect at deploy time.'
-// `deepspace dev` regenerates .dev.vars from the store only at startup, so a
+// `deepspace dev start` regenerates .dev.vars from the store only at startup, so a
 // secret changed mid-session isn't picked up until dev restarts (DEV-4).
-const LOCAL_DEV_HINT = 'Running `deepspace dev`? Restart it to load the change locally.'
+const LOCAL_DEV_HINT = 'Running `deepspace dev start`? Restart it to load the change locally.'
 
 const list = defineCommand({
   meta: { name: 'list', description: 'List masked secrets in a config' },
@@ -144,14 +170,13 @@ const list = defineCommand({
       description: 'Only print secret names; omit values and metadata',
       default: false,
     },
-    json: { type: 'boolean', description: 'Machine-readable output', default: false },
   },
   async run({ args }) {
     try {
       const t = await resolveTarget(args)
       const { secrets } = await listSecrets(DEPLOY_URL, t.token, t.appId, t.configName)
       if (args.json) {
-        console.log(JSON.stringify({ appId: t.appId, config: t.configName, secrets }, null, 2))
+        console.log(JSON.stringify({ ok: true, appId: t.appId, config: t.configName, secrets }))
         return
       }
       if (secrets.length === 0) {
@@ -181,7 +206,7 @@ const set = defineCommand({
       const dupes: string[] = []
       for (const pair of pairs) {
         const eq = pair.indexOf('=')
-        if (eq <= 0) throw new Error(`Expected KEY=value, got "${pair}"`)
+        if (eq <= 0) throw new InputError(`Expected KEY=value, got "${pair}"`, 'invalid_pair')
         const key = validateSecretName(pair.slice(0, eq))
         const value = pair.slice(eq + 1)
         validateSecretValue(key, value)
@@ -201,11 +226,18 @@ const set = defineCommand({
       } else {
         await uploadSecrets(DEPLOY_URL, t.token, t.appId, t.configName, secrets, false)
       }
-      console.log(`Set ${Object.keys(secrets).length} secret${Object.keys(secrets).length === 1 ? '' : 's'} in ${t.configName}.`)
-      if (!warnIfDebugRoutesEnabled(secrets)) {
-        console.log(APPLY_HINT)
-        console.log(LOCAL_DEV_HINT)
-      }
+      const n = Object.keys(secrets).length
+      ok(
+        args.json === true,
+        { appId: t.appId, config: t.configName, set: Object.keys(secrets) },
+        () => {
+          console.log(`Set ${n} secret${n === 1 ? '' : 's'} in ${t.configName}.`)
+          if (!warnIfDebugRoutesEnabled(secrets)) {
+            console.log(APPLY_HINT)
+            console.log(LOCAL_DEV_HINT)
+          }
+        },
+      )
     } catch (err) {
       fail(err)
     }
@@ -225,15 +257,28 @@ const get = defineCommand({
       const key = validateSecretName(args.key)
       if (args.plain) {
         const { value } = await getSecretPlain(DEPLOY_URL, t.token, t.appId, t.configName, key)
-        // Byte-exact when piped/redirected (`… get --plain KEY > key.pem`); add a
-        // trailing newline only for a human reading it in a terminal.
+        // Raw value, byte-exact when piped (`… get --plain KEY > key.pem`) — a
+        // --json wrapper would corrupt it, so --plain is a raw stream either
+        // way (documented exception, like `download`). Trailing newline only
+        // for a human at a TTY.
         process.stdout.write(process.stdout.isTTY ? value + '\n' : value)
         return
       }
       const { secrets } = await listSecrets(DEPLOY_URL, t.token, t.appId, t.configName)
       const item = secrets.find((s) => s.key === key)
-      if (!item) fail(new Error(`Secret "${key}" not found in ${t.configName}`))
-      console.log(`${item.key}  (v${item.version}, ${item.updatedAt})`)
+      if (!item)
+        fail(new InputError(`Secret "${key}" not found in ${t.configName}`, 'secret_not_found'))
+      ok(
+        args.json === true,
+        {
+          appId: t.appId,
+          config: t.configName,
+          key: item!.key,
+          version: item!.version,
+          updatedAt: item!.updatedAt,
+        },
+        () => console.log(`${item!.key}  (v${item!.version}, ${item!.updatedAt})`),
+      )
     } catch (err) {
       fail(err)
     }
@@ -265,8 +310,12 @@ const del = defineCommand({
         }
       }
       const note = absent > 0 ? ` (${absent} already absent)` : ''
-      console.log(`Deleted ${deleted} secret${deleted === 1 ? '' : 's'} from ${t.configName}.${note}`)
-      if (deleted > 0) console.log(APPLY_HINT)
+      ok(args.json === true, { appId: t.appId, config: t.configName, deleted, absent }, () => {
+        console.log(
+          `Deleted ${deleted} secret${deleted === 1 ? '' : 's'} from ${t.configName}.${note}`,
+        )
+        if (deleted > 0) console.log(APPLY_HINT)
+      })
     } catch (err) {
       fail(err)
     }
@@ -277,7 +326,11 @@ const upload = defineCommand({
   meta: { name: 'upload', description: 'Upload secrets from a dotenv or JSON file' },
   args: {
     ...COMMON_ARGS,
-    file: { type: 'positional', description: 'Path to a dotenv or JSON file (- for stdin)', required: true },
+    file: {
+      type: 'positional',
+      description: 'Path to a dotenv or JSON file (- for stdin)',
+      required: true,
+    },
     replace: {
       type: 'boolean',
       description: 'Replace the whole config (delete keys missing from the file)',
@@ -290,11 +343,19 @@ const upload = defineCommand({
       const content =
         args.file === '-' ? readFileSync(0, 'utf-8') : readFileSync(args.file, 'utf-8')
       const secrets = parseSecretsUpload(content)
-      if (Object.keys(secrets).length === 0) fail(new Error('No secrets found in the input.'))
+      if (Object.keys(secrets).length === 0)
+        fail(new InputError('No secrets found in the input.', 'empty_input'))
       await uploadSecrets(DEPLOY_URL, t.token, t.appId, t.configName, secrets, args.replace)
-      console.log(`Uploaded ${Object.keys(secrets).length} secrets to ${t.configName}.`)
-      // A file can turn on the debug API just like `set` can — warn either way.
-      if (!warnIfDebugRoutesEnabled(secrets)) console.log(APPLY_HINT)
+      const uploaded = Object.keys(secrets)
+      ok(
+        args.json === true,
+        { appId: t.appId, config: t.configName, uploaded, replaced: args.replace === true },
+        () => {
+          console.log(`Uploaded ${uploaded.length} secrets to ${t.configName}.`)
+          // A file can turn on the debug API just like `set` can — warn either way.
+          if (!warnIfDebugRoutesEnabled(secrets)) console.log(APPLY_HINT)
+        },
+      )
     } catch (err) {
       fail(err)
     }
@@ -316,7 +377,12 @@ const download = defineCommand({
       const t = await resolveTarget(args)
       const format = args.format as SecretsDownloadFormat
       if (!['dotenv', 'json', 'shell'].includes(format)) {
-        fail(new Error(`Unknown format "${args.format}" — use dotenv, json, or shell.`))
+        fail(
+          new InputError(
+            `Unknown format "${args.format}" — use dotenv, json, or shell.`,
+            'invalid_format',
+          ),
+        )
       }
       const { secrets } = await fetchSecretsValues(DEPLOY_URL, t.token, t.appId, t.configName)
       process.stdout.write(formatSecretsDownload(secrets, format))
@@ -333,12 +399,24 @@ const pull = defineCommand({
     try {
       const wranglerEnv = args.env?.trim() || undefined
       const appDir = findAppDir()
-      if (!appDir) fail(new Error('Run from a DeepSpace app directory (one containing wrangler.toml).'))
+      if (!appDir)
+        fail(
+          new InputError(
+            'Run from a DeepSpace app directory (one containing wrangler.toml).',
+            'not_in_app_repo',
+          ),
+        )
       const t = await resolveTarget(args)
       const ownerId = decodeJwtPayload<{ sub: string }>(t.token).sub
       const pulled = await pullAppSecretsCache(DEPLOY_URL, t.token, t.appId, t.configName)
       if (!pulled) {
-        console.log(`No secrets in ${t.configName} yet — nothing to pull.`)
+        // A collaborator's first pull on a fresh clone often lands here —
+        // point at how secrets get INTO the store, not just that it's empty.
+        ok(args.json === true, { appId: t.appId, config: t.configName, pulled: 0 }, () =>
+          console.log(
+            `No secrets in ${t.configName} yet — nothing to pull. Whoever has them adds them with \`deepspace secrets set KEY=value\` (or \`secrets upload <file>\`); if the app truly needs none, you're ready as-is.`,
+          ),
+        )
         return
       }
       await writeDevVars(appDir, ownerId, t.token, wranglerEnv, {
@@ -346,8 +424,9 @@ const pull = defineCommand({
         generatedSecretsCache: renderSecretsCache(pulled.values, pulled),
         sharedDevVarsCache: true,
       })
-      console.log(
-        `Pulled ${Object.keys(pulled.values).length} secrets (${t.configName}) into .dev.vars.`,
+      const count = Object.keys(pulled.values).length
+      ok(args.json === true, { appId: t.appId, config: t.configName, pulled: count }, () =>
+        console.log(`Pulled ${count} secrets (${t.configName}) into .dev.vars.`),
       )
     } catch (err) {
       fail(err)
@@ -362,13 +441,15 @@ const configsList = defineCommand({
     try {
       const t = await resolveTarget(args)
       const { configs } = await listConfigs(DEPLOY_URL, t.token, t.appId)
-      if (configs.length === 0) {
-        console.log('No configs yet — the first `secrets set` creates one.')
-        return
-      }
-      for (const cfg of configs) {
-        console.log(`${cfg.name}  (${cfg.secretCount ?? 0} secrets, updated ${cfg.updatedAt})`)
-      }
+      ok(args.json === true, { appId: t.appId, configs }, () => {
+        if (configs.length === 0) {
+          console.log('No configs yet — the first `secrets set` creates one.')
+          return
+        }
+        for (const cfg of configs) {
+          console.log(`${cfg.name}  (${cfg.secretCount ?? 0} secrets, updated ${cfg.updatedAt})`)
+        }
+      })
     } catch (err) {
       fail(err)
     }
@@ -395,16 +476,23 @@ const configsCreate = defineCommand({
       if (configs.some((c) => c.name === name)) {
         if (copyFrom) {
           fail(
-            new Error(
+            new InputError(
               `Config "${name}" already exists — refusing to copy "${copyFrom}" over it. Delete it first, or pick a new name.`,
+              'config_exists',
             ),
           )
         }
-        console.log(`Config ${name} already exists.`)
+        ok(args.json === true, { appId: t.appId, config: name, created: false }, () =>
+          console.log(`Config ${name} already exists.`),
+        )
         return
       }
       await createConfig(DEPLOY_URL, t.token, t.appId, name, copyFrom)
-      console.log(`Created ${name}.`)
+      ok(
+        args.json === true,
+        { appId: t.appId, config: name, created: true, ...(copyFrom ? { copyFrom } : {}) },
+        () => console.log(`Created ${name}.`),
+      )
     } catch (err) {
       fail(err)
     }
@@ -422,7 +510,9 @@ const configsDelete = defineCommand({
       const t = await resolveTarget(args)
       const name = validateConfigName(args.name)
       await deleteConfig(DEPLOY_URL, t.token, t.appId, name)
-      console.log(`Deleted ${name}.`)
+      ok(args.json === true, { appId: t.appId, config: name, deleted: true }, () =>
+        console.log(`Deleted ${name}.`),
+      )
     } catch (err) {
       fail(err)
     }

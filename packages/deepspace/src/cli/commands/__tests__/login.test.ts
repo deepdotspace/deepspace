@@ -3,7 +3,7 @@
  * ONB-7: `-e` alias parity for --env across dev/deploy/test.
  */
 import { describe, it, expect } from 'vitest'
-import { resolveLoginCredentials, loginModeDecision } from '../login'
+import login, { resolveLoginCredentials, loginModeDecision } from '../login'
 import dev from '../dev'
 import deploy from '../deploy'
 import test from '../test'
@@ -17,7 +17,9 @@ describe('resolveLoginCredentials (ONB-4)', () => {
   })
 
   it('prefers --password over $DEEPSPACE_PASSWORD when no stdin', () => {
-    expect(resolveLoginCredentials({ passwordArg: 'flag', envPassword: 'env' }).password).toBe('flag')
+    expect(resolveLoginCredentials({ passwordArg: 'flag', envPassword: 'env' }).password).toBe(
+      'flag',
+    )
   })
 
   it('falls back to $DEEPSPACE_PASSWORD', () => {
@@ -26,12 +28,15 @@ describe('resolveLoginCredentials (ONB-4)', () => {
 
   it('returns an explicitly-empty stdin password as "" (run() then rejects it)', () => {
     expect(
-      resolveLoginCredentials({ passwordArg: 'flag', envPassword: 'env', passwordStdin: '' }).password,
+      resolveLoginCredentials({ passwordArg: 'flag', envPassword: 'env', passwordStdin: '' })
+        .password,
     ).toBe('')
   })
 
   it('email: --email over $DEEPSPACE_EMAIL, else the env', () => {
-    expect(resolveLoginCredentials({ emailArg: 'a@x.com', envEmail: 'b@x.com' }).email).toBe('a@x.com')
+    expect(resolveLoginCredentials({ emailArg: 'a@x.com', envEmail: 'b@x.com' }).email).toBe(
+      'a@x.com',
+    )
     expect(resolveLoginCredentials({ envEmail: 'b@x.com' }).email).toBe('b@x.com')
     expect(resolveLoginCredentials({}).email).toBeUndefined()
   })
@@ -39,7 +44,9 @@ describe('resolveLoginCredentials (ONB-4)', () => {
 
 describe('loginModeDecision (ONB-4 — no silent OAuth fall-through)', () => {
   it('password mode when email + non-empty password present', () => {
-    expect(loginModeDecision({ email: 'a@x.com', password: 'pw', passwordIntent: true }).mode).toBe('password')
+    expect(loginModeDecision({ email: 'a@x.com', password: 'pw', passwordIntent: true }).mode).toBe(
+      'password',
+    )
   })
   it('oauth mode when no credentials were supplied at all', () => {
     expect(loginModeDecision({ passwordIntent: false }).mode).toBe('oauth')
@@ -53,6 +60,26 @@ describe('loginModeDecision (ONB-4 — no silent OAuth fall-through)', () => {
     const d = loginModeDecision({ password: 'pw', passwordIntent: true })
     expect(d.mode).toBe('error')
     expect(d.mode === 'error' && d.message).toMatch(/needs an email/)
+  })
+  // The slug is what an agent branches on; the two error modes must not
+  // collapse to one code just because both are "bad credentials".
+  it('carries a distinct slug per error mode', () => {
+    const noEmail = loginModeDecision({ password: 'pw', passwordIntent: true })
+    const noPassword = loginModeDecision({ email: 'a@x.com', password: '', passwordIntent: true })
+    expect(noEmail.mode === 'error' && noEmail.code).toBe('missing_email')
+    expect(noPassword.mode === 'error' && noPassword.code).toBe('missing_password')
+  })
+})
+
+describe('the command runtime supplies --json', () => {
+  // login had NO machine surface at all before the runtime — it is the first
+  // command an agent runs, so its --json flag is load-bearing.
+  it.each([
+    ['login', login],
+    ['dev', dev],
+    ['test', test],
+  ])('%s accepts --json', (_name, cmd) => {
+    expect((cmd.args as Record<string, { type?: string }>).json?.type).toBe('boolean')
   })
 })
 

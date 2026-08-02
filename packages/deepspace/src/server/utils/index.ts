@@ -1,3 +1,14 @@
+export { matchOrigin, platformCorsPatterns } from './cors'
+export { DEPLOYED_APPS_DEFAULTS, parseQuotaLimit } from './plan-quotas'
+export {
+  APP_ID_RE,
+  STRICT_APP_ID_RE,
+  callRegistry,
+  REGISTRY_INSTANCE,
+  RegistryClientError,
+  registryErrorJson,
+  registryStub,
+} from './registry-client'
 export * from './tools'
 export * from './scoped-r2-files'
 export * from './action-types'
@@ -19,7 +30,6 @@ export {
 export {
   captureScreenshot,
   type ScreenshotEnv,
-  type ScreenshotOptions,
   type ScreenshotResult,
 } from './screenshot'
 export {

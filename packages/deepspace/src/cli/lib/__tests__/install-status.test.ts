@@ -1,0 +1,41 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, describe, expect, it } from 'vitest'
+import { installState, resolvesDeepspace } from '../install-status'
+
+describe('resolvesDeepspace', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ds-install-'))
+  afterAll(() => rmSync(root, { recursive: true, force: true }))
+
+  it('finds node_modules by walking up, matching Node resolution', () => {
+    // A linked worktree nested inside the app has no node_modules of its own;
+    // the gate must accept it because imports resolve against the app's.
+    const app = join(root, 'app')
+    const worktree = join(app, '.deepspace', 'ws', '01abc')
+    mkdirSync(join(app, 'node_modules', 'deepspace'), { recursive: true })
+    writeFileSync(join(app, 'node_modules', 'deepspace', 'package.json'), '{}')
+    mkdirSync(worktree, { recursive: true })
+    expect(resolvesDeepspace(app)).toBe(true)
+    expect(resolvesDeepspace(worktree)).toBe(true)
+  })
+
+  it('returns false when no ancestor has node_modules/deepspace', () => {
+    const bare = join(root, 'bare', 'deep', 'dir')
+    mkdirSync(bare, { recursive: true })
+    expect(resolvesDeepspace(bare)).toBe(false)
+  })
+
+  it('does not treat an unrelated .deepspace directory as an active install', () => {
+    const app = join(root, 'markers-only')
+    mkdirSync(join(app, '.deepspace'), { recursive: true })
+    expect(installState(app)).toBe('missing')
+  })
+
+  it('reports explicit install failures', () => {
+    const app = join(root, 'failed')
+    mkdirSync(join(app, '.deepspace'), { recursive: true })
+    writeFileSync(join(app, '.deepspace', 'install.err'), 'failed')
+    expect(installState(app)).toBe('failed')
+  })
+})

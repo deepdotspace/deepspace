@@ -108,7 +108,6 @@ function makeSocket(over: { getToken?: () => Promise<string | null> } = {}): Har
     getToken,
     listeners,
     wsUrl: 'https://example.test',
-    extraParams: { appId: 'app_' + 'A'.repeat(26) },
     WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
   })
   return {
@@ -133,12 +132,10 @@ afterEach(() => {
 // ── connect / token race ─────────────────────────────────────────────────────
 
 describe('connect', () => {
-  it('builds the URL from wsUrl + path prefix + token + extra params', async () => {
+  it('builds the URL from wsUrl + path prefix + token', async () => {
     const h = makeSocket()
     await h.socket.connect()
-    expect(h.ws().url).toBe(
-      `wss://example.test/ws/app:test?token=jwt-token&appId=app_${'A'.repeat(26)}`,
-    )
+    expect(h.ws().url).toBe('wss://example.test/ws/app:test?token=jwt-token')
   })
 
   it('connects tokenless when the token fetch fails (server decides)', async () => {

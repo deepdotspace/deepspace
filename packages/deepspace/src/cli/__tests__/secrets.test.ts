@@ -19,7 +19,7 @@ import {
   validateConfigName,
   validateSecretName,
 } from '../lib/secrets'
-import { DEV_VARS_DIVIDER, extractCustomDevVars, parseDevVars } from '../env'
+import { DEV_VARS_DIVIDER, extractCustomDevVars, parseDevVars } from '../lib/dev-vars'
 
 const APP_ID = 'app_01HZXYABCDEFGHJKMNPQRSTVWX'
 
@@ -201,6 +201,24 @@ describe('pullAppSecretsCache', () => {
       vi.fn(async () => Response.json({ error: 'app_not_found' }, { status: 404 })),
     )
     expect(await pullAppSecretsCache('https://deploy.test', 't', APP_ID, 'prd')).toBeNull()
+  })
+
+  it('codes a wrong-shape 2xx (missing `secrets` object) as invalid_response, not a raw TypeError', async () => {
+    // A broken/wrong service answering 200 {} used to leave `values: undefined`,
+    // then `Object.keys(values)` threw an uncoded `Cannot convert undefined or
+    // null to object` on the deploy secrets-refresh path.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({})),
+    )
+    const err = await pullAppSecretsCache('https://deploy.test', 't', APP_ID, 'prd').then(
+      () => {
+        throw new Error('expected pullAppSecretsCache to reject')
+      },
+      (e: Error & { code?: string }) => e,
+    )
+    expect(err.code).toBe('invalid_response')
+    expect(err.message).not.toMatch(/Cannot convert|undefined|null/)
   })
 
   it('propagates real failures with a clean message (server sentence, no API path) + status', async () => {

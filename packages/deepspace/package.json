@@ -1,6 +1,6 @@
 {
   "name": "deepspace",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "engines": {
     "node": ">=22.15.0"
   },
@@ -33,7 +33,6 @@
   "files": [
     "dist",
     "features",
-    "scripts",
     "CHANGELOG.md"
   ],
   "scripts": {

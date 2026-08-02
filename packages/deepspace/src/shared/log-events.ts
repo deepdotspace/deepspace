@@ -6,7 +6,7 @@
  * rebuilds each event field-by-field from a raw Cloudflare row — see the
  * security invariant there). The consumers are the CLI tail
  * (`cli/commands/logs.ts`), the dashboard Logs panel
- * (`apps/dashboard/src/lib/types.ts`), and the e2e whitelist assertion
+ * (`apps/dashboard/src/lib/apps.ts`), and the e2e whitelist assertion
  * (`tests/e2e/tests/logs.spec.ts`). This module used to be hand-mirrored in
  * all four places; `source` was added to three of them and missed in the
  * e2e whitelist, so it now lives here once and they import it.

@@ -1,5 +1,5 @@
 /**
- * Tests for `records.query` paging + oversized-result handling.
+ * Tests for built-in tool dispatch, paging, result caps, and Yjs cache lifetime.
  *
  * Two related guarantees, locked down end to end:
  *
@@ -26,8 +26,17 @@
 
 import { describe, it, expect, beforeEach } from 'vitest'
 import Database from 'better-sqlite3'
+import type { ConnectionAttachment } from '../../../shared/protocol/types'
+import type { YjsSubscription } from '../../../shared/types'
 import { executeQuery } from '../subscriptions'
 import { handleToolsRequest, type ToolsApiContext } from '../tools-api'
+import {
+  getOrCreateYjsDoc,
+  getYjsDocKey,
+  handleYjsDisconnect,
+  handleYjsLeave,
+  type YjsContext,
+} from '../yjs'
 import {
   SchemaRegistry,
   noopPermissionContext,
@@ -65,15 +74,61 @@ function makeSql(db: Database.Database): SqlStorage {
   } as unknown as SqlStorage
 }
 
-function makeToolsContext(sql: SqlStorage, schemas: CollectionSchema[]): ToolsApiContext {
+function makeToolsContext(
+  sql: SqlStorage,
+  schemas: CollectionSchema[],
+  state: DurableObjectState = {
+    getWebSockets: () => [],
+  } as unknown as DurableObjectState,
+): ToolsApiContext {
   return {
     sql,
     schemaRegistry: new SchemaRegistry(schemas),
-    state: {} as DurableObjectState,
+    state,
     getPermissionContext: () => noopPermissionContext,
     send: () => {},
     yjsDocs: new Map(),
     sendBinary: () => {},
+  }
+}
+
+function makeSocket(attachment: ConnectionAttachment): WebSocket {
+  return {
+    deserializeAttachment: () => attachment,
+    serializeAttachment: () => {},
+  } as unknown as WebSocket
+}
+
+function makeYjsContext(sql: SqlStorage, state: DurableObjectState): YjsContext {
+  return {
+    sql,
+    state,
+    yjsDocs: new Map(),
+    schemaRegistry: new SchemaRegistry([]),
+    getPermissionContext: () => noopPermissionContext,
+    send: () => {},
+    sendBinary: () => {},
+  }
+}
+
+function createYjsTable(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE yjs_docs (
+      doc_key TEXT PRIMARY KEY,
+      state BLOB NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `)
+}
+
+function yjsAttachment(subscription: YjsSubscription): ConnectionAttachment {
+  return {
+    userId: crypto.randomUUID(),
+    userName: 'Test User',
+    userEmail: 'test@example.com',
+    role: 'member',
+    subscriptions: [],
+    yjsSubscriptions: [subscription],
   }
 }
 
@@ -222,5 +277,142 @@ describe('records.query oversized result degrades to a usable page', () => {
     expect((capped.data.returned as number)).toBeGreaterThan(0)
     expect((capped.data.returned as number)).toBeLessThan(120)
     expect(JSON.stringify(capped).length).toBeLessThanOrEqual(CAP)
+  })
+})
+
+describe('built-in tool catalog', () => {
+  it('advertises only tools owned by the main or Yjs dispatcher', async () => {
+    const db = new Database(':memory:')
+    const sql = makeSql(db)
+    const ctx = makeToolsContext(sql, [companies])
+
+    // The two parameter-free list tools reach storage. Empty tables let the
+    // parity check exercise their real dispatcher cases without extra fixtures.
+    db.exec(`
+      CREATE TABLE c_users (
+        _row_id TEXT PRIMARY KEY,
+        _created_by TEXT NOT NULL,
+        _created_at TEXT NOT NULL,
+        _updated_at TEXT NOT NULL
+      );
+      CREATE TABLE yjs_docs (
+        doc_key TEXT PRIMARY KEY,
+        updated_at TEXT NOT NULL
+      );
+    `)
+
+    const listResponse = await handleToolsRequest(
+      ctx,
+      new Request('https://internal/api/tools/list'),
+      'tools/list',
+    )
+    const { tools } = await listResponse.json() as { tools: Array<{ name: string }> }
+    const toolNames = tools.map(tool => tool.name)
+
+    expect(new Set(toolNames).size).toBe(toolNames.length)
+    expect(toolNames.filter(name => name.startsWith('yjs.'))).toEqual([
+      'yjs.list',
+      'yjs.getText',
+      'yjs.setText',
+    ])
+
+    for (const toolName of toolNames) {
+      const executeResponse = await handleToolsRequest(
+        ctx,
+        new Request('https://internal/api/tools/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tool: toolName, params: {} }),
+        }),
+        'tools/execute',
+      )
+      const result = await executeResponse.json() as { success: boolean; error?: string }
+      const unknownError = toolName.startsWith('yjs.')
+        ? `Unknown Yjs tool: ${toolName}`
+        : `Unknown tool: ${toolName}`
+
+      expect(result, `${toolName} has no dispatcher case`).not.toEqual(
+        expect.objectContaining({ success: false, error: unknownError }),
+      )
+    }
+  })
+})
+
+describe('Yjs document cache lifetime', () => {
+  it('keeps a subscribed document and evicts it when the final subscriber leaves', () => {
+    const db = new Database(':memory:')
+    createYjsTable(db)
+    const sql = makeSql(db)
+    const subscription = { collection: 'docs', recordId: 'doc-1', fieldName: 'body' }
+    const firstAttachment = yjsAttachment(subscription)
+    const secondAttachment = yjsAttachment(subscription)
+    const firstSocket = makeSocket(firstAttachment)
+    const secondSocket = makeSocket(secondAttachment)
+    const state = {
+      getWebSockets: () => [firstSocket, secondSocket],
+    } as unknown as DurableObjectState
+    const ctx = makeYjsContext(sql, state)
+    const docKey = getYjsDocKey('docs', 'doc-1', 'body')
+    const doc = getOrCreateYjsDoc(ctx, docKey)
+    doc.getText('body').insert(0, 'persisted')
+
+    handleYjsLeave(ctx, firstSocket, firstAttachment, subscription)
+    expect(ctx.yjsDocs.get(docKey)).toBe(doc)
+    expect(doc.isDestroyed).toBe(false)
+
+    handleYjsLeave(ctx, secondSocket, secondAttachment, subscription)
+    expect(ctx.yjsDocs.has(docKey)).toBe(false)
+    expect(doc.isDestroyed).toBe(true)
+
+    const reloaded = getOrCreateYjsDoc(ctx, docKey)
+    expect(reloaded).not.toBe(doc)
+    expect(reloaded.getText('body').toString()).toBe('persisted')
+    db.close()
+  })
+
+  it('evicts documents held only by a closed connection', () => {
+    const db = new Database(':memory:')
+    createYjsTable(db)
+    const sql = makeSql(db)
+    const subscription = { collection: 'docs', recordId: 'doc-1', fieldName: 'body' }
+    const attachment = yjsAttachment(subscription)
+    const socket = makeSocket(attachment)
+    const state = {
+      getWebSockets: () => [socket],
+    } as unknown as DurableObjectState
+    const ctx = makeYjsContext(sql, state)
+    const docKey = getYjsDocKey('docs', 'doc-1', 'body')
+    const doc = getOrCreateYjsDoc(ctx, docKey)
+
+    handleYjsDisconnect(ctx, socket, attachment)
+
+    expect(ctx.yjsDocs.has(docKey)).toBe(false)
+    expect(doc.isDestroyed).toBe(true)
+    db.close()
+  })
+
+  it('does not retain documents loaded only for a tool call', async () => {
+    const db = new Database(':memory:')
+    createYjsTable(db)
+    const sql = makeSql(db)
+    const ctx = makeToolsContext(sql, [])
+
+    const write = await execTool(ctx, 'yjs.setText', {
+      collection: 'canvas-settings',
+      recordId: 'canvas-1',
+      fieldName: 'body',
+      text: 'persisted',
+    })
+    expect(write.success).toBe(true)
+    expect(ctx.yjsDocs.size).toBe(0)
+
+    const read = await execTool(ctx, 'yjs.getText', {
+      collection: 'canvas-settings',
+      recordId: 'canvas-1',
+      fieldName: 'body',
+    })
+    expect(read).toMatchObject({ success: true, data: { text: 'persisted' } })
+    expect(ctx.yjsDocs.size).toBe(0)
+    db.close()
   })
 })

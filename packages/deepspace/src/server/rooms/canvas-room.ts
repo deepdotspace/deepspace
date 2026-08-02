@@ -315,7 +315,7 @@ export class CanvasRoom<E = Record<string, unknown>> extends BaseRoom<E> {
     }
   }
 
-  protected onDisconnect(ws: WebSocket, user: UserAttachment): void {
+  protected onDisconnect(_ws: WebSocket, user: UserAttachment): void {
     this.viewports.delete(user.userId)
     this.undoStacks.delete(user.userId)
     this.redoStacks.delete(user.userId)

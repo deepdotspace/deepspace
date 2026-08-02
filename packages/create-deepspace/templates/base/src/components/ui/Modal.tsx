@@ -1,9 +1,4 @@
-/**
- * Modal / ConfirmModal — backward-compatible wrappers around Dialog primitives.
- *
- * New code should use Dialog directly. These wrappers exist so existing
- * widget code (`<Modal open={...}>`) keeps working without changes.
- */
+/** Modal / ConfirmModal — app-level wrappers around Dialog primitives. */
 
 import React, { ReactNode, JSX } from 'react'
 import {
@@ -66,13 +61,6 @@ export function Modal({
 
 interface ModalHeaderProps {
   children: ReactNode
-  /**
-   * @deprecated Accepted for backward compatibility and intentionally
-   * ignored — the dialog's built-in close button (top-right X) already
-   * calls the Modal's `onClose`. Put close side effects in the Modal's
-   * own `onClose` instead of here.
-   */
-  onClose?: () => void
   className?: string
 }
 

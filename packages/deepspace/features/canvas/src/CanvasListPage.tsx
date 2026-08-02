@@ -47,7 +47,7 @@ function CreateCanvasModal({ isOpen, onClose, onCreate }: CreateCanvasModalProps
 
   return (
     <Modal open={isOpen} onClose={onClose} size="sm">
-      <Modal.Header onClose={onClose}>
+      <Modal.Header>
         <Modal.Title>New Canvas</Modal.Title>
       </Modal.Header>
       <Modal.Body>

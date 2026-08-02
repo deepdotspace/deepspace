@@ -3,7 +3,7 @@
  *
  * The pair is `x-app-identity-token` (HMAC(PLATFORM_IDENTITY_SECRET, appId),
  * minted at deploy time and injected as a binding) + `x-app-id`. Pre-first-
- * deploy the token binding is ABSENT — `deepspace dev` can only fetch it once
+ * deploy the token binding is ABSENT — `deepspace dev start` can only fetch it once
  * the app is in the deploy registry. Attaching headers built from an undefined
  * binding sends the literal string "undefined", which upstream identity
  * verification rejects as a *tampered* token (401 invalid) instead of the

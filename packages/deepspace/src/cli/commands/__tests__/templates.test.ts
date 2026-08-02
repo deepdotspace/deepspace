@@ -11,9 +11,9 @@
  *    module", and route-group moves that broke `../` depths.
  *
  * 2. Fork drift: the copilot template intentionally ships owned COPIES of
- *    the ai-chat feature's ChatPanel and schema wrapper (copy-paste-ownable
- *    is the template model — no runtime install). The copies must stay
- *    byte-identical to their feature sources so fixes land in one place and
+ *    the ai-chat feature's ChatPanel subsystem and schema wrapper
+ *    (copy-paste-ownable is the template model — no runtime install). The
+ *    copies must stay byte-identical to their feature sources so fixes land in one place and
  *    propagate by re-copying; this already failed once (a model-lineup
  *    refresh updated the feature but not the template).
  */
@@ -21,12 +21,7 @@ import { describe, it, expect, afterAll } from 'vitest'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
-import {
-  TEMPLATES_DIR,
-  FEATURES_DIR,
-  listOverlays,
-  assembleTemplate,
-} from './template-assembly'
+import { TEMPLATES_DIR, FEATURES_DIR, listOverlays, assembleTemplate } from './template-assembly'
 
 const cleanups: string[] = []
 afterAll(() => {
@@ -94,9 +89,40 @@ describe('assembled templates', () => {
     describe(`${overlay} (base + overlay)`, () => {
       it('ships the entrypoints every app needs', () => {
         const app = makeAssembled(overlay)
-        for (const required of ['index.html', 'package.json', 'worker.ts', 'src/main.tsx']) {
+        for (const required of [
+          'index.html',
+          'package.json',
+          'worker.ts',
+          'src/main.tsx',
+          'src/server/action-routes.ts',
+          'src/server/http-routes.ts',
+          'src/server/realtime-routes.ts',
+        ]) {
           expect(existsSync(join(app, required)), `${overlay} is missing ${required}`).toBe(true)
         }
+      })
+
+      it('assembles worker routes in security-sensitive order', () => {
+        const app = makeAssembled(overlay)
+        const worker = readFileSync(join(app, 'worker.ts'), 'utf-8')
+        const registrations = [
+          'registerAuthAndIntegrationRoutes(app)',
+          'registerRealtimeRoutes(app)',
+          'registerActionRoutes(app, resolveAuth)',
+          'registerAiChatRoutes(app, resolveAuth)',
+          'registerPlatformProxyRoutes(app)',
+          'registerStaticRoutes(app)',
+        ]
+        const positions = registrations.map((registration) => worker.indexOf(registration))
+        expect(positions.every((position) => position >= 0)).toBe(true)
+        expect(positions).toEqual([...positions].sort((left, right) => left - right))
+
+        const httpRoutes = readFileSync(join(app, 'src/server/http-routes.ts'), 'utf-8')
+        expect(httpRoutes.indexOf("app.all('/api/auth/sign-out'")).toBeLessThan(
+          httpRoutes.indexOf("app.all('/api/auth/*'"),
+        )
+        expect(httpRoutes).toContain("headers.delete('x-user-id')")
+        expect(httpRoutes).toContain("headers.delete('x-app-identity-token')")
       })
 
       it('has no dangling relative or @/ imports', () => {
@@ -111,10 +137,122 @@ describe('assembled templates', () => {
             }
           }
         }
-        expect(dangling, `unresolved imports in assembled ${overlay}:\n${dangling.join('\n')}`).toEqual([])
+        expect(
+          dangling,
+          `unresolved imports in assembled ${overlay}:\n${dangling.join('\n')}`,
+        ).toEqual([])
+      })
+
+      it('uses the current CLI command tree', () => {
+        const app = makeAssembled(overlay)
+        const pkg = JSON.parse(readFileSync(join(app, 'package.json'), 'utf-8')) as {
+          scripts?: Record<string, string>
+        }
+        expect(pkg.scripts).toMatchObject({
+          dev: 'deepspace dev start',
+          test: 'deepspace test run',
+          'test:smoke': 'deepspace test run smoke',
+          'test:api': 'deepspace test run api',
+          'test:e2e': 'deepspace test run e2e',
+          screenshot: 'deepspace test screenshot',
+        })
+
+        const agentGuide = readFileSync(join(app, 'CLAUDE.md'), 'utf-8')
+        expect(agentGuide).toContain('npx deepspace auth login')
+        expect(agentGuide).toContain('npx deepspace dev start')
       })
     })
   }
+})
+
+describe('installable feature UI quality', () => {
+  it('keeps the items reference feature aligned with the scaffold UI contract', () => {
+    const source = readFileSync(join(FEATURES_DIR, 'items', 'src', 'ItemsPage.tsx'), 'utf-8')
+
+    expect(source).not.toMatch(/<(?:button|input|label|textarea|svg)\b/)
+    expect(source).not.toMatch(/\b(?:window\.)?(?:alert|confirm|prompt)\s*\(/)
+
+    for (const localPrimitive of [
+      'Button',
+      'ConfirmModal',
+      'EmptyState',
+      'Input',
+      'Label',
+      'Textarea',
+      'useToast',
+    ]) {
+      expect(source).toContain(localPrimitive)
+    }
+    expect(source).toContain("from 'lucide-react'")
+
+    for (const visibleOutcome of [
+      'Item created',
+      'Could not create item',
+      'Item archived',
+      'Item restored',
+      'Could not update item',
+      'Item deleted',
+      'Could not delete item',
+    ]) {
+      expect(source).toContain(visibleOutcome)
+    }
+
+    expect(source).toMatch(
+      /const created = await onCreate\([\s\S]*if \(!created\) return[\s\S]*onClose\(\)/,
+    )
+    for (const confirmedMutation of ['createConfirmed', 'putConfirmed', 'removeConfirmed']) {
+      expect(source).toContain(confirmedMutation)
+    }
+    expect(source).toContain('await putConfirmed(itemId, { status: newStatus })')
+    expect(source).not.toContain('{ ...item.data, status: newStatus }')
+  })
+
+  it('keeps the leaderboard reference feature aligned with the scaffold UI contract', () => {
+    const source = readFileSync(
+      join(FEATURES_DIR, 'leaderboard', 'src', 'LeaderboardPage.tsx'),
+      'utf-8',
+    )
+
+    expect(source).not.toMatch(/<(?:button|input|label|option|select|svg)\b/)
+    expect(source).not.toMatch(/\b(?:window\.)?(?:alert|confirm|prompt)\s*\(/)
+
+    for (const localPrimitive of [
+      'Button',
+      'ConfirmModal',
+      'EmptyState',
+      'Input',
+      'Label',
+      'Select',
+      'useToast',
+    ]) {
+      expect(source).toContain(localPrimitive)
+    }
+    expect(source).toContain("from 'lucide-react'")
+
+    for (const visibleOutcome of [
+      'Score submitted',
+      'Could not submit score',
+      'Could not load leaderboard',
+      'Score updated',
+      'Could not update score',
+      'Score deleted',
+      'Could not delete score',
+    ]) {
+      expect(source).toContain(visibleOutcome)
+    }
+
+    expect(source).toMatch(
+      /const submitted = await onSubmit\([\s\S]*if \(!submitted\) return[\s\S]*onClose\(\)/,
+    )
+    expect(source).toMatch(
+      /const saved = await onSave\([\s\S]*if \(!saved\) return[\s\S]*onClose\(\)/,
+    )
+    for (const confirmedMutation of ['createConfirmed', 'putConfirmed', 'removeConfirmed']) {
+      expect(source).toContain(confirmedMutation)
+    }
+    expect(source).toContain('await putConfirmed(entry.recordId, { score: newScore })')
+    expect(source).not.toContain('{ ...entry.data, score: newScore }')
+  })
 })
 
 describe('copilot fork stays in sync with the ai-chat feature', () => {
@@ -124,6 +262,14 @@ describe('copilot fork stays in sync with the ai-chat feature', () => {
       join(FEATURES_DIR, 'ai-chat', 'src', 'ChatPanel.tsx'),
     ],
     [
+      join(TEMPLATES_DIR, 'copilot', 'src', 'components', 'chat', 'ChatPanel.messages.tsx'),
+      join(FEATURES_DIR, 'ai-chat', 'src', 'ChatPanel.messages.tsx'),
+    ],
+    [
+      join(TEMPLATES_DIR, 'copilot', 'src', 'components', 'chat', 'ChatPanel.stream.ts'),
+      join(FEATURES_DIR, 'ai-chat', 'src', 'ChatPanel.stream.ts'),
+    ],
+    [
       join(TEMPLATES_DIR, 'copilot', 'src', 'schemas', 'ai-chat-schema.ts'),
       join(FEATURES_DIR, 'ai-chat', 'src', 'ai-chat-schema.ts'),
     ],
@@ -131,9 +277,10 @@ describe('copilot fork stays in sync with the ai-chat feature', () => {
 
   for (const [templateCopy, featureSource] of pairs) {
     it(`${templateCopy.split('/').slice(-1)[0]} matches its feature source`, () => {
-      expect(readFileSync(templateCopy, 'utf-8'),
+      expect(
+        readFileSync(templateCopy, 'utf-8'),
         `template copy has drifted from the feature source — apply the change to ` +
-        `${featureSource} and re-copy it over ${templateCopy} (or vice versa)`,
+          `${featureSource} and re-copy it over ${templateCopy} (or vice versa)`,
       ).toBe(readFileSync(featureSource, 'utf-8'))
     })
   }

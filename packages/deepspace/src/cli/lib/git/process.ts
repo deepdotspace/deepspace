@@ -1,0 +1,85 @@
+import { sync as spawnSync } from 'cross-spawn'
+
+const MAX_GIT_BUFFER = 512 * 1024 * 1024
+
+export class GitError extends Error {
+  constructor(
+    message: string,
+    /** Optional machine slug; generic Git errors fall back to `git_error`. */
+    readonly code?: string,
+  ) {
+    super(message)
+    this.name = 'GitError'
+  }
+}
+
+/** Execute git without terminal prompts, localized output, or shell interpolation. */
+export function runGit(
+  cwd: string,
+  args: string[],
+  opts: { input?: string | Buffer; allowFail?: boolean; env?: Record<string, string> } = {},
+): { stdout: Buffer; stderr: Buffer; status: number } {
+  const result = spawnSync('git', args, {
+    cwd,
+    input: opts.input,
+    maxBuffer: MAX_GIT_BUFFER,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: '0',
+      LC_ALL: 'C',
+      ...(opts.env ?? {}),
+    },
+  })
+  if (result.error) {
+    const code = (result.error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') {
+      throw new GitError(
+        'git is not installed or not on PATH — install git and retry.',
+        'git_not_installed',
+      )
+    }
+    throw new GitError(`git ${args[0]} failed: ${result.error.message}`)
+  }
+  const status = result.status ?? 1
+  if (status !== 0 && !opts.allowFail) {
+    const stderr = result.stderr?.toString('utf-8').trim() ?? ''
+    throw new GitError(`git ${args.join(' ')} exited ${status}${stderr ? `: ${stderr}` : ''}`)
+  }
+  return {
+    stdout: result.stdout ?? Buffer.alloc(0),
+    stderr: result.stderr ?? Buffer.alloc(0),
+    status,
+  }
+}
+
+export function gitLine(cwd: string, args: string[]): string {
+  return runGit(cwd, args).stdout.toString('utf-8').trim()
+}
+
+/** Decode a NUL-delimited git result without corrupting control characters in paths. */
+export function splitNulFields(buffer: Buffer): string[] {
+  const fields: string[] = []
+  let start = 0
+  for (let index = 0; index < buffer.length; index++) {
+    if (buffer[index] === 0) {
+      fields.push(buffer.toString('utf-8', start, index))
+      start = index + 1
+    }
+  }
+  if (start < buffer.length) fields.push(buffer.toString('utf-8', start))
+  return fields
+}
+
+/** Parse `git --version` into the major/minor pair used by the compatibility floor. */
+export function parseGitVersion(output: string): [number, number] | null {
+  const match = /(\d+)\.(\d+)/.exec(output)
+  return match ? [Number(match[1]), Number(match[2])] : null
+}
+
+/** Git 2.29 is the minimum version that exposes the required object-format probe. */
+export function gitMeetsFloor(version: [number, number] | null): boolean {
+  if (!version) return true
+  const [major, minor] = version
+  return major > 2 || (major === 2 && minor >= 29)
+}

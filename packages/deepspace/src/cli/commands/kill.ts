@@ -1,14 +1,14 @@
 /**
- * deepspace kill [--port N] [--all]
+ * deepspace dev kill [--port N] [--all]
  *
  * Stops a local dev server bound to the given port, plus the workerd
  * child processes that wrangler/Vite would normally clean up but
  * sometimes leak when the parent dies ungracefully (Ctrl-C in a
  * detached terminal, IDE close, sandbox deny on signal, etc).
  *
- *   deepspace kill                  # kill listener on 5173 + its workerd children
- *   deepspace kill --port 5180      # kill listener on a different port
- *   deepspace kill --all            # also sweep ALL stray workerd/wrangler procs on the machine
+ *   deepspace dev kill                  # kill listener on 5173 + its workerd children
+ *   deepspace dev kill --port 5180      # kill listener on a different port
+ *   deepspace dev kill --all            # also sweep ALL stray workerd/wrangler procs on the machine
  *
  * Cross-platform: uses lsof/pgrep on macOS and Linux, and PowerShell
  * (Get-NetTCPConnection / Get-CimInstance) on Windows. PowerShell ships
@@ -21,12 +21,13 @@
  * still issue them in the same order for consistent log output.)
  */
 
-import { defineCommand } from 'citty'
 import { spawnSync } from 'node:child_process'
 import { readFileSync, readdirSync, readlinkSync } from 'node:fs'
 import { setTimeout as wait } from 'node:timers/promises'
-import { findAppDir, resolveWorktreePort, resolveAppLaunchPort } from '../lib/app-context'
+import { findAppDir } from '../lib/app-context'
+import { resolveWorktreePort, resolveAppLaunchPort } from '../lib/launch-config'
 import { DEFAULT_PORT, resolvePort } from '../lib/port'
+import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 
 const SIGTERM_GRACE_MS = 1500
 const IS_WIN = process.platform === 'win32'
@@ -53,7 +54,7 @@ export function pickKillPort(opts: {
   return opts.appLaunch ?? DEFAULT_PORT
 }
 
-export default defineCommand({
+export default defineDeepspaceCommand({
   meta: {
     name: 'kill',
     description: 'Kill the local dev server and any orphaned workerd processes',
@@ -71,12 +72,17 @@ export default defineCommand({
     },
   },
   async run({ args }) {
+    const portArg = args.port as string | undefined
+    const all = Boolean(args.all)
+    const say = (line: string) => {
+      if (!args.json) console.log(line)
+    }
     // Resolve which port to target, mirroring `dev`'s own precedence so `kill`
     // always targets the server `dev` bound (DEV-2). Without this, no-arg `kill`
     // hit :5173 even when `dev --port 8790` was running elsewhere.
     const cwd = process.cwd()
     const port = pickKillPort({
-      explicit: args.port ? resolvePort(args.port) : null,
+      explicit: portArg ? resolvePort(portArg) : null,
       worktree: resolveWorktreePort(cwd),
       // resolvePort() reads + validates $DEEPSPACE_PORT; only consult it when set.
       env: process.env.DEEPSPACE_PORT ? resolvePort() : null,
@@ -100,7 +106,7 @@ export default defineCommand({
     //    Useful when port 5173 is "free" but a leftover workerd from a
     //    previous run is still holding D1 / DO state in .wrangler/.
     let swept = false
-    if (args.all) {
+    if (all) {
       const sweep = sweepByName(['workerd', 'wrangler', 'vite'])
       swept = sweep.swept
       for (const pid of sweep.pids) targets.add(pid)
@@ -113,21 +119,20 @@ export default defineCommand({
       const outcome = noTargetsMessage({
         enumerated: listeners.enumerated,
         swept,
-        all: args.all,
+        all,
         port,
       })
       if (!outcome.ok) {
-        console.error(outcome.message)
-        process.exit(1)
+        throw new Refusal(outcome.message, 'inspect_unavailable')
       }
-      console.log(outcome.message)
-      return
+      say(outcome.message)
+      return { data: { port, all, killed: [], portFree: true } }
     }
 
     // SIGTERM pass.
     for (const pid of targets) {
       if (sendSignal(pid, 'SIGTERM')) {
-        console.log(`SIGTERM → pid ${pid}`)
+        say(`SIGTERM → pid ${pid}`)
       }
     }
     await wait(SIGTERM_GRACE_MS)
@@ -138,9 +143,11 @@ export default defineCommand({
     }
 
     // SIGKILL holdouts.
+    const killed: number[] = []
     for (const pid of stillAlive) {
       if (sendSignal(pid, 'SIGKILL')) {
-        console.log(`SIGKILL → pid ${pid} (did not exit on SIGTERM)`)
+        killed.push(pid)
+        say(`SIGKILL → pid ${pid} (did not exit on SIGTERM)`)
       }
     }
 
@@ -148,19 +155,26 @@ export default defineCommand({
     await wait(200)
     const remaining = listenerPids(port)
     if (remaining.length > 0) {
-      console.error(
-        `Port ${port} is still held by pid(s) ${remaining.join(', ')} — try \`deepspace kill --port ${port}\` again, or kill manually.`,
+      throw new Refusal(
+        `Port ${port} is still held by pid(s) ${remaining.join(', ')} — try \`deepspace dev kill --port ${port}\` again, or kill manually.`,
+        'port_still_held',
+        {
+          action: cliAction('deepspace', 'dev', 'kill', '--port', String(port)),
+          extra: { port, holders: remaining },
+        },
       )
-      process.exit(1)
     }
 
     // Report what actually happened. Under --all we may have swept processes on
     // ports other than `port` (matched by name), so a bare "Port 5173 is free"
     // would misrepresent the sweep (DEV-6).
-    if (args.all) {
-      console.log(`Killed ${targets.size} process(es) (workerd/wrangler/vite sweep). :${port} is free.`)
-    } else {
-      console.log(`Port ${port} is free.`)
+    say(
+      all
+        ? `Killed ${targets.size} process(es) (workerd/wrangler/vite sweep). :${port} is free.`
+        : `Port ${port} is free.`,
+    )
+    return {
+      data: { port, all, killed: [...targets], sigkilled: killed, portFree: true },
     }
   },
 })

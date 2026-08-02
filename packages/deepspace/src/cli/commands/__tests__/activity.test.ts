@@ -1,0 +1,144 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import activity, { formatEvent, landIndex } from '../activity'
+import type { RemoteActivityEvent } from '../../lib/repo-api'
+import * as authModule from '../../auth'
+import * as appTargetModule from '../../lib/app-target'
+import * as actorLabelsModule from '../../lib/actor-labels'
+import * as repoApiModule from '../../lib/repo-api'
+
+const ev = (partial: Partial<RemoteActivityEvent>): RemoteActivityEvent => ({
+  seq: 1,
+  kind: 'push',
+  subjectId: null,
+  summary: null,
+  actor: 'u',
+  createdAt: '2026-07-24T00:00:00.000Z',
+  ...partial,
+})
+
+const OID = 'a'.repeat(40)
+const OTHER = 'b'.repeat(40)
+
+afterEach(() => vi.restoreAllMocks())
+
+describe('landIndex + formatEvent land labeling', () => {
+  const landed = ev({
+    seq: 2,
+    kind: 'workspace.landed',
+    subjectId: 'ws_01TEST',
+    summary: { task: 't', landedOid: OID, into: 'main' },
+  })
+  const landPush = ev({
+    seq: 1,
+    summary: { refs: [{ ref: 'refs/heads/main', newOid: OID }] },
+  })
+  const unrelatedPush = ev({
+    seq: 3,
+    summary: { refs: [{ ref: 'refs/heads/main', newOid: OTHER }] },
+  })
+
+  it('labels a trunk push whose oid matches a landed event in the page', () => {
+    const lands = landIndex([landPush, landed, unrelatedPush])
+    expect(formatEvent(landPush, lands)).toContain('(land of ws_01TEST)')
+    expect(formatEvent(unrelatedPush, lands)).not.toContain('land of')
+  })
+
+  it('is inert without the index and skips landed events missing a subject', () => {
+    expect(formatEvent(landPush)).not.toContain('land of')
+    const noSubject = { ...landed, subjectId: null }
+    expect(landIndex([landPush, noSubject]).size).toBe(0)
+  })
+
+  it('resolves actor ids through the labels map, falling back to the raw id', () => {
+    const actors = new Map([['u', 'dev@example.com (you)']])
+    expect(formatEvent(landPush, undefined, actors)).toContain('dev@example.com (you)')
+    expect(formatEvent(landPush, undefined, new Map())).toContain('  u  ')
+  })
+
+  it('renders an unknown event kind as a plain line instead of crashing', () => {
+    const unknown = ev({ seq: 5, kind: 'some.future.kind', summary: { x: 1 } })
+    expect(formatEvent(unknown)).toContain('some.future.kind')
+  })
+})
+
+describe('activity --since/--limit validation fires before any network', () => {
+  // The cursor/limit parse was moved to the top of run(), ahead of ensureToken/
+  // resolveAppTarget, so malformed input is rejected without an auth/network
+  // round-trip. These drive run() with no network mocks: if the guard were
+  // removed, control would reach ensureToken (unmocked) and emit some OTHER
+  // code, so `.find` on the expected code would return undefined and fail.
+  const cmd = activity as unknown as {
+    run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+  }
+  const drive = async (args: Record<string, unknown>) => {
+    const logs: string[] = []
+    const exits: number[] = []
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(((s?: unknown) => {
+      logs.push(String(s))
+    }) as never)
+    const errSpy = vi.spyOn(console, 'error').mockImplementation((() => {}) as never)
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((c?: number) => {
+      exits.push(Number(c ?? 0))
+      throw new Error(`exit:${c ?? ''}`)
+    }) as never)
+    try {
+      await cmd.run({ args })
+    } catch {
+      // expected: the mocked exit throws to unwind
+    } finally {
+      logSpy.mockRestore()
+      errSpy.mockRestore()
+      exitSpy.mockRestore()
+    }
+    return { logs, exits }
+  }
+
+  it('rejects a fractional --since with invalid_cursor (the flagship malformed-cursor case)', async () => {
+    const { logs, exits } = await drive({ since: '1.9', json: true })
+    const out = logs.map((l) => JSON.parse(l)).find((o) => o.code === 'invalid_cursor')
+    expect(out).toMatchObject({ ok: false, code: 'invalid_cursor' })
+    expect(exits[0]).toBe(1)
+  })
+
+  it('rejects a non-numeric --limit with invalid_limit', async () => {
+    const { logs, exits } = await drive({ limit: 'nope', json: true })
+    const out = logs.map((l) => JSON.parse(l)).find((o) => o.code === 'invalid_limit')
+    expect(out).toMatchObject({ ok: false, code: 'invalid_limit' })
+    expect(exits[0]).toBe(1)
+  })
+})
+
+describe('one-shot activity pagination', () => {
+  it('returns one bounded page in human mode instead of draining hasMore', async () => {
+    const listActivity = vi
+      .fn()
+      .mockResolvedValueOnce({ events: [ev({})], cursor: 1, hasMore: true })
+      .mockResolvedValueOnce({ events: [ev({ seq: 2 })], cursor: 2, hasMore: false })
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(
+      'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
+    )
+    vi.spyOn(actorLabelsModule, 'actorLabels').mockResolvedValue(new Map())
+    vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({ listActivity } as never)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`exit:${code ?? 0}`)
+    }) as never)
+
+    const cmd = activity as unknown as {
+      run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+    }
+    await expect(
+      cmd.run({
+        args: {
+          app: 'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
+          follow: false,
+          json: false,
+          limit: '1',
+          since: '0',
+        },
+      }),
+    ).rejects.toThrow('exit:0')
+    expect(listActivity).toHaveBeenCalledTimes(1)
+  })
+})

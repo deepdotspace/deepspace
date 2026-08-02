@@ -10,7 +10,7 @@
  * 4. Hostname detection (fallback)
  */
 
-export type Environment = 'dev' | 'prod'
+export type Environment = 'dev' | 'staging' | 'prod'
 
 declare const __DEEPSPACE_ENV__: string | undefined
 
@@ -47,6 +47,21 @@ const DEV_CONFIG: EnvironmentConfig = {
   dashboardUrl: 'http://localhost:5174',
 }
 
+// Mirrors the CLI's staging preset (cli/env.ts) and the staging wrangler
+// routes: services and the dashboard on deepspacesites.com, user apps on
+// spacestest.com. This module had NO staging tier — a staging app calling
+// getApiUrl() silently targeted production.
+const STAGING_CONFIG: EnvironmentConfig = {
+  name: 'staging',
+  apiUrl: 'https://api.deepspacesites.com',
+  platformWorkerUrl: 'https://platform.deepspacesites.com',
+  authUrl: 'https://auth.deepspacesites.com',
+  authSignInUrl: 'https://auth.deepspacesites.com/login/social',
+  authSignUpUrl: 'https://auth.deepspacesites.com/login/social',
+  mainAppUrl: 'https://spacestest.com',
+  dashboardUrl: 'https://dashboard.deepspacesites.com',
+}
+
 const PROD_CONFIG: EnvironmentConfig = {
   name: 'prod',
   apiUrl: 'https://api-worker.deep.space',
@@ -68,6 +83,7 @@ function parseEnv(value: string | undefined): Environment | null {
   if (!value) return null
   const v = value.toLowerCase()
   if (v === 'dev' || v === 'development') return 'dev'
+  if (v === 'staging') return 'staging'
   if (v === 'prod' || v === 'production') return 'prod'
   return null
 }
@@ -124,6 +140,17 @@ export function detectEnvironment(): Environment {
       return 'dev'
     }
 
+    // Staging: apps on *.spacestest.com, services on *.deepspacesites.com.
+    if (
+      hostname === 'spacestest.com' ||
+      hostname.endsWith('.spacestest.com') ||
+      hostname === 'deepspacesites.com' ||
+      hostname.endsWith('.deepspacesites.com')
+    ) {
+      cachedEnvironment = 'staging'
+      return 'staging'
+    }
+
     // Production: app.space, *.app.space, deep.space, *.deep.space
     if (
       hostname === 'app.space' ||
@@ -143,7 +170,7 @@ export function detectEnvironment(): Environment {
 
 export function getEnvironmentConfig(): EnvironmentConfig {
   const env = detectEnvironment()
-  return env === 'dev' ? DEV_CONFIG : PROD_CONFIG
+  return env === 'dev' ? DEV_CONFIG : env === 'staging' ? STAGING_CONFIG : PROD_CONFIG
 }
 
 // ============================================================================

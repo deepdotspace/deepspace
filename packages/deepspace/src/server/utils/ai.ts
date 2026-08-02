@@ -8,13 +8,13 @@
  *   - Service binding `env.API_WORKER` (Cloudflare Fetcher) — preferred in
  *     production if the app has declared the binding in wrangler.toml.
  *   - HTTPS URL `env.API_WORKER_URL` — used in local dev and in production
- *     for apps that don't declare the binding. `deepspace dev` writes this
+ *     for apps that don't declare the binding. `deepspace dev start` writes this
  *     into `.dev.vars` automatically.
  *
  * Auth is automatic by default:
  *   - For server-side autonomous calls (cron, DO alarms, background agents),
  *     the helper reads the long-lived `env.APP_OWNER_JWT` minted at deploy
- *     time (or by `deepspace dev` in local development) and uses it for the
+ *     time (or by `deepspace dev start` in local development) and uses it for the
  *     proxy auth header. The owner is billed automatically via the JWT sub.
  *   - For user-initiated calls (e.g. an `/api/ai/chat` route handling a
  *     browser request), pass `options.authToken` explicitly with the user's
@@ -49,7 +49,7 @@ type Provider = 'anthropic' | 'openai' | 'cerebras'
 
 export interface DeepSpaceAIEnv extends ApiWorkerEnv {
   /**
-   * Long-lived owner-scoped JWT minted at deploy time (or by `deepspace dev`).
+   * Long-lived owner-scoped JWT minted at deploy time (or by `deepspace dev start`).
    * Used as the default proxy auth token when `options.authToken` is absent.
    * Bills the app owner.
    */
@@ -110,7 +110,7 @@ export function createDeepSpaceAI(
     throw new Error(
       'createDeepSpaceAI: no auth token available. Either pass `options.authToken` ' +
         'explicitly (for user-initiated calls), or ensure `env.APP_OWNER_JWT` is set ' +
-        '(injected at deploy time or by `deepspace dev`).',
+        '(injected at deploy time or by `deepspace dev start`).',
     )
   }
 
@@ -131,8 +131,7 @@ export function createDeepSpaceAI(
     headers.delete('x-api-key')
     headers.set('X-Auth-Token', authToken)
 
-    const body =
-      provider === 'anthropic' ? withDefaultAnthropicMaxTokens(init?.body) : init?.body
+    const body = provider === 'anthropic' ? withDefaultAnthropicMaxTokens(init?.body) : init?.body
     if (body !== init?.body) {
       // The request body length changed, so the runtime must recompute it.
       headers.delete('content-length')

@@ -11,7 +11,7 @@
  * const { doc, text, setText, synced, canWrite } = useYjsRoom(docId, 'content')
  */
 
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react'
 import * as Y from 'yjs'
 import { getAuthToken } from '../../auth'
 import { wsLog } from '../ws-log'
@@ -33,6 +33,8 @@ import {
   readVarUint8Array,
 } from '@/shared/protocol/yjs'
 
+const UPDATE_BATCH_DELAY_MS = 16
+
 // ============================================================================
 // Hook
 // ============================================================================
@@ -50,6 +52,8 @@ export interface UseYjsRoomResult {
   synced: boolean
   /** Whether user has write access */
   canWrite: boolean
+  /** Whether the server has resolved this connection's write permission */
+  writeAuthResolved: boolean
 }
 
 /**
@@ -59,24 +63,56 @@ export interface UseYjsRoomResult {
  * @param fieldName - Y.Text field name within the Y.Doc
  */
 export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
-  const [synced, setSynced] = useState(false)
+  const [syncedDocId, setSyncedDocId] = useState<string | null>(null)
   const [canWrite, setCanWrite] = useState(false)
+  const [writeAuthResolved, setWriteAuthResolved] = useState(false)
   const [text, setTextState] = useState('')
   const [, setUpdateCount] = useState(0)
+  const synced = syncedDocId === docId
 
-  const docRef = useRef<Y.Doc | null>(null)
-  if (!docRef.current) docRef.current = new Y.Doc()
-  const doc = docRef.current
-
-  const awarenessRef = useRef<Awareness | null>(null)
-  if (!awarenessRef.current) awarenessRef.current = new Awareness(doc)
-  const awareness = awarenessRef.current
+  const { doc, awareness } = useMemo(() => {
+    const nextDoc = new Y.Doc()
+    return { doc: nextDoc, awareness: new Awareness(nextDoc) }
+    // docId deliberately owns this resource pair. Reusing either resource
+    // across room ids can answer B's sync handshake with A's document state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- docId is the Yjs document identity
+  }, [docId])
 
   const wsRef = useRef<WebSocket | null>(null)
   const isLocalRef = useRef(false)
   const applyingRemoteAwarenessRef = useRef(false)
+  const pendingUpdateRef = useRef<Uint8Array | null>(null)
+  const updateBatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const yText = useMemo(() => doc.getText(fieldName), [doc, fieldName])
+
+  const flushPendingUpdate = useCallback((socket = wsRef.current) => {
+    if (updateBatchTimerRef.current) clearTimeout(updateBatchTimerRef.current)
+    updateBatchTimerRef.current = null
+    const update = pendingUpdateRef.current
+    pendingUpdateRef.current = null
+    if (!update || !socket || socket.readyState !== WebSocket.OPEN) return
+
+    const enc = createEncoder()
+    writeVarUint(enc, MSG_SYNC)
+    writeVarUint(enc, MSG_SYNC_UPDATE)
+    writeVarUint8Array(enc, update)
+    socket.send(toUint8Array(enc).buffer)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      awareness.destroy()
+      doc.destroy()
+    }
+  }, [awareness, doc])
+
+  useLayoutEffect(() => {
+    setSyncedDocId(null)
+    setCanWrite(false)
+    setWriteAuthResolved(false)
+    setTextState('')
+  }, [docId])
 
   // Observe remote Y.Text changes
   useEffect(() => {
@@ -94,8 +130,23 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let alive = true
 
+    const renewLocalAwareness = () => {
+      const localState = awareness.getLocalState()
+      if (localState) awareness.setLocalState(localState)
+    }
+
     const connect = async () => {
       if (!alive) return
+
+      // Permissions belong to one socket handshake. Every replacement socket
+      // starts closed, including reconnects and same-room field changes.
+      setCanWrite(false)
+      setWriteAuthResolved(false)
+
+      // The server's disconnect tombstone advances the old awareness clock
+      // once. Renew while offline and again on open so the one transmitted
+      // replay is strictly newer and peers accept it immediately.
+      renewLocalAwareness()
 
       const token = await getAuthToken()
       // Unmounted (or reconnect superseded) while awaiting the token — bail so
@@ -113,14 +164,18 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
 
       ws.onopen = () => {
         wsLog('connected', `yjs:${docId}`)
-        setSynced(false)
+        setSyncedDocId(null)
+        renewLocalAwareness()
       }
 
       ws.onmessage = (event) => {
         if (typeof event.data === 'string') {
           try {
             const msg = JSON.parse(event.data) as { type?: string; canWrite?: unknown }
-            if (msg.type === 'auth' && typeof msg.canWrite === 'boolean') setCanWrite(msg.canWrite)
+            if (msg.type === 'auth' && typeof msg.canWrite === 'boolean') {
+              setCanWrite(msg.canWrite)
+              setWriteAuthResolved(true)
+            }
           } catch {
             /* ignore */
           }
@@ -143,13 +198,13 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
               writeVarUint(enc, MSG_SYNC_STEP2)
               writeVarUint8Array(enc, diff)
               ws?.send(toUint8Array(enc).buffer)
-              setSynced(true)
+              setSyncedDocId(docId)
               break
             }
             case MSG_SYNC_STEP2: {
               Y.applyUpdate(doc, payload, 'server')
               setTextState(yText.toString())
-              setSynced(true)
+              setSyncedDocId(docId)
               break
             }
             case MSG_SYNC_UPDATE: {
@@ -165,6 +220,9 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
           applyingRemoteAwarenessRef.current = true
           try {
             handleAwarenessMessage(awareness, data)
+          } catch {
+            // Awareness is ephemeral. Ignore a malformed peer frame without
+            // breaking subsequent document sync messages on this socket.
           } finally {
             applyingRemoteAwarenessRef.current = false
           }
@@ -174,7 +232,9 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
       ws.onclose = () => {
         wsLog('disconnected', `yjs:${docId}`)
         wsRef.current = null
-        setSynced(false)
+        setSyncedDocId(null)
+        setCanWrite(false)
+        setWriteAuthResolved(false)
         if (alive) reconnectTimer = setTimeout(connect, 1000)
       }
 
@@ -187,6 +247,9 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
       wsLog('closing', `yjs:${docId}`)
       alive = false
       if (reconnectTimer) clearTimeout(reconnectTimer)
+      // This effect owns the socket, so it must drain a pending local batch
+      // before closing it. A later effect cleanup cannot safely do so.
+      flushPendingUpdate(ws)
       if (ws) {
         ws.onclose = null
         ws.onmessage = null
@@ -195,7 +258,7 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
       }
       wsRef.current = null
     }
-  }, [doc, awareness, docId, yText])
+  }, [doc, awareness, docId, flushPendingUpdate, yText])
 
   // Relay local awareness updates (presence, typing) through YjsRoom with shared MSG_AWARENESS encoding.
   useEffect(() => {
@@ -232,18 +295,18 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
       const ws = wsRef.current
       if (!ws || ws.readyState !== WebSocket.OPEN) return
 
-      const enc = createEncoder()
-      writeVarUint(enc, MSG_SYNC)
-      writeVarUint(enc, MSG_SYNC_UPDATE)
-      writeVarUint8Array(enc, update)
-      ws.send(toUint8Array(enc).buffer)
+      pendingUpdateRef.current = pendingUpdateRef.current
+        ? Y.mergeUpdates([pendingUpdateRef.current, update])
+        : update
+      updateBatchTimerRef.current ??= setTimeout(flushPendingUpdate, UPDATE_BATCH_DELAY_MS)
     }
 
     doc.on('update', handler)
     return () => {
       doc.off('update', handler)
+      flushPendingUpdate()
     }
-  }, [doc])
+  }, [doc, flushPendingUpdate])
 
   // setText: update Y.Text + local state
   const setText = useCallback(
@@ -261,5 +324,5 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
     [doc, yText, canWrite],
   )
 
-  return { doc, awareness, text, setText, synced, canWrite }
+  return { doc, awareness, text, setText, synced, canWrite, writeAuthResolved }
 }

@@ -1,11 +1,18 @@
-/**
- * CLI-side coverage for the chunked-deploy resilience logic. The worker tests
- * (platform/deploy-worker) cover the receiving end; these cover the part that
- * actually survives a flaky uplink — the asset packing and the retry gate.
- */
+/** Deploy CLI decision and request helpers, imported from their owning modules. */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { packAssetGroups, postWithRetry, classifyDevVarsSecrets } from '../deploy'
+import { blankSelectorRefusal, staleBaseGuardFields } from '../deploy'
+import { packAssetGroups, postWithRetry } from '../deploy/request'
+import { classifyDevVarsSecrets } from '../deploy/secrets'
+import {
+  deployRepositoryFailure,
+  dirtyWorktreeRefusal,
+  pushWithTransientRetry,
+  shouldSendLineage,
+  workspaceDeployLineage,
+} from '../deploy/repository'
+import type { PushRefResult } from '../../lib/vc-push'
+import { GitError } from '../../lib/git/process'
 
 type Asset = { path: string; contentBase64: string }
 
@@ -14,6 +21,23 @@ function assetOfSize(path: string, bytes: number): Asset {
   const overhead = JSON.stringify({ path, contentBase64: '' }).length
   return { path, contentBase64: 'A'.repeat(Math.max(0, bytes - overhead)) }
 }
+
+describe('blankSelectorRefusal (pre-auth blank deploy selector)', () => {
+  // A present-but-blank target selector is refused pre-auth with a true code so an
+  // unset `--env "$VAR"` can't silently deploy prod, nor `deploy "$DIR"` the cwd.
+  it('refuses an explicitly-blank/whitespace --env as invalid_env', () => {
+    expect(blankSelectorRefusal({ env: '' })?.code).toBe('invalid_env')
+    expect(blankSelectorRefusal({ env: '   ' })?.code).toBe('invalid_env')
+  })
+  it('refuses an explicitly-blank/whitespace dir as invalid_dir', () => {
+    expect(blankSelectorRefusal({ dir: '' })?.code).toBe('invalid_dir')
+    expect(blankSelectorRefusal({ dir: '  ' })?.code).toBe('invalid_dir')
+  })
+  it('allows an omitted or real selector (undefined → documented default)', () => {
+    expect(blankSelectorRefusal({})).toBeNull()
+    expect(blankSelectorRefusal({ env: 'staging', dir: 'apps/web' })).toBeNull()
+  })
+})
 
 describe('packAssetGroups', () => {
   it('returns no groups for an empty asset list', () => {
@@ -199,5 +223,187 @@ describe('classifyDevVarsSecrets (#145 secret-drop guard)', () => {
       allowMissing: false,
     })
     expect(r.kind).toBe('ok')
+  })
+})
+
+describe('pushWithTransientRetry (deploy auto-push)', () => {
+  const committed: PushRefResult = {
+    status: 'committed',
+    localRef: 'refs/heads/main',
+    remoteRef: 'refs/heads/main',
+    summary: 'abc1234..def5678',
+  }
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('retries an HTTP 429 throw with backoff and returns the eventual result', async () => {
+    vi.useFakeTimers()
+    const doPush = vi
+      .fn<() => PushRefResult>()
+      .mockImplementationOnce(() => {
+        throw new Error(
+          "fatal: unable to access 'https://x/': The requested URL returned error: 429",
+        )
+      })
+      .mockReturnValueOnce(committed)
+
+    const promise = pushWithTransientRetry(doPush)
+    await vi.runAllTimersAsync()
+    expect(await promise).toBe(committed)
+    expect(doPush).toHaveBeenCalledTimes(2)
+  })
+
+  it("retries an HTTP 503 throw (the repo store's brief compaction freeze)", async () => {
+    vi.useFakeTimers()
+    const doPush = vi
+      .fn<() => PushRefResult>()
+      .mockImplementationOnce(() => {
+        throw new Error('error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503')
+      })
+      .mockReturnValueOnce(committed)
+
+    const promise = pushWithTransientRetry(doPush)
+    await vi.runAllTimersAsync()
+    expect(await promise).toBe(committed)
+    expect(doPush).toHaveBeenCalledTimes(2)
+  })
+
+  it('does NOT retry a non-transient failure (surfaces it on the first throw)', async () => {
+    const doPush = vi.fn<() => PushRefResult>().mockImplementation(() => {
+      throw new Error("fatal: unable to access 'https://x/': The requested URL returned error: 401")
+    })
+    await expect(pushWithTransientRetry(doPush)).rejects.toThrow('401')
+    expect(doPush).toHaveBeenCalledTimes(1)
+  })
+
+  it('gives up after the backoff schedule and rethrows the transient error', async () => {
+    vi.useFakeTimers()
+    const doPush = vi.fn<() => PushRefResult>().mockImplementation(() => {
+      throw new Error('The requested URL returned error: 503')
+    })
+    const promise = pushWithTransientRetry(doPush)
+    const rejection = expect(promise).rejects.toThrow('503')
+    await vi.runAllTimersAsync()
+    await rejection
+    expect(doPush).toHaveBeenCalledTimes(4) // 1 try + 3 backoffs
+  })
+})
+
+describe('deployRepositoryFailure (auto-push error contract)', () => {
+  it('preserves a first-registration app quota refusal distinctly', () => {
+    const failure = deployRepositoryFailure(
+      new GitError("fatal: unable to access 'https://x/': The requested URL returned error: 409"),
+    )
+
+    expect(failure.code).toBe('app_quota_exceeded')
+    expect(failure.error).toContain('active-app quota')
+    expect(failure.error).toContain('deepspace app list')
+    expect(failure).not.toHaveProperty('action')
+  })
+
+  it('preserves transient rate limiting without conflating app quota', () => {
+    const failure = deployRepositoryFailure(
+      new GitError("fatal: unable to access 'https://x/': The requested URL returned error: 429"),
+    )
+
+    expect(failure.code).toBe('rate_limited')
+    expect(failure.error).toContain('Wait a few seconds')
+    expect(failure.error).not.toContain('app quota')
+    expect(failure).not.toHaveProperty('action')
+  })
+
+  it('preserves an explicit GitError code and message without wrapping it', () => {
+    expect(
+      deployRepositoryFailure(
+        new GitError(
+          'git is not installed or not on PATH — install git and retry.',
+          'git_not_installed',
+        ),
+      ),
+    ).toEqual({
+      code: 'git_not_installed',
+      error: 'git is not installed or not on PATH — install git and retry.',
+    })
+  })
+
+  it('does not misclassify an unrelated 429 count as an HTTP failure', () => {
+    expect(deployRepositoryFailure(new GitError('Total 429 (delta 3)'))).toEqual({
+      code: 'git_error',
+      error: 'Version-control sync failed: Total 429 (delta 3)',
+    })
+  })
+
+  it('keeps the generic boundary for an untyped failure', () => {
+    expect(deployRepositoryFailure(new Error('unexpected local failure'))).toEqual({
+      code: 'vc_sync_failed',
+      error: 'Version-control sync failed: unexpected local failure',
+    })
+  })
+})
+
+describe('staleBaseGuardFields (deploy --json passthrough)', () => {
+  it("passes through the server's skipped marker", () => {
+    expect(staleBaseGuardFields({ staleBaseGuard: 'skipped' })).toEqual({
+      staleBaseGuard: 'skipped',
+    })
+  })
+
+  it('is empty for normal/older servers — absent field or unknown values', () => {
+    expect(staleBaseGuardFields({})).toEqual({})
+    expect(staleBaseGuardFields({ staleBaseGuard: 'ran' })).toEqual({})
+    expect(staleBaseGuardFields({ staleBaseGuard: true })).toEqual({})
+  })
+})
+
+describe('shouldSendLineage (deploy release-lineage gate)', () => {
+  const oid = 'a'.repeat(40)
+
+  it('records lineage only when a commit was actually synced this deploy (recoverable)', () => {
+    expect(shouldSendLineage(oid, true)).toBe(true)
+  })
+
+  it('withholds lineage for a resolved-but-unsynced commit (skipped/rejected/--no-push)', () => {
+    // The B6 case: a skipped .dev.vars push or a server-rejected oversized object
+    // still resolves a commitOid, but sending it would 409 every later deploy.
+    expect(shouldSendLineage(oid, false)).toBe(false)
+  })
+
+  it('withholds lineage when there is no commit at all', () => {
+    expect(shouldSendLineage(null, true)).toBe(false)
+    expect(shouldSendLineage(null, false)).toBe(false)
+  })
+})
+
+describe('workspace deploy lineage', () => {
+  const oid = 'a'.repeat(40)
+
+  it('is recoverable only when an active workspace published this exact HEAD', () => {
+    expect(workspaceDeployLineage('active', oid, oid)).toBe('recoverable')
+    expect(workspaceDeployLineage('active', 'b'.repeat(40), oid)).toBe('unsynced')
+    expect(workspaceDeployLineage('active', null, oid)).toBe('unsynced')
+    expect(workspaceDeployLineage('landed', oid, oid)).toBe('inactive')
+  })
+})
+
+describe('dirtyWorktreeRefusal (deploy is commit-first)', () => {
+  it('refuses with the stable code and names BOTH escapes (commit, or --no-push)', () => {
+    const r = dirtyWorktreeRefusal('main')
+    expect(r.code).toBe('dirty_worktree')
+    expect(r.error).toContain('uncommitted changes')
+    expect(r.error).toContain('--no-push')
+  })
+
+  it('on a ws/<id> branch, points at THAT branch', () => {
+    const branch = 'ws/01hq9j8k7m6n5p4r3s2t1v0w9x'
+    const r = dirtyWorktreeRefusal(branch)
+    expect(r.error).toContain(branch)
+    expect(r.error).toContain('WIP commits are fine')
+  })
+
+  it('off a workspace branch, suggests creating one for work in progress', () => {
+    expect(dirtyWorktreeRefusal('main').error).toContain('deepspace workspace new')
+    expect(dirtyWorktreeRefusal(null).error).toContain('deepspace workspace new')
   })
 })

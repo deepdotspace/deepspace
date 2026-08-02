@@ -3,7 +3,7 @@
  *
  * Subscribe to a query with real-time updates.
  * Resolves the correct scope via ScopeRegistry (multi-scope)
- * or falls back to useRecordContext() (single-scope backward compat).
+ * or uses the nearest RecordScope context during registry transitions.
  */
 
 import { useEffect, useCallback, useRef, useMemo, useContext, useSyncExternalStore } from 'react'
@@ -38,7 +38,7 @@ export function useQuery<T = unknown>(
   status: 'loading' | 'ready' | 'error'
   error?: string
 } {
-  // Try scope resolution first (multi-scope), then fall back to RecordContext
+  // Resolve through the registry and retain the nearest scope during navigation.
   const registry = useScopeRegistry()
   const recordCtx = useContext(RecordContext)
 
@@ -59,7 +59,7 @@ export function useQuery<T = unknown>(
 
   if (!store || !sendMessage || !registerSub || !unregisterSub) {
     throw new Error(
-      `useQuery('${collection}'): No scope found. Wrap in a RecordProvider (with roomId) or a RecordScope that registers this collection.`,
+      `useQuery('${collection}'): No scope found. Wrap this hook in a RecordScope that registers the collection.`,
     )
   }
 

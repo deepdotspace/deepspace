@@ -252,7 +252,7 @@ export abstract class GameRoom<E = Record<string, unknown>> extends BaseRoom<E> 
     }
   }
 
-  protected onDisconnect(ws: WebSocket, user: UserAttachment): void {
+  protected onDisconnect(_ws: WebSocket, user: UserAttachment): void {
     const player = this.players.get(user.userId)
     if (player) {
       this.players.delete(user.userId)

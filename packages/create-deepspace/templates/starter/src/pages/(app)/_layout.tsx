@@ -21,7 +21,7 @@ import { DeepSpaceAuthProvider, useAuthStatus } from 'deepspace'
 import { RecordProvider, RecordScope } from 'deepspace'
 import Navigation from '../../components/Navigation'
 import { useToast } from '@/components/ui'
-import { APP_NAME, SCOPE_ID } from '../../constants'
+import { SCOPE_ID } from '../../constants'
 import { schemas } from '../../schemas'
 
 export default function AppLayout() {
@@ -69,7 +69,7 @@ function AuthBoot({ children }: { children: ReactNode }) {
         e.kind === 'permission' ? warning(e.title, e.detail) : error(e.title, e.detail)
       }
     >
-      <RecordScope roomId={SCOPE_ID} schemas={schemas} appId={APP_NAME}>
+      <RecordScope roomId={SCOPE_ID} schemas={schemas}>
         {children}
       </RecordScope>
     </RecordProvider>

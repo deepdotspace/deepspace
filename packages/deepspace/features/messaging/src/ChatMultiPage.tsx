@@ -27,13 +27,11 @@ import { ChannelSettingsPanel } from '../components/messaging/chat-multi/Channel
 
 interface ChatMultiPageProps {
   schemas?: CollectionSchema[]
-  appId?: string
   className?: string
 }
 
 export default function ChatMultiPage({
   schemas = messagingSchemas,
-  appId = '',
   className,
 }: ChatMultiPageProps) {
   const {
@@ -158,7 +156,7 @@ export default function ChatMultiPage({
         }`}
       >
         {activeChannelId ? (
-          <RecordScope key={activeChannelId} roomId={`chat:${activeChannelId}`} schemas={schemas} appId={appId}>
+          <RecordScope key={activeChannelId} roomId={`chat:${activeChannelId}`} schemas={schemas}>
             {/* Multi-channel header with back button on mobile */}
             <div
               data-testid="multi-chat-header"

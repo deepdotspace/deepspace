@@ -1,22 +1,15 @@
 /**
  * Storage Types
- * 
+ *
  * Type definitions for the RecordRoom storage system.
  */
 
-import type { CollectionSchema } from '../../shared/types'
+import type { ReactNode } from 'react'
+export type { Query } from '../../shared/types'
 
 // ============================================================================
-// Query Types
+// Record Types
 // ============================================================================
-
-export interface Query {
-  collection: string
-  where?: Record<string, unknown>
-  orderBy?: string
-  orderDir?: 'asc' | 'desc'
-  limit?: number
-}
 
 export interface RecordData<T = unknown> {
   recordId: string
@@ -64,7 +57,7 @@ export interface UserProfile {
 
 /**
  * Complete user data combining API profile + room-specific role.
- * 
+ *
  * Used by useUser() hook. Merges:
  * - UserProfile from API (karma, credits, isAdmin, etc.)
  * - Room role from WebSocket (derived from user-roles collection)
@@ -94,23 +87,18 @@ export interface RoomUser {
 
 export type RoomConnectionState = 'connecting' | 'connected' | 'disconnected'
 
-/**
- * Function to fetch user profile from API.
- * Uses Better Auth token from the auth module.
- */
-export type FetchUserProfile = () => Promise<UserProfile | null>
+/** A server-rejected optimistic write. */
+export interface WriteError {
+  /** RBAC denial or data validation/other rejection. */
+  kind: 'permission' | 'validation'
+  /** Short human-readable summary, safe to show end users. */
+  title: string
+  /** Longer human-readable explanation; may be empty. */
+  detail: string
+}
 
 export interface RecordProviderProps {
-  /** Room ID for backward compat. Omit for multi-scope mode (use RecordScope instead). */
-  roomId?: string
-  schemas?: CollectionSchema[]
-  wsUrl?: string
-  children: React.ReactNode
-  /**
-   * Custom function to fetch user profile.
-   * If not provided, uses Better Auth session.
-   */
-  fetchUser?: FetchUserProfile
+  children: ReactNode
   /**
    * If true, allow anonymous users to connect as read-only viewers.
    * Non-signed-in users skip the sign-in screen and connect
@@ -120,4 +108,9 @@ export interface RecordProviderProps {
   allowAnonymous?: boolean
   /** Auth token provider for WS connections. */
   getAuthToken?: () => Promise<string | null>
+  /**
+   * Receives server-rejected optimistic writes. Wire this to app UI so users
+   * see denied or invalid changes. Defaults to a deduplicated console error.
+   */
+  onWriteError?: (error: WriteError) => void
 }

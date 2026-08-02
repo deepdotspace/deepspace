@@ -16,7 +16,7 @@
  *
  * `users(N)` picks the first N test accounts from
  * `~/.deepspace/test-accounts.json` (created via
- * `deepspace test-accounts create`). `users(['Alice', 'Bob'])` picks
+ * `deepspace test accounts create`). `users(['Alice', 'Bob'])` picks
  * specific accounts by name.
  *
  * Each user gets a separate browser context with cached storageState

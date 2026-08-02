@@ -78,7 +78,10 @@ export interface UseR2FilesReturn {
    * await downloadFile('widgets/abc/f.pdf', 'report.pdf') // explicit name
    * ```
    */
-  downloadFile: (fileOrKey: R2FileInfo | string, fileName?: string) => Promise<{ success: boolean; error?: string }>
+  downloadFile: (
+    fileOrKey: R2FileInfo | string,
+    fileName?: string,
+  ) => Promise<{ success: boolean; error?: string }>
   /**
    * Read a file's contents with authentication. Returns the raw Response.
    * Unlike `downloadFile`, this does NOT trigger a browser download —
@@ -131,6 +134,11 @@ function resolveFile(fileOrKey: R2FileInfo | string): { key: string; name: strin
   return { key: fileOrKey.key, name: fileOrKey.originalName }
 }
 
+/** Encode an R2 key as URL path segments without flattening its `/` hierarchy. */
+function encodeKeyPath(key: string): string {
+  return key.split('/').map(encodeURIComponent).join('/')
+}
+
 // ============================================================================
 // Hook
 // ============================================================================
@@ -155,119 +163,146 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
     return {}
   }, [])
 
-  const upload = useCallback(async (file: File | Blob, name?: string): Promise<R2UploadResult> => {
-    setIsUploading(true)
-    try {
-      const headers = await authHeaders()
-      const formData = new FormData()
-      formData.append('file', file)
-      if (name) formData.append('name', name)
+  const upload = useCallback(
+    async (file: File | Blob, name?: string): Promise<R2UploadResult> => {
+      setIsUploading(true)
+      try {
+        const headers = await authHeaders()
+        const formData = new FormData()
+        formData.append('file', file)
+        if (name) formData.append('name', name)
 
-      const response = await fetch(`/api/files/upload?${scopeParams}`, {
-        method: 'POST',
-        headers,
-        body: formData,
-      })
-      return await response.json() as R2UploadResult
-    } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : 'Upload failed' }
-    } finally {
-      setIsUploading(false)
-    }
-  }, [scopeParams, authHeaders])
-
-  const uploadBase64 = useCallback(async (base64Data: string, name: string, mimeType?: string): Promise<R2UploadResult> => {
-    setIsUploading(true)
-    try {
-      const headers = await authHeaders()
-      const response = await fetch(`/api/files/upload?${scopeParams}`, {
-        method: 'POST',
-        headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data: base64Data, name, mimeType }),
-      })
-      return await response.json() as R2UploadResult
-    } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : 'Upload failed' }
-    } finally {
-      setIsUploading(false)
-    }
-  }, [scopeParams, authHeaders])
-
-  const deleteFile = useCallback(async (fileOrKey: R2FileInfo | string): Promise<{ success: boolean; error?: string }> => {
-    const { key } = resolveFile(fileOrKey)
-    try {
-      const headers = await authHeaders()
-      const response = await fetch(`/api/files/${key}?${scopeParams}`, { method: 'DELETE', headers })
-      return await response.json() as { success: boolean; error?: string }
-    } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : 'Delete failed' }
-    }
-  }, [scopeParams, authHeaders])
-
-  const list = useCallback(async (prefix?: string): Promise<R2FileInfo[]> => {
-    try {
-      const headers = await authHeaders()
-      const params = new URLSearchParams(scopeParams)
-      if (prefix) params.set('prefix', prefix)
-      const response = await fetch(`/api/files?${params.toString()}`, { headers })
-      const result = await response.json() as { files: R2FileInfo[] }
-      return result.files || []
-    } catch {
-      return []
-    }
-  }, [scopeParams, authHeaders])
-
-  const downloadFile = useCallback(async (fileOrKey: R2FileInfo | string, fileName?: string): Promise<{ success: boolean; error?: string }> => {
-    const { key, name: infoName } = resolveFile(fileOrKey)
-    try {
-      const headers = await authHeaders()
-      const response = await fetch(`/api/files/${key}?${scopeParams}`, { headers })
-
-      if (!response.ok) {
-        const body = await response.json().catch(() => null) as { error?: string } | null
-        return { success: false, error: body?.error ?? `Download failed (${response.status})` }
+        const response = await fetch(`/api/files/upload?${scopeParams}`, {
+          method: 'POST',
+          headers,
+          body: formData,
+        })
+        return (await response.json()) as R2UploadResult
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : 'Upload failed' }
+      } finally {
+        setIsUploading(false)
       }
+    },
+    [scopeParams, authHeaders],
+  )
 
-      // Derive a display name: explicit arg > R2FileInfo.originalName > Content-Disposition > last key segment
-      const disposition = response.headers.get('Content-Disposition')
-      const dispositionName = disposition?.match(/filename="(.+?)"/)?.[1]
-      const fallbackName = key.split('/').pop() ?? 'download'
-      const resolvedName = fileName ?? infoName ?? dispositionName ?? fallbackName
+  const uploadBase64 = useCallback(
+    async (base64Data: string, name: string, mimeType?: string): Promise<R2UploadResult> => {
+      setIsUploading(true)
+      try {
+        const headers = await authHeaders()
+        const response = await fetch(`/api/files/upload?${scopeParams}`, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data: base64Data, name, mimeType }),
+        })
+        return (await response.json()) as R2UploadResult
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : 'Upload failed' }
+      } finally {
+        setIsUploading(false)
+      }
+    },
+    [scopeParams, authHeaders],
+  )
 
-      const blob = await response.blob()
-      const blobUrl = URL.createObjectURL(blob)
+  const deleteFile = useCallback(
+    async (fileOrKey: R2FileInfo | string): Promise<{ success: boolean; error?: string }> => {
+      const { key } = resolveFile(fileOrKey)
+      try {
+        const headers = await authHeaders()
+        const response = await fetch(`/api/files/${encodeKeyPath(key)}?${scopeParams}`, {
+          method: 'DELETE',
+          headers,
+        })
+        return (await response.json()) as { success: boolean; error?: string }
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : 'Delete failed' }
+      }
+    },
+    [scopeParams, authHeaders],
+  )
 
-      const anchor = document.createElement('a')
-      anchor.href = blobUrl
-      anchor.download = resolvedName
-      document.body.appendChild(anchor)
-      anchor.click()
+  const list = useCallback(
+    async (prefix?: string): Promise<R2FileInfo[]> => {
+      try {
+        const headers = await authHeaders()
+        const params = new URLSearchParams(scopeParams)
+        if (prefix) params.set('prefix', prefix)
+        const response = await fetch(`/api/files?${params.toString()}`, { headers })
+        const result = (await response.json()) as { files: R2FileInfo[] }
+        return result.files || []
+      } catch {
+        return []
+      }
+    },
+    [scopeParams, authHeaders],
+  )
 
-      // Clean up
-      document.body.removeChild(anchor)
-      URL.revokeObjectURL(blobUrl)
+  const downloadFile = useCallback(
+    async (
+      fileOrKey: R2FileInfo | string,
+      fileName?: string,
+    ): Promise<{ success: boolean; error?: string }> => {
+      const { key, name: infoName } = resolveFile(fileOrKey)
+      try {
+        const headers = await authHeaders()
+        const response = await fetch(`/api/files/${encodeKeyPath(key)}?${scopeParams}`, { headers })
 
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : 'Download failed' }
-    }
-  }, [scopeParams, authHeaders])
+        if (!response.ok) {
+          const body = (await response.json().catch(() => null)) as { error?: string } | null
+          return { success: false, error: body?.error ?? `Download failed (${response.status})` }
+        }
 
-  const readFile = useCallback(async (fileOrKey: R2FileInfo | string): Promise<Response> => {
-    const { key } = resolveFile(fileOrKey)
-    const headers = await authHeaders()
-    const response = await fetch(`/api/files/${key}?${scopeParams}`, { headers })
-    if (!response.ok) {
-      const body = await response.text().catch(() => '')
-      throw new Error(`Failed to read file (${response.status}): ${body}`)
-    }
-    return response
-  }, [scopeParams, authHeaders])
+        // Derive a display name: explicit arg > R2FileInfo.originalName > Content-Disposition > last key segment
+        const disposition = response.headers.get('Content-Disposition')
+        const dispositionName = disposition?.match(/filename="(.+?)"/)?.[1]
+        const fallbackName = key.split('/').pop() ?? 'download'
+        const resolvedName = fileName ?? infoName ?? dispositionName ?? fallbackName
 
-  const getUrl = useCallback((fileOrKey: R2FileInfo | string): string => {
-    const { key } = resolveFile(fileOrKey)
-    return `/api/files/${key}?${scopeParams}`
-  }, [scopeParams])
+        const blob = await response.blob()
+        const blobUrl = URL.createObjectURL(blob)
+
+        const anchor = document.createElement('a')
+        anchor.href = blobUrl
+        anchor.download = resolvedName
+        document.body.appendChild(anchor)
+        anchor.click()
+
+        // Clean up
+        document.body.removeChild(anchor)
+        URL.revokeObjectURL(blobUrl)
+
+        return { success: true }
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : 'Download failed' }
+      }
+    },
+    [scopeParams, authHeaders],
+  )
+
+  const readFile = useCallback(
+    async (fileOrKey: R2FileInfo | string): Promise<Response> => {
+      const { key } = resolveFile(fileOrKey)
+      const headers = await authHeaders()
+      const response = await fetch(`/api/files/${encodeKeyPath(key)}?${scopeParams}`, { headers })
+      if (!response.ok) {
+        const body = await response.text().catch(() => '')
+        throw new Error(`Failed to read file (${response.status}): ${body}`)
+      }
+      return response
+    },
+    [scopeParams, authHeaders],
+  )
+
+  const getUrl = useCallback(
+    (fileOrKey: R2FileInfo | string): string => {
+      const { key } = resolveFile(fileOrKey)
+      return `/api/files/${encodeKeyPath(key)}?${scopeParams}`
+    },
+    [scopeParams],
+  )
 
   return { upload, uploadBase64, deleteFile, downloadFile, readFile, list, getUrl, isUploading }
 }

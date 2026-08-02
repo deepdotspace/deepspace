@@ -4,7 +4,7 @@
  * Real-time collaborative editing using Yjs.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react'
 import * as Y from 'yjs'
 import { useRecordContext } from '../context'
 import { debugLog } from '../../debug'
@@ -62,22 +62,29 @@ export function useYjsField(
   const [canWrite, setCanWrite] = useState(false)
   const [updateCount, setUpdateCount] = useState(0)
   const canWriteRef = useRef(false)
-
-  // Stable Yjs doc instance
-  const docRef = useRef<Y.Doc | null>(null)
-  if (!docRef.current) {
-    docRef.current = new Y.Doc()
-  }
-  const doc = docRef.current
-
-  // Stable awareness instance (one per doc)
-  const awarenessRef = useRef<Awareness | null>(null)
-  if (!awarenessRef.current) {
-    awarenessRef.current = new Awareness(doc)
-  }
-  const awareness = awarenessRef.current
-
   const docKey = `${collection}:${recordId}:${fieldName}`
+
+  const { doc, awareness } = useMemo(() => {
+    const nextDoc = new Y.Doc()
+    return { doc: nextDoc, awareness: new Awareness(nextDoc) }
+    // The wire-level field key is the Yjs document identity. Reusing either
+    // resource across keys can answer B's sync handshake with A's state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- docKey is the Yjs document identity
+  }, [docKey])
+
+  useEffect(() => {
+    return () => {
+      awareness.destroy()
+      doc.destroy()
+    }
+  }, [awareness, doc])
+
+  useLayoutEffect(() => {
+    setSynced(false)
+    setCanWrite(false)
+    setUpdateCount(0)
+    canWriteRef.current = false
+  }, [docKey])
 
   // Keep ref in sync with state for use in callbacks
   useEffect(() => {
@@ -258,38 +265,32 @@ export function useYjsText(
   fieldName: string,
 ): UseYjsTextResult {
   const { doc, synced, canWrite, updateCount } = useYjsField(collection, recordId, fieldName)
-  const [text, setTextState] = useState('')
-  const yTextRef = useRef<Y.Text | null>(null)
-  const isLocalUpdateRef = useRef(false)
+  const yText = useMemo(() => doc.getText(fieldName), [doc, fieldName])
+  const [textState, setTextState] = useState(() => ({ doc, value: '' }))
+  const text = textState.doc === doc ? textState.value : ''
 
-  // Get Y.Text instance once doc is ready
   useEffect(() => {
-    yTextRef.current = doc.getText(fieldName)
-  }, [doc, fieldName])
+    if (!synced) return
+    const value = yText.toString()
+    setTextState((current) =>
+      current.doc === doc && current.value === value ? current : { doc, value },
+    )
+  }, [doc, yText, synced, updateCount])
 
-  // Sync Y.Text to local state when doc updates
-  useEffect(() => {
-    if (yTextRef.current && synced && !isLocalUpdateRef.current) {
-      setTextState(yTextRef.current.toString())
-    }
-    isLocalUpdateRef.current = false
-  }, [synced, updateCount])
-
-  // setText function that updates both local state and Yjs
   const setText = useCallback(
     (value: string) => {
-      setTextState(value)
+      setTextState((current) =>
+        current.doc === doc && current.value === value ? current : { doc, value },
+      )
 
-      if (yTextRef.current && canWrite) {
-        isLocalUpdateRef.current = true
+      if (canWrite) {
         doc.transact(() => {
-          const yText = yTextRef.current!
           yText.delete(0, yText.length)
           yText.insert(0, value)
         })
       }
     },
-    [doc, canWrite],
+    [doc, yText, canWrite],
   )
 
   return { text, setText, synced, canWrite }

@@ -1,7 +1,7 @@
 /**
  * Test-account identification, shared by every platform worker.
  *
- * Test accounts (created via `deepspace test-accounts`) are real Better Auth
+ * Test accounts (created via `deepspace test accounts`) are real Better Auth
  * users demarcated three ways, and a caller may present as any of them
  * depending on where the check runs:
  *  - their email always ends with @deepspace.test (enforced at creation)

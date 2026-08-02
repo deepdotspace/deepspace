@@ -1,3 +1,4 @@
+import { Refusal } from './command'
 /**
  * Shared dev-server port resolution for `dev`, `test`, and `kill`.
  *
@@ -13,7 +14,7 @@ export const DEFAULT_PORT = 5173
 /**
  * Whether `port` is free to bind on `host`. Used by `dev` to pre-probe before
  * spawning vite (which binds with `--host`, i.e. 0.0.0.0), so a busy port gets
- * a friendly `deepspace kill` / `--port` remedy instead of vite's raw
+ * a friendly `deepspace dev kill` / `--port` remedy instead of vite's raw
  * EADDRINUSE stack (DEV-5). Best-effort: a bind race after the probe still
  * surfaces vite's own error, but the common "server already running" case is
  * caught cleanly.
@@ -32,8 +33,11 @@ export function resolvePort(arg?: string): number {
   if (!raw) return DEFAULT_PORT
   const n = Number(raw)
   if (!Number.isInteger(n) || n < 1 || n > 65535) {
-    console.error(`Invalid port: ${raw}. Must be an integer between 1 and 65535.`)
-    process.exit(1)
+    // Throw, never process.exit: these helpers run inside runtime command
+    // bodies, and an exit skips the runtime's envelope — a --json caller
+    // would get code 1 with an EMPTY stdout, the exact hole the runtime
+    // exists to close.
+    throw new Refusal(`Invalid port: ${raw}. Must be an integer between 1 and 65535.`, 'invalid_port')
   }
   return n
 }

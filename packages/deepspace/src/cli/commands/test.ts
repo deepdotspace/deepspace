@@ -1,15 +1,15 @@
 /**
- * deepspace test [suite] [--port N]
+ * deepspace test run [suite] [--port N]
  *
  * Runs tests for a DeepSpace app. Always uses dev workers.
  *
- *   deepspace test              # smoke + api (quick check)
- *   deepspace test smoke        # smoke tests only
- *   deepspace test api          # API tests only
- *   deepspace test e2e          # all Playwright tests
- *   deepspace test unit         # vitest unit tests
- *   deepspace test all          # everything
- *   deepspace test <file>       # run specific test file
+ *   deepspace test run              # smoke + api (quick check)
+ *   deepspace test run smoke        # smoke tests only
+ *   deepspace test run api          # API tests only
+ *   deepspace test run e2e          # all Playwright tests
+ *   deepspace test run unit         # vitest unit tests
+ *   deepspace test run all          # everything
+ *   deepspace test run <file>       # run specific test file
  *
  * Port is `--port` > $DEEPSPACE_PORT > 5173 — except inside a Claude Code
  * worktree, where (unless --port was passed) the worktree's own port is used
@@ -18,15 +18,23 @@
  * webServer both bind to the same address. Pass a different port per app to
  * run multiple apps
  * (and test suites) in parallel.
+ *
+ * Defined with the command runtime (lib/command.ts). The suite runner streams
+ * playwright/vitest output through inherited stdio, so under `--json` that
+ * text still scrolls past and the envelope is the LAST line rather than the
+ * only one — buffering a test run to keep stdout pristine would cost the live
+ * feedback the command exists for. The suite's own exit code collapses to the
+ * contract's 0/1.
  */
 
-import { defineCommand } from 'citty'
 import { readAppId } from '../lib/app-identity'
 import { resolve } from 'node:path'
 import { sync as spawnSync } from 'cross-spawn'
 import { ensureToken } from '../auth'
-import { findAppDir, findChildApps, resolveWorktreePort } from '../lib/app-context'
-import { PLATFORM_URLS, writeDevVars } from '../env'
+import { findAppDir, findChildApps } from '../lib/app-context'
+import { resolveWorktreePort } from '../lib/launch-config'
+import { PLATFORM_URLS } from '../env'
+import { writeDevVars } from '../lib/dev-vars'
 import { decodeJwtPayload } from '../jwt'
 import { ensureInstallReady } from '../lib/install-status'
 import { ensurePlaywright } from '../lib/playwright'
@@ -38,10 +46,13 @@ import {
   wranglerViteEnv,
   type PreparedWranglerEnvConfig,
 } from '../lib/wrangler-env'
+import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
+// Same refusal text `dev` uses — one source so the two can't drift.
+import { noAppDirMessage } from './dev'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
-export default defineCommand({
+export default defineDeepspaceCommand({
   meta: {
     name: 'test',
     description: 'Run tests for your DeepSpace app',
@@ -66,24 +77,19 @@ export default defineCommand({
     },
   },
   async run({ args }) {
-    preflightNodeVersion('test')
-    const suite = args.suite ?? 'default'
+    const say = (line: string) => {
+      if (!args.json) console.log(line)
+    }
+    preflightNodeVersion('test run')
+    const suite = (args.suite as string | undefined) ?? 'default'
     const wranglerEnv =
       typeof args.env === 'string' && args.env.trim() ? args.env.trim() : undefined
 
-    // Resolve the app root by walking up from cwd, matching `deepspace dev`.
+    // Resolve the app root by walking up from cwd, matching `deepspace dev start`.
     const start = resolve('.')
     const appDir = findAppDir(start)
     if (!appDir) {
-      console.error(`No wrangler.toml found at or above ${start}.`)
-      const children = findChildApps(start)
-      if (children.length > 0) {
-        console.error('Did you mean to run inside one of these app directories?')
-        for (const c of children) console.error(`  cd ${c}`)
-      } else {
-        console.error('Run from a DeepSpace app directory (one containing wrangler.toml).')
-      }
-      process.exit(1)
+      throw new Refusal(noAppDirMessage(start, findChildApps(start)), 'no_app_dir')
     }
 
     // Inside a Claude Code worktree the default port must match the
@@ -91,9 +97,9 @@ export default defineCommand({
     // would otherwise attach to the MAIN repo's server and silently test
     // stale code. Explicit --port still wins.
     const worktreePort = args.port ? null : resolveWorktreePort(appDir)
-    const port = worktreePort ?? resolvePort(args.port)
+    const port = worktreePort ?? resolvePort(args.port as string | undefined)
     if (worktreePort && process.env.DEEPSPACE_PORT) {
-      console.log(
+      say(
         `Ignoring DEEPSPACE_PORT=${process.env.DEEPSPACE_PORT} inside a worktree — ` +
           `targeting per-worktree port ${port}. Pass --port to override.`,
       )
@@ -112,13 +118,16 @@ export default defineCommand({
     } catch (err) {
       // Surface ensureToken's canonical message ("Not logged in. Run `deepspace
       // login` first." / "Session expired…") instead of a bespoke one (ONB-5).
-      console.error(err instanceof Error ? err.message : 'Not logged in. Run `deepspace login` first.')
-      process.exit(1)
+      throw new Refusal(
+        err instanceof Error ? err.message : 'Not logged in. Run `deepspace auth login` first.',
+        'not_authenticated',
+        { action: cliAction('deepspace', 'auth', 'login') },
+      )
     }
 
     // Refresh the app-store secrets cache (config = wrangler env, or 'prd').
     // A repo without a DEEPSPACE_APP_ID hasn't been initialized — writeDevVars
-    // below throws with the `deepspace init` pointer, so skip the pull.
+    // below throws with the `deepspace app init` pointer, so skip the pull.
     let generatedSecretsCache: string | undefined
     const appIdForSecrets = readAppId(appDir, wranglerEnv)
     if (appIdForSecrets) {
@@ -126,13 +135,13 @@ export default defineCommand({
         const refreshed = await refreshSecretsCache(DEPLOY_URL, token, appIdForSecrets, wranglerEnv)
         if (refreshed) {
           generatedSecretsCache = refreshed.rendered
-          console.log(refreshed.summary)
+          say(refreshed.summary)
         }
       } catch (err: unknown) {
-        console.error(
+        throw new Refusal(
           `Failed to refresh app secrets: ${err instanceof Error ? err.message : String(err)}`,
+          'secrets_refresh_failed',
         )
-        process.exit(1)
       }
     }
 
@@ -192,13 +201,22 @@ export default defineCommand({
         if (suite.endsWith('.spec.ts')) {
           exitCode = runPlaywright(appDir, [suite], port, wranglerEnv, sharedDevVarsCache)
         } else {
-          console.error(`Unknown test suite: ${suite}`)
-          console.error('Available: smoke, api, e2e, unit, all')
-          process.exit(1)
+          throw new Refusal(
+            `Unknown test suite: ${suite}\nAvailable: smoke, api, e2e, unit, all`,
+            'unknown_suite',
+          )
         }
     }
 
-    process.exit(exitCode)
+    // The runner already printed every failure in detail; the refusal adds the
+    // slug and the non-zero exit. Playwright's own code collapses to 1 — the
+    // contract reserves 0/1/2 and every non-zero code here means "tests failed".
+    if (exitCode !== 0) {
+      throw new Refusal(`Test suite '${suite}' failed (exit ${exitCode}).`, 'tests_failed', {
+        extra: { suite, port, exitCode },
+      })
+    }
+    return { data: { suite, port, appDir, wranglerEnv: wranglerEnv ?? null } }
   },
 })
 

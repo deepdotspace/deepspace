@@ -2,7 +2,7 @@
  * Tools API Types and Definitions
  * 
  * MCP-like interface for agent tool calls.
- * Built-in tools for storage and backup operations.
+ * Built-in tools for records, schemas, users, and Yjs documents.
  */
 
 export interface ToolSchema {
@@ -59,7 +59,7 @@ export function applyAiToolDefaults(
 }
 
 /**
- * Built-in tool definitions for storage, record, schema, user, and backup operations
+ * Built-in tool definitions for record, schema, user, and Yjs operations.
  */
 export const BUILT_IN_TOOLS: ToolSchema[] = [
   // Record tools (structured collections with RBAC)
@@ -137,72 +137,6 @@ export const BUILT_IN_TOOLS: ToolSchema[] = [
     description: 'List all users in this room',
     params: {}
   },
-  // Storage tools (legacy key-value)
-  {
-    name: 'storage.list',
-    description: 'List all keys in a storage scope',
-    params: {
-      scope: { type: 'string', description: 'Storage scope: global, files, user, userFiles', required: true },
-      prefix: { type: 'string', description: 'Optional key prefix filter', required: false },
-      userId: { type: 'string', description: 'User ID (required for user/userFiles scopes)', required: false },
-    }
-  },
-  {
-    name: 'storage.read',
-    description: 'Read one or more keys from storage',
-    params: {
-      scope: { type: 'string', description: 'Storage scope: global, files, user, userFiles', required: true },
-      keys: { type: 'array', description: 'Array of keys to read (or single key string)', required: true },
-      userId: { type: 'string', description: 'User ID (required for user/userFiles scopes)', required: false },
-    }
-  },
-  {
-    name: 'storage.write',
-    description: 'Write one or more key-value pairs to storage (batch supported)',
-    params: {
-      scope: { type: 'string', description: 'Storage scope: global, files, user, userFiles', required: true },
-      data: { type: 'object', description: 'Object with key-value pairs to write', required: true },
-      userId: { type: 'string', description: 'User ID (required for user/userFiles scopes)', required: false },
-    }
-  },
-  {
-    name: 'storage.delete',
-    description: 'Delete one or more keys from storage',
-    params: {
-      scope: { type: 'string', description: 'Storage scope: global, files, user, userFiles', required: true },
-      keys: { type: 'array', description: 'Array of keys to delete', required: true },
-      userId: { type: 'string', description: 'User ID (required for user/userFiles scopes)', required: false },
-    }
-  },
-  // Backup tools
-  {
-    name: 'backup.create',
-    description: 'Create a backup of the current Yjs document state to R2',
-    params: {
-      description: { type: 'string', description: 'Optional description for the backup', required: false },
-    }
-  },
-  {
-    name: 'backup.list',
-    description: 'List all available backups',
-    params: {
-      limit: { type: 'number', description: 'Maximum number of backups to return (default: 50)', required: false },
-    }
-  },
-  {
-    name: 'backup.restore',
-    description: 'Restore the Yjs document from a backup',
-    params: {
-      backupId: { type: 'string', description: 'The backup ID to restore from', required: true },
-    }
-  },
-  {
-    name: 'backup.delete',
-    description: 'Delete a specific backup',
-    params: {
-      backupId: { type: 'string', description: 'The backup ID to delete', required: true },
-    }
-  },
   // Yjs tools (collaborative document access)
   {
     name: 'yjs.list',
@@ -229,4 +163,3 @@ export const BUILT_IN_TOOLS: ToolSchema[] = [
     }
   },
 ]
-

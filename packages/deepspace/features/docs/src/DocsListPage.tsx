@@ -25,17 +25,13 @@ import {
   Pencil,
 } from 'lucide-react'
 import { LibrarySidebar, readSidebarCollapsed, writeSidebarCollapsed } from './LibrarySidebar'
-import { getFavorites, saveFavorites } from './docs-favorites'
-import type { DocFolderFields, LibraryNavSelection } from './docs-library-types'
+import {
+  parseDocsIdList,
+  type DocFolderFields,
+  type DocsDocumentFields,
+  type LibraryNavSelection,
+} from './docs-library-types'
 import './docs-ui.css'
-
-interface DocumentFields {
-  title: string
-  ownerId: string
-  collaborators?: string
-  editors?: string
-  folderId?: string
-}
 
 type SortOption = 'lastEdited' | 'titleAZ' | 'titleZA'
 type ViewMode = 'grid' | 'list'
@@ -47,6 +43,24 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 ]
 
 const UNTITLED = 'Untitled Document'
+const FAVORITES_KEY = 'deepspace-docs-favorites'
+
+function readFavorites(): Set<string> {
+  try {
+    const stored = localStorage.getItem(FAVORITES_KEY)
+    return new Set(parseDocsIdList(stored ?? undefined))
+  } catch {
+    return new Set()
+  }
+}
+
+function writeFavorites(favorites: Set<string>): void {
+  try {
+    localStorage.setItem(FAVORITES_KEY, JSON.stringify([...favorites]))
+  } catch {
+    // Favorites are local convenience state; storage denial must not break UI state.
+  }
+}
 
 function greetingForTime(): string {
   const h = new Date().getHours()
@@ -63,16 +77,6 @@ function formatDate(iso: string): string {
   })
 }
 
-function parseIdList(raw: string | undefined): string[] {
-  if (!raw) return []
-  try {
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []
-  } catch {
-    return []
-  }
-}
-
 export default function DocsListPage() {
   const { user } = useUser()
   const navigate = useNavigate()
@@ -83,7 +87,7 @@ export default function DocsListPage() {
   const [sortBy, setSortBy] = useState<SortOption>('lastEdited')
   const [viewMode, setViewMode] = useState<ViewMode>('grid')
   const [sortOpen, setSortOpen] = useState(false)
-  const [favorites, setFavorites] = useState<Set<string>>(() => getFavorites())
+  const [favorites, setFavorites] = useState<Set<string>>(readFavorites)
   const [libraryNav, setLibraryNav] = useState<LibraryNavSelection>({ kind: 'all' })
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed)
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -93,11 +97,11 @@ export default function DocsListPage() {
   const [moveMenuId, setMoveMenuId] = useState<string | null>(null)
   const [actionsMenuId, setActionsMenuId] = useState<string | null>(null)
 
-  const { records: documents, status } = useQuery<DocumentFields>('documents', {
+  const { records: documents, status } = useQuery<DocsDocumentFields>('documents', {
     orderBy: 'createdAt',
     orderDir: 'desc',
   })
-  const { create, remove, put } = useMutations<DocumentFields>('documents')
+  const { create, remove, put } = useMutations<DocsDocumentFields>('documents')
 
   const { records: folderRecords } = useQuery<DocFolderFields>('doc_folders', {
     orderBy: 'createdAt',
@@ -128,16 +132,16 @@ export default function DocsListPage() {
   const displayFirstName = user?.name?.trim().split(/\s+/)[0] ?? 'there'
 
   const isOwnedDocument = useCallback(
-    (d: RecordData<DocumentFields>) => d.data.ownerId === user?.id,
+    (d: RecordData<DocsDocumentFields>) => d.data.ownerId === user?.id,
     [user?.id],
   )
 
   const isSharedWithCurrentUser = useCallback(
-    (d: RecordData<DocumentFields>) =>
+    (d: RecordData<DocsDocumentFields>) =>
       Boolean(
         user?.id &&
-          d.data.ownerId !== user.id &&
-          parseIdList(d.data.collaborators).includes(user.id),
+        d.data.ownerId !== user.id &&
+        parseDocsIdList(d.data.collaborators).includes(user.id),
       ),
     [user?.id],
   )
@@ -160,7 +164,7 @@ export default function DocsListPage() {
   }, [libraryNav, sortedFolders])
 
   const matchesNav = useCallback(
-    (d: RecordData<DocumentFields>) => {
+    (d: RecordData<DocsDocumentFields>) => {
       const fid = d.data.folderId ?? ''
       if (libraryNav.kind === 'all') return isOwnedDocument(d)
       if (libraryNav.kind === 'shared') return isSharedWithCurrentUser(d)
@@ -205,7 +209,7 @@ export default function DocsListPage() {
       const next = new Set(prev)
       if (next.has(contentId)) next.delete(contentId)
       else next.add(contentId)
-      saveFavorites(next)
+      writeFavorites(next)
       return next
     })
   }, [])

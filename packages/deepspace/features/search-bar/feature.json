@@ -3,8 +3,12 @@
   "name": "Search Bar",
   "category": "data",
   "description": "Drop-in InlineSearch/SearchOverlay for app search; use instead of raw SearchInput when showing or filtering results",
-  "details": "Use this before hand-rolling search over local arrays, feeds, tables, pickers, or RecordRoom records. Installs a component-only search toolkit with lightweight InlineSearch + useSearchIndex for simple in-page filtering, plus SearchOverlay for global/command search, keyboard navigation, grouped results, loading/error/empty states, click selection, optional Enter-to-submit query navigation, opt-in match highlighting, overlay-only recent result and query searches, and a debounced async-search helper. It does not add a route or demo page; import the installed component into the page you are building.",
+  "details": "Use this before hand-rolling search over local arrays, feeds, tables, pickers, or RecordRoom records. Installs focused UI and search-model modules for inline or overlay search, ranking, keyboard navigation, grouped results, async search, highlighting, and optional recent searches. It does not add a route or demo page; import the installed modules into the page you are building.",
   "files": [
+    {
+      "src": "src/search-model.ts",
+      "dest": "src/components/search/search-model.ts"
+    },
     {
       "src": "src/SearchOverlay.tsx",
       "dest": "src/components/search/SearchOverlay.tsx"
@@ -12,7 +16,8 @@
   ],
   "requires": [],
   "instructions": [
-    "Installs src/components/search/SearchOverlay.tsx (exports InlineSearch, SearchOverlay, and useSearchIndex). It adds no route — import what you need into your own page.",
+    "Installs src/components/search/SearchOverlay.tsx for UI and src/components/search/search-model.ts for ranking, async search, highlighting, and recent-history behavior. It adds no route.",
+    "Import InlineSearch, SearchOverlay, or SearchResultList from @/components/search/SearchOverlay; import useSearchIndex, useAsyncSearch, or getHighlightedParts from @/components/search/search-model.",
     "Use InlineSearch + useSearchIndex for in-page filtering (lists, feeds, tables, pickers, RecordRoom records); use SearchOverlay for global/command-style search.",
     "Use the raw SearchInput primitive only for a bare input with no result list, ranking, keyboard navigation, or selection handling."
   ],
@@ -31,5 +36,5 @@
     "Use mocked or debounced async providers during prototyping before wiring live integration calls.",
     "For privacy-sensitive search contexts, set showRecentSearches={false} or use a scoped recentStorageKey per page or account context."
   ],
-  "example": "import { InlineSearch, useSearchIndex } from './components/search/SearchOverlay'\n\nconst results = useSearchIndex({\n  items: posts,\n  query,\n  getText: (post) => [post.title, post.body, post.authorName],\n})\n\n<InlineSearch\n  query={query}\n  onQueryChange={setQuery}\n  items={results.map((post) => ({\n    id: post.id,\n    title: post.title,\n    subtitle: post.authorName,\n    description: post.body,\n  }))}\n  onSelect={(item) => openPost(item.id)}\n  placeholder=\"Search posts...\"\n/>"
+  "example": "import { InlineSearch } from '@/components/search/SearchOverlay'\nimport { useSearchIndex } from '@/components/search/search-model'\n\nconst results = useSearchIndex({\n  items: posts,\n  query,\n  getText: (post) => [post.title, post.body, post.authorName],\n})\n\n<InlineSearch\n  query={query}\n  onQueryChange={setQuery}\n  items={results.map((post) => ({\n    id: post.id,\n    title: post.title,\n    subtitle: post.authorName,\n    description: post.body,\n  }))}\n  onSelect={(item) => openPost(item.id)}\n  placeholder=\"Search posts...\"\n/>"
 }

@@ -1,6 +1,6 @@
 /**
  * RecordSocket — the ONE WebSocket engine behind both providers
- * (context.tsx's backward-compat RecordProvider and RecordScope).
+ * used by RecordScope.
  *
  * Framework-free: React never appears here. The providers own React state
  * and wire it up via the listener callbacks; everything race-sensitive —
@@ -38,7 +38,7 @@ export interface RecordSocketListeners {
   onReady(ready: boolean): void
   onRole(role: string | null): void
   onUsers(users: RoomUser[]): void
-  /** MSG.LIST_SCHEMAS — optional; the compat provider has no schemas surface. */
+  /** MSG.LIST_SCHEMAS — optional for scopes that support schema discovery. */
   onSchemas?(schemas: CollectionSchema[]): void
   onPermissionError?(title: string, detail: string): void
   onValidationError?(title: string, detail: string): void
@@ -56,8 +56,6 @@ export interface RecordSocketConfig {
   wsUrl?: string
   /** Default '/ws'. */
   wsPathPrefix?: string
-  /** Extra query params (e.g. { appId }). The token param is added by connect. */
-  extraParams?: Record<string, string>
   /** Diagnostics hook (wsLog/debugLog per provider). */
   log?: (event: string, detail?: unknown) => void
   /** Test injection. Defaults to globalThis.WebSocket. */
@@ -144,10 +142,6 @@ export class RecordSocket {
     // bail so we don't open (and leak) a socket the caller already tore
     // down, whose onclose would then schedule a zombie reconnect.
     if (this.connectToken !== myToken || this.destroyed) return
-
-    for (const [key, value] of Object.entries(config.extraParams ?? {})) {
-      params.set(key, value)
-    }
 
     // Only an explicit tag overwrites the remembered identity — a bare
     // connect() (visibility retry, scheduled reconnect) keeps the last one.

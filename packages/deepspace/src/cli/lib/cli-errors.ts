@@ -11,6 +11,44 @@
  */
 
 import type { CommandDef } from 'citty'
+import { stopActiveSpinner } from './spinner'
+import { withSlug } from './output'
+import { ApiError } from './api'
+
+/**
+ * A client-side or precondition failure that carries a machine `code`, so a
+ * thrown error (a blank `--app`, "not logged in", an empty repo) reads in
+ * `--json` exactly like a server ApiError — `{ ok:false, code, error }` — rather
+ * than a bare message. Reuses no HTTP semantics (unlike ApiError). Most instances
+ * are pure client-side validation that never touch the network; a few are
+ * preconditions checked before the real work (e.g. an expired session, detected
+ * after a refresh attempt) — the shared contract is only "carries a stable code".
+ */
+export class InputError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+  ) {
+    super(message)
+  }
+}
+
+/**
+ * The machine `code` slug an error carries, if any — an {@link ApiError} (server
+ * failure) or an {@link InputError} (client-side validation). Lets a command's
+ * `--json` catch surface `code` uniformly without knowing the concrete type.
+ * Deliberately narrow: it does NOT read arbitrary `.code` properties (a Node
+ * `ENOENT` fs error must not leak into the machine contract as a `code`).
+ */
+export function errorCode(err: unknown): string | undefined {
+  if (err instanceof ApiError || err instanceof InputError) return err.code
+  // GitError (raw git operation/transport failure) — duck-typed by `name` to
+  // avoid a cli-errors↔git import cycle. Give it a generic `git_error` (or its
+  // own slug, if set) so a --json caller can branch on "a git op failed"
+  // instead of scraping the fatal-… prose.
+  if (err instanceof Error && err.name === 'GitError') return (err as { code?: string }).code ?? 'git_error'
+  return undefined
+}
 
 /**
  * API error slugs that genuinely confuse people → what to tell them. Slugs
@@ -20,15 +58,17 @@ import type { CommandDef } from 'citty'
 const API_ERROR_HINTS: Record<string, string> = {
   not_app_owner: 'Only the app owner can do this.',
   app_not_found:
-    'App not found. Check the app id — the DEEPSPACE_APP_ID value in wrangler.toml, usually ' +
-    '`app_…` (a legacy app\'s id is its name). List your apps with `deepspace apps`. ' +
-    '(`domain` commands take the deployed app *name* instead.)',
+    'App not found on the service this command asked. Check the app id — the DEEPSPACE_APP_ID ' +
+    'value in wrangler.toml, usually `app_…` (a legacy app\'s id is its name); list your apps ' +
+    'with `deepspace app list`. If you are overriding DEEPSPACE_DEPLOY_URL (staging), note that ' +
+    'account/collaborator commands go to the PLATFORM API — an app registered only on a staging ' +
+    'deploy service is unknown there. (`domain` commands take the deployed app *name* instead.)',
   not_app_owner_or_collaborator: 'You must be the app owner or a collaborator to do this.',
   test_account_cannot_be_collaborator:
     'Test accounts cannot be added as collaborators. Use a real DeepSpace account.',
   user_not_found:
     'No DeepSpace user with that email. They need to log in to DeepSpace at least once ' +
-    '(`deepspace login`, or sign in to any app) before they can be referenced by email.',
+    '(`deepspace auth login`, or sign in to any app) before they can be referenced by email.',
   insufficient_credits:
     'Out of credits. Inviting a new collaborator by email sends them a transactional ' +
     'email billed to your account — top up your credits and try again.',
@@ -39,19 +79,32 @@ const API_ERROR_HINTS: Record<string, string> = {
 /** Exported for tests. One clean message for an escaped error. */
 export function formatCliError(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err)
-  // Preferred: the platform returns { error: <sentence>, code: <slug> } and
-  // apiFetch throws a typed ApiError carrying the code. Fallback: legacy
-  // helpers throw `API <path> (<status>): <slug>` with the slug in the text.
-  const code = (err as { code?: unknown })?.code
-  const slug =
-    typeof code === 'string' ? code : /^API \S+ \(\d+\): ([a-z0-9_]+)$/.exec(message)?.[1]
+  // The platform returns { error: <sentence>, code: <slug> }, and apiFetch
+  // preserves that code on a typed error. Never infer machine state from prose.
+  const slug = errorCode(err)
   const hint = slug ? API_ERROR_HINTS[slug] : undefined
   // The server sentence and the hint can say the same thing — don't stutter.
   return hint && !message.includes(hint) ? `${message}\n${hint}` : message
 }
 
-function renderCliError(err: unknown): never {
-  console.error(formatCliError(err))
+export function renderCliError(err: unknown): never {
+  // A command may throw with its progress spinner still live; stop it before
+  // the process.exit below so the exit can't abort on Windows (see spinner.ts).
+  stopActiveSpinner()
+  const message = formatCliError(err)
+  const slug = errorCode(err)
+  // `--json` callers get the envelope every other refusal path emits. Without
+  // this, an error that ESCAPES a command's own try/catch printed prose to
+  // stderr and left stdout EMPTY — a machine consumer saw a non-zero exit with
+  // nothing to parse. Commands that catch their own errors are unaffected;
+  // this is the fallback for the ~15 that don't.
+  if (process.argv.includes('--json')) {
+    console.log(JSON.stringify({ ok: false, ...(slug ? { code: slug } : {}), error: message }))
+    process.exit(1)
+  }
+  // Human path: the last line carries the machine slug, per the output
+  // contract (lib/output.ts).
+  console.error(slug ? withSlug(message, slug) : message)
   if (process.env.DEBUG) {
     // ApiError/secretsApi keep the internal REST path off the message; show it here.
     const { apiPath, status } = err as { apiPath?: string; status?: number }

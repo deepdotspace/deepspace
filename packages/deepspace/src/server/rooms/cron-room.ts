@@ -19,24 +19,13 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import { BaseRoom, type UserAttachment } from './base-room'
+import { nextCronFire, validateTask, type CronTask } from './cron-schedule'
 import { MSG } from '../../shared/protocol/constants'
 import { ROLES } from '../../shared/roles'
 
 // ============================================================================
 // Types
 // ============================================================================
-
-export interface CronTask {
-  name: string
-  /** Interval in minutes (interval mode) — mutually exclusive with `schedule`. */
-  intervalMinutes?: number
-  /** 5-field cron expression (cron mode) — requires `timezone`. */
-  schedule?: string
-  /** IANA timezone string (e.g. "America/New_York"). Required with `schedule`. */
-  timezone?: string
-  /** Whether the task starts paused. */
-  paused?: boolean
-}
 
 export interface CronRoomConfig {
   tasks: CronTask[]
@@ -73,11 +62,7 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
   private tasks: CronTask[]
   private initialized = false
 
-  constructor(
-    state: DurableObjectState,
-    env: unknown,
-    config: CronRoomConfig
-  ) {
+  constructor(state: DurableObjectState, env: unknown, config: CronRoomConfig) {
     super(state, env)
     // Validate at construction time — bad configs should never reach DB.
     this.tasks = config.tasks.map(validateTask)
@@ -116,9 +101,9 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
     // on existing ones (so editing src/cron.ts and re-deploying picks up the
     // change without a manual reset). Preserve last_run_at / paused.
     for (const task of this.tasks) {
-      const existing = this.sql.exec(
-        `SELECT name FROM cron_tasks WHERE name = ?`, task.name
-      ).toArray()
+      const existing = this.sql
+        .exec(`SELECT name FROM cron_tasks WHERE name = ?`, task.name)
+        .toArray()
       if (existing.length === 0) {
         this.sql.exec(
           `INSERT INTO cron_tasks (name, interval_minutes, schedule, timezone, paused)
@@ -143,7 +128,7 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
     }
 
     // Remove tasks no longer in config
-    const configNames = new Set(this.tasks.map(t => t.name))
+    const configNames = new Set(this.tasks.map((t) => t.name))
     const dbTasks = this.sql.exec(`SELECT name FROM cron_tasks`).toArray()
     for (const row of dbTasks) {
       if (!configNames.has((row as { name: string }).name)) {
@@ -192,7 +177,7 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
   protected async onMessage(
     ws: WebSocket,
     user: UserAttachment,
-    message: { type: string; [key: string]: unknown }
+    message: { type: string; [key: string]: unknown },
   ): Promise<void> {
     this.ensureInitialized()
     const { type, payload } = message as { type: string; payload: Record<string, unknown> }
@@ -212,7 +197,12 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
           this.sendTo(ws, { type: MSG.ERROR, payload: { error: 'Missing taskName' } })
           return
         }
-        await this.executeTask(taskName)
+        if (!(await this.executeTask(taskName))) {
+          this.sendTo(ws, {
+            type: MSG.ERROR,
+            payload: { error: `Unknown cron task: ${taskName}` },
+          })
+        }
         break
       }
 
@@ -249,7 +239,10 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
       }
 
       default:
-        this.sendTo(ws, { type: MSG.ERROR, payload: { error: `Unknown cron message type: ${type}` } })
+        this.sendTo(ws, {
+          type: MSG.ERROR,
+          payload: { error: `Unknown cron message type: ${type}` },
+        })
     }
   }
 
@@ -258,13 +251,20 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
     const now = new Date()
 
     // Find all tasks due to run
-    const tasks = this.sql.exec(
-      `SELECT * FROM cron_tasks WHERE paused = 0 AND (next_run_at IS NULL OR next_run_at <= ?)`,
-      now.toISOString()
-    ).toArray()
+    const tasks = this.sql
+      .exec(
+        `SELECT * FROM cron_tasks WHERE paused = 0 AND (next_run_at IS NULL OR next_run_at <= ?)`,
+        now.toISOString(),
+      )
+      .toArray()
 
     for (const row of tasks) {
-      const task = row as { name: string; interval_minutes: number | null; schedule: string | null; timezone: string | null }
+      const task = row as {
+        name: string
+        interval_minutes: number | null
+        schedule: string | null
+        timezone: string | null
+      }
       await this.executeTask(task.name)
     }
 
@@ -275,7 +275,17 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
   // Task Execution
   // ==========================================================================
 
-  private async executeTask(taskName: string): Promise<void> {
+  private async executeTask(taskName: string): Promise<boolean> {
+    // Resolve the configured task before invoking application code. A manual
+    // trigger must not turn an arbitrary caller-provided name into a reported
+    // successful execution.
+    const taskRow = this.sql
+      .exec(`SELECT interval_minutes, schedule, timezone FROM cron_tasks WHERE name = ?`, taskName)
+      .toArray()[0] as
+      | { interval_minutes: number | null; schedule: string | null; timezone: string | null }
+      | undefined
+    if (!taskRow) return false
+
     const startedAt = new Date().toISOString()
     const start = Date.now()
     let success = true
@@ -296,27 +306,32 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
     this.sql.exec(
       `INSERT INTO cron_history (task_name, started_at, completed_at, success, duration_ms, error, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      taskName, startedAt, completedAt, success ? 1 : 0, durationMs, error ?? null, completedAt,
+      taskName,
+      startedAt,
+      completedAt,
+      success ? 1 : 0,
+      durationMs,
+      error ?? null,
+      completedAt,
     )
 
     // Update last_run_at and compute next_run_at
-    const taskRow = this.sql.exec(
-      `SELECT interval_minutes, schedule, timezone FROM cron_tasks WHERE name = ?`, taskName
-    ).toArray()[0] as { interval_minutes: number | null; schedule: string | null; timezone: string | null } | undefined
-
-    if (taskRow) {
-      const nextRunAt = computeNextRunAt(taskRow, new Date(completedAt))
-      this.sql.exec(
-        `UPDATE cron_tasks SET last_run_at = ?, next_run_at = ? WHERE name = ?`,
-        completedAt, nextRunAt, taskName,
-      )
-    }
+    const nextRunAt = computeNextRunAt(taskRow, new Date(completedAt))
+    this.sql.exec(
+      `UPDATE cron_tasks SET last_run_at = ?, next_run_at = ? WHERE name = ?`,
+      completedAt,
+      nextRunAt,
+      taskName,
+    )
 
     // Trim history to last 500 entries
-    this.sql.exec(`DELETE FROM cron_history WHERE id NOT IN (SELECT id FROM cron_history ORDER BY id DESC LIMIT 500)`)
+    this.sql.exec(
+      `DELETE FROM cron_history WHERE id NOT IN (SELECT id FROM cron_history ORDER BY id DESC LIMIT 500)`,
+    )
 
     // Broadcast update to monitors
     this.broadcastStatus()
+    return true
   }
 
   // ==========================================================================
@@ -327,9 +342,11 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
     const now = Date.now()
     let earliestMs = Infinity
 
-    const tasks = this.sql.exec(
-      `SELECT interval_minutes, schedule, timezone, next_run_at FROM cron_tasks WHERE paused = 0`
-    ).toArray()
+    const tasks = this.sql
+      .exec(
+        `SELECT interval_minutes, schedule, timezone, next_run_at FROM cron_tasks WHERE paused = 0`,
+      )
+      .toArray()
 
     for (const row of tasks) {
       const t = row as {
@@ -365,34 +382,38 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
   // ==========================================================================
 
   private getTaskStates(): Record<string, unknown>[] {
-    return this.sql.exec(`SELECT * FROM cron_tasks`).toArray().map(row => {
-      const r = row as Record<string, unknown>
-      return {
-        name: r.name,
-        intervalMinutes: r.interval_minutes,
-        schedule: r.schedule,
-        timezone: r.timezone,
-        paused: r.paused === 1,
-        lastRunAt: r.last_run_at,
-        nextRunAt: r.next_run_at,
-      }
-    })
+    return this.sql
+      .exec(`SELECT * FROM cron_tasks`)
+      .toArray()
+      .map((row) => {
+        const r = row as Record<string, unknown>
+        return {
+          name: r.name,
+          intervalMinutes: r.interval_minutes,
+          schedule: r.schedule,
+          timezone: r.timezone,
+          paused: r.paused === 1,
+          lastRunAt: r.last_run_at,
+          nextRunAt: r.next_run_at,
+        }
+      })
   }
 
   private getRecentHistory(limit: number): CronExecution[] {
-    return this.sql.exec(
-      `SELECT * FROM cron_history ORDER BY id DESC LIMIT ?`, limit
-    ).toArray().map(row => {
-      const r = row as Record<string, unknown>
-      return {
-        taskName: r.task_name as string,
-        startedAt: r.started_at as string,
-        completedAt: r.completed_at as string | null,
-        success: r.success === 1,
-        durationMs: r.duration_ms as number,
-        error: r.error as string | undefined,
-      }
-    })
+    return this.sql
+      .exec(`SELECT * FROM cron_history ORDER BY id DESC LIMIT ?`, limit)
+      .toArray()
+      .map((row) => {
+        const r = row as Record<string, unknown>
+        return {
+          taskName: r.task_name as string,
+          startedAt: r.started_at as string,
+          completedAt: r.completed_at as string | null,
+          success: r.success === 1,
+          durationMs: r.duration_ms as number,
+          error: r.error as string | undefined,
+        }
+      })
   }
 
   private broadcastStatus(): void {
@@ -416,143 +437,6 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
   protected abstract onTask(taskName: string): void | Promise<void>
 }
 
-// ============================================================================
-// Cron expression evaluation
-// ============================================================================
-
-const TASK_NAME_RE = /^[a-z0-9-]+$/
-
-/**
- * Validate a single task config. Throws on bad input so a misconfigured
- * deploy fails loudly at construction time rather than silently running
- * the wrong schedule.
- */
-export function validateTask(task: CronTask): CronTask {
-  if (!task.name || typeof task.name !== 'string') {
-    throw new Error(`CronTask.name is required`)
-  }
-  if (task.name.length > 64 || !TASK_NAME_RE.test(task.name)) {
-    throw new Error(
-      `CronTask.name "${task.name}" must be lowercase alphanumeric with hyphens, 1-64 chars`,
-    )
-  }
-  const hasInterval = task.intervalMinutes != null
-  const hasSchedule = task.schedule != null
-  const hasTimezone = task.timezone != null
-  if (hasInterval && (hasSchedule || hasTimezone)) {
-    throw new Error(
-      `CronTask "${task.name}" cannot mix intervalMinutes with schedule/timezone`,
-    )
-  }
-  if (!hasInterval && !(hasSchedule && hasTimezone)) {
-    throw new Error(
-      `CronTask "${task.name}" must declare either intervalMinutes or schedule+timezone`,
-    )
-  }
-  if (hasInterval) {
-    if (!Number.isInteger(task.intervalMinutes) || task.intervalMinutes! < 1 || task.intervalMinutes! > 10080) {
-      throw new Error(
-        `CronTask "${task.name}" intervalMinutes must be an integer 1..10080`,
-      )
-    }
-  }
-  if (hasSchedule) {
-    // Throw on parse failure
-    parseCronExpression(task.schedule!)
-    if (typeof task.timezone !== 'string' || task.timezone.length === 0) {
-      throw new Error(`CronTask "${task.name}" timezone must be a non-empty IANA string`)
-    }
-    // Validate timezone by attempting to format with it.
-    try {
-      new Intl.DateTimeFormat('en-US', { timeZone: task.timezone })
-    } catch {
-      throw new Error(`CronTask "${task.name}" timezone "${task.timezone}" is not a valid IANA timezone`)
-    }
-  }
-  return task
-}
-
-interface ParsedCron {
-  minute: Set<number>
-  hour: Set<number>
-  dayOfMonth: Set<number>
-  month: Set<number>
-  dayOfWeek: Set<number>
-}
-
-/**
- * Parse a 5-field cron expression. Supports:
- *   *           — all values in range
- *   N           — literal
- *   N-M         — range
- *   N-M/S       — range with step
- *   * /S        — every S
- *   N,M,...     — list
- *
- * Throws on malformed input — caller should treat that as a hard config error.
- */
-export function parseCronExpression(expression: string): ParsedCron {
-  const fields = expression.trim().split(/\s+/)
-  if (fields.length !== 5) {
-    throw new Error(`Cron expression must have exactly 5 fields, got ${fields.length}: "${expression}"`)
-  }
-  const [cMin, cHour, cDom, cMonth, cDow] = fields
-  return {
-    minute: parseField(cMin, 0, 59, 'minute'),
-    hour: parseField(cHour, 0, 23, 'hour'),
-    dayOfMonth: parseField(cDom, 1, 31, 'day-of-month'),
-    month: parseField(cMonth, 1, 12, 'month'),
-    dayOfWeek: parseField(cDow, 0, 6, 'day-of-week'),
-  }
-}
-
-function parseField(field: string, min: number, max: number, label: string): Set<number> {
-  const result = new Set<number>()
-
-  for (const part of field.split(',')) {
-    const trimmed = part.trim()
-
-    if (trimmed === '*') {
-      for (let i = min; i <= max; i++) result.add(i)
-      continue
-    }
-
-    // */step
-    const allStep = trimmed.match(/^\*\/(\d+)$/)
-    if (allStep) {
-      const step = parseInt(allStep[1], 10)
-      if (step <= 0) throw new Error(`Cron ${label} step must be positive: "${trimmed}"`)
-      for (let i = min; i <= max; i += step) result.add(i)
-      continue
-    }
-
-    // N-M or N-M/S
-    const rangeMatch = trimmed.match(/^(\d+)-(\d+)(?:\/(\d+))?$/)
-    if (rangeMatch) {
-      const start = parseInt(rangeMatch[1], 10)
-      const end = parseInt(rangeMatch[2], 10)
-      const step = rangeMatch[3] ? parseInt(rangeMatch[3], 10) : 1
-      if (start < min || end > max || start > end || step <= 0) {
-        throw new Error(`Cron ${label} range out of bounds: "${trimmed}" (${min}..${max})`)
-      }
-      for (let i = start; i <= end; i += step) result.add(i)
-      continue
-    }
-
-    // literal
-    const num = parseInt(trimmed, 10)
-    if (isNaN(num) || num < min || num > max || String(num) !== trimmed) {
-      throw new Error(`Cron ${label} value invalid: "${trimmed}" (${min}..${max})`)
-    }
-    result.add(num)
-  }
-
-  if (result.size === 0) {
-    throw new Error(`Cron ${label} field "${field}" produced no valid values`)
-  }
-  return result
-}
-
 /**
  * Compute the next ISO timestamp the given task should run at, using
  * `from` as the reference moment.
@@ -569,58 +453,4 @@ function computeNextRunAt(
     return next ? next.toISOString() : null
   }
   return null
-}
-
-/**
- * Find the next UTC instant after `from` whose wall-clock time in
- * `timezone` matches `expression`. Walks forward minute-by-minute up to
- * a year — matches Miyagi's bound and any task that wouldn't fire in a
- * year is almost certainly misconfigured.
- *
- * DST is handled implicitly: each candidate minute is shifted via
- * `Intl.DateTimeFormat` to the target timezone before comparison, so
- * "0 2 * * *" (2 AM daily) skips the missing 2 AM on spring-forward day
- * and fires once on the duplicate 2 AM in fall-back.
- */
-export function nextCronFire(expression: string, timezone: string, from: Date): Date | null {
-  const parsed = parseCronExpression(expression)
-  // Start at the next minute boundary.
-  const start = new Date(Math.floor(from.getTime() / 60_000) * 60_000 + 60_000)
-  const limit = new Date(start.getTime() + 366 * 24 * 60 * 60_000)
-  for (let t = start.getTime(); t < limit.getTime(); t += 60_000) {
-    const candidate = new Date(t)
-    if (cronMatches(parsed, timezone, candidate)) {
-      return candidate
-    }
-  }
-  return null
-}
-
-function cronMatches(parsed: ParsedCron, timezone: string, date: Date): boolean {
-  const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: 'numeric',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: 'numeric',
-    weekday: 'short',
-    hour12: false,
-  })
-  const parts = Object.fromEntries(
-    formatter.formatToParts(date).map(p => [p.type, p.value]),
-  )
-  const minute = parseInt(parts.minute, 10)
-  const hour = parseInt(parts.hour, 10) % 24
-  const dayOfMonth = parseInt(parts.day, 10)
-  const month = parseInt(parts.month, 10)
-  const weekdayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }
-  const dayOfWeek = weekdayMap[parts.weekday] ?? 0
-  return (
-    parsed.minute.has(minute) &&
-    parsed.hour.has(hour) &&
-    parsed.dayOfMonth.has(dayOfMonth) &&
-    parsed.month.has(month) &&
-    parsed.dayOfWeek.has(dayOfWeek)
-  )
 }

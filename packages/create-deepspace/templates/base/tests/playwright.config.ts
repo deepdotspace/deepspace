@@ -1,14 +1,14 @@
 import { defineConfig } from '@playwright/test'
 
 /**
- * Port comes from $DEEPSPACE_PORT (set by `deepspace test [--port N]`),
+ * Port comes from $DEEPSPACE_PORT (set by `deepspace test run [--port N]`),
  * defaulting to 5173. The same port is passed to vite via --strictPort so
  * a busy address fails fast rather than silently rebinding to 5174.
  *
  * To run multiple apps in parallel, give each one a different port:
- *   DEEPSPACE_PORT=5180 npx deepspace dev   (terminal 1, app A)
- *   DEEPSPACE_PORT=5181 npx deepspace dev   (terminal 2, app B)
- *   DEEPSPACE_PORT=5180 npx deepspace test  (terminal 3, against A)
+ *   DEEPSPACE_PORT=5180 npx deepspace dev start  (terminal 1, app A)
+ *   DEEPSPACE_PORT=5181 npx deepspace dev start  (terminal 2, app B)
+ *   DEEPSPACE_PORT=5180 npx deepspace test run   (terminal 3, against A)
  */
 const PORT = Number(process.env.DEEPSPACE_PORT ?? 5173)
 const BASE_URL = `http://localhost:${PORT}`

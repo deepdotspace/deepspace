@@ -4,7 +4,7 @@
  * Provides pre-configured Better Auth instances for Cloudflare Workers + D1.
  */
 
-import { betterAuth } from 'better-auth'
+import { betterAuth, type BetterAuthOptions } from 'better-auth'
 import { organization, twoFactor } from 'better-auth/plugins'
 import { SignJWT, importPKCS8 } from 'jose'
 
@@ -31,6 +31,24 @@ export interface DeepSpaceAuthConfig {
   emailAndPassword?: boolean
   /** Trusted origins for CORS */
   trustedOrigins?: string[]
+  /**
+   * Called after a new user row is created (any flow: social OAuth callback,
+   * email/password, server-side `auth.api.signUpEmail`). When the signup came
+   * in over HTTP, `ctx.request` exposes the inbound request; some better-auth
+   * entry points carry standalone `ctx.headers` instead of (or as well as) a
+   * request, so both are forwarded. For server-side creations (`auth.api.*`
+   * calls) an endpoint context usually still exists but may carry NEITHER —
+   * guard every field.
+   *
+   * Better Auth awaits `user.create.after` hooks inline before the response
+   * is sent, so keep this cheap (e.g. a single D1 write) and hand slow work
+   * to `ctx.waitUntil` at the call site. Exceptions are caught and logged so
+   * a failing observer can never break signup itself.
+   */
+  onUserCreated?: (
+    user: { id: string; email: string; name: string },
+    ctx: { request?: Request; headers?: Headers } | null,
+  ) => Promise<void>
 }
 
 /**
@@ -83,6 +101,16 @@ export function createDeepSpaceAuth(config: DeepSpaceAuthConfig) {
     database: config.database,
     baseURL: config.baseURL,
     secret: config.secret,
+    // Login is a one-time human act; everything after it is agents minting
+    // short-lived JWTs from this session. 30 days idle (vs the 7-day
+    // default) with daily sliding renewal means any agent active within a
+    // month keeps the session alive indefinitely — the human re-logs-in
+    // only after a full month of zero activity. Short-lived access stays
+    // short: CLI JWTs expire in minutes (auth-worker /api/auth/token).
+    session: {
+      expiresIn: 60 * 60 * 24 * 30,
+      updateAge: 60 * 60 * 24,
+    },
     emailAndPassword: {
       enabled: config.emailAndPassword ?? true,
     },
@@ -113,8 +141,49 @@ export function createDeepSpaceAuth(config: DeepSpaceAuthConfig) {
           },
         }
       : {}),
+    // Observer hook for new-user creation (see DeepSpaceAuthConfig.onUserCreated).
+    // Two-layer wiring guard — be honest about what each layer catches:
+    //  1. buildDatabaseHooks's return type is pinned to
+    //     BetterAuthOptions['databaseHooks'], so a better-auth upgrade that
+    //     renames/reshapes the option fails tsc.
+    //  2. A LOCAL typo of this key would still compile (betterAuth's generic
+    //     options parameter defeats excess-property checking even for plain
+    //     keys) — that case is caught by the runtime assertions in
+    //     __tests__/betterAuth-hooks.test.ts, which read the wired hook back
+    //     off auth.options. Don't rename the key without running them.
+    databaseHooks: buildDatabaseHooks(config.onUserCreated),
     plugins: [organization(), twoFactor()],
   })
+}
+
+/**
+ * Wire onUserCreated into better-auth's user.create.after hook. The wrapper
+ * try/catches so a throwing observer can't fail the signup — better-auth
+ * awaits `after` hooks inline before responding. Returns undefined when no
+ * observer is configured (better-auth treats that as "no hooks").
+ */
+function buildDatabaseHooks(
+  onUserCreated: DeepSpaceAuthConfig['onUserCreated'],
+): BetterAuthOptions['databaseHooks'] {
+  if (!onUserCreated) return undefined
+  return {
+    user: {
+      create: {
+        after: async (user, ctx) => {
+          try {
+            await onUserCreated(
+              { id: user.id, email: user.email, name: user.name },
+              // Forward BOTH request and standalone headers — some better-auth
+              // entry points populate ctx.headers without a request.
+              ctx ? { request: ctx.request, headers: ctx.headers ?? undefined } : null,
+            )
+          } catch (err) {
+            console.error('[deepspace] onUserCreated hook failed (signup unaffected)', err)
+          }
+        },
+      },
+    },
+  }
 }
 
 /**
@@ -136,7 +205,11 @@ async function generateAppleClientSecret(apple: {
 }): Promise<string> {
   const now = Math.floor(Date.now() / 1000)
   // Reuse until an hour before expiry; re-mint if the signing key rotates.
-  if (cachedAppleSecret && cachedAppleSecret.keyId === apple.keyId && cachedAppleSecret.expiresAt - now > 3600) {
+  if (
+    cachedAppleSecret &&
+    cachedAppleSecret.keyId === apple.keyId &&
+    cachedAppleSecret.expiresAt - now > 3600
+  ) {
     return cachedAppleSecret.token
   }
   // PEM secrets in this stack are stored with escaped newlines (mirrors the

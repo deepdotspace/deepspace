@@ -302,7 +302,7 @@ export interface UserUpdatePayload {
 
 export function handleUserUpdate(
   ctx: RecordContext,
-  ws: WebSocket,
+  _ws: WebSocket,
   attachment: ConnectionAttachment,
   payload: UserUpdatePayload
 ): void {

@@ -2,7 +2,7 @@
  * Account-credential plumbing for the testing module.
  *
  * Reads test accounts from `~/.deepspace/test-accounts.json` (the same
- * file `deepspace test-accounts create` writes). Each account has at
+ * file `deepspace test accounts create` writes). Each account has at
  * minimum `{email, password}`; `name` and `label` are optional.
  *
  * Used by the multi-user Playwright fixture in `./fixtures.ts` and is
@@ -67,7 +67,7 @@ export function pickTestAccounts(
     throw new Error(
       `Multiplayer test needs ${count} test accounts${labelHint}, but only ${sorted.length} ` +
         `are present in ${ACCOUNTS_PATH}. Create more with:\n` +
-        `  deepspace test-accounts create --email <name>@deepspace.test --password <pw> --name "<name>"${
+        `  deepspace test accounts create --email <name>@deepspace.test --password <pw> --name "<name>"${
           options?.label ? ` --label ${options.label}` : ''
         }`,
     )
@@ -86,7 +86,7 @@ export function findTestAccountByName(name: string): TestAccount {
   if (!match) {
     throw new Error(
       `No test account named "${name}" in ${ACCOUNTS_PATH}. Create with:\n` +
-        `  deepspace test-accounts create --email ${name.toLowerCase()}@deepspace.test --password <pw> --name "${name}"`,
+        `  deepspace test accounts create --email ${name.toLowerCase()}@deepspace.test --password <pw> --name "${name}"`,
     )
   }
   return match

@@ -14,12 +14,12 @@
       "dest": "src/pages/docs/[docId].tsx"
     },
     {
-      "src": "src/InviteDialog.tsx",
-      "dest": "src/pages/docs/InviteDialog.tsx"
+      "src": "src/use-docs-presence-access.ts",
+      "dest": "src/pages/docs/use-docs-presence-access.ts"
     },
     {
-      "src": "src/use-yjs-room-with-awareness.ts",
-      "dest": "src/pages/docs/use-yjs-room-with-awareness.ts"
+      "src": "src/InviteDialog.tsx",
+      "dest": "src/pages/docs/InviteDialog.tsx"
     },
     {
       "src": "src/docs-ui.css",
@@ -32,10 +32,6 @@
     {
       "src": "src/docs-library-types.ts",
       "dest": "src/pages/docs/docs-library-types.ts"
-    },
-    {
-      "src": "src/docs-favorites.ts",
-      "dest": "src/pages/docs/docs-favorites.ts"
     },
     {
       "src": "src/LibrarySidebar.tsx",

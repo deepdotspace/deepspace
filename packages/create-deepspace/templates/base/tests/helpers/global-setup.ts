@@ -3,7 +3,7 @@
  *
  * The DeepSpace auth worker (deployed at deepspace-auth.*.workers.dev) is
  * the same one used by every environment — there is no separate dev/local
- * auth worker. `npx deepspace dev` only runs Vite + the app worker
+ * auth worker. `npx deepspace dev start` only runs Vite + the app worker
  * locally; auth requests are proxied through the app worker's /api/auth/*
  * route to the deployed auth worker.
  *

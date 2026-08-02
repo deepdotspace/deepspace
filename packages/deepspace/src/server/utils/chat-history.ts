@@ -16,23 +16,8 @@
  * envelopes; helpers below flatten them into ChatRow / ChatMessageRow.
  */
 
-/**
- * Canonical chat row.
- *
- * `recordId` is the primary identifier — same envelope shape as every
- * other DeepSpace data type (records.* tools, useQuery results, etc.).
- *
- * `id` is kept as a deprecated alias so existing callers don't break,
- * but every new caller should prefer `recordId`. Without this rename
- * an integrator who reads `chat.recordId` (the obvious thing given the
- * rest of the SDK) silently gets `undefined`, then ships code that
- * sends `{"chatId": undefined}` to `/api/ai/chat` and gets back a 400
- * with a misleading error.
- */
 export type ChatRow = {
   recordId: string
-  /** @deprecated Use `recordId`. Retained for backward compatibility. */
-  id: string
   userId: string
   title: string
   model?: string
@@ -44,8 +29,6 @@ export type ChatRow = {
 
 export type ChatMessageRow = {
   recordId: string
-  /** @deprecated Use `recordId`. Retained for backward compatibility. */
-  id: string
   chatId: string
   userId: string
   role: 'user' | 'assistant' | 'system'
@@ -105,8 +88,6 @@ async function executeTool<T>(
 function toChatRow(env: RecordEnvelope<ChatColumns>): ChatRow {
   return {
     recordId: env.recordId,
-    // Deprecated alias — populated for back-compat with callers reading `id`.
-    id: env.recordId,
     userId: env.data.userId,
     title: env.data.title ?? '',
     model: env.data.model,
@@ -120,8 +101,6 @@ function toChatRow(env: RecordEnvelope<ChatColumns>): ChatRow {
 function toMessageRow(env: RecordEnvelope<MessageColumns>): ChatMessageRow {
   return {
     recordId: env.recordId,
-    // Deprecated alias — populated for back-compat with callers reading `id`.
-    id: env.recordId,
     chatId: env.data.chatId,
     userId: env.data.userId,
     role: env.data.role,

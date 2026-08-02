@@ -5,17 +5,17 @@
  * The socket → parseServerError → listener edge was always covered by
  * record-socket.test.ts, but the seam ABOVE it — public RecordProvider prop
  * → context/refs → socket listeners — shipped as dead code for months
- * because nothing rendered the providers and asserted the prop actually
- * received an error. These tests pin that seam in both provider modes, plus
- * the signed-out diagnostic and the deduped console.error default.
+ * because nothing rendered the provider and asserted the prop actually
+ * received an error. These tests pin that seam through RecordScope, plus the
+ * signed-out diagnostic and the deduplicated console.error default.
  */
 import React from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react'
-import { RecordProvider, __resetDevWarningsForTests, type WriteError } from '../context'
+import { RecordProvider, __resetDevWarningsForTests } from '../context'
 import { RecordScope } from '../RecordScope'
-
+import type { WriteError } from '../types'
 ;(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
 // ── Mocks ────────────────────────────────────────────────────────────────
@@ -92,36 +92,11 @@ afterEach(async () => {
 // ── Tests ────────────────────────────────────────────────────────────────
 
 describe('RecordProvider onWriteError wiring', () => {
-  it('single-scope mode: a socket permission error reaches the public prop', async () => {
-    const spy = vi.fn<(e: WriteError) => void>()
-    await render(
-      <RecordProvider roomId="app:test" allowAnonymous onWriteError={spy}>
-        <div data-testid="child" />
-      </RecordProvider>,
-    )
-    expect(container.querySelector('[data-testid="child"]')).toBeTruthy()
-    expect(sockets.all.length).toBeGreaterThan(0)
-
-    sockets.all[0].listeners.onPermissionError?.("Viewers can't edit Tasks", '')
-    expect(spy).toHaveBeenCalledWith({
-      kind: 'permission',
-      title: "Viewers can't edit Tasks",
-      detail: '',
-    })
-
-    sockets.all[0].listeners.onValidationError?.('Missing field', '"title" is required')
-    expect(spy).toHaveBeenCalledWith({
-      kind: 'validation',
-      title: 'Missing field',
-      detail: '"title" is required',
-    })
-  })
-
-  it('multi-scope mode: a RecordScope socket error reaches the provider prop', async () => {
+  it('a RecordScope socket error reaches the provider prop', async () => {
     const spy = vi.fn<(e: WriteError) => void>()
     await render(
       <RecordProvider allowAnonymous onWriteError={spy}>
-        <RecordScope roomId="app:test" schemas={[]} appId="test">
+        <RecordScope roomId="app:test" schemas={[]}>
           <div />
         </RecordScope>
       </RecordProvider>,
@@ -134,13 +109,22 @@ describe('RecordProvider onWriteError wiring', () => {
       title: 'Error',
       detail: 'raw server string',
     })
+
+    sockets.all[0].listeners.onPermissionError?.("Viewers can't edit Tasks", '')
+    expect(spy).toHaveBeenCalledWith({
+      kind: 'permission',
+      title: "Viewers can't edit Tasks",
+      detail: '',
+    })
   })
 
   it('default handler console.errors once per unique error (deduped)', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     await render(
-      <RecordProvider roomId="app:test" allowAnonymous>
-        <div />
+      <RecordProvider allowAnonymous>
+        <RecordScope roomId="app:test" schemas={[]}>
+          <div />
+        </RecordScope>
       </RecordProvider>,
     )
     const fire = () => sockets.all[0].listeners.onPermissionError?.('Denied', 'same detail')
@@ -160,7 +144,7 @@ describe('signed-out diagnostic', () => {
     ;(globalThis as Record<string, unknown>).DEEPSPACE_DEV = true
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     await render(
-      <RecordProvider roomId="app:test">
+      <RecordProvider>
         <div data-testid="child" />
       </RecordProvider>,
     )
@@ -173,7 +157,7 @@ describe('signed-out diagnostic', () => {
     // jsdom serves from localhost, so this specifically proves the escape hatch.
     ;(globalThis as Record<string, unknown>).DEEPSPACE_DEV = false
     await render(
-      <RecordProvider roomId="app:test">
+      <RecordProvider>
         <div data-testid="child" />
       </RecordProvider>,
     )

@@ -81,7 +81,7 @@ function CreateChallengeModal({ isOpen, onClose, onCreate }: CreateChallengeModa
 
   return (
     <Modal open={isOpen} onClose={onClose} size="md">
-      <Modal.Header onClose={onClose}>
+      <Modal.Header>
         <Modal.Title>Create Challenge</Modal.Title>
       </Modal.Header>
       <Modal.Body>
@@ -163,7 +163,7 @@ function SubmitModal({ isOpen, onClose, onSubmit, challenge }: SubmitModalProps)
 
   return (
     <Modal open={isOpen} onClose={onClose} size="md">
-      <Modal.Header onClose={onClose}>
+      <Modal.Header>
         <Modal.Title>Submit Challenge</Modal.Title>
       </Modal.Header>
       <Modal.Body>
@@ -228,7 +228,7 @@ function GradeModal({ isOpen, onClose, onGrade, challenge }: GradeModalProps) {
 
   return (
     <Modal open={isOpen} onClose={onClose} size="md">
-      <Modal.Header onClose={onClose}>
+      <Modal.Header>
         <Modal.Title>Grade Submission</Modal.Title>
       </Modal.Header>
       <Modal.Body>

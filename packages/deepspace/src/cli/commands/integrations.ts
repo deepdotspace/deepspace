@@ -8,11 +8,14 @@
  *   deepspace integrations info openai/chat-completion      # schema + example
  *   deepspace integrations invoke openai/chat-completion --body '{...}'
  *
- * `deepspace invoke ...` is a top-level alias for `integrations invoke ...`.
- * `deepspace invoke --list` is a shortcut for `integrations list`.
- *
- * All calls are made as the currently logged-in user (`deepspace whoami`).
+ * All calls are made as the currently logged-in user (`deepspace auth whoami`).
  * That user is billed.
+ *
+ * Each subcommand is defined with the command runtime (lib/command.ts): the
+ * `--json` flag, the `{ ok, … }` envelope, the refusal slug, the `Next:` line,
+ * and the exit code come from there. Before that, the subcommands caught their
+ * own errors and `console.error`'d the message — which meant a `--json` caller
+ * got PLAIN PROSE on stderr and an empty stdout.
  *
  * No `run()` is defined on the parent — that matches the convention used
  * by `test-accounts` and prevents citty from firing both the parent and
@@ -21,31 +24,20 @@
  */
 
 import { defineCommand } from 'citty'
-import { runInvoke, runInfo, runList } from './_invoke-impl'
+import { defineDeepspaceCommand } from '../lib/command'
+import { runInvoke, runInfo, runList, parseTimeout } from './_invoke-impl'
 
-const list = defineCommand({
+const list = defineDeepspaceCommand({
   meta: {
     name: 'list',
     description: 'List all available integrations',
   },
-  args: {
-    json: {
-      type: 'boolean',
-      description: 'Print raw JSON (machine-readable)',
-      default: false,
-    },
-  },
   async run({ args }) {
-    try {
-      await runList({ json: args.json })
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err))
-      process.exit(1)
-    }
+    return runList({ json: args.json })
   },
 })
 
-const info = defineCommand({
+const info = defineDeepspaceCommand({
   meta: {
     name: 'info',
     description: 'Print schema + example body for an integration endpoint',
@@ -56,23 +48,13 @@ const info = defineCommand({
       description: "<integration>/<endpoint> (e.g. 'openai/chat-completion')",
       required: true,
     },
-    json: {
-      type: 'boolean',
-      description: 'Print raw JSON (machine-readable)',
-      default: false,
-    },
   },
   async run({ args }) {
-    try {
-      await runInfo({ target: args.target as string, json: args.json })
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err))
-      process.exit(1)
-    }
+    return runInfo({ target: args.target as string, json: args.json })
   },
 })
 
-const invoke = defineCommand({
+const invoke = defineDeepspaceCommand({
   meta: {
     name: 'invoke',
     description: 'Invoke a platform integration as the logged-in user',
@@ -95,11 +77,6 @@ const invoke = defineCommand({
       description: 'Read JSON body from file (use - for stdin)',
       required: false,
     },
-    json: {
-      type: 'boolean',
-      description: 'Print only the response JSON (machine-readable)',
-      default: false,
-    },
     timeout: {
       type: 'string',
       description: 'Request timeout in milliseconds (default: 120000)',
@@ -113,23 +90,14 @@ const invoke = defineCommand({
     },
   },
   async run({ args }) {
-    try {
-      const timeout = args.timeout != null ? Number(args.timeout) : undefined
-      if (timeout != null && (!Number.isFinite(timeout) || timeout <= 0)) {
-        throw new Error(`Invalid --timeout '${args.timeout}'. Must be a positive number of milliseconds.`)
-      }
-      await runInvoke({
-        target: args.target as string,
-        body: args.body,
-        bodyFile: args['body-file'],
-        json: args.json,
-        timeout,
-        yes: args.yes,
-      })
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err))
-      process.exit(1)
-    }
+    return runInvoke({
+      target: args.target as string,
+      body: args.body as string | undefined,
+      bodyFile: args['body-file'] as string | undefined,
+      json: args.json,
+      timeout: parseTimeout(args.timeout),
+      yes: Boolean(args.yes),
+    })
   },
 })
 

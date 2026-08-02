@@ -4,7 +4,12 @@
 
 import * as Y from 'yjs'
 import type { ConnectionAttachment } from '../../shared/protocol/types'
-import type { YjsDocKey, YjsJoinPayload, YjsLeavePayload } from '../../shared/types'
+import type {
+  YjsDocKey,
+  YjsJoinPayload,
+  YjsLeavePayload,
+  YjsSubscription,
+} from '../../shared/types'
 import { MSG_YJS_SYNC, MSG_YJS_AWARENESS, MSG } from '../../shared/protocol/constants'
 import {
   MSG_SYNC_STEP1,
@@ -38,6 +43,15 @@ function parseYjsDocKey(docKey: YjsDocKey): { collection: string; recordId: stri
     recordId: docKey.slice(firstColon + 1, lastColon),
     fieldName: docKey.slice(lastColon + 1),
   }
+}
+
+function hasYjsSubscription(attachment: ConnectionAttachment, target: YjsSubscription): boolean {
+  return attachment.yjsSubscriptions.some(
+    (subscription) =>
+      subscription.collection === target.collection &&
+      subscription.recordId === target.recordId &&
+      subscription.fieldName === target.fieldName,
+  )
 }
 
 // ============================================================================
@@ -86,10 +100,10 @@ export function getYjsDocKey(collection: string, recordId: string, fieldName: st
  * Get or create a Y.Doc for a record field.
  * Loads from database if exists, creates new if not.
  */
-export async function getOrCreateYjsDoc(
+export function getOrCreateYjsDoc(
   ctx: YjsContext,
   docKey: YjsDocKey
-): Promise<Y.Doc> {
+): Y.Doc {
   // Return cached doc if available
   let doc = ctx.yjsDocs.get(docKey)
   if (doc) return doc
@@ -121,6 +135,29 @@ export async function getOrCreateYjsDoc(
   return doc
 }
 
+/** Destroy and evict a document once no live connection subscribes to it. */
+export function unloadYjsDocIfUnused(
+  ctx: YjsContext,
+  docKey: YjsDocKey,
+  excludeWs: WebSocket | null = null,
+): boolean {
+  const target = parseYjsDocKey(docKey)
+  if (!target) return false
+
+  for (const ws of ctx.state.getWebSockets()) {
+    if (ws === excludeWs) continue
+    const attachment = ws.deserializeAttachment() as ConnectionAttachment | null
+    if (attachment && hasYjsSubscription(attachment, target)) return false
+  }
+
+  const doc = ctx.yjsDocs.get(docKey)
+  if (!doc) return false
+
+  ctx.yjsDocs.delete(docKey)
+  doc.destroy()
+  return true
+}
+
 /**
  * Save Yjs doc state to database.
  */
@@ -138,12 +175,12 @@ export function saveYjsDoc(sql: SqlStorage, docKey: YjsDocKey, doc: Y.Doc): void
  * Handle request to join Yjs sync for a record field.
  * System collections (see SYSTEM_COLLECTIONS) are permissive; others require schema.
  */
-export async function handleYjsJoin(
+export function handleYjsJoin(
   ctx: YjsContext,
   ws: WebSocket,
   attachment: ConnectionAttachment,
   payload: YjsJoinPayload
-): Promise<void> {
+): void {
   const { collection, recordId, fieldName } = payload
   const isSystem = SYSTEM_COLLECTIONS.has(collection)
 
@@ -185,11 +222,9 @@ export async function handleYjsJoin(
 
   // Get or create Yjs doc and subscribe
   const docKey = getYjsDocKey(collection, recordId, fieldName)
-  const doc = await getOrCreateYjsDoc(ctx, docKey)
+  const doc = getOrCreateYjsDoc(ctx, docKey)
 
-  if (!attachment.yjsSubscriptions.some(s => 
-    s.collection === collection && s.recordId === recordId && s.fieldName === fieldName
-  )) {
+  if (!hasYjsSubscription(attachment, payload)) {
     attachment.yjsSubscriptions.push({ collection, recordId, fieldName })
     ws.serializeAttachment(attachment)
   }
@@ -220,6 +255,7 @@ export async function handleYjsJoin(
  * Handle request to leave Yjs sync for a record field.
  */
 export function handleYjsLeave(
+  ctx: YjsContext,
   ws: WebSocket,
   attachment: ConnectionAttachment,
   payload: YjsLeavePayload
@@ -231,8 +267,7 @@ export function handleYjsLeave(
     !(s.collection === collection && s.recordId === recordId && s.fieldName === fieldName)
   )
   ws.serializeAttachment(attachment)
-
-  // TODO: If no more subscribers for this doc, consider unloading it from memory
+  unloadYjsDocIfUnused(ctx, getYjsDocKey(collection, recordId, fieldName), ws)
 }
 
 /**
@@ -242,12 +277,12 @@ export function handleYjsLeave(
  * - MSG_SYNC_STEP1: Client sends state vector → Server responds with SYNC_STEP2 (diff)
  * - MSG_SYNC_STEP2/UPDATE: Client sends update → Server applies and broadcasts
  */
-export async function handleYjsBinaryMessage(
+export function handleYjsBinaryMessage(
   ctx: YjsContext,
   ws: WebSocket,
   attachment: ConnectionAttachment,
   data: Uint8Array
-): Promise<void> {
+): void {
   const decoder = createDecoder(data)
   const messageType = readVarUint(decoder)
 
@@ -259,12 +294,8 @@ export async function handleYjsBinaryMessage(
 
     const parsed = parseYjsDocKey(docKey)
     if (!parsed) return
-    const { collection, recordId, fieldName } = parsed
 
-    const isSubscribed = attachment.yjsSubscriptions.some(s =>
-      s.collection === collection && s.recordId === recordId && s.fieldName === fieldName
-    )
-    if (!isSubscribed) return
+    if (!hasYjsSubscription(attachment, parsed)) return
 
     // Capture the client's awareness clientId for disconnect cleanup
     if (attachment.awarenessClientId == null) {
@@ -292,16 +323,13 @@ export async function handleYjsBinaryMessage(
 
   const parsed = parseYjsDocKey(docKey)
   if (!parsed) return
-  const { collection, recordId, fieldName } = parsed
+  const { collection, recordId } = parsed
 
   // Verify subscription
-  const isSubscribed = attachment.yjsSubscriptions.some(s =>
-    s.collection === collection && s.recordId === recordId && s.fieldName === fieldName
-  )
-  if (!isSubscribed) return
+  if (!hasYjsSubscription(attachment, parsed)) return
 
   // Load doc from SQLite if not in memory (handles DO hibernation wake-up)
-  const doc = await getOrCreateYjsDoc(ctx, docKey)
+  const doc = getOrCreateYjsDoc(ctx, docKey)
 
   const syncType = readVarUint(decoder)
 
@@ -333,7 +361,6 @@ export async function handleYjsBinaryMessage(
 
       const update = readVarUint8Array(decoder)
       Y.applyUpdate(doc, update, 'client')
-      saveYjsDoc(ctx.sql, docKey, doc)
       broadcastYjsUpdate(ctx, docKey, update, ws)
       break
     }
@@ -351,7 +378,6 @@ export function broadcastYjsUpdate(
 ): void {
   const parsed = parseYjsDocKey(docKey)
   if (!parsed) return
-  const { collection, recordId, fieldName } = parsed
 
   // Build message once
   const encoder = createEncoder()
@@ -368,11 +394,7 @@ export function broadcastYjsUpdate(
     const attachment = ws.deserializeAttachment() as ConnectionAttachment | null
     if (!attachment) continue
 
-    const isSubscribed = attachment.yjsSubscriptions.some(s =>
-      s.collection === collection && s.recordId === recordId && s.fieldName === fieldName
-    )
-    
-    if (isSubscribed) {
+    if (hasYjsSubscription(attachment, parsed)) {
       ctx.sendBinary(ws, message)
     }
   }
@@ -390,7 +412,6 @@ export function broadcastAwareness(
 ): void {
   const parsed = parseYjsDocKey(docKey)
   if (!parsed) return
-  const { collection, recordId, fieldName } = parsed
 
   // Build message once
   const encoder = createEncoder()
@@ -406,11 +427,7 @@ export function broadcastAwareness(
     const attachment = ws.deserializeAttachment() as ConnectionAttachment | null
     if (!attachment) continue
 
-    const isSubscribed = attachment.yjsSubscriptions.some(s =>
-      s.collection === collection && s.recordId === recordId && s.fieldName === fieldName
-    )
-
-    if (isSubscribed) {
+    if (hasYjsSubscription(attachment, parsed)) {
       ctx.sendBinary(ws, message)
     }
   }
@@ -441,5 +458,23 @@ export function broadcastAwarenessRemoval(
   for (const sub of attachment.yjsSubscriptions) {
     const docKey = getYjsDocKey(sub.collection, sub.recordId, sub.fieldName)
     broadcastAwareness(ctx, docKey, removalPayload, null)
+  }
+}
+
+/** Clean up ephemeral awareness and cached documents for a closed connection. */
+export function handleYjsDisconnect(
+  ctx: YjsContext,
+  ws: WebSocket,
+  attachment: ConnectionAttachment,
+): void {
+  broadcastAwarenessRemoval(ctx, attachment)
+
+  const docKeys = new Set(
+    attachment.yjsSubscriptions.map((subscription) =>
+      getYjsDocKey(subscription.collection, subscription.recordId, subscription.fieldName),
+    ),
+  )
+  for (const docKey of docKeys) {
+    unloadYjsDocIfUnused(ctx, docKey, ws)
   }
 }

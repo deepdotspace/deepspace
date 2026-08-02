@@ -11,7 +11,6 @@
  *   <RecordScope
  *     roomId="app:my-app"
  *     schemas={appSchemas}
- *     appId="my-app"
  *     sharedScopes={[
  *       { roomId: 'workspace:default', schemas: workspaceSchemas },
  *     ]}
@@ -22,7 +21,7 @@
  * ```
  */
 
-import React, { useEffect, useState, useCallback, useRef, useMemo, type ReactNode } from 'react'
+import { useEffect, useState, useCallback, useRef, useMemo, type ReactNode } from 'react'
 import type { CollectionSchema } from '../../shared/types'
 import { RecordContext, type RecordContextValue } from './context'
 import { useRecordAuth } from './context'
@@ -33,11 +32,6 @@ import { getAuthToken } from '../auth'
 import { wsLog } from './ws-log'
 import type { RoomConnectionState, RoomUser } from './types'
 import { MSG } from '@/shared/protocol/constants'
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
 
 // ============================================================================
 // Types
@@ -52,8 +46,6 @@ interface RecordScopeProps {
   roomId: string
   schemas: CollectionSchema[]
   children?: ReactNode
-  /** App ID passed to the server for schema resolution. */
-  appId: string
   /** Additional scopes to connect (headless — no children, just register collections). */
   sharedScopes?: SharedScopeConfig[]
   /** WebSocket base URL override. Derived from window.location if omitted. */
@@ -71,24 +63,16 @@ interface RecordScopeProps {
 function HeadlessScope({
   roomId,
   schemas,
-  appId,
   wsUrl,
   wsPathPrefix,
 }: {
   roomId: string
   schemas: CollectionSchema[]
-  appId: string
   wsUrl?: string
   wsPathPrefix?: string
 }) {
   return (
-    <ScopeConnection
-      roomId={roomId}
-      schemas={schemas}
-      appId={appId}
-      wsUrl={wsUrl}
-      wsPathPrefix={wsPathPrefix}
-    />
+    <ScopeConnection roomId={roomId} schemas={schemas} wsUrl={wsUrl} wsPathPrefix={wsPathPrefix} />
   )
 }
 
@@ -99,7 +83,6 @@ function HeadlessScope({
 function ScopeConnection({
   roomId,
   schemas,
-  appId,
   children,
   wsUrl,
   wsPathPrefix = '/ws',
@@ -107,7 +90,6 @@ function ScopeConnection({
 }: {
   roomId: string
   schemas: CollectionSchema[]
-  appId: string
   children?: ReactNode
   wsUrl?: string
   wsPathPrefix?: string
@@ -152,7 +134,7 @@ function ScopeConnection({
   // The engine (RecordSocket) owns everything race-sensitive: connect-token
   // guard, backoff, resubscribe-on-open, pending-request settlement. This
   // component owns React state and recreates the socket when the connection
-  // identity (room, URL, app, or signed-in user) changes.
+  // identity (room, URL, or signed-in user) changes.
 
   const userProfileId = auth?.userProfile?.id ?? null
   const userProfileLoading = auth?.userProfileLoading ?? false
@@ -171,7 +153,6 @@ function ScopeConnection({
       getToken: () => (getAuthTokenRef.current ?? getAuthToken)(),
       wsUrl,
       wsPathPrefix,
-      extraParams: { appId },
       log: (event) => wsLog(event as Parameters<typeof wsLog>[0], roomId),
       listeners: {
         onStatus: setStatus,
@@ -200,7 +181,7 @@ function ScopeConnection({
       setStatus('connecting')
       setReady(false)
     }
-  }, [roomId, wsUrl, wsPathPrefix, appId, userProfileId, userProfileLoading, allowAnonymous])
+  }, [roomId, wsUrl, wsPathPrefix, userProfileId, userProfileLoading, allowAnonymous])
 
   // Reconnect on tab focus
   useEffect(() => {
@@ -392,7 +373,6 @@ export function RecordScope({
   roomId,
   schemas,
   children,
-  appId,
   sharedScopes,
   wsUrl,
   wsPathPrefix = '/ws',
@@ -405,7 +385,6 @@ export function RecordScope({
           key={shared.roomId}
           roomId={shared.roomId}
           schemas={shared.schemas}
-          appId={appId}
           wsUrl={wsUrl}
           wsPathPrefix={wsPathPrefix}
         />
@@ -413,7 +392,6 @@ export function RecordScope({
       <ScopeConnection
         roomId={roomId}
         schemas={schemas}
-        appId={appId}
         wsUrl={wsUrl}
         wsPathPrefix={wsPathPrefix}
         isolated={isolated}

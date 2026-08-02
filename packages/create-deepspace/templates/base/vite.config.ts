@@ -12,7 +12,7 @@ export default defineConfig({
     cloudflare(),
     // Runs the Rules of Hooks lint (see eslint.config.js) automatically, so
     // there's no separate step to remember: a violation surfaces as an overlay
-    // during `deepspace dev` and fails the build during `deepspace deploy`.
+    // during `deepspace dev start` and fails the build during `deepspace deploy`.
     // That stops the cryptic "Minified React error #310 / #300" crash before
     // it can ship.
     checker({

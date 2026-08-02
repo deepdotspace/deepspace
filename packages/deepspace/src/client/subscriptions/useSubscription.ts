@@ -60,7 +60,7 @@ interface UseSubscriptionReturn {
    * subscription is currently entitled. Same entitlement gate as `hasTier`.
    */
   isAtLeast: (slug: string) => boolean
-  /** Plan catalog from /me — pass into `<PricingTable plans={...}>` directly. */
+  /** Plan catalog from /me; PricingTable also requires an onSelect callback. */
   plans: PlanInfo[]
   subscribe: (planSlug: string, opts?: SubscribeOpts) => Promise<SubscribeResult>
   openPortal: (returnUrl?: string) => Promise<{ url: string }>

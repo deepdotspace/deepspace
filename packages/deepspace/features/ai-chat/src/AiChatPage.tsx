@@ -175,8 +175,8 @@ export default function AiChatPage() {
       if (token) headers.Authorization = `Bearer ${token}`
       const res = await fetch('/api/ai/chats', { method: 'POST', headers })
       if (!res.ok) throw new Error(`create chat failed: ${res.status}`)
-      const data = (await res.json()) as { chat?: { id?: string } }
-      if (data.chat?.id) setActiveChatId(data.chat.id)
+      const data = (await res.json()) as { chat?: { recordId?: string } }
+      if (data.chat?.recordId) setActiveChatId(data.chat.recordId)
     } catch (err) {
       console.error('[ai-chat-page] create chat failed:', err)
       setCreateError(err instanceof Error ? err.message : 'Failed to create chat')
@@ -689,4 +689,3 @@ function ResizeHandle({ onStart, dragging }: { onStart: () => void; dragging: bo
     </div>
   )
 }
-

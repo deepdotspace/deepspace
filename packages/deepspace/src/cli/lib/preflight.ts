@@ -1,3 +1,4 @@
+import { Refusal } from './command'
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 // Namespace import on purpose: a named `import { registerHooks }` would itself
@@ -23,11 +24,13 @@ export function preflightNodeVersion(
     'function',
 ): void {
   if (hasRegisterHooks) return
-  console.error(
-    `deepspace ${command} requires Node 22.15 or newer (found v${process.versions.node}).`,
+  // Throw, never process.exit — see resolvePort: an exit inside a runtime
+  // command body skips the --json envelope entirely.
+  throw new Refusal(
+    `deepspace ${command} requires Node 22.15 or newer (found v${process.versions.node}). ` +
+      'Install the current LTS from https://nodejs.org and re-run.',
+    'node_too_old',
   )
-  console.error('Install the current LTS from https://nodejs.org and re-run.')
-  process.exit(1)
 }
 
 // 0xC0000135 = STATUS_DLL_NOT_FOUND on Windows. Node reports it as a signed int.
@@ -64,17 +67,12 @@ export function preflightWindowsWorkerd(appDir: string): void {
     const status = (err as { status?: number }).status
     if (status !== DLL_NOT_FOUND) return
 
-    console.error('')
-    console.error('  workerd (Cloudflare Workers runtime) cannot start on this system.')
-    console.error('  It needs the Microsoft Visual C++ Redistributable, which is not installed.')
-    console.error('')
-    console.error('  Install it with any of:')
-    console.error('    winget install Microsoft.VCRedist.2015+.x64')
-    console.error('    choco install -y vcredist140')
-    console.error('    https://aka.ms/vs/17/release/vc_redist.x64.exe')
-    console.error('')
-    console.error('  Then restart this terminal and re-run the command.')
-    console.error('')
-    process.exit(1)
+    throw new Refusal(
+      'workerd (Cloudflare Workers runtime) cannot start on this system: it needs the ' +
+        'Microsoft Visual C++ Redistributable, which is not installed. Install it with ' +
+        '`winget install Microsoft.VCRedist.2015+.x64` (or choco install -y vcredist140, or ' +
+        'https://aka.ms/vs/17/release/vc_redist.x64.exe), then restart this terminal and re-run.',
+      'vcredist_missing',
+    )
   }
 }

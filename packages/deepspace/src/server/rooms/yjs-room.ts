@@ -158,7 +158,7 @@ export class YjsRoom<E = Record<string, unknown>> extends BaseRoom<E> {
     // (ping/pong handled by auto-response)
   }
 
-  protected onBinaryMessage(ws: WebSocket, user: UserAttachment, data: ArrayBuffer): void {
+  protected onBinaryMessage(ws: WebSocket, _user: UserAttachment, data: ArrayBuffer): void {
     const bytes = new Uint8Array(data)
     const decoder = createDecoder(bytes)
     const messageType = readVarUint(decoder)

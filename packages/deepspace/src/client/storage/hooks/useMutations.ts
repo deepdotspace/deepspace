@@ -3,7 +3,7 @@
  *
  * Get mutation functions for a collection.
  * Resolves the correct scope via ScopeRegistry (multi-scope)
- * or falls back to useRecordContext() (single-scope backward compat).
+ * or uses the nearest RecordScope context during registry transitions.
  */
 
 import { useCallback, useContext, useMemo } from 'react'
@@ -42,7 +42,7 @@ export function useMutations<T = unknown>(collection: string): {
   putConfirmed: (recordId: string, data: Partial<T>) => Promise<void>
   removeConfirmed: (recordId: string) => Promise<void>
 } {
-  // Try scope resolution first (multi-scope), then fall back to RecordContext
+  // Resolve through the registry and retain the nearest scope during navigation.
   const registry = useScopeRegistry()
   const recordCtx = useContext(RecordContext)
 
@@ -55,7 +55,7 @@ export function useMutations<T = unknown>(collection: string): {
 
   if (!sendMessage || !sendConfirmed) {
     throw new Error(
-      `useMutations('${collection}'): No scope found. Wrap in a RecordProvider (with roomId) or a RecordScope that registers this collection.`,
+      `useMutations('${collection}'): No scope found. Wrap this hook in a RecordScope that registers the collection.`,
     )
   }
 

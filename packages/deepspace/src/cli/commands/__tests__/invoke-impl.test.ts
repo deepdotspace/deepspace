@@ -2,7 +2,24 @@
  * INT-1 (per-token pricing label) and FEAT-13 (paid-invoke confirmation gate).
  */
 import { describe, it, expect } from 'vitest'
+import type { CommandDef } from 'citty'
 import { billingUnit, shouldConfirmCost, isInteractive } from '../_invoke-impl'
+import integrations from '../integrations'
+
+describe('integrations command surface', () => {
+  it('exposes list, info, and invoke as distinct canonical commands', () => {
+    const subCommands = integrations.subCommands as Record<string, CommandDef>
+    expect(Object.keys(subCommands)).toEqual(['list', 'info', 'invoke'])
+
+    const invokeArgs = subCommands.invoke.args as Record<
+      string,
+      { type: string; required?: boolean }
+    >
+    expect(invokeArgs.target).toMatchObject({ type: 'positional', required: true })
+    expect(invokeArgs).not.toHaveProperty('list')
+    expect(invokeArgs).not.toHaveProperty('info')
+  })
+})
 
 describe('billingUnit (INT-1)', () => {
   it('renders per_token as "per token", not "per call"', () => {

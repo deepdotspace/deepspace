@@ -9,7 +9,7 @@
 
 import { tool } from 'ai'
 import type { ToolSet } from 'ai'
-import { z } from 'zod'
+import { z } from 'zod/v4'
 import { BUILT_IN_TOOLS, applyAiToolDefaults } from 'deepspace/worker'
 import type { ToolSchema, CollectionSchema } from 'deepspace/worker'
 
@@ -110,7 +110,7 @@ function buildZodSchema(def: ToolSchema) {
       case 'string':  s = z.string(); break
       case 'number':  s = z.number(); break
       case 'boolean': s = z.boolean(); break
-      case 'object':  s = z.record(z.unknown()); break
+      case 'object':  s = z.record(z.string(), z.unknown()); break
       case 'array':   s = z.array(z.unknown()); break
       default:        s = z.unknown(); break
     }

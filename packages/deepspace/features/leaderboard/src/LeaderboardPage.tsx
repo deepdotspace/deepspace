@@ -2,250 +2,337 @@
  * Leaderboard Page
  *
  * Demonstrates:
- * - useQuery for fetching records with ordering
+ * - useQuery for fetching ordered records
  * - useMutations for CRUD operations
- * - useUser for current user
- * - Role-based UI (admin can edit anyone's score)
+ * - useUser for role-aware actions
  */
 
 import { useState } from 'react'
-import { useUser } from 'deepspace'
-import { useQuery } from 'deepspace'
-import { useMutations } from 'deepspace'
-import { Button, Modal, EmptyState, Badge } from '@/components/ui'
-import { ROLES, type Role } from 'deepspace'
-import { LEADERBOARD_CATEGORY, CATEGORY_CONFIG, type LeaderboardCategory } from '../components/leaderboard/leaderboard-constants'
+import { BarChart3, Medal, Pencil, Plus, Trash2, TriangleAlert } from 'lucide-react'
+import { ROLES, useMutations, useQuery, useUser, type Role } from 'deepspace'
+import {
+  Badge,
+  Button,
+  ConfirmModal,
+  EmptyState,
+  Input,
+  Label,
+  Modal,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  useToast,
+  type BadgeProps,
+} from '@/components/ui'
 
-// ============================================================================
-// Types
-// ============================================================================
+type BadgeVariant = BadgeProps['variant']
+
+const LEADERBOARD_CATEGORY = {
+  GENERAL: 'general',
+  SPEED: 'speed',
+  ACCURACY: 'accuracy',
+} as const
+
+type LeaderboardCategory = (typeof LEADERBOARD_CATEGORY)[keyof typeof LEADERBOARD_CATEGORY]
+
+const CATEGORY_CONFIG: Record<LeaderboardCategory, { title: string; color: BadgeVariant }> = {
+  [LEADERBOARD_CATEGORY.GENERAL]: { title: 'General', color: 'info' },
+  [LEADERBOARD_CATEGORY.SPEED]: { title: 'Speed', color: 'warning' },
+  [LEADERBOARD_CATEGORY.ACCURACY]: { title: 'Accuracy', color: 'success' },
+}
 
 interface LeaderboardEntry {
   playerName: string
   score: number
-  category: string
+  category: LeaderboardCategory
   playerId: string
+}
+
+type LeaderboardRecord = {
+  recordId: string
+  data: LeaderboardEntry
 }
 
 interface LeaderboardPageProps {
   className?: string
 }
 
-// ============================================================================
-// Submit Score Modal
-// ============================================================================
-
 interface SubmitScoreModalProps {
-  isOpen: boolean
   onClose: () => void
-  onSubmit: (playerName: string, score: number, category: string) => void
+  onSubmit: (playerName: string, score: number, category: LeaderboardCategory) => Promise<boolean>
   userName: string
 }
 
-function SubmitScoreModal({ isOpen, onClose, onSubmit, userName }: SubmitScoreModalProps) {
+function SubmitScoreModal({ onClose, onSubmit, userName }: SubmitScoreModalProps) {
   const [playerName, setPlayerName] = useState(userName)
   const [score, setScore] = useState('')
-  const [category, setCategory] = useState<string>(LEADERBOARD_CATEGORY.GENERAL)
+  const [category, setCategory] = useState<LeaderboardCategory>(LEADERBOARD_CATEGORY.GENERAL)
+  const [submitting, setSubmitting] = useState(false)
 
-  const handleSubmit = () => {
-    const parsed = Number(score)
-    if (playerName.trim() && !isNaN(parsed)) {
-      onSubmit(playerName.trim(), parsed, category)
-      setPlayerName(userName)
-      setScore('')
-      setCategory(LEADERBOARD_CATEGORY.GENERAL)
+  const parsedScore = Number(score)
+  const isValid =
+    playerName.trim().length > 0 && score.trim().length > 0 && Number.isFinite(parsedScore)
+
+  const handleSubmit = async () => {
+    if (!isValid || submitting) return
+
+    setSubmitting(true)
+    try {
+      const submitted = await onSubmit(playerName.trim(), parsedScore, category)
+      if (!submitted) return
       onClose()
+    } finally {
+      setSubmitting(false)
     }
   }
 
   return (
-    <Modal open={isOpen} onClose={onClose} size="sm">
-      <Modal.Header onClose={onClose}>
+    <Modal open onClose={submitting ? () => undefined : onClose} size="sm">
+      <Modal.Header>
         <Modal.Title>Submit Score</Modal.Title>
       </Modal.Header>
       <Modal.Body>
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-muted-foreground mb-2">Player Name</label>
-            <input
+            <Label htmlFor="leaderboard-player-name" className="mb-2 block">
+              Player name
+            </Label>
+            <Input
+              id="leaderboard-player-name"
               type="text"
               value={playerName}
-              onChange={(e) => setPlayerName(e.target.value)}
+              onChange={(event) => setPlayerName(event.target.value)}
               placeholder="Your name"
-              className="w-full px-3 py-2 bg-transparent border border-border rounded-lg text-foreground placeholder-muted-foreground focus:outline-none focus:ring-ring"
+              disabled={submitting}
               autoFocus
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-muted-foreground mb-2">Score</label>
-            <input
+            <Label htmlFor="leaderboard-score" className="mb-2 block">
+              Score
+            </Label>
+            <Input
+              id="leaderboard-score"
               type="number"
               value={score}
-              onChange={(e) => setScore(e.target.value)}
+              onChange={(event) => setScore(event.target.value)}
               placeholder="Enter your score"
-              className="w-full px-3 py-2 bg-transparent border border-border rounded-lg text-foreground placeholder-muted-foreground focus:outline-none focus:ring-ring"
+              disabled={submitting}
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-muted-foreground mb-2">Category</label>
-            <select
+            <Label htmlFor="leaderboard-category" className="mb-2 block">
+              Category
+            </Label>
+            <Select
               value={category}
-              onChange={(e) => setCategory(e.target.value)}
-              className="w-full px-3 py-2 bg-transparent border border-border rounded-lg text-foreground focus:outline-none focus:ring-ring"
+              onValueChange={(value) => setCategory(value as LeaderboardCategory)}
+              disabled={submitting}
             >
-              {Object.values(LEADERBOARD_CATEGORY).map(cat => (
-                <option key={cat} value={cat}>{CATEGORY_CONFIG[cat].title}</option>
-              ))}
-            </select>
+              <SelectTrigger id="leaderboard-category">
+                <SelectValue placeholder="Choose a category" />
+              </SelectTrigger>
+              <SelectContent>
+                {Object.values(LEADERBOARD_CATEGORY).map((value) => (
+                  <SelectItem key={value} value={value}>
+                    {CATEGORY_CONFIG[value].title}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
         </div>
       </Modal.Body>
       <Modal.Footer>
-        <Button variant="secondary" onClick={onClose}>Cancel</Button>
-        <Button onClick={handleSubmit} disabled={!playerName.trim() || !score}>Submit</Button>
+        <Button variant="secondary" onClick={onClose} disabled={submitting}>
+          Cancel
+        </Button>
+        <Button onClick={() => void handleSubmit()} disabled={!isValid} loading={submitting}>
+          Submit
+        </Button>
       </Modal.Footer>
     </Modal>
   )
 }
 
-// ============================================================================
-// Edit Score Modal (Admin)
-// ============================================================================
-
 interface EditScoreModalProps {
-  isOpen: boolean
+  entry: LeaderboardRecord
   onClose: () => void
-  onSave: (score: number) => void
-  entry: { recordId: string; data: LeaderboardEntry } | null
+  onSave: (entry: LeaderboardRecord, score: number) => Promise<boolean>
 }
 
-function EditScoreModal({ isOpen, onClose, onSave, entry }: EditScoreModalProps) {
-  const [score, setScore] = useState('')
+function EditScoreModal({ entry, onClose, onSave }: EditScoreModalProps) {
+  const [score, setScore] = useState(String(entry.data.score))
+  const [saving, setSaving] = useState(false)
+  const parsedScore = Number(score)
+  const isValid = score.trim().length > 0 && Number.isFinite(parsedScore)
 
-  const handleOpen = () => {
-    if (entry) setScore(String(entry.data.score))
-  }
+  const handleSave = async () => {
+    if (!isValid || saving) return
 
-  const handleSave = () => {
-    const parsed = Number(score)
-    if (!isNaN(parsed)) {
-      onSave(parsed)
+    setSaving(true)
+    try {
+      const saved = await onSave(entry, parsedScore)
+      if (!saved) return
       onClose()
+    } finally {
+      setSaving(false)
     }
   }
 
-  // Reset score when entry changes
-  if (isOpen && entry && score === '') handleOpen()
-
   return (
-    <Modal open={isOpen} onClose={onClose} size="sm">
-      <Modal.Header onClose={onClose}>
-        <Modal.Title>Edit Score - {entry?.data.playerName}</Modal.Title>
+    <Modal open onClose={saving ? () => undefined : onClose} size="sm">
+      <Modal.Header>
+        <Modal.Title>Edit score for {entry.data.playerName}</Modal.Title>
       </Modal.Header>
       <Modal.Body>
-        <div>
-          <label className="block text-sm font-medium text-muted-foreground mb-2">Score</label>
-          <input
-            type="number"
-            value={score}
-            onChange={(e) => setScore(e.target.value)}
-            className="w-full px-3 py-2 bg-transparent border border-border rounded-lg text-foreground placeholder-muted-foreground focus:outline-none focus:ring-ring"
-            autoFocus
-          />
-        </div>
+        <Label htmlFor="leaderboard-edit-score" className="mb-2 block">
+          Score
+        </Label>
+        <Input
+          id="leaderboard-edit-score"
+          type="number"
+          value={score}
+          onChange={(event) => setScore(event.target.value)}
+          disabled={saving}
+          autoFocus
+        />
       </Modal.Body>
       <Modal.Footer>
-        <Button variant="secondary" onClick={onClose}>Cancel</Button>
-        <Button onClick={handleSave} disabled={!score}>Save</Button>
+        <Button variant="secondary" onClick={onClose} disabled={saving}>
+          Cancel
+        </Button>
+        <Button onClick={() => void handleSave()} disabled={!isValid} loading={saving}>
+          Save
+        </Button>
       </Modal.Footer>
     </Modal>
   )
 }
 
-// ============================================================================
-// Rank Badge Component
-// ============================================================================
-
 function RankBadge({ rank }: { rank: number }) {
-  if (rank === 1) {
-    return <span className="text-lg" title="1st place">&#x1F947;</span>
+  if (rank <= 3) {
+    const label = rank === 1 ? '1st' : rank === 2 ? '2nd' : '3rd'
+    const variant: BadgeVariant = rank === 1 ? 'warning' : rank === 2 ? 'secondary' : 'outline'
+
+    return (
+      <Badge variant={variant} aria-label={`${label} place`}>
+        <Medal aria-hidden="true" className="mr-1 size-3" />
+        {label}
+      </Badge>
+    )
   }
-  if (rank === 2) {
-    return <span className="text-lg" title="2nd place">&#x1F948;</span>
-  }
-  if (rank === 3) {
-    return <span className="text-lg" title="3rd place">&#x1F949;</span>
-  }
+
   return <span className="text-sm font-medium text-muted-foreground">#{rank}</span>
 }
-
-// ============================================================================
-// Main Page
-// ============================================================================
 
 export default function LeaderboardPage({ className }: LeaderboardPageProps) {
   const { user } = useUser()
   const userRole = (user?.role ?? ROLES.VIEWER) as Role
   const isAdmin = userRole === ROLES.ADMIN
-  const canSubmit = userRole === ROLES.MEMBER || userRole === ROLES.ADMIN
+  const canSubmit = userRole === ROLES.MEMBER || isAdmin
+  const toast = useToast()
 
   const [showSubmitModal, setShowSubmitModal] = useState(false)
-  const [editingEntry, setEditingEntry] = useState<{ recordId: string; data: LeaderboardEntry } | null>(null)
+  const [editingEntry, setEditingEntry] = useState<LeaderboardRecord | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<LeaderboardRecord | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
-  // Query all leaderboard entries, sorted by score descending
-  const { records: entries, status } = useQuery<LeaderboardEntry>('leaderboard', {
+  const {
+    records: entries,
+    status,
+    error: queryError,
+  } = useQuery<LeaderboardEntry>('leaderboard', {
     orderBy: 'score',
     orderDir: 'desc',
   })
+  const { createConfirmed, putConfirmed, removeConfirmed } =
+    useMutations<LeaderboardEntry>('leaderboard')
 
-  // Mutations for leaderboard
-  const { create, put, remove } = useMutations<LeaderboardEntry>('leaderboard')
+  const handleSubmit = async (
+    playerName: string,
+    score: number,
+    category: LeaderboardCategory,
+  ): Promise<boolean> => {
+    if (!user) {
+      toast.error('Could not submit score', 'Sign in and try again.')
+      return false
+    }
 
-  const handleSubmit = async (playerName: string, score: number, category: string) => {
-    await create({
-      playerName,
-      score,
-      category,
-      playerId: user!.id,
-    })
-  }
-
-  const handleEditSave = async (newScore: number) => {
-    if (editingEntry) {
-      await put(editingEntry.recordId, { ...editingEntry.data, score: newScore })
-      setEditingEntry(null)
+    try {
+      await createConfirmed({ playerName, score, category, playerId: user.id })
+      toast.success(
+        'Score submitted',
+        `${score.toLocaleString()} points recorded for "${playerName}".`,
+      )
+      return true
+    } catch (error) {
+      toast.error(
+        'Could not submit score',
+        error instanceof Error ? error.message : 'Please try again.',
+      )
+      return false
     }
   }
 
-  const handleDelete = async (recordId: string) => {
-    if (confirm('Are you sure you want to delete this entry?')) {
-      await remove(recordId)
+  const handleEditSave = async (entry: LeaderboardRecord, newScore: number): Promise<boolean> => {
+    try {
+      await putConfirmed(entry.recordId, { score: newScore })
+      toast.success(
+        'Score updated',
+        `"${entry.data.playerName}" now has ${newScore.toLocaleString()} points.`,
+      )
+      return true
+    } catch (error) {
+      toast.error(
+        'Could not update score',
+        error instanceof Error ? error.message : 'Please try again.',
+      )
+      return false
+    }
+  }
+
+  const handleDelete = async () => {
+    if (!deleteTarget || deleting) return
+
+    setDeleting(true)
+    try {
+      await removeConfirmed(deleteTarget.recordId)
+      toast.success('Score deleted', `The score for "${deleteTarget.data.playerName}" was deleted.`)
+      setDeleteTarget(null)
+    } catch (error) {
+      toast.error(
+        'Could not delete score',
+        error instanceof Error ? error.message : 'Please try again.',
+      )
+    } finally {
+      setDeleting(false)
     }
   }
 
   const isLoading = status === 'loading'
 
   return (
-    <div className={`h-full bg-background overflow-y-auto ${className ?? ''}`}>
-      {/* Header */}
-      <div className="bg-card/60 backdrop-blur-md border-b border-border sticky top-0 z-10">
-        <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <div className="flex items-center justify-between">
+    <div className={`h-full overflow-y-auto bg-background ${className ?? ''}`}>
+      <div className="sticky top-0 z-10 border-b border-border bg-card/60 backdrop-blur-md">
+        <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-between gap-4">
             <div>
               <h1 className="text-2xl font-bold text-foreground">Leaderboard</h1>
-              <p className="text-muted-foreground mt-1">
-                {canSubmit
-                  ? 'Submit your score and compete for the top spot'
-                  : 'View the rankings below'
-                }
+              <p className="mt-1 text-muted-foreground">
+                {isLoading
+                  ? 'Loading current rankings...'
+                  : canSubmit
+                    ? 'Submit a score and see where you rank.'
+                    : 'Scores are ranked from highest to lowest.'}
               </p>
             </div>
 
             {canSubmit && (
               <Button onClick={() => setShowSubmitModal(true)}>
-                <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                </svg>
+                <Plus aria-hidden="true" />
                 Submit Score
               </Button>
             )}
@@ -253,36 +340,61 @@ export default function LeaderboardPage({ className }: LeaderboardPageProps) {
         </div>
       </div>
 
-      {/* Content */}
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6 lg:px-8">
         {isLoading ? (
-          <div className="flex items-center justify-center py-16">
-            <div className="w-8 h-8 border-2 border-primary/20 border-t-primary rounded-full animate-spin" />
+          <div
+            className="space-y-3 rounded-xl border border-border bg-card/60 p-4"
+            aria-label="Loading leaderboard"
+            aria-busy="true"
+          >
+            <div className="h-8 animate-pulse rounded-md bg-muted/60" />
+            <div className="h-12 animate-pulse rounded-md bg-muted/40" />
+            <div className="h-12 animate-pulse rounded-md bg-muted/40" />
+            <div className="h-12 animate-pulse rounded-md bg-muted/40" />
           </div>
+        ) : status === 'error' ? (
+          <EmptyState
+            title="Could not load leaderboard"
+            description={queryError ?? 'Refresh the page to try again.'}
+            icon={<TriangleAlert aria-hidden="true" />}
+          />
         ) : entries.length === 0 ? (
           <EmptyState
             title="No scores yet"
-            description={canSubmit
-              ? "Be the first to submit a score!"
-              : "No scores have been submitted yet"
+            description={
+              canSubmit
+                ? 'Submit the first score to start the leaderboard.'
+                : 'Scores will appear here after a member submits one.'
             }
-            icon={
-              <svg className="w-12 h-12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-              </svg>
+            icon={<BarChart3 aria-hidden="true" />}
+            action={
+              canSubmit
+                ? { label: 'Submit a score', onClick: () => setShowSubmitModal(true) }
+                : undefined
             }
           />
         ) : (
-          <div className="bg-card/60 rounded-xl border border-border overflow-hidden">
-            <table className="w-full">
+          <div className="overflow-x-auto rounded-xl border border-border bg-card/60">
+            <table className="w-full min-w-160">
+              <caption className="sr-only">Scores ranked from highest to lowest</caption>
               <thead>
                 <tr className="border-b border-border">
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider w-16">Rank</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Player</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Category</th>
-                  <th className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">Score</th>
-                  {(canSubmit || isAdmin) && (
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider w-24">Actions</th>
+                  <th className="w-20 px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Rank
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Player
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Category
+                  </th>
+                  <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Score
+                  </th>
+                  {canSubmit && (
+                    <th className="w-24 px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                      Actions
+                    </th>
                   )}
                 </tr>
               </thead>
@@ -290,57 +402,61 @@ export default function LeaderboardPage({ className }: LeaderboardPageProps) {
                 {entries.map((entry, index) => {
                   const rank = index + 1
                   const isOwn = entry.data.playerId === user?.id
-                  const cat = entry.data.category as LeaderboardCategory
-                  const catConfig = CATEGORY_CONFIG[cat] ?? CATEGORY_CONFIG[LEADERBOARD_CATEGORY.GENERAL]
+                  const categoryConfig =
+                    CATEGORY_CONFIG[entry.data.category] ??
+                    CATEGORY_CONFIG[LEADERBOARD_CATEGORY.GENERAL]
+                  const canManage = isOwn || isAdmin
 
                   return (
                     <tr
                       key={entry.recordId}
-                      className={`transition-colors ${isOwn ? 'bg-primary/20/10' : 'hover:bg-muted/30'}`}
+                      className={`transition-colors ${
+                        isOwn ? 'bg-primary/10' : 'hover:bg-muted/30'
+                      }`}
                     >
                       <td className="px-4 py-3">
                         <RankBadge rank={rank} />
                       </td>
                       <td className="px-4 py-3">
-                        <span className={`font-medium ${isOwn ? 'text-primary' : 'text-foreground'}`}>
+                        <span
+                          className={`font-medium ${isOwn ? 'text-primary' : 'text-foreground'}`}
+                        >
                           {entry.data.playerName}
                         </span>
-                        {isOwn && (
-                          <span className="ml-2 text-xs text-primary">(you)</span>
-                        )}
+                        {isOwn && <span className="ml-2 text-xs text-primary">(you)</span>}
                       </td>
                       <td className="px-4 py-3">
-                        <Badge variant={catConfig.color} size="sm">{catConfig.title}</Badge>
+                        <Badge variant={categoryConfig.color} size="sm">
+                          {categoryConfig.title}
+                        </Badge>
                       </td>
                       <td className="px-4 py-3 text-right font-mono font-semibold text-foreground">
                         {entry.data.score.toLocaleString()}
                       </td>
-                      {(canSubmit || isAdmin) && (
+                      {canSubmit && (
                         <td className="px-4 py-3 text-right">
-                          <div className="flex items-center justify-end gap-1">
-                            {(isOwn || isAdmin) && (
-                              <button
+                          {canManage && (
+                            <div className="flex items-center justify-end gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="size-8 text-muted-foreground"
                                 onClick={() => setEditingEntry(entry)}
-                                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/60 rounded-lg transition-colors"
-                                title="Edit score"
+                                aria-label={`Edit score for ${entry.data.playerName}`}
                               >
-                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                                </svg>
-                              </button>
-                            )}
-                            {(isOwn || isAdmin) && (
-                              <button
-                                onClick={() => handleDelete(entry.recordId)}
-                                className="p-1.5 text-muted-foreground hover:text-destructive hover:bg-destructive/20 rounded-lg transition-colors"
-                                title="Delete"
+                                <Pencil aria-hidden="true" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="size-8 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
+                                onClick={() => setDeleteTarget(entry)}
+                                aria-label={`Delete score for ${entry.data.playerName}`}
                               >
-                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                </svg>
-                              </button>
-                            )}
-                          </div>
+                                <Trash2 aria-hidden="true" />
+                              </Button>
+                            </div>
+                          )}
                         </td>
                       )}
                     </tr>
@@ -352,20 +468,39 @@ export default function LeaderboardPage({ className }: LeaderboardPageProps) {
         )}
       </div>
 
-      {/* Submit Modal */}
-      <SubmitScoreModal
-        isOpen={showSubmitModal}
-        onClose={() => setShowSubmitModal(false)}
-        onSubmit={handleSubmit}
-        userName={user?.name ?? ''}
-      />
+      {showSubmitModal && (
+        <SubmitScoreModal
+          onClose={() => setShowSubmitModal(false)}
+          onSubmit={handleSubmit}
+          userName={user?.name ?? ''}
+        />
+      )}
 
-      {/* Edit Modal (admin or own) */}
-      <EditScoreModal
-        isOpen={!!editingEntry}
-        onClose={() => setEditingEntry(null)}
-        onSave={handleEditSave}
-        entry={editingEntry}
+      {editingEntry && (
+        <EditScoreModal
+          key={editingEntry.recordId}
+          entry={editingEntry}
+          onClose={() => setEditingEntry(null)}
+          onSave={handleEditSave}
+        />
+      )}
+
+      <ConfirmModal
+        open={deleteTarget !== null}
+        onClose={() => {
+          if (!deleting) setDeleteTarget(null)
+        }}
+        onConfirm={() => void handleDelete()}
+        title={
+          deleteTarget ? `Delete score for "${deleteTarget.data.playerName}"?` : 'Delete score?'
+        }
+        description={
+          deleteTarget
+            ? `This permanently removes the ${deleteTarget.data.score.toLocaleString()}-point score.`
+            : 'This cannot be undone.'
+        }
+        confirmText="Delete"
+        loading={deleting}
       />
     </div>
   )

@@ -1,8 +1,38 @@
 # deepspace
 
+## 0.8.0
+
+### Minor Changes
+
+- Git-native version control for DeepSpace apps.
+
+  Every app now has a cloud git repo the CLI (and plain git) can talk to over the real Git smart-HTTP protocol, with auth injected automatically:
+  - **Sync** — `deepspace clone <app>` materializes the repo; `deepspace push` / `deepspace pull` sync branches; a host-scoped credential helper (`deepspace git-credential`) makes bare `git push space` / `git fetch space` work from any terminal after first use. This removes the GitHub dependency for collaborator code sync.
+  - **Versioned deploys** — `deepspace deploy` is commit-first: it auto-pushes the branch, refuses to ship a checkout that is stale or strictly behind the cloud trunk (`--ignore-stale` to override), and refuses a dirty worktree (`dirty_worktree`, exit 2) so every sourced release points at a commit the cloud repo holds. Commit the changes — to a workspace branch when it's WIP — or pass `--no-push` to deploy without version-control sync (the release then records no lineage). `deepspace releases` lists the append-only release ledger and `deepspace rollback` re-ships any prior release whose bundle is still retained.
+  - **Workspaces** — the one unit of in-progress work. `deepspace workspace new/attach/sync/list/status/land/drop` gives each parallel agent a durable, named line of work (a hidden ref + task metadata) that survives any sandbox, is resumable from any machine (`attach`), and lands through an ordinary merge. Workspace refs are fast-forward-only, overlap warnings are computed from live peer tips, and land/drop clean up the local worktree by default (`--keep-worktree` opts out). WIP belongs in commits on the workspace branch; it becomes durable when synced and remains reachable through the land merge.
+  - **Validate** — `workspace land --validate` runs the project's `validate` script against the merged tree and aborts the land (exit 2) if it fails.
+  - **Activity** — `deepspace activity` is a stateless, cursored coordination feed (pushes, workspace lifecycle, releases) so an agent can answer "did trunk move / did a workspace land / did someone deploy" without cloning anything. Callers retain and resubmit cursors: one-shot reads default to cursor `0`, while follow mode defaults to the current tail. `activity --follow --json` emits NDJSON `ready`, `activity`, and retrying `transport` frames.
+  - **Bounded storage** — each app has one fixed Git-plus-rollback budget by owner tier: test 0, free 128 MiB, starter 512 MiB, premium 2 GiB, and admin 10 GiB. Accounting covers active Git packs plus distinct retained release bundles. Pushes over the irreducible Git floor are refused; bundle admission evicts the oldest rollback payloads, and a durable purge queue retries R2 cleanup. If a concurrent post-deploy admission can no longer retain the new bundle, the live release is recorded with `bundleRetained: false` instead of re-deploying or discarding older rollback history.
+  - **Screenshot boundary** — screenshot capture stays deliberately small and deprioritized. It enforces the configured DeepSpace host boundary on the submitted main-frame URL and every main-frame redirect; subresource policy remains the browser/network boundary's responsibility.
+
+  The CLI surface is agent-first and static: session verbs live under `auth`, app lifecycle under `app`, local development under `dev start|kill`, tests under `test run|screenshot|accounts`, and direct integration calls under `integrations invoke`. There are no compatibility aliases or tombstones for the unshipped tree. `status` reports present-tense facts only. A command that knows one executable follow-up owns exactly one `action: { cwd, argv }`; human output renders the same value as `Next:`. Terminal commands and input-dependent decisions emit no filler action.
+
+  Everything is designed for non-interactive use: commands support `--json`, mutations are idempotency-keyed, and failures carry a stable machine-readable `code` (for example `conflict`, `not_found`, `behind_trunk`, `stale_base`, and `no_releases`). A safe stop that still requires the command's executable local action exits 2 with `actionRequired: true`; failures without one deterministic action exit 1.
+
+### Patch Changes
+
+- Install Framer Motion only when adding the landing-page feature instead of including it in every new app.
+- createDeepSpaceAuth: add optional `onUserCreated` observer hook, wired to better-auth's `databaseHooks.user.create.after`. Fires once per new user with the originating endpoint context (request headers/cookies when the signup came over HTTP, null for server-side creations); exceptions are caught and logged so a failing observer can never break signup.
+- Windows support fixes. `deepspace create` now runs the scaffolder correctly (it exec's `npx.cmd` via cross-spawn instead of exiting 1 with no output) and reports a spawn failure instead of swallowing it. Scaffolded dependency installs are reliable and observable on Windows: the install runs in the foreground rather than a detached worker that the terminal's job object could kill mid-install, and the log-tail hint is PowerShell-aware (`Get-Content -Wait`) off Windows and `tail -f` elsewhere. CLI error paths (workspace/deploy/pull/push/clone and any escaped error) now stop the active progress spinner before exiting, so an expected error exits cleanly instead of aborting with a libuv assertion. Cross-platform path and process spawning throughout.
+
 ## 0.7.0
 
 ### Minor Changes
+
+- Remove the legacy single-scope `RecordProvider` API (`roomId`, `schemas`, and
+  `wsUrl`). `RecordProvider` now owns only shared auth and scope registration;
+  every RecordRoom connection is declared with `RecordScope`. This removes a
+  second, drifting WebSocket lifecycle and the silently ignored `schemas` prop.
 
 - Client-side error reporting (opt-in) for `deepspace logs`. Browser JS errors never invoke the Worker, so they never reached Workers Logs. New `installClientErrorReporter()` (client) hooks `window` 'error'/'unhandledrejection' and forwards each to the app's own Worker via `registerClientErrorRoute(app)` (`POST /_deepspace/client-errors`), which logs them so they appear in `deepspace logs` and the dashboard tagged `CLIENT`. Also exports `reportClientError()` for React error boundaries. Off by default (no starter wiring); anonymous ingestion is size-capped, deduped, and throttled, and — because the route runs in the tenant's own Worker — a browser can only ever write to its own app's log stream.
 

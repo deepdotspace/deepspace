@@ -9,7 +9,7 @@
 // Hooks.
 //
 // This runs automatically via vite-plugin-checker (see vite.config.ts): a
-// violation shows as an overlay during `deepspace dev` and fails the build
+// violation shows as an overlay during `deepspace dev start` and fails the build
 // during `deepspace deploy`. You can also run it on its own with `npm run lint`.
 import reactHooks from 'eslint-plugin-react-hooks'
 import tseslint from 'typescript-eslint'

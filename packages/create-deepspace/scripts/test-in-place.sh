@@ -62,6 +62,7 @@ SENTINEL='# preserved-by-test-in-place'
 PASS=0
 FAIL=0
 FAILED_SCENARIOS=()
+PACK_INJECTION_MARKER=''
 
 # run_scenario <id> <description> <invoke-mode> <seed-mode>
 #   invoke-mode: "parent" or "inside"
@@ -137,17 +138,39 @@ run_scenario() {
   if grep -qF 'cd action-coding' "$log"; then
     errors+=("'cd action-coding' present in output (means new-directory branch fired)")
   fi
+  if ! grep -qF 'npx deepspace dev start' "$log"; then
+    errors+=("next steps do not point at 'deepspace dev start'")
+  fi
 
   # 3. Files must land at $target, not a nested action-coding/action-coding.
   if [[ ! -f "$target/package.json" ]]; then
     errors+=("$target/package.json missing")
   else
-    local name
+    local name command_scripts
     name=$(node -p "require('$target/package.json').name")
     [[ "$name" == "action-coding" ]] || errors+=("package.json name='$name' (want 'action-coding')")
+    command_scripts=$(node -e '
+      const scripts = require(process.argv[1]).scripts
+      console.log([scripts.dev, scripts.test, scripts["test:smoke"], scripts["test:api"], scripts["test:e2e"]].join("|"))
+    ' "$target/package.json")
+    if [[ "$command_scripts" != 'deepspace dev start|deepspace test run|deepspace test run smoke|deepspace test run api|deepspace test run e2e' ]]; then
+      errors+=("package scripts do not match the current CLI command tree: $command_scripts")
+    fi
   fi
   if [[ ! -f "$target/worker.ts" ]]; then
     errors+=("$target/worker.ts missing")
+  fi
+  if [[ ! -f "$target/.claude/launch.json" ]]; then
+    errors+=(".claude/launch.json missing")
+  else
+    local launch_args
+    launch_args=$(node -e '
+      const config = require(process.argv[1])
+      console.log(config.configurations?.[0]?.runtimeArgs?.join(" ") ?? "")
+    ' "$target/.claude/launch.json")
+    if [[ "$launch_args" != 'deepspace dev start --port 5173' ]]; then
+      errors+=("launch.json uses stale runtime args: $launch_args")
+    fi
   fi
   if [[ -d "$target/action-coding" ]]; then
     errors+=("nested $target/action-coding/ exists (scaffold landed in wrong dir)")
@@ -229,6 +252,11 @@ run_scenario() {
     fi
   fi
 
+  if [[ -n "$PACK_INJECTION_MARKER" && -e "$PACK_INJECTION_MARKER" ]]; then
+    errors+=("local SDK packing executed shell syntax from the scaffold path")
+    rm -f "$PACK_INJECTION_MARKER"
+  fi
+
   if (( ${#errors[@]} == 0 )); then
     echo "PASS"
     PASS=$((PASS+1))
@@ -247,6 +275,10 @@ run_scenario 3 "inside dir + fully empty (no .git)"              inside empty
 run_scenario 4 "parent dir + fully empty (no .git)"              parent empty
 run_scenario 5 "parent dir + docs/ + README.md + CLAUDE.md"      parent docs-and-md
 run_scenario 6 "inside dir + docs/ + README.md + CLAUDE.md"      inside docs-and-md
+PACK_INJECTION_MARKER="$SDK_ROOT/packages/deepspace/.pack-injection-test-$$"
+run_scenario "7-\$(touch $(basename "$PACK_INJECTION_MARKER"))" \
+  "parent path containing shell syntax" parent empty
+PACK_INJECTION_MARKER=''
 
 # ---- Agent-friendly CLI contract ------------------------------------------
 # These exercise the non-scaffolding entry points: --help, --version, missing
@@ -283,10 +315,10 @@ run_cli_test() {
     errors+=("prompted interactively for app name (must not prompt by default)")
   fi
   # Per-test extra assertions are passed via the CLI_EXTRA_GREP env, set below.
-  if [[ -n "${CLI_EXPECT:-}" ]] && ! grep -qF "$CLI_EXPECT" "$log"; then
+  if [[ -n "${CLI_EXPECT:-}" ]] && ! grep -qF -- "$CLI_EXPECT" "$log"; then
     errors+=("expected substring not found: '$CLI_EXPECT'")
   fi
-  if [[ -n "${CLI_NOT_EXPECT:-}" ]] && grep -qF "$CLI_NOT_EXPECT" "$log"; then
+  if [[ -n "${CLI_NOT_EXPECT:-}" ]] && grep -qF -- "$CLI_NOT_EXPECT" "$log"; then
     errors+=("unexpected substring present: '$CLI_NOT_EXPECT'")
   fi
 
@@ -306,7 +338,12 @@ CLI_EXPECT='USAGE'                 run_cli_test help-long    "--help shows usage
 CLI_EXPECT='USAGE'                 run_cli_test help-short   "-h shows usage and exits 0"     0 -h
 CLI_EXPECT='.'                     run_cli_test version      "--version prints version, exits 0" 0 --version
 CLI_EXPECT='missing required'      run_cli_test no-args      "no args errors, prints usage, exits 1" 1
-CLI_EXPECT='lowercase alphanumeric' run_cli_test bad-name    "invalid name rejected with validator message" 1 Bad-Name
+CLI_EXPECT='lowercase letters'      run_cli_test bad-name    "invalid name rejected with validator message" 1 Bad-Name
+CLI_EXPECT='at least 2 characters'  run_cli_test short-name  "single-character name rejected" 1 a
+CLI_EXPECT='single dashes'          run_cli_test double-dash "consecutive dashes rejected" 1 bad--name
+CLI_EXPECT='single dashes'          run_cli_test trailing    "trailing dash rejected" 1 bad-name-
+CLI_EXPECT='--local requires a value' run_cli_test local-value "value flag cannot consume the next flag" 1 my-app --local --template copilot
+CLI_EXPECT='Unexpected positional'  run_cli_test extra-name  "second app name is rejected" 1 first-app second-app
 
 # ---------------------------------------------------------------------------
 # Identity guard: scaffolding over an existing DeepSpace app must REFUSE and

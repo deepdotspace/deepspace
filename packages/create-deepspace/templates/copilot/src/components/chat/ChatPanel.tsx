@@ -1,48 +1,35 @@
 /**
- * ChatPanel — DO-backed AI chat surface.
+ * DO-backed AI chat surface.
  *
- * Reads canonical messages via `useQuery('ai-messages')` and sends new turns
- * through `POST /api/ai/chat`. The panel itself owns no chat lifecycle —
- * pass `chatId={null}` and we'll auto-create on first send via `onChatCreated`.
+ * The parent owns chat lifecycle. Pass `chatId={null}` to create on first send
+ * and update the parent from `onChatCreated`.
  */
 
 import {
-  memo,
-  useState,
-  useRef,
   useEffect,
   useMemo,
-  useCallback,
+  useRef,
+  useState,
   type KeyboardEvent,
   type ReactNode,
 } from 'react'
-import ReactMarkdown, { type Components } from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import remarkBreaks from 'remark-breaks'
-import rehypeHighlight from 'rehype-highlight'
 import {
   AlertCircle,
   ArrowUp,
   Check,
   ChevronDown,
-  Copy,
   Square,
 } from 'lucide-react'
-// Atom One Dark — always-dark code blocks, reads cleanly under both
-// light and dark host themes (matches the conventional chat-app pattern).
-import 'highlight.js/styles/atom-one-dark.css'
-import {
-  getAuthToken,
-  useQuery,
-  parseSseLine,
-  decodeAiStreamChunk,
-  type AiStreamAction,
-} from 'deepspace'
+import { useQuery } from 'deepspace'
+import { EmptyState, MessageTurn, ThinkingIndicator } from './ChatPanel.messages'
+import { useStreamingChat } from './ChatPanel.stream'
 
-type ModelOption = { id: string; label: string; provider: string }
+export type ModelOption = {
+  id: string
+  label: string
+  provider: string
+}
 
-// The ai-messages columns. useQuery wraps this in a RecordData envelope
-// (recordId / data / createdAt / updatedAt) — we flatten before rendering.
 type AiMessageData = {
   chatId: string
   userId: string
@@ -53,573 +40,187 @@ type AiMessageData = {
 
 type RenderMessage = {
   id: string
-  role: 'user' | 'assistant' | 'system'
+  role: AiMessageData['role']
   content: string
   parts?: unknown[]
 }
 
-type InFlightMessage = {
-  id: string
-  role: 'user' | 'assistant'
-  content: string
-  parts: MessagePart[]
-  /** Server-assigned recordId for the row that will be persisted at
-   *  onFinish — set on assistant messages once the response header
-   *  `X-Asst-Id` arrives. Dedup against the WebSocket-broadcast persisted
-   *  row checks this id (which matches), avoiding the clock-skew bug that
-   *  bit the previous `spawnTime` vs `createdAt` comparison. Undefined for
-   *  user rows (whose `id` already matches the server-side recordId). */
-  serverId?: string
-  /** The chat this overlay belongs to. Items from a previous chat must
-   *  not render in the current view. */
-  forChatId: string
-}
-
-export interface ChatPanelProps {
-  /** Active chat. `null` triggers auto-create on first send. */
+export type ChatPanelProps = {
+  /** Active chat. `null` creates one on first send. */
   chatId: string | null
-  /** Current user id; scopes the messages query as defense-in-depth. */
+  /** Current user id; scopes the messages query as defense in depth. */
   userId: string
-  /** Fired when the panel auto-creates a chat. */
+  /** Required in practice when `chatId` is null so the parent tracks the new chat. */
   onChatCreated?: (chatId: string) => void
-  /** Models to show in the picker. Defaults to the SDK's default set. */
+  /** Models shown in the picker. */
   models?: ModelOption[]
   /** Clickable prompts shown when the conversation is empty. */
   emptyStatePrompts?: string[]
-  /** Applied to the outer container. Use to control size, border, background. */
+  /** Applied to the outer container. */
   className?: string
-  /** Optional header slot (title, close button, etc.). Rendered above messages. */
+  /** Optional content rendered above the messages. */
   header?: ReactNode
-  /** Tighter paddings and type for narrow containers (<400px). */
+  /** Tighter spacing for narrow containers. */
   compact?: boolean
-  /** Suspend send while the parent has a chat-create in flight. Without
-   *  this, a fast typist can submit between the parent's eager-create POST
-   *  and its response — both layers would auto-create, spawning two chats. */
+  /** Suspends send while a parent-owned create is in flight. */
   disabled?: boolean
 }
 
 const MODEL_STORAGE_KEY = 'deepspace-ai-model'
-
 const DEFAULT_PROMPTS = [
   'What can you help with?',
   'Summarize recent activity',
   'List my collections',
 ]
 
-// Mirrors the allowlist in the scaffolded ai/chat-routes.ts. Sonnet 5 is the
-// default — balanced cost/capability with the same 1M-token context as Opus
-// at a lower price. Within each provider we list default → premium → cheap
-// so the picker shows the recommended option first when a user opens it.
-// Override by passing your own `models` prop — apps scaffolded before this
-// lineup must either update their ALLOWED_MODELS to match or pass the models
-// they allowlist, otherwise the worker rejects the picker's ids with a 400.
+// Keep this picker aligned with ALLOWED_MODELS in src/ai/chat-routes.ts.
 const DEFAULT_MODELS: ModelOption[] = [
-  { id: 'claude-sonnet-5',  label: 'Claude Sonnet 5',  provider: 'Anthropic' },
-  { id: 'claude-opus-4-8',  label: 'Claude Opus 4.8',  provider: 'Anthropic' },
+  { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', provider: 'Anthropic' },
+  { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', provider: 'Anthropic' },
   { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', provider: 'Anthropic' },
-  { id: 'gpt-5.6-terra',    label: 'GPT-5.6 Terra',    provider: 'OpenAI' },
-  { id: 'gpt-5.6-sol',      label: 'GPT-5.6 Sol',      provider: 'OpenAI' },
-  { id: 'gpt-5.6-luna',     label: 'GPT-5.6 Luna',     provider: 'OpenAI' },
-  { id: 'gpt-oss-120b',     label: 'GPT-OSS 120B',     provider: 'Cerebras' },
+  { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', provider: 'OpenAI' },
+  { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', provider: 'OpenAI' },
+  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', provider: 'OpenAI' },
+  { id: 'gpt-oss-120b', label: 'GPT-OSS 120B', provider: 'Cerebras' },
 ]
-
-// ============================================================================
-// useStreamingChat — POSTs /api/ai/chat, parses Vercel data-stream lines,
-// exposes an in-flight overlay until useQuery delivers the persisted rows.
-// ============================================================================
-
-function useStreamingChat(
-  chatId: string | null,
-  modelId: string | undefined,
-  onChatCreated?: (id: string) => void,
-) {
-  const [inFlight, setInFlight] = useState<InFlightMessage[]>([])
-  const [isLoading, setIsLoading] = useState(false)
-  // Mirror of `isLoading` for use inside `send`'s in-flight guard. Reading
-  // from state directly would force `isLoading` into the useCallback deps,
-  // recreating `send` on every loading flip and exposing a stale-closure
-  // window where a programmatic retry could see the pre-flip closure.
-  const isLoadingRef = useRef(false)
-  const [error, setError] = useState<Error | null>(null)
-  const abortRef = useRef<AbortController | null>(null)
-  const lastSendRef = useRef<{ content: string } | null>(null)
-  const prevChatIdRef = useRef<string | null>(chatId)
-
-  // Abort on any transition AWAY from a real chatId — chat switch (id→id) and
-  // chat clear (id→null, e.g. the active chat being deleted). null→newId is
-  // the auto-create promotion mid-send and must NOT abort, or the user's
-  // first message dies before it reaches the server. Without aborting on
-  // id→null, deleting the chat you're streaming in lets onFinish persist an
-  // orphan assistant row tagged with a chatId that no longer exists.
-  useEffect(() => {
-    const prev = prevChatIdRef.current
-    prevChatIdRef.current = chatId
-    if (prev !== null && prev !== chatId) {
-      abortRef.current?.abort()
-      setInFlight([])
-    }
-  }, [chatId])
-
-  // Abort any in-flight stream on unmount — without this, navigating away
-  // mid-stream leaks the fetch (response body keeps being consumed, setState
-  // fires on an unmounted component, AI tokens keep accruing server-side).
-  useEffect(() => {
-    return () => {
-      abortRef.current?.abort()
-    }
-  }, [])
-
-  const send = useCallback(
-    async (content: string) => {
-      // Defense-in-depth guard for programmatic call paths (retry, etc.) —
-      // the canSend UI gate already blocks form submits while loading. We
-      // read from a ref (not state) so this callback stays stable across
-      // loading transitions; that closes the stale-closure window a retry
-      // click could otherwise hit during the brief moment between
-      // setIsLoading(true) and React re-rendering with the new closure.
-      if (isLoadingRef.current) return
-      setError(null)
-      lastSendRef.current = { content }
-      // Claim the in-flight slot BEFORE any await. The auto-create below is a
-      // real network round-trip; setting the guard only after it would let a
-      // second send() slip through with chatId still null and create a second
-      // chat (double-create race, orphaning the first turn).
-      isLoadingRef.current = true
-      setIsLoading(true)
-
-      let activeChatId = chatId
-      if (!activeChatId) {
-        try {
-          const token = await getAuthToken()
-          const res = await fetch('/api/ai/chats', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-            body: JSON.stringify({}),
-          })
-          if (!res.ok) throw new Error(`Failed to create chat: ${res.status}`)
-          const data = (await res.json()) as { chat: { id: string } }
-          activeChatId = data.chat.id
-          onChatCreated?.(activeChatId)
-        } catch (err) {
-          setError(err instanceof Error ? err : new Error(String(err)))
-          isLoadingRef.current = false
-          setIsLoading(false)
-          return
-        }
-      }
-
-      const localTs = Date.now()
-      const userMessageId = `usr-${localTs}-${Math.random().toString(36).slice(2, 8)}`
-      const assistantId = `asst-pending-${localTs}`
-      // forChatId uses the resolved id (whether passed in or just created above).
-      const userMsg: InFlightMessage = { id: userMessageId, role: 'user', content, parts: [], forChatId: activeChatId }
-      const asstMsg: InFlightMessage = { id: assistantId, role: 'assistant', content: '', parts: [], forChatId: activeChatId }
-      setInFlight([userMsg, asstMsg])
-      abortRef.current = new AbortController()
-
-      try {
-        const token = await getAuthToken()
-        const res = await fetch('/api/ai/chat', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          body: JSON.stringify({ chatId: activeChatId, userMessageId, content, modelId }),
-          signal: abortRef.current.signal,
-        })
-        if (!res.ok || !res.body) {
-          const detail = res.body ? await res.text().catch(() => '') : ''
-          throw new Error(detail || `Request failed: ${res.status}`)
-        }
-
-        // Tag the in-flight assistant row with the server-assigned id so the
-        // dedup memo can drop it once the persisted row arrives over WS,
-        // independent of either party's clock.
-        const serverAsstId = res.headers.get('X-Asst-Id')
-        if (serverAsstId) {
-          setInFlight((cur) =>
-            cur.map((m) => (m.id === assistantId ? { ...m, serverId: serverAsstId } : m)),
-          )
-        }
-
-        // v5's `toUIMessageStreamResponse` emits SSE: `data: <json>\n\n`
-        // events terminating with `data: [DONE]\n\n`. `parseSseLine` +
-        // `decodeAiStreamChunk` are the SDK's pure decoders (covered by
-        // `ai-stream.test.ts`); we just apply the resulting actions to
-        // local React state.
-        const reader = res.body.getReader()
-        const decoder = new TextDecoder()
-        let buf = ''
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buf += decoder.decode(value, { stream: true })
-          const lines = buf.split('\n')
-          buf = lines.pop() ?? ''
-          for (const line of lines) handleSseLine(line, assistantId, setInFlight, setError)
-        }
-        // Flush any pending bytes the streaming decoder held back at a
-        // multi-byte boundary, then process the trailing line.
-        buf += decoder.decode()
-        handleSseLine(buf, assistantId, setInFlight, setError)
-      } catch (err) {
-        const e = err instanceof Error ? err : new Error(String(err))
-        if (e.name !== 'AbortError') {
-          console.error('[chat] STREAM error', { name: e.name, message: e.message })
-          setError(e)
-        }
-      } finally {
-        isLoadingRef.current = false
-        setIsLoading(false)
-        abortRef.current = null
-        // No wall-clock timer to clear inFlight. Dedup is by id: user rows
-        // share their id with the server; assistant rows are matched via
-        // the server-emitted `X-Asst-Id` header captured into `serverId`.
-      }
-    },
-    [chatId, modelId, onChatCreated],
-  )
-
-  const stop = useCallback(() => {
-    abortRef.current?.abort()
-  }, [])
-
-  const retry = useCallback(() => {
-    if (lastSendRef.current) void send(lastSendRef.current.content)
-  }, [send])
-
-  return { send, stop, retry, isLoading, error, inFlight }
-}
-
-// SDK-decoded chunk → React state mutation. The decoder vocabulary
-// (`AiStreamAction`) lives in `deepspace/src/client/ai-stream.ts` and is
-// covered by unit tests. This function does the React-bound part: which
-// in-flight message to update, how to coalesce text, when to drop the
-// overlay. Keep it dumb — anything the decoder can decide should stay
-// in the decoder so it remains testable in isolation.
-function handleSseLine(
-  line: string,
-  assistantId: string,
-  setInFlight: React.Dispatch<React.SetStateAction<InFlightMessage[]>>,
-  setError: (e: Error | null) => void,
-) {
-  const chunk = parseSseLine(line)
-  if (!chunk) return
-  const action = decodeAiStreamChunk(chunk)
-  if (!action) return
-  applyStreamAction(action, assistantId, setInFlight, setError)
-}
-
-function applyStreamAction(
-  action: AiStreamAction,
-  assistantId: string,
-  setInFlight: React.Dispatch<React.SetStateAction<InFlightMessage[]>>,
-  setError: (e: Error | null) => void,
-) {
-  switch (action.type) {
-    case 'append-text':
-      // Append to the last text part if it's still the tail; otherwise start
-      // a new text part. Keeps text + tool-invocations in chronological order.
-      setInFlight((cur) =>
-        cur.map((m) => {
-          if (m.id !== assistantId) return m
-          const last = m.parts[m.parts.length - 1]
-          if (last && last.type === 'text') {
-            const merged: MessagePart = { type: 'text', text: (last as { text: string }).text + action.delta }
-            return { ...m, content: m.content + action.delta, parts: [...m.parts.slice(0, -1), merged] }
-          }
-          return {
-            ...m,
-            content: m.content + action.delta,
-            parts: [...m.parts, { type: 'text', text: action.delta }],
-          }
-        }),
-      )
-      return
-
-    case 'upsert-tool-call':
-      upsertToolInvocation(setInFlight, assistantId, action.toolCallId, {
-        toolName: action.toolName,
-        state: 'call',
-        args: action.input,
-      })
-      return
-
-    case 'finalize-tool-call':
-      finalizeToolInvocation(setInFlight, assistantId, action.toolCallId, {
-        result: action.result as ToolInvocation['result'],
-      })
-      return
-
-    case 'fail-tool-input':
-      // Schema validation failed BEFORE the tool ran; no preceding
-      // `tool-input-available` was emitted. Upsert a failed invocation
-      // (we have toolName + the rejected input) so the user sees a tool
-      // row with the failure dot, not a stuck spinner / nothing at all.
-      console.error('[chat] STREAM tool-input-error', {
-        toolCallId: action.toolCallId,
-        errorText: action.errorText,
-      })
-      upsertToolInvocation(setInFlight, assistantId, action.toolCallId, {
-        toolName: action.toolName,
-        state: 'result',
-        args: action.input,
-        result: { success: false, error: action.errorText } as ToolInvocation['result'],
-      })
-      return
-
-    case 'fail-tool-output':
-      // Tool ran (or failed during execution); a preceding `upsert-tool-call`
-      // already produced the in-flight invocation, so we just finalize it.
-      console.error('[chat] STREAM tool-output-error', {
-        toolCallId: action.toolCallId,
-        errorText: action.errorText,
-      })
-      finalizeToolInvocation(setInFlight, assistantId, action.toolCallId, {
-        result: { success: false, error: action.errorText } as ToolInvocation['result'],
-      })
-      return
-
-    case 'stream-error':
-      console.error('[chat] STREAM error', action.errorText)
-      setError(new Error(action.errorText))
-      // Drop the assistant overlay entirely — emptying it would leave a
-      // zero-content flex container that still eats the parent's gap, showing
-      // a phantom vertical space between the user message and the error banner.
-      setInFlight((cur) => cur.filter((m) => m.id !== assistantId))
-      return
-
-    case 'abort':
-      // Server-side abort with no error chunk to follow. Drop the empty
-      // assistant overlay so we don't leave a phantom bubble — but keep
-      // it if the user already saw partial text OR a tool invocation
-      // landed before the abort. `parts.length > 0` covers both: a
-      // text-delta appends to both `content` and `parts`, and a tool
-      // call lands in `parts` only.
-      setInFlight((cur) => cur.filter((m) => m.id !== assistantId || m.parts.length > 0))
-      return
-
-    default: {
-      // Exhaustiveness check — adding a new variant to AiStreamAction
-      // without a case here will fail this assignment at compile time.
-      const _exhaustive: never = action
-      void _exhaustive
-      return
-    }
-  }
-}
-
-function upsertToolInvocation(
-  setInFlight: React.Dispatch<React.SetStateAction<InFlightMessage[]>>,
-  assistantId: string,
-  toolCallId: string,
-  inv: ToolInvocation,
-) {
-  const part: MessagePart = { type: 'tool-invocation', toolInvocation: inv, toolCallId }
-  // Dedup by toolCallId — replace if already present (the multi-step loop
-  // can re-emit a tool-input-available for the same call on retry).
-  setInFlight((cur) =>
-    cur.map((m) => {
-      if (m.id !== assistantId) return m
-      const existingIdx = m.parts.findIndex(
-        (p) => p.type === 'tool-invocation' && (p as ToolInvocationPart).toolCallId === toolCallId,
-      )
-      if (existingIdx >= 0) {
-        const next = m.parts.slice()
-        next[existingIdx] = part
-        return { ...m, parts: next }
-      }
-      return { ...m, parts: [...m.parts, part] }
-    }),
-  )
-}
-
-function finalizeToolInvocation(
-  setInFlight: React.Dispatch<React.SetStateAction<InFlightMessage[]>>,
-  assistantId: string,
-  toolCallId: string,
-  patch: { result: ToolInvocation['result'] },
-) {
-  setInFlight((cur) =>
-    cur.map((m) => {
-      if (m.id !== assistantId) return m
-      const parts = m.parts.map((p) => {
-        if (
-          p.type === 'tool-invocation' &&
-          (p as ToolInvocationPart).toolCallId === toolCallId
-        ) {
-          const inv = (p as ToolInvocationPart).toolInvocation
-          const updated: ToolInvocation = { ...inv, state: 'result', result: patch.result }
-          return { ...p, toolInvocation: updated }
-        }
-        return p
-      })
-      return { ...m, parts }
-    }),
-  )
-}
-
-// ============================================================================
-// ChatPanel
-// ============================================================================
 
 export function ChatPanel({
   chatId,
   userId,
   onChatCreated,
-  models: modelsProp,
-  emptyStatePrompts,
+  models: modelOptions,
+  emptyStatePrompts = DEFAULT_PROMPTS,
   className,
   header,
   compact = false,
   disabled = false,
 }: ChatPanelProps) {
-  const models = modelsProp ?? DEFAULT_MODELS
+  const models = modelOptions ?? DEFAULT_MODELS
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const stickToBottomRef = useRef(true)
+  const [input, setInput] = useState('')
+  const [modelId, setModelId] = useState<string | undefined>(() =>
+    initialModelId(models),
+  )
 
-  const [modelId, setModelId] = useState<string | undefined>(() => {
-    let saved: string | null = null
-    try { saved = typeof window === 'undefined' ? null : window.localStorage.getItem(MODEL_STORAGE_KEY) } catch { saved = null }
-    if (saved && models.some((m) => m.id === saved)) return saved
-    return models[0]?.id
-  })
-  function updateModelId(id: string) {
-    setModelId(id)
-    try { if (typeof window !== 'undefined') window.localStorage.setItem(MODEL_STORAGE_KEY, id) } catch { /* ignore */ }
-  }
+  // A custom model list may change at runtime. Never keep sending an id the
+  // picker no longer offers (the worker correctly rejects unknown ids).
+  useEffect(() => {
+    if (modelId && models.some((model) => model.id === modelId)) return
+    setModelId(models[0]?.id)
+  }, [modelId, models])
 
   const groupedModels = useMemo(() => groupModelsByProvider(models), [models])
-  const selectedModel = models.find((m) => m.id === modelId)
-
-  const { send, stop, retry, isLoading, error, inFlight } = useStreamingChat(
+  const selectedModel = models.find((model) => model.id === modelId)
+  const { send, stop, retry, isLoading, error, inFlight } = useStreamingChat({
     chatId,
     modelId,
     onChatCreated,
-  )
+  })
 
-  // Sentinel where-clause yields an empty result when no chat is selected.
   const queryWhere = useMemo(
     () => ({ chatId: chatId ?? '__none__', userId }),
     [chatId, userId],
   )
-  const { records: persistedRecords } = useQuery<AiMessageData>('ai-messages', {
+  const { records } = useQuery<AiMessageData>('ai-messages', {
     where: queryWhere,
     orderBy: 'createdAt',
     orderDir: 'asc',
   })
-
-  // Persisted rows change only when the WS query delivers; mapping them (and
-  // building the id Set) in their own memos keeps that O(history) work out of
-  // the per-token recompute below AND keeps row object identities stable
-  // across streamed chunks, which is what lets memo(MessageTurn) skip
-  // re-rendering (and re-parsing markdown for) every finished turn.
-  const persisted: RenderMessage[] = useMemo(
-    () =>
-      persistedRecords.map((r) => ({
-        id: r.recordId,
-        role: r.data.role,
-        content: r.data.content ?? '',
-        parts: r.data.parts,
-      })),
-    [persistedRecords],
+  const persisted = useMemo<RenderMessage[]>(
+    () => records.map((record) => ({
+      id: record.recordId,
+      role: record.data.role,
+      content: record.data.content ?? '',
+      parts: record.data.parts,
+    })),
+    [records],
   )
-  const persistedIds = useMemo(() => new Set(persisted.map((m) => m.id)), [persisted])
-
-  const messages: RenderMessage[] = useMemo(() => {
-    const tail = inFlight.filter((m) => {
-      // Only render in-flight items that belong to the chat we're currently
-      // viewing. Prevents the previous chat's bubbles from leaking through
-      // when activeChatId switches (new chat, chat select).
-      if (m.forChatId !== chatId) return false
-      // User rows: id is the same client/server. Assistant rows: serverId is
-      // the worker-assigned recordId (from the X-Asst-Id response header) and
-      // matches the WS-broadcast persisted row. Dedup is purely id-based
-      // — there is no clock comparison, so client/server clock skew can't
-      // leave a duplicate stuck on screen.
-      if (persistedIds.has(m.id)) return false
-      if (m.serverId && persistedIds.has(m.serverId)) return false
-      return true
+  const persistedIds = useMemo(
+    () => new Set(persisted.map((message) => message.id)),
+    [persisted],
+  )
+  const messages = useMemo<RenderMessage[]>(() => {
+    const overlay = inFlight.filter((message) => {
+      if (message.forChatId !== chatId) return false
+      if (persistedIds.has(message.id)) return false
+      return !message.serverId || !persistedIds.has(message.serverId)
     })
-    return [...persisted, ...tail]
-  }, [persisted, persistedIds, inFlight, chatId])
+    return [...persisted, ...overlay]
+  }, [chatId, inFlight, persisted, persistedIds])
 
-  const [input, setInput] = useState('')
-
-  // Auto-scroll only when the user is already pinned to the bottom.
-  const stickToBottomRef = useRef(true)
   useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    const onScroll = () => {
-      const gap = el.scrollHeight - el.scrollTop - el.clientHeight
-      stickToBottomRef.current = gap < 80
+    const element = scrollRef.current
+    if (!element) return
+    const trackPosition = () => {
+      const bottomGap = element.scrollHeight - element.scrollTop - element.clientHeight
+      stickToBottomRef.current = bottomGap < 80
     }
-    el.addEventListener('scroll', onScroll, { passive: true })
-    return () => el.removeEventListener('scroll', onScroll)
+    element.addEventListener('scroll', trackPosition, { passive: true })
+    return () => element.removeEventListener('scroll', trackPosition)
   }, [])
 
   useEffect(() => {
-    const el = scrollRef.current
-    if (!el || !stickToBottomRef.current) return
-    // While streaming, chunks arrive faster than a smooth scroll completes —
-    // each restart leaves the view lagging the newest text and pays an extra
-    // animation. Jump instantly during the stream; ease only for discrete
-    // changes (history load, completed turn).
-    el.scrollTo({ top: el.scrollHeight, behavior: isLoading ? 'auto' : 'smooth' })
-  }, [messages, isLoading])
+    const element = scrollRef.current
+    if (!element || !stickToBottomRef.current) return
+    element.scrollTo({
+      top: element.scrollHeight,
+      behavior: isLoading ? 'auto' : 'smooth',
+    })
+  }, [isLoading, messages])
 
-  // Auto-grow textarea, capped at 200px.
   useEffect(() => {
-    const el = inputRef.current
-    if (!el) return
+    const element = inputRef.current
+    if (!element) return
     if (!input) {
-      el.style.height = ''
+      element.style.height = ''
       return
     }
-    const raf = requestAnimationFrame(() => {
-      el.style.height = 'auto'
-      el.style.height = `${Math.min(el.scrollHeight, 200)}px`
+    const frame = requestAnimationFrame(() => {
+      element.style.height = 'auto'
+      element.style.height = `${Math.min(element.scrollHeight, 200)}px`
     })
-    return () => cancelAnimationFrame(raf)
+    return () => cancelAnimationFrame(frame)
   }, [input])
 
   const canSend = input.trim().length > 0 && !isLoading && !disabled
 
   function submit() {
     if (!canSend) return
-    const value = input.trim()
+    const content = input.trim()
     setInput('')
-    void send(value)
+    void send(content)
   }
 
-  function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    // IME composition: the Enter that COMMITS a CJK composition fires keydown
-    // with isComposing=true (keyCode 229 on older WebKit) — it must confirm
-    // the text, not send the half-composed message.
-    if (e.nativeEvent.isComposing || e.keyCode === 229) return
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
+  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    // Enter commits an active IME composition; it must not also send it.
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
       submit()
     }
   }
 
-  function onPickPrompt(prompt: string) {
+  function selectPrompt(prompt: string) {
     setInput(prompt)
     inputRef.current?.focus()
   }
 
-  const prompts = emptyStatePrompts ?? DEFAULT_PROMPTS
+  function selectModel(id: string) {
+    setModelId(id)
+    try {
+      window.localStorage.setItem(MODEL_STORAGE_KEY, id)
+    } catch {
+      // Storage can be unavailable in privacy modes; selection still works.
+    }
+  }
+
   const lastMessage = messages[messages.length - 1]
   const streamingAssistantId =
     isLoading && lastMessage?.role === 'assistant' ? lastMessage.id : null
   const waitingForAssistant = isLoading && lastMessage?.role === 'user'
-
-  const outerPx = compact ? 'px-4' : 'px-6'
+  const horizontalPadding = compact ? 'px-4' : 'px-6'
   const textSize = compact ? 'text-[13px]' : 'text-[14px]'
   const turnGap = compact ? 'gap-6' : 'gap-8'
 
@@ -629,27 +230,25 @@ export function ChatPanel({
     >
       {header && <div className="shrink-0">{header}</div>}
 
-      {/* min-h-0 is required on a flex-1 child so overflow-y-auto actually
-          activates instead of growing the parent. */}
       <div
         ref={scrollRef}
         role="log"
         aria-live="polite"
         aria-atomic="false"
         aria-label="Assistant conversation"
-        className={`min-h-0 flex-1 overflow-y-auto ${outerPx} py-8`}
+        className={`min-h-0 flex-1 overflow-y-auto ${horizontalPadding} py-8`}
       >
         {messages.length === 0 ? (
-          <EmptyState prompts={prompts} onPick={onPickPrompt} />
+          <EmptyState prompts={emptyStatePrompts} onPick={selectPrompt} />
         ) : (
           <div className={`mx-auto flex max-w-[44rem] flex-col ${turnGap}`}>
-            {messages.map((m) => (
+            {messages.map((message) => (
               <MessageTurn
-                key={m.id}
-                role={m.role}
-                content={m.content}
-                parts={m.parts as unknown[] | undefined}
-                isStreaming={m.id === streamingAssistantId}
+                key={message.id}
+                role={message.role}
+                content={message.content}
+                parts={message.parts}
+                isStreaming={message.id === streamingAssistantId}
               />
             ))}
             {waitingForAssistant && <ThinkingIndicator />}
@@ -658,7 +257,7 @@ export function ChatPanel({
       </div>
 
       {error && (
-        <div className={`mx-auto mb-2 w-full max-w-[44rem] ${outerPx}`} role="alert">
+        <div className={`mx-auto mb-2 w-full max-w-[44rem] ${horizontalPadding}`} role="alert">
           <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
             <div className="flex-1 text-[13px] leading-relaxed">{error.message}</div>
@@ -673,10 +272,10 @@ export function ChatPanel({
         </div>
       )}
 
-      <div className={`shrink-0 border-t border-border/60 ${outerPx} pb-4 pt-3`}>
+      <div className={`shrink-0 border-t border-border/60 ${horizontalPadding} pb-4 pt-3`}>
         <form
-          onSubmit={(e) => {
-            e.preventDefault()
+          onSubmit={(event) => {
+            event.preventDefault()
             submit()
           }}
           className="mx-auto w-full max-w-[44rem]"
@@ -686,24 +285,22 @@ export function ChatPanel({
               ref={inputRef}
               rows={1}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={onKeyDown}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={handleKeyDown}
               disabled={disabled}
               placeholder={disabled ? 'Creating chat…' : 'Message the assistant…'}
               className="block w-full resize-none bg-transparent px-4 pt-3 pb-12 leading-[1.5] text-foreground placeholder:text-muted-foreground/60 outline-none disabled:cursor-not-allowed"
             />
 
             <div className="pointer-events-none absolute inset-x-2 bottom-2 flex items-center justify-between">
-              {groupedModels && modelId && selectedModel ? (
+              {groupedModels.length > 0 && modelId && selectedModel ? (
                 <ModelPicker
                   grouped={groupedModels}
                   modelId={modelId}
                   label={selectedModel.label}
-                  onChange={updateModelId}
+                  onChange={selectModel}
                 />
-              ) : (
-                <span />
-              )}
+              ) : <span />}
 
               {isLoading ? (
                 <button
@@ -732,315 +329,29 @@ export function ChatPanel({
   )
 }
 
-
-// ----- Turn rendering ----------------------------------------------------
-
-type ToolInvocationPart = {
-  type: 'tool-invocation'
-  toolInvocation: ToolInvocation
-  toolCallId: string
-}
-
-type MessagePart =
-  | { type: 'text'; text: string }
-  | ToolInvocationPart
-
-interface MessageTurnProps {
-  role: 'user' | 'assistant' | 'system'
-  content: string
-  parts?: unknown[]
-  isStreaming: boolean
-}
-
-// memo: every streamed chunk and composer keystroke re-renders ChatPanel and
-// with it the whole turn list. Finished turns receive referentially stable
-// props (see the `persisted` memo), so memo lets them skip the re-render —
-// and with it a full ReactMarkdown re-parse per turn per chunk. Only the
-// actively streaming row's props change, so only it re-renders.
-const MessageTurn = memo(function MessageTurn({ role, content, parts, isStreaming }: MessageTurnProps) {
-  const orderedParts: MessagePart[] = useMemo(() => {
-    if (Array.isArray(parts) && parts.length > 0) {
-      const cast = parts as MessagePart[]
-      const hasText = cast.some((p) => (p as { type?: string }).type === 'text')
-      if (hasText) return cast
-      if (content) return [...cast, { type: 'text', text: content }]
-      return cast
-    }
-    if (content) return [{ type: 'text', text: content }]
-    return []
-  }, [parts, content])
-
-  if (role === 'user') {
-    return (
-      <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-2xl bg-muted px-4 py-2.5 leading-relaxed text-foreground whitespace-pre-wrap break-words">
-          {content}
-        </div>
-      </div>
-    )
+function initialModelId(models: ModelOption[]): string | undefined {
+  let saved: string | null = null
+  try {
+    saved = typeof window === 'undefined'
+      ? null
+      : window.localStorage.getItem(MODEL_STORAGE_KEY)
+  } catch {
+    // Storage is optional.
   }
+  return saved && models.some((model) => model.id === saved)
+    ? saved
+    : models[0]?.id
+}
 
-  if (role === 'system') {
-    // Server compaction wraps summaries in this prefix; strip for display.
-    const body = content.replace(/^Earlier conversation summary:\n?/, '')
-    return (
-      <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-[12px] text-muted-foreground">
-        <div className="mb-1 font-medium tracking-tight text-foreground/80">
-          Earlier conversation summary
-        </div>
-        <div className="whitespace-pre-wrap leading-relaxed">{body}</div>
-      </div>
-    )
+function groupModelsByProvider(models: ModelOption[]): Array<[string, ModelOption[]]> {
+  const groups = new Map<string, ModelOption[]>()
+  for (const model of models) {
+    const group = groups.get(model.provider) ?? []
+    group.push(model)
+    groups.set(model.provider, group)
   }
-
-  return (
-    <div className="flex flex-col gap-3">
-      {orderedParts.map((p, i) => {
-        if (p.type === 'text') {
-          const text = (p as { text: string }).text
-          if (!text) return null
-          // Markdown styling without `@tailwindcss/typography`: arbitrary
-          // descendant selectors (`[&_p]:my-2`) target the markdown's
-          // emitted HTML directly. Avoids a plugin dep on every scaffolded
-          // app — `prose` classes emit zero CSS unless typography is
-          // installed, which is what made paragraphs / line breaks
-          // collapse into one wall of text.
-          //
-          // Code blocks are always-dark (`bg-zinc-900`) so they stay
-          // readable under both light and dark host themes — matches the
-          // atom-one-dark hljs palette imported above. Inline `<code>`
-          // remains theme-aware via `bg-muted`.
-          return (
-            <div
-              key={i}
-              className="text-foreground leading-relaxed
-                         [&_p]:my-2 [&_p]:[overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0
-                         [&_h1]:text-lg [&_h1]:font-semibold [&_h1]:my-3
-                         [&_h2]:text-base [&_h2]:font-semibold [&_h2]:my-3
-                         [&_h3]:font-semibold [&_h3]:my-2
-                         [&_strong]:font-semibold [&_em]:italic
-                         [&_a]:text-primary [&_a]:underline [&_a]:underline-offset-2
-                         [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-6
-                         [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-6
-                         [&_li]:my-0.5
-                         [&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground
-                         [&_hr]:my-3 [&_hr]:border-border
-                         [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-[0.9em]
-                         [&_pre]:bg-zinc-900 [&_pre]:text-zinc-100 [&_pre]:rounded-md [&_pre]:p-3 [&_pre]:my-2 [&_pre]:overflow-x-auto
-                         [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:rounded-none [&_pre_code]:text-inherit
-                         [&_table]:my-2 [&_table]:w-full [&_table]:border-collapse
-                         [&_th]:border [&_th]:border-border [&_th]:px-2 [&_th]:py-1 [&_th]:font-semibold [&_th]:text-left
-                         [&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1"
-            >
-              <ReactMarkdown
-                remarkPlugins={REMARK_PLUGINS}
-                rehypePlugins={REHYPE_PLUGINS}
-                components={MARKDOWN_COMPONENTS}
-              >
-                {text}
-              </ReactMarkdown>
-            </div>
-          )
-        }
-        if (p.type === 'tool-invocation') {
-          const inv = (p as ToolInvocationPart).toolInvocation
-          return <ToolRow key={i} inv={inv} />
-        }
-        return null
-      })}
-      {isStreaming && <LiveIndicator />}
-    </div>
-  )
-})
-
-// ----- Empty state --------------------------------------------------------
-
-function EmptyState({ prompts, onPick }: { prompts: string[]; onPick: (p: string) => void }) {
-  return (
-    <div className="mx-auto flex h-full max-w-[28rem] flex-col items-start justify-center gap-4 px-2">
-      <div className="space-y-1">
-        <h2 className="text-[17px] font-medium tracking-tight text-foreground">
-          How can I help?
-        </h2>
-        <p className="text-[13px] leading-relaxed text-muted-foreground">
-          I can query records, list schemas, and inspect collections on your behalf.
-        </p>
-      </div>
-      <div className="flex flex-col gap-0.5 pt-2">
-        <div className="pb-1 text-[10.5px] font-medium tracking-[0.08em] uppercase text-muted-foreground">
-          Try
-        </div>
-        {prompts.map((p) => (
-          <button
-            key={p}
-            type="button"
-            onClick={() => onPick(p)}
-            className="group flex items-center gap-2 py-1 text-left text-[13px] text-muted-foreground transition-colors hover:text-foreground"
-          >
-            <span className="h-px w-3 shrink-0 bg-border transition-colors group-hover:bg-muted-foreground" />
-            <span className="truncate">{p}</span>
-          </button>
-        ))}
-      </div>
-    </div>
-  )
+  return Array.from(groups.entries())
 }
-
-// ----- Pending + Live indicators -----------------------------------------
-
-function ThinkingIndicator() {
-  return (
-    <div className="flex items-center gap-2 text-[13px] text-muted-foreground">
-      <EllipsisDots />
-      <span>Thinking</span>
-    </div>
-  )
-}
-
-function LiveIndicator() {
-  return (
-    <div className="flex items-center gap-2 text-[12px] text-muted-foreground" aria-live="polite">
-      <span className="relative flex h-1.5 w-1.5">
-        <span className="absolute inset-0 rounded-full bg-primary/50 animate-ping" />
-        <span className="relative h-1.5 w-1.5 rounded-full bg-primary" />
-      </span>
-      <span className="tracking-wide">Working</span>
-    </div>
-  )
-}
-
-function EllipsisDots() {
-  return (
-    <span className="inline-flex items-center gap-[3px]">
-      <span className="h-1 w-1 rounded-full bg-muted-foreground animate-[pulse_1.4s_ease-in-out_0ms_infinite]" />
-      <span className="h-1 w-1 rounded-full bg-muted-foreground animate-[pulse_1.4s_ease-in-out_180ms_infinite]" />
-      <span className="h-1 w-1 rounded-full bg-muted-foreground animate-[pulse_1.4s_ease-in-out_360ms_infinite]" />
-    </span>
-  )
-}
-
-// ----- Tool row ----------------------------------------------------------
-
-type ToolInvocation = {
-  toolName: string
-  state: 'call' | 'result' | 'partial-call'
-  args?: unknown
-  result?: { success?: boolean } & Record<string, unknown>
-}
-
-// ----- Code block + copy button ------------------------------------------
-
-// `pre` slot for ReactMarkdown — wraps the highlighted <pre><code> with a
-// copy-to-clipboard button. Positioned absolutely; revealed on hover via
-// `group-hover` so it doesn't add visual noise on every code block.
-const CodeBlock: Components['pre'] = ({ children, node: _node, ref: _ref, ...props }) => {
-  const ref = useRef<HTMLPreElement>(null)
-  const [copied, setCopied] = useState(false)
-  const onCopy = () => {
-    const text = ref.current?.textContent ?? ''
-    if (!text) return
-    void navigator.clipboard.writeText(text).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    })
-  }
-  return (
-    <div className="group relative">
-      <button
-        type="button"
-        onClick={onCopy}
-        aria-label={copied ? 'Copied' : 'Copy code'}
-        className="absolute right-2 top-2 inline-flex h-6 items-center gap-1 rounded-md border border-zinc-700 bg-zinc-800 px-2 text-[11px] font-medium text-zinc-200 opacity-0 transition-opacity hover:bg-zinc-700 focus-visible:opacity-100 group-hover:opacity-100"
-      >
-        {copied
-          ? <Check className="h-3 w-3" aria-hidden="true" />
-          : <Copy className="h-3 w-3" aria-hidden="true" />}
-        <span>{copied ? 'Copied' : 'Copy'}</span>
-      </button>
-      <pre ref={ref} {...props}>{children}</pre>
-    </div>
-  )
-}
-
-// Markdown links default to navigating in the same tab — which kills the
-// chat session. Force new-tab + noopener for safety.
-const ExternalLink: Components['a'] = ({ children, href, node: _node, ...props }) => {
-  return (
-    <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
-      {children}
-    </a>
-  )
-}
-
-// Module-level so ReactMarkdown's props stay referentially stable across
-// renders — inline literals would defeat memo(MessageTurn) and re-run the
-// remark/rehype parse for every finished turn on every streamed chunk.
-// (Defined after CodeBlock/ExternalLink: they are const components, so an
-// earlier literal would hit their temporal dead zone at module init.)
-const REMARK_PLUGINS = [remarkGfm, remarkBreaks]
-const REHYPE_PLUGINS = [rehypeHighlight]
-const MARKDOWN_COMPONENTS = { pre: CodeBlock, a: ExternalLink }
-
-function ToolRow({ inv }: { inv: ToolInvocation }) {
-  const done = inv.state === 'result'
-  const failed = done && inv.result?.success === false
-  const running = !done
-  const { label, path } = describeTool(inv.toolName, inv.args as Record<string, unknown> | undefined)
-
-  return (
-    <div className={`flex items-center gap-2 text-[13px] leading-tight ${running ? 'animate-[pulse_2s_ease-in-out_infinite]' : ''}`}>
-      <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center">
-        {running ? <Spinner /> : failed ? <FailDot /> : <Check className="h-3 w-3 shrink-0 text-foreground/60" aria-hidden="true" />}
-      </span>
-      <span className={running ? 'text-foreground' : 'text-muted-foreground'}>{label}</span>
-      {path && (
-        <code className="truncate font-mono text-[12.5px] text-foreground/70">{path}</code>
-      )}
-      {running && <EllipsisDots />}
-    </div>
-  )
-}
-
-function Spinner() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 12 12" className="animate-spin text-foreground/70">
-      <circle cx="6" cy="6" r="4.5" fill="none" stroke="currentColor" strokeOpacity="0.2" strokeWidth="1.5" />
-      <path d="M10.5 6 A 4.5 4.5 0 0 1 6 10.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function FailDot() {
-  return <span className="h-1.5 w-1.5 rounded-full bg-destructive" aria-label="failed" />
-}
-
-function describeTool(
-  name: string,
-  args?: Record<string, unknown>,
-): { label: string; path?: string } {
-  const collection = typeof args?.collection === 'string' ? args.collection : undefined
-  const recordId = typeof args?.recordId === 'string' ? args.recordId : undefined
-
-  switch (name) {
-    case 'schema_list':
-      return { label: 'Listing collections' }
-    case 'schema_describe':
-      return { label: 'Describing', path: collection }
-    case 'records_query':
-      return { label: 'Reading', path: collection }
-    case 'records_get':
-      return {
-        label: 'Fetching',
-        path: collection && recordId ? `${collection}/${recordId}` : collection,
-      }
-    case 'user_current':
-      return { label: 'Checking current user' }
-    default:
-      return { label: 'Running', path: name }
-  }
-}
-
-// ----- Model picker ------------------------------------------------------
 
 function ModelPicker({
   grouped,
@@ -1058,17 +369,17 @@ function ModelPicker({
 
   useEffect(() => {
     if (!open) return
-    function onDocDown(e: MouseEvent) {
-      if (!containerRef.current?.contains(e.target as Node)) setOpen(false)
+    const closeOutside = (event: MouseEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) setOpen(false)
     }
-    function onKey(e: globalThis.KeyboardEvent) {
-      if (e.key === 'Escape') setOpen(false)
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
     }
-    document.addEventListener('mousedown', onDocDown)
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('mousedown', closeOutside)
+    document.addEventListener('keydown', closeOnEscape)
     return () => {
-      document.removeEventListener('mousedown', onDocDown)
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('mousedown', closeOutside)
+      document.removeEventListener('keydown', closeOnEscape)
     }
   }, [open])
 
@@ -1076,7 +387,7 @@ function ModelPicker({
     <div ref={containerRef} className="pointer-events-auto relative inline-flex">
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpen((current) => !current)}
         className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-[12px] text-muted-foreground transition-colors hover:text-foreground"
         aria-haspopup="menu"
         aria-expanded={open}
@@ -1090,28 +401,26 @@ function ModelPicker({
           role="menu"
           className="absolute bottom-full left-0 z-30 mb-2 w-64 max-h-[22rem] overflow-y-auto rounded-lg border border-border bg-popover text-popover-foreground shadow-lg"
         >
-          {grouped.map(([provider, items], pIdx) => (
+          {grouped.map(([provider, items], providerIndex) => (
             <div key={provider}>
-              {pIdx > 0 && <div className="border-t border-border/60" />}
+              {providerIndex > 0 && <div className="border-t border-border/60" />}
               <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                 {provider}
               </div>
-              {items.map((m) => {
-                const active = m.id === modelId
+              {items.map((model) => {
+                const active = model.id === modelId
                 return (
                   <button
-                    key={m.id}
+                    key={model.id}
                     type="button"
                     role="menuitem"
                     onClick={() => {
-                      onChange(m.id)
+                      onChange(model.id)
                       setOpen(false)
                     }}
-                    className={`flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-[12.5px] transition-colors ${
-                      active ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50'
-                    }`}
+                    className={`flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-[12.5px] transition-colors ${active ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50'}`}
                   >
-                    <span className="truncate">{m.label}</span>
+                    <span className="truncate">{model.label}</span>
                     {active && <Check className="h-3 w-3 shrink-0 text-foreground/60" aria-hidden="true" />}
                   </button>
                 )
@@ -1122,17 +431,4 @@ function ModelPicker({
       )}
     </div>
   )
-}
-
-// ----- Utils -------------------------------------------------------------
-
-function groupModelsByProvider(models?: ModelOption[]): Array<[string, ModelOption[]]> | null {
-  if (!models || models.length === 0) return null
-  const map = new Map<string, ModelOption[]>()
-  for (const m of models) {
-    const list = map.get(m.provider) ?? []
-    list.push(m)
-    map.set(m.provider, list)
-  }
-  return Array.from(map.entries())
 }

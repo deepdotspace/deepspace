@@ -14,7 +14,8 @@
  *   4. ctx.continue: a handler that yields once resumes with the previous
  *      checkpoint as `job.resumeFrom`.
  *   5. Crash recovery: a `running` row older than the alarm wall-time is
- *      either retried or permanently failed when the room re-initializes.
+ *      either retried or permanently failed, and a recent orphan has a
+ *      persisted wake-up that recovers it once it crosses that boundary.
  *
  * The handler closures inside each test are the public contract the
  * SDK ships — if any of these break, an app's job handler breaks too.
@@ -332,7 +333,89 @@ describe('JobRoom — ctx.continue checkpoint', () => {
 })
 
 describe('JobRoom — crash recovery', () => {
-  it('retries a stale `running` row that has retry budget left', async () => {
+  it('runs an earlier queued job, then re-arms the orphan recovery deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      const now = new Date('2026-08-02T12:00:00.000Z')
+      vi.setSystemTime(now)
+      const db = new Database(':memory:')
+      new TestJobRoom(makeState(db).state, {}).init()
+
+      const startedAt = new Date(now.getTime() - 5 * 60_000)
+      const queuedAt = new Date(now.getTime() + 2 * 60_000)
+      db.prepare(
+        `INSERT INTO jobs (id, type, status, attempts, max_attempts, enqueued_at, started_at)
+           VALUES (?, ?, 'running', 1, 3, ?, ?)`,
+      ).run('recent-orphan', 'orphan', startedAt.toISOString(), startedAt.toISOString())
+      db.prepare(
+        `INSERT INTO jobs (id, type, status, attempts, max_attempts, enqueued_at, next_run_at)
+           VALUES (?, ?, 'queued', 0, 1, ?, ?)`,
+      ).run('queued-first', 'queued', now.toISOString(), queuedAt.toISOString())
+
+      const { state, alarms } = makeState(db)
+      const room = new TestJobRoom(state, {})
+      room.handler = (job) => job.type
+      room.init()
+
+      expect(alarms.at(-1)).toBe(queuedAt.getTime())
+
+      vi.setSystemTime(queuedAt)
+      await room.runAlarm()
+
+      expect(db.prepare(`SELECT status FROM jobs WHERE id = 'queued-first'`).get()).toEqual({
+        status: 'succeeded',
+      })
+      expect(db.prepare(`SELECT status FROM jobs WHERE id = 'recent-orphan'`).get()).toEqual({
+        status: 'running',
+      })
+      expect(alarms.at(-1)).toBe(startedAt.getTime() + 16 * 60_000)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('arms a wake-up for a recent orphan and recovers it at the stale boundary', async () => {
+    vi.useFakeTimers()
+    try {
+      const now = new Date('2026-08-02T12:00:00.000Z')
+      vi.setSystemTime(now)
+      const db = new Database(':memory:')
+      new TestJobRoom(makeState(db).state, {}).init()
+
+      const startedAt = new Date(now.getTime() - 5 * 60_000)
+      db.prepare(
+        `INSERT INTO jobs (id, type, status, attempts, max_attempts, enqueued_at, started_at)
+           VALUES (?, ?, 'running', 1, 3, ?, ?)`,
+      ).run('recent-orphan', 'orphan', startedAt.toISOString(), startedAt.toISOString())
+
+      const { state, alarms } = makeState(db)
+      const room = new TestJobRoom(state, {})
+      let didRun = false
+      room.handler = () => {
+        didRun = true
+        return 'recovered'
+      }
+      room.init()
+
+      const recoveryAt = startedAt.getTime() + 16 * 60_000
+      expect(alarms.at(-1)).toBe(recoveryAt)
+      expect(db.prepare(`SELECT status FROM jobs WHERE id = 'recent-orphan'`).get()).toEqual({
+        status: 'running',
+      })
+
+      vi.setSystemTime(recoveryAt)
+      await room.runAlarm()
+
+      expect(didRun).toBe(true)
+      expect(db.prepare(`SELECT status FROM jobs WHERE id = 'recent-orphan'`).get()).toEqual({
+        status: 'succeeded',
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('retries a stale or undated `running` row that has retry budget left', async () => {
     const db = new Database(':memory:')
 
     // Seed the schema by initializing a throwaway room, then plant the
@@ -344,6 +427,10 @@ describe('JobRoom — crash recovery', () => {
       `INSERT INTO jobs (id, type, status, attempts, max_attempts, enqueued_at, started_at)
          VALUES (?, ?, 'running', 1, 3, ?, ?)`,
     ).run('zombie-1', 'orphan', longAgo, longAgo)
+    db.prepare(
+      `INSERT INTO jobs (id, type, status, attempts, max_attempts, enqueued_at, started_at)
+         VALUES (?, ?, 'running', 1, 3, ?, NULL)`,
+    ).run('zombie-undated', 'orphan', new Date().toISOString())
 
     // Fresh room init triggers recoverStuckRunning(); the row should be
     // re-queued and pickable on the next alarm.
@@ -360,11 +447,17 @@ describe('JobRoom — crash recovery', () => {
       .get() as Record<string, unknown>
     expect(recovered.status).toBe('queued')
     expect(recovered.started_at).toBeNull()
+    expect(
+      db.prepare(`SELECT status FROM jobs WHERE id = 'zombie-undated'`).get(),
+    ).toEqual({ status: 'queued' })
 
     await room.runAlarm()
     expect(didRun).toBe(true)
     const final = db.prepare(`SELECT status FROM jobs WHERE id = 'zombie-1'`).get() as Record<string, unknown>
     expect(final.status).toBe('succeeded')
+    expect(
+      db.prepare(`SELECT status FROM jobs WHERE id = 'zombie-undated'`).get(),
+    ).toEqual({ status: 'succeeded' })
   })
 
   it('permanently fails a stale `running` row that has exhausted attempts', async () => {

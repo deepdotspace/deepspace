@@ -4,7 +4,8 @@ export { YjsRoom } from './yjs-room'
 export { GameRoom, type GameRoomConfig, type Player, type GameInput } from './game-room'
 export { CanvasRoom, type CanvasShape, type Viewport } from './canvas-room'
 export { PresenceRoom, type PresencePeer } from './presence-room'
-export { CronRoom, type CronRoomConfig, type CronTask, type CronExecution } from './cron-room'
+export { CronRoom, type CronRoomConfig, type CronExecution } from './cron-room'
+export { type CronTask } from './cron-schedule'
 export {
   JobRoom,
   enqueueJob,

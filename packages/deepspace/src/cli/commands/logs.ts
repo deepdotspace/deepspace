@@ -23,7 +23,9 @@ import { defineCommand } from 'citty'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { apiFetch, ApiError } from '../lib/api'
-import { resolveAppTarget, findAppDir } from '../lib/app-context'
+import { InputError } from '../lib/cli-errors'
+import { findAppDir } from '../lib/app-context'
+import { resolveAppTarget } from '../lib/app-target'
 import { readAppId } from '../lib/app-identity'
 // Whitelisted wire DTO + level set — shared with the platform reader and the
 // dashboard (packages/deepspace/src/shared/log-events.ts) so they can't drift.
@@ -80,11 +82,11 @@ export function parseSince(input: string, now: number = Date.now()): number {
   } else {
     ts = Date.parse(trimmed)
     if (Number.isNaN(ts)) {
-      throw new Error(`Invalid --since "${input}" — use 30s, 15m, 2h, 7d, or an ISO timestamp.`)
+      throw new InputError(`Invalid --since "${input}" — use 30s, 15m, 2h, 7d, or an ISO timestamp.`, 'invalid_since')
     }
   }
   if (now - ts > RETENTION_MS) {
-    throw new Error('Logs are retained for 7 days — --since can reach back at most 7d.')
+    throw new InputError('Logs are retained for 7 days — --since can reach back at most 7d.', 'since_out_of_range')
   }
   return ts
 }
@@ -244,8 +246,9 @@ export default defineCommand({
     // is ambiguous — and previously --env was silently ignored when --app was
     // also passed — so fail fast rather than tail the wrong app.
     if (args.app && wranglerEnv) {
-      throw new Error(
+      throw new InputError(
         'Pass either --app or --env, not both — --env reads the [env.<name>] block’s own app id, --app names an app directly.',
+        'ambiguous_target',
       )
     }
     let appId: string
@@ -255,8 +258,9 @@ export default defineCommand({
       const appDir = findAppDir()
       const id = appDir ? readAppId(appDir, wranglerEnv) : null
       if (!id) {
-        throw new Error(
+        throw new InputError(
           `No app id for env "${wranglerEnv}" — wrangler.toml has no [env.${wranglerEnv}] block with its own DEEPSPACE_APP_ID.`,
+          'no_app_id_for_env',
         )
       }
       appId = id
@@ -265,13 +269,13 @@ export default defineCommand({
     }
 
     if (args.level && !(LOG_LEVELS as readonly string[]).includes(args.level)) {
-      throw new Error(`Invalid --level "${args.level}". Use: ${LOG_LEVELS.join(', ')}`)
+      throw new InputError(`Invalid --level "${args.level}". Use: ${LOG_LEVELS.join(', ')}`, 'invalid_level')
     }
     let limit: number | undefined
     if (args.limit !== undefined) {
       limit = Number(args.limit)
       if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
-        throw new Error('Invalid --limit — expected an integer between 1 and 500.')
+        throw new InputError('Invalid --limit — expected an integer between 1 and 500.', 'invalid_limit')
       }
     }
 
@@ -308,10 +312,17 @@ export default defineCommand({
     print(first.events)
 
     if (!args.follow) {
-      if (first.events.length === 0 && !args.json) {
-        console.log(
-          `No logs in the last ${windowLabel} for ${appId}. New logs can take up to a minute to appear; retention is 7 days.`,
-        )
+      if (first.events.length === 0) {
+        if (args.json) {
+          // An empty NDJSON stream is indistinguishable from a crash without a
+          // trailing record — emit a discriminable meta line so an agent can
+          // tell "ran, no events" from "died". (events never carry `type`.)
+          process.stdout.write(JSON.stringify({ type: 'meta', count: 0, window: windowLabel }) + '\n')
+        } else {
+          console.log(
+            `No logs in the last ${windowLabel} for ${appId}. New logs can take up to a minute to appear; retention is 7 days.`,
+          )
+        }
       } else if (first.truncated) {
         // A machine consumer reading NDJSON needs the signal too — emit a
         // discriminable meta record (events never carry a `type` field).

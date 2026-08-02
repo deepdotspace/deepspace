@@ -5,7 +5,6 @@
  */
 
 import { useEffect, useCallback, useState } from 'react'
-import { EMOJI_LIST } from './ReactionPicker'
 import type { MessageRect } from './MessageItem'
 
 interface MessageActionSheetProps {
@@ -22,6 +21,7 @@ interface MessageActionSheetProps {
 
 const ACTION_BAR_HEIGHT = 44
 const VIEWPORT_PADDING = 12
+const EMOJI_LIST = ['👍', '👎', '😄', '🎉', '❤️', '🚀', '👀', '🔥', '💯', '🤔', '😢', '🙏']
 
 export function MessageActionSheet({
   visible,
@@ -41,7 +41,7 @@ export function MessageActionSheet({
       action()
       onClose()
     },
-    [onClose]
+    [onClose],
   )
 
   useEffect(() => {
@@ -84,8 +84,18 @@ export function MessageActionSheet({
             className="shrink-0 p-1.5 rounded-lg active:bg-muted text-muted-foreground active:text-foreground transition-colors"
             title="Edit"
           >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={1.5}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+              />
             </svg>
           </button>
           <button
@@ -94,8 +104,18 @@ export function MessageActionSheet({
             className="shrink-0 p-1.5 rounded-lg active:bg-destructive/10 text-muted-foreground active:text-destructive transition-colors"
             title="Delete"
           >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={1.5}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+              />
             </svg>
           </button>
           <div className="shrink-0 w-px h-6 bg-border mx-0.5" />
@@ -107,8 +127,18 @@ export function MessageActionSheet({
         className="shrink-0 p-1.5 rounded-lg active:bg-muted text-muted-foreground active:text-foreground transition-colors"
         title="Reply"
       >
-        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
+        <svg
+          className="w-5 h-5"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={1.5}
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"
+          />
         </svg>
       </button>
       <div className="shrink-0 w-px h-6 bg-border mx-0.5" />
@@ -143,9 +173,7 @@ export function MessageActionSheet({
         onClick={(e) => e.stopPropagation()}
       >
         {layout === 'above' && (
-          <div className="absolute bottom-full mb-2 left-0 w-full">
-            {actionBar}
-          </div>
+          <div className="absolute bottom-full mb-2 left-0 w-full">{actionBar}</div>
         )}
 
         <div
@@ -157,11 +185,7 @@ export function MessageActionSheet({
           </p>
         </div>
 
-        {layout === 'below' && (
-          <div className="mt-2 w-full">
-            {actionBar}
-          </div>
-        )}
+        {layout === 'below' && <div className="mt-2 w-full">{actionBar}</div>}
       </div>
     </div>
   )

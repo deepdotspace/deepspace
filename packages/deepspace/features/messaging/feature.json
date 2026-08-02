@@ -58,10 +58,6 @@
       "dest": "src/components/messaging/chat/MessageActionSheet.tsx"
     },
     {
-      "src": "src/components/chat/ReactionPicker.tsx",
-      "dest": "src/components/messaging/chat/ReactionPicker.tsx"
-    },
-    {
       "src": "src/components/chat-multi/ChannelSidebar.tsx",
       "dest": "src/components/messaging/chat-multi/ChannelSidebar.tsx"
     },

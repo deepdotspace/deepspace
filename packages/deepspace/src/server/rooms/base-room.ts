@@ -126,7 +126,7 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
   // WebSocket Connection
   // ==========================================================================
 
-  private async handleWebSocketUpgrade(request: Request, url: URL): Promise<Response> {
+  private async handleWebSocketUpgrade(_request: Request, url: URL): Promise<Response> {
     const userId = url.searchParams.get('userId') || undefined
     const userName = url.searchParams.get('userName') || 'Anonymous'
     const userEmail = url.searchParams.get('userEmail') || ''
@@ -192,7 +192,7 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
     }
   }
 
-  async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
+  async webSocketError(_ws: WebSocket, error: unknown): Promise<void> {
     console.error(`[${this.constructor.name}] webSocketError:`, error)
   }
 

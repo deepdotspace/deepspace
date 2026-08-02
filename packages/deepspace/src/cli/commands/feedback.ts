@@ -17,9 +17,13 @@
  * Best-effort environment context (CLI version, Node version, OS, and the
  * current app name if run inside a scaffolded app) is attached automatically
  * so the team can reproduce issues without a round-trip.
+ *
+ * Defined with the command runtime (lib/command.ts): `--json`, the envelope,
+ * and the exit code come from there. Its old local `fail()` emitted
+ * `{ ok:false, error }` with NO `code`, so a `--json` caller had nothing
+ * stable to branch on — every refusal below now carries a slug.
  */
 
-import { defineCommand } from 'citty'
 import * as p from '@clack/prompts'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -28,6 +32,7 @@ import { release } from 'node:os'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS, DASHBOARD_URL } from '../env'
 import { apiFetch } from '../lib/api'
+import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 import { hasWranglerConfig, readWranglerConfig } from '../lib/wrangler-env'
 
 const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
@@ -155,7 +160,7 @@ export function buildFeedbackPayload(input: {
   }
 }
 
-export default defineCommand({
+export default defineDeepspaceCommand({
   meta: {
     name: 'feedback',
     description: 'Submit a bug report, feature request, or feedback to DeepSpace',
@@ -183,32 +188,15 @@ export default defineCommand({
       description: 'Skip the confirmation prompt',
       default: false,
     },
-    json: {
-      type: 'boolean',
-      description: 'Emit JSON instead of human output',
-      default: false,
-    },
   },
   async run({ args }) {
-    const interactive = process.stdin.isTTY && !args.json
-
-    // Fail consistently: under --json, emit the same { ok, error } shape on
-    // stdout that the success/network paths use, so an agent can always parse
-    // the outcome. Otherwise print to stderr. Either way exit non-zero.
-    const fail = (message: string): never => {
-      if (args.json) {
-        process.stdout.write(JSON.stringify({ ok: false, error: message }) + '\n')
-      } else {
-        console.error(message)
-      }
-      process.exit(1)
-    }
+    const interactive = Boolean(process.stdin.isTTY) && !args.json
 
     let type: FeedbackType
     try {
       type = normalizeType(args.type ? String(args.type) : undefined)
     } catch (err) {
-      return fail((err as Error).message)
+      throw new Refusal((err as Error).message, 'invalid_type')
     }
 
     let title = args.title ? String(args.title) : ''
@@ -216,9 +204,10 @@ export default defineCommand({
 
     // Non-interactive callers (agents/CI) must supply both fields up front.
     if ((!title || !body) && !interactive) {
-      return fail(
+      throw new Refusal(
         'Provide a title and --message to submit non-interactively, ' +
           'e.g. `deepspace feedback "Title" --message "Details"`.',
+        'missing_input',
       )
     }
 
@@ -236,7 +225,7 @@ export default defineCommand({
         })
         if (p.isCancel(picked)) {
           p.cancel('Cancelled.')
-          process.exit(0)
+          return { data: { submitted: false, cancelled: true } }
         }
         type = picked as FeedbackType
       }
@@ -254,7 +243,7 @@ export default defineCommand({
         })
         if (p.isCancel(t)) {
           p.cancel('Cancelled.')
-          process.exit(0)
+          return { data: { submitted: false, cancelled: true } }
         }
         title = String(t)
       }
@@ -272,7 +261,7 @@ export default defineCommand({
         })
         if (p.isCancel(m)) {
           p.cancel('Cancelled.')
-          process.exit(0)
+          return { data: { submitted: false, cancelled: true } }
         }
         body = String(m)
       }
@@ -287,7 +276,7 @@ export default defineCommand({
         context: collectContext(),
       })
     } catch (err) {
-      return fail((err as Error).message)
+      throw new Refusal((err as Error).message, 'invalid_input')
     }
 
     // Confirmation — only when interactive and not explicitly skipped.
@@ -301,7 +290,7 @@ export default defineCommand({
       const ok = await p.confirm({ message: 'Send this to the DeepSpace team?' })
       if (p.isCancel(ok) || !ok) {
         p.cancel('Not sent.')
-        process.exit(0)
+        return { data: { submitted: false, cancelled: true } }
       }
     }
 
@@ -309,29 +298,31 @@ export default defineCommand({
     try {
       token = await ensureToken()
     } catch (err) {
-      return fail((err as Error).message ?? 'Not signed in. Run `deepspace login`.')
+      throw new Refusal(
+        (err as Error).message ?? 'Not signed in. Run `deepspace auth login`.',
+        'not_authenticated',
+        { action: cliAction('deepspace', 'auth', 'login') },
+      )
     }
 
-    let result: { report: FeedbackReport }
-    try {
-      result = await api<{ report: FeedbackReport }>(token, '/api/feedback', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      })
-    } catch (err) {
-      return fail((err as Error).message)
+    // The POST is left uncaught on purpose: apiFetch throws a typed ApiError
+    // whose `code` the runtime already lifts into the envelope, so wrapping it
+    // here would only replace a real server slug with a made-up one.
+    const result = await api<{ report: FeedbackReport }>(token, '/api/feedback', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+
+    if (!args.json) {
+      if (interactive) {
+        p.outro(`Thanks! Submitted as ${result.report.id}.`)
+      } else {
+        console.log(`Submitted feedback ${result.report.id} (${result.report.type}).`)
+      }
+      console.log(`Track triage status at ${DASHBOARD_URL}.`)
     }
 
-    if (args.json) {
-      process.stdout.write(JSON.stringify({ ok: true, report: result.report }) + '\n')
-      return
-    }
-
-    if (interactive) {
-      p.outro(`Thanks! Submitted as ${result.report.id}.`)
-    } else {
-      console.log(`Submitted feedback ${result.report.id} (${result.report.type}).`)
-    }
-    console.log(`Track triage status at ${DASHBOARD_URL}.`)
+    // Terminal operation — nothing to run next, so no `next` (never filler).
+    return { data: { report: result.report as unknown as Record<string, unknown> } }
   },
 })

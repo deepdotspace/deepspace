@@ -341,6 +341,15 @@ export class Awareness {
       this.emit({ added: [], updated: [], removed })
     }
   }
+
+  /** Release all state and listeners owned by this awareness instance. */
+  destroy(): void {
+    this.setLocalState(null)
+    this.states.clear()
+    this.meta.clear()
+    this.updateListeners.clear()
+    this.changeListeners.clear()
+  }
 }
 
 /**
@@ -378,4 +387,3 @@ export function getMessageType(data: Uint8Array): number {
   const decoder = createDecoder(data)
   return readVarUint(decoder)
 }
-
