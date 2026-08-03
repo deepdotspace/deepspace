@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.8.2
+
+### Patch Changes
+
+- Publish the SDK after verifying its packed artifacts across the supported Node 22.15, 24, and 26 Linux runtimes.
+
 ## 0.8.1
 
 ### Patch Changes

@@ -1,5 +1,7 @@
 # create-deepspace
 
+## 0.8.2
+
 ## 0.8.1
 
 ### Patch Changes
