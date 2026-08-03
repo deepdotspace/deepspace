@@ -7,6 +7,7 @@ import migrate from '../migrate'
 import * as authModule from '../../auth'
 import * as appContext from '../../lib/app-context'
 import * as migrationApi from '../../lib/identity-migration-api'
+import * as repoApiModule from '../../lib/repo-api'
 import * as sourceControl from '../../lib/source-control'
 
 const LEGACY_ID = 'deepdotspace-site'
@@ -193,6 +194,41 @@ describe('legacy app identity migration workflow', () => {
     expect(exits).toEqual([1])
   })
 
+  it('dry-runs pending source migrations without changing the checkout', async () => {
+    const made = makeRepo()
+    repo = made.dir
+    writeFileSync(
+      join(repo, 'worker.ts'),
+      `interface Env {\n  APP_NAME: string\n}\nheaders.set('x-app-name', env.APP_NAME)\n`,
+    )
+    execFileSync('git', ['add', 'worker.ts'], { cwd: repo })
+    execFileSync('git', ['commit', '-q', '-m', 'legacy worker'], { cwd: repo })
+    const oid = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repo,
+      encoding: 'utf-8',
+    }).trim()
+    arrangeRepo(repo, oid)
+    vi.spyOn(migrationApi, 'getIdentityMigration').mockResolvedValue(null)
+    vi.spyOn(migrationApi, 'inspectIdentityMigration').mockResolvedValue(inventory())
+    const before = readFileSync(join(repo, 'worker.ts'), 'utf-8')
+
+    const { output, exits } = await runMigrateJson({ 'dry-run': true })
+
+    expect(output).toMatchObject({
+      ok: true,
+      status: 'ready',
+      sourceMigrations: [
+        {
+          id: '2026-08-canonical-app-identity-wire',
+          files: ['worker.ts'],
+          replacements: 1,
+        },
+      ],
+    })
+    expect(readFileSync(join(repo, 'worker.ts'), 'utf-8')).toBe(before)
+    expect(exits).toEqual([0])
+  })
+
   it('refuses an untracked wrangler.toml before reserving an identity', async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'ds-migrate-command-')))
     repo = dir
@@ -216,7 +252,7 @@ describe('legacy app identity migration workflow', () => {
     expect(exits).toEqual([1])
   })
 
-  it('prepares the journal, writes only wrangler.toml, and returns an exact commit action', async () => {
+  it('prepares the journal, writes deterministic migration files, and returns an exact commit action', async () => {
     const made = makeRepo()
     repo = made.dir
     arrangeRepo(repo, made.oid)
@@ -247,6 +283,40 @@ describe('legacy app identity migration workflow', () => {
     expect(readFileSync(join(repo, 'wrangler.toml'), 'utf-8')).toContain(
       `DEEPSPACE_APP_ID = "${APP_ID}"`,
     )
+    expect(exits).toEqual([2])
+  })
+
+  it('migrates legacy worker identity headers in the same commit as the app id', async () => {
+    const made = makeRepo()
+    repo = made.dir
+    writeFileSync(
+      join(repo, 'worker.ts'),
+      `interface Env {\n  APP_NAME: string\n}\nconst room = \`app:\${env.APP_NAME}\`\nheaders.set('x-app-name', env.APP_NAME)\n`,
+    )
+    execFileSync('git', ['add', 'worker.ts'], { cwd: repo })
+    execFileSync('git', ['commit', '-q', '-m', 'legacy worker'], { cwd: repo })
+    const oid = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repo,
+      encoding: 'utf-8',
+    }).trim()
+    arrangeRepo(repo, oid)
+    vi.spyOn(migrationApi, 'getIdentityMigration').mockResolvedValue(null)
+    vi.spyOn(migrationApi, 'inspectIdentityMigration').mockResolvedValue(inventory())
+    vi.spyOn(migrationApi, 'prepareIdentityMigration').mockResolvedValue(migration())
+
+    const { output, exits } = await runMigrateJson()
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'migration_commit_required',
+      action: {
+        argv: expect.arrayContaining(['worker.ts', 'wrangler.toml']),
+      },
+    })
+    const worker = readFileSync(join(repo, 'worker.ts'), 'utf-8')
+    expect(worker).toContain('DEEPSPACE_APP_ID: string')
+    expect(worker).toContain("headers.set('x-app-id', env.DEEPSPACE_APP_ID)")
+    expect(worker).toContain('const room = `app:${env.APP_NAME}`')
     expect(exits).toEqual([2])
   })
 
@@ -474,7 +544,96 @@ describe('legacy app identity migration workflow', () => {
     vi.spyOn(migrationApi, 'getIdentityMigration').mockResolvedValue(null)
 
     const { output, exits } = await runMigrateJson()
-    expect(output).toMatchObject({ ok: true, status: 'already_modern', appId: APP_ID })
+    expect(output).toMatchObject({ ok: true, status: 'up_to_date', appId: APP_ID })
     expect(exits).toEqual([0])
+  })
+
+  it('applies future source migrations even when app identity is already modern', async () => {
+    const made = makeRepo(APP_ID)
+    repo = made.dir
+    writeFileSync(
+      join(repo, 'worker.ts'),
+      `interface Env {\n  APP_NAME: string\n}\nheaders.set('x-app-name', env.APP_NAME)\n`,
+    )
+    execFileSync('git', ['add', 'worker.ts'], { cwd: repo })
+    execFileSync('git', ['commit', '-q', '-m', 'legacy worker'], { cwd: repo })
+    const oid = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repo,
+      encoding: 'utf-8',
+    }).trim()
+    arrangeRepo(repo, oid)
+    vi.spyOn(migrationApi, 'getIdentityMigration').mockResolvedValue(null)
+
+    const { output, exits } = await runMigrateJson()
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'migration_commit_required',
+      action: {
+        argv: [
+          'git',
+          'commit',
+          '--only',
+          '--message',
+          'Apply DeepSpace app migrations',
+          '--message',
+          'DeepSpace-Migrations: 2026-08-canonical-app-identity-wire',
+          '--',
+          'worker.ts',
+        ],
+      },
+      sourceMigrations: [expect.objectContaining({ id: '2026-08-canonical-app-identity-wire' })],
+    })
+    expect(readFileSync(join(repo, 'worker.ts'), 'utf-8')).toContain(
+      "headers.set('x-app-id', env.DEEPSPACE_APP_ID)",
+    )
+    expect(exits).toEqual([2])
+  })
+
+  it('requires deploy while a committed source migration is newer than the live release', async () => {
+    const made = makeRepo(APP_ID)
+    repo = made.dir
+    writeFileSync(
+      join(repo, 'worker.ts'),
+      `interface Env {\n  APP_NAME: string\n  DEEPSPACE_APP_ID: string\n}\nheaders.set('x-app-id', env.DEEPSPACE_APP_ID)\n`,
+    )
+    execFileSync('git', ['add', 'worker.ts'], { cwd: repo })
+    execFileSync(
+      'git',
+      [
+        'commit',
+        '-q',
+        '-m',
+        'Apply DeepSpace app migrations',
+        '-m',
+        'DeepSpace-Migrations: 2026-08-canonical-app-identity-wire',
+      ],
+      { cwd: repo },
+    )
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repo,
+      encoding: 'utf-8',
+    }).trim()
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    vi.spyOn(migrationApi, 'getIdentityMigration').mockResolvedValue(null)
+    vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
+      latestRelease: vi.fn().mockResolvedValue({
+        release: { commitOid: made.oid },
+      }),
+    } as never)
+
+    const { output, exits } = await runMigrateJson()
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'migration_deploy_required',
+      actionRequired: true,
+      action: { cwd: repo, argv: ['deepspace', 'deploy'] },
+      appId: APP_ID,
+      sourceMigrations: ['2026-08-canonical-app-identity-wire'],
+      commitOid: head,
+    })
+    expect(exits).toEqual([2])
   })
 })

@@ -1,18 +1,25 @@
-/** `deepspace app migrate` — safe name-shaped GitHub app identity upgrade. */
+/** `deepspace app migrate` — ordered, idempotent app upgrade workflow. */
 
 import { ensureToken } from '../auth'
 import { findAppDir } from '../lib/app-context'
 import { mintAppId, readAppId, readLegacyAppId, writeAppId } from '../lib/app-identity'
+import {
+  APP_MIGRATION_DEFINITIONS,
+  applyAppMigrationPlan,
+  planAppMigrations,
+  type AppMigrationPlan,
+} from '../lib/app-migrations'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import {
   assertSyncableRepo,
   currentBranch,
+  isAncestor,
   isWorkTreeClean,
   repoToplevel,
   resolveCommit,
 } from '../lib/git/repository'
 import { statusFiles } from '../lib/git/safety'
-import { gitLine, runGit } from '../lib/git/process'
+import { gitLine, runGit, splitNulFields } from '../lib/git/process'
 import {
   cancelIdentityMigration,
   commitIdentityMigration,
@@ -22,6 +29,7 @@ import {
   rollbackIdentityMigration,
   type IdentityMigration,
 } from '../lib/identity-migration-api'
+import { repoApi } from '../lib/repo-api'
 import { selectGitHubRemote, remoteBranchOid, type GitHubRemote } from '../lib/source-control'
 import { deployBaseUrl } from '../lib/vc-remote'
 
@@ -30,7 +38,7 @@ const STRICT_APP_ID_RE = /^app_[0-9A-HJKMNP-TV-Z]{26}$/
 export default defineDeepspaceCommand({
   meta: {
     name: 'migrate',
-    description: 'Upgrade a legacy GitHub app to an immutable app id without moving its data',
+    description: 'Apply pending DeepSpace app migrations without moving retained data',
   },
   args: {
     remote: {
@@ -107,14 +115,57 @@ export default defineDeepspaceCommand({
       })
     }
 
+    const sourcePlan = planAppMigrations(appDir)
+    if (sourcePlan.blockers.length > 0) {
+      const first = sourcePlan.blockers[0]!
+      throw new Refusal(
+        `Migration ${first.migrationId} needs a manual source update at ${first.file}:${first.line}. ${first.message}`,
+        'source_migration_blocked',
+        { extra: { blockers: sourcePlan.blockers } },
+      )
+    }
+
     if (STRICT_APP_ID_RE.test(currentAppId)) {
       if (!existingMigration) {
-        reportAlreadyModern(currentAppId, args.json)
-        return { data: { status: 'already_modern', appId: currentAppId } }
+        if (args['dry-run'] && sourcePlan.pending.length > 0) {
+          reportSourcePlan(sourcePlan, args.json)
+          return {
+            data: {
+              status: 'ready',
+              appId: currentAppId,
+              sourceMigrations: sourcePlan.pending,
+            },
+          }
+        }
+        if (sourcePlan.pending.length > 0) {
+          requireSourceMigrationWorktree(appDir)
+          applyAppMigrationPlan(appDir, sourcePlan)
+          throw sourceMigrationCommitRequired(appDir, sourcePlan)
+        }
+        await requireSourceMigrationDeploy(appDir, currentAppId, deployUrl, token)
+        reportUpToDate(currentAppId, args.json)
+        return { data: { status: 'up_to_date', appId: currentAppId } }
+      }
+      if (sourcePlan.pending.length === 0 && existingMigration.status === 'verified') {
+        await requireSourceMigrationDeploy(appDir, currentAppId, deployUrl, token)
       }
       if (args['dry-run']) {
         reportMigration(existingMigration, args.json)
-        return { data: { status: existingMigration.status, migration: existingMigration } }
+        reportSourcePlan(sourcePlan, args.json)
+        return {
+          data: {
+            status: existingMigration.status,
+            migration: existingMigration,
+            sourceMigrations: sourcePlan.pending,
+          },
+        }
+      }
+      if (sourcePlan.pending.length > 0) {
+        requireSourceMigrationWorktree(appDir, existingMigration.status === 'prepared')
+        applyAppMigrationPlan(appDir, sourcePlan)
+        throw existingMigration.status === 'prepared'
+          ? commitRequired(appDir, existingMigration, envName, sourcePlan.changedFiles)
+          : sourceMigrationCommitRequired(appDir, sourcePlan)
       }
       return continuePreparedMigration({
         appDir,
@@ -176,6 +227,7 @@ export default defineDeepspaceCommand({
         )
         console.log('No changes made.')
       }
+      reportSourcePlan(sourcePlan, args.json)
       return {
         data: {
           status: 'ready',
@@ -186,6 +238,7 @@ export default defineDeepspaceCommand({
           branch: head.branch,
           commitOid: head.oid,
           sourceClaimRequired: inventory.app.sourceClaimRequired,
+          sourceMigrations: sourcePlan.pending,
           inventory,
         },
       }
@@ -200,8 +253,9 @@ export default defineDeepspaceCommand({
             expectedSourceRevision: inventory.app.sourceRevision,
           })
 
+    applyAppMigrationPlan(appDir, sourcePlan)
     writeAppId(appDir, migration.appId, { wranglerEnv: envName, force: true })
-    throw commitRequired(appDir, migration, envName)
+    throw commitRequired(appDir, migration, envName, sourcePlan.changedFiles)
   },
 })
 
@@ -377,10 +431,16 @@ function requirePublishedHead(
   return head
 }
 
-function commitRequired(appDir: string, migration: IdentityMigration, envName?: string): Refusal {
+function commitRequired(
+  appDir: string,
+  migration: IdentityMigration,
+  envName?: string,
+  additionalPaths: string[] = [],
+): Refusal {
   const wranglerPath = wranglerRepoPath(appDir)
+  const migrationPaths = [...new Set([wranglerPath, ...additionalPaths])].sort()
   return new Refusal(
-    `Prepared ${migration.legacyAppId} → ${migration.appId}. Commit the deterministic wrangler.toml change, then rerun.`,
+    `Prepared ${migration.legacyAppId} → ${migration.appId}. Commit the deterministic app migration changes, then rerun.`,
     'migration_commit_required',
     {
       actionRequired: true,
@@ -393,11 +453,119 @@ function commitRequired(appDir: string, migration: IdentityMigration, envName?: 
           '--message',
           `Migrate DeepSpace app identity to ${migration.appId}`,
           '--',
-          wranglerPath,
+          ...migrationPaths,
         ],
       },
       extra: { migration, env: envName ?? null },
     },
+  )
+}
+
+function sourceMigrationCommitRequired(appDir: string, plan: AppMigrationPlan): Refusal {
+  const migrationIds = plan.pending.map((migration) => migration.id)
+  return new Refusal(
+    `Applied ${migrationIds.join(', ')}. Commit the deterministic app migration changes, then rerun.`,
+    'migration_commit_required',
+    {
+      actionRequired: true,
+      action: {
+        cwd: repoToplevel(appDir),
+        argv: [
+          'git',
+          'commit',
+          '--only',
+          '--message',
+          'Apply DeepSpace app migrations',
+          '--message',
+          `DeepSpace-Migrations: ${migrationIds.join(',')}`,
+          '--',
+          ...plan.changedFiles,
+        ],
+      },
+      extra: { sourceMigrations: plan.pending },
+    },
+  )
+}
+
+async function requireSourceMigrationDeploy(
+  appDir: string,
+  appId: string,
+  deployUrl: string,
+  token: string,
+): Promise<void> {
+  if (!isWorkTreeClean(appDir)) {
+    throw new Refusal(
+      'Commit or discard local changes before checking app migration deployment state.',
+      'dirty_worktree',
+    )
+  }
+  const head = resolveCommit(appDir, 'HEAD')
+  if (!head) return
+  const repo = repoToplevel(appDir)
+  const knownIds = new Set(APP_MIGRATION_DEFINITIONS.map((migration) => migration.id))
+  const migrationCommits = splitNulFields(
+    runGit(repo, [
+      'log',
+      '--format=%H%x00',
+      '--extended-regexp',
+      '--grep',
+      `^DeepSpace-Migrations:.*(${[...knownIds].join('|')})`,
+    ]).stdout,
+  )
+    .map((oid) => oid.trim())
+    .filter((oid) => /^[0-9a-f]{40}$/.test(oid))
+  if (migrationCommits.length === 0) return
+
+  const { release } = await repoApi(deployUrl, token, appId).latestRelease()
+  if (release?.commitOid === head) return
+
+  const liveCommit = release?.commitOid ?? null
+  if (
+    liveCommit &&
+    (resolveCommit(appDir, liveCommit) === null || !isAncestor(appDir, liveCommit, head))
+  ) {
+    throw new Refusal(
+      `The live release commit ${liveCommit.slice(0, 10)} is not an ancestor of this checkout, so migration deployment state cannot be proven. Fetch and integrate the live source history first.`,
+      'migration_lineage_unknown',
+      { extra: { appId, liveCommitOid: liveCommit, commitOid: head } },
+    )
+  }
+  const undeployedMigrationCommits = migrationCommits.filter(
+    (oid) => !liveCommit || (oid !== liveCommit && isAncestor(appDir, liveCommit, oid)),
+  )
+  const pendingIds = [
+    ...new Set(
+      undeployedMigrationCommits.flatMap((oid) => {
+        const message = runGit(repo, ['show', '-s', '--format=%B', oid]).stdout.toString('utf-8')
+        return [...message.matchAll(/^DeepSpace-Migrations:\s*(.+)$/gm)].flatMap((match) =>
+          (match[1] ?? '')
+            .split(',')
+            .map((id) => id.trim())
+            .filter((id) => knownIds.has(id)),
+        )
+      }),
+    ),
+  ]
+  if (pendingIds.length === 0) return
+
+  throw new Refusal(
+    `App migrations ${pendingIds.join(', ')} are committed but are not in the live release. Deploy them, then rerun.`,
+    'migration_deploy_required',
+    {
+      actionRequired: true,
+      action: { cwd: appDir, argv: ['deepspace', 'deploy'] },
+      extra: { appId, sourceMigrations: pendingIds, commitOid: head },
+    },
+  )
+}
+
+function requireSourceMigrationWorktree(appDir: string, allowDirtyWrangler = false): void {
+  if (isWorkTreeClean(appDir)) return
+  const changed = statusFiles(repoToplevel(appDir))
+  if (allowDirtyWrangler && changed.every((path) => path === wranglerRepoPath(appDir))) return
+  throw new Refusal(
+    'Commit or discard unrelated working-tree changes before applying app migrations.',
+    'dirty_worktree',
   )
 }
 
@@ -461,8 +629,17 @@ function deployRequired(appDir: string, migration: IdentityMigration, envName?: 
   )
 }
 
-function reportAlreadyModern(appId: string, json: boolean): void {
-  if (!json) console.log(`${appId} already uses an immutable DeepSpace app id.`)
+function reportUpToDate(appId: string, json: boolean): void {
+  if (!json) console.log(`No pending DeepSpace app migrations for ${appId}.`)
+}
+
+function reportSourcePlan(plan: AppMigrationPlan, json: boolean): void {
+  if (json || plan.pending.length === 0) return
+  for (const migration of plan.pending) {
+    console.log(
+      `Pending source migration: ${migration.id} (${migration.files.length} file${migration.files.length === 1 ? '' : 's'})`,
+    )
+  }
 }
 
 function reportMigration(migration: IdentityMigration, json: boolean): void {

@@ -1,5 +1,15 @@
 # deepspace
 
+## 0.9.1
+
+### Patch Changes
+
+- Keep `deepspace app migrate` as the permanent ordered app-upgrade runner and
+  repair obsolete `x-app-name` platform identity wiring before a canonical app
+  deployment, without changing retained `APP_NAME` data namespaces. Track
+  source-only migration commits against live release lineage so both GitHub and
+  DeepSpace apps are guided through the required deploy.
+
 ## 0.9.0
 
 ### Minor Changes

@@ -90,9 +90,9 @@ npx deepspace deploy     # deploy to *.app.space
 ```
 
 The [normative CLI hierarchy](../../docs/platform/cli-contract.md#public-command-hierarchy)
-keeps durable app identity and lifecycle operations under `deepspace app`,
+keeps durable app lifecycle and version migrations under `deepspace app`,
 while checkout-oriented Git, workspace, release, and deploy operations stay
-top-level. In particular, legacy identity migration is
+top-level. In particular, app migration is
 `deepspace app migrate`; there is no top-level `deepspace migrate` alias.
 
 Every app has one authoritative Git repository. DeepSpace source is the packaged
@@ -118,17 +118,28 @@ atomic authority change; switching back uses the same commands. Commands support
 [repository guide](https://github.com/deepdotspace/deepspace/blob/main/docs/platform/repo-store-git.md)
 for workspaces, releases, and rollback.
 
-Legacy GitHub apps whose `DEEPSPACE_APP_ID` is still name-shaped migrate in
-place with one resumable command:
+`deepspace app migrate` is the permanent upgrade runner for breaking app
+changes. It contains an ordered set of structural, idempotent migrations, so
+agents and developers keep using the same command across releases:
 
 ```bash
 npx deepspace app migrate --dry-run
 npx deepspace app migrate
 ```
 
-The dry-run lists the exact registry rows that will be re-keyed and the
-physical stores that remain at the existing resource id. The command then
-pauses for the normal manual GitHub commit/push and finishes with one deploy.
+The dry-run lists pending source migrations without changing files. For a
+legacy GitHub app whose `DEEPSPACE_APP_ID` is still name-shaped, it also lists
+the exact registry rows that will be re-keyed and the physical stores that
+remain at the existing resource id. The command applies only transformations
+it recognizes safely, pauses for normal commit/push, and finishes with one
+deploy. Source migration commits carry a machine-readable Git trailer, so the
+next run can compare them with the live release and return the deploy action
+without a local state file. Rerun after each returned action; when nothing is
+pending it reports `up_to_date`. This is the same workflow for GitHub and
+DeepSpace source; only their normal push behavior differs. `APP_NAME`-based
+legacy room and storage addresses are retained; canonical `DEEPSPACE_APP_ID`
+is used only for logical identity and platform authentication.
+
 Keep deploy, release rollback, and undeploy idle from the mutating command until
 that returned deploy begins; normal app traffic continues throughout.
 Before that deploy starts, `--cancel` reverses a prepared migration and

@@ -1,11 +1,10 @@
 /**
  * DeepSpace CLI
  *
- * Commands:
- *   login    — authenticate with your DeepSpace account
- *   deploy   — build and deploy your app to *.app.space
- *   undeploy — remove a deployed app
- *   create   — redirects to `npm create deepspace`
+ * Public hierarchy is defined by the grouped command table below and
+ * documented in docs/platform/cli-contract.md. Keep app lifecycle under
+ * `app`, sessions under `auth`, local development under `dev`, and testing
+ * under `test`.
  */
 
 import { defineCommand, runMain, runCommand } from 'citty'
