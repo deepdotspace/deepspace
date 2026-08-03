@@ -107,6 +107,8 @@ describe('validateBindingManifest', () => {
         'ASSETS',
         'PLATFORM_WORKER',
         'API_WORKER',
+        'DEEPSPACE_APP_ID',
+        'DEEPSPACE_RESOURCE_ID',
         'APP_NAME',
         'OWNER_USER_ID',
         'AUTH_JWT_PUBLIC_KEY',
@@ -256,9 +258,7 @@ describe('AUTO_PROVISION_SENTINEL + validator', () => {
   })
 
   it('rejects kv namespace_id="auto" without title', () => {
-    const r = validateBindingManifest([
-      { type: 'kv_namespace', name: 'KV', namespace_id: 'auto' },
-    ])
+    const r = validateBindingManifest([{ type: 'kv_namespace', name: 'KV', namespace_id: 'auto' }])
     expect(r.valid).toBe(false)
     if (!r.valid) expect(r.errors[0].reason).toMatch(/requires "title"/)
   })
@@ -314,10 +314,14 @@ describe('AUTO_PROVISION_SENTINEL + validator', () => {
     expect(isAutoProvision({ type: 'd1', name: 'DB', id: 'real-uuid' })).toBe(false)
     expect(isAutoProvision({ type: 'ai', name: 'AI' })).toBe(false)
     expect(
-      isAutoProvision({ type: 'vectorize', name: 'V', index_name: 'auto', dimensions: 1024, metric: 'cosine' }),
+      isAutoProvision({
+        type: 'vectorize',
+        name: 'V',
+        index_name: 'auto',
+        dimensions: 1024,
+        metric: 'cosine',
+      }),
     ).toBe(true)
-    expect(
-      isAutoProvision({ type: 'r2_bucket', name: 'F', bucket_name: 'auto' }),
-    ).toBe(true)
+    expect(isAutoProvision({ type: 'r2_bucket', name: 'F', bucket_name: 'auto' })).toBe(true)
   })
 })

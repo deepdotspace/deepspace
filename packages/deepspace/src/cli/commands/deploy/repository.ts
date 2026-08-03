@@ -13,12 +13,17 @@ import { classifyPushTransportFailure, pushToSpace, type PushRefResult } from '.
 import { ensureSpaceRemote, runGitRemote, SPACE_REMOTE } from '../../lib/vc-remote'
 import { workspaceIdFromBranch } from '../../lib/workspace-id'
 import { errorCode } from '../../lib/cli-errors'
+import { listGitHubRemotes, remoteBranchOid, selectGitHubRemote } from '../../lib/source-control'
+import { getAppSource, type AppSource, type AppSourceState } from '../../lib/source-api'
 import type { DeployOutput } from './output'
 
 export interface DeployRepositoryState {
   commitOid: string | null
   recoverable: boolean
   deployKey: string
+  source: AppSource | null
+  sourceRevision: number
+  baseReleaseId: string | null
 }
 
 export async function syncDeployRepository(options: {
@@ -29,24 +34,51 @@ export async function syncDeployRepository(options: {
   push: boolean
   ignoreStale: boolean
   output: DeployOutput
+  sourceState: AppSourceState
 }): Promise<DeployRepositoryState> {
-  const { deployUrl, appDir, appId, token, push, ignoreStale, output } = options
+  const { deployUrl, appDir, appId, token, push, ignoreStale, output, sourceState } = options
   let commitOid: string | null = null
   let recoverable = false
   const deployKey = mintIdempotencyKey()
+  let source = sourceState.source
+  let sourceRevision = sourceState.revision
+  const baseReleaseId: string | null = null
 
-  if (!push) {
+  if (!push && source?.provider !== 'github') {
     try {
       assertSyncableRepo(appDir)
       commitOid = resolveCommit(appDir, 'HEAD')
     } catch {
       // A non-repository app can still deploy; it simply has no source lineage.
     }
-    return { commitOid, recoverable, deployKey }
+    return { commitOid, recoverable, deployKey, source, sourceRevision, baseReleaseId }
   }
 
   try {
     assertSyncableRepo(appDir)
+    if (source?.provider === 'github') {
+      const github = syncGitHubDeploy({
+        deployUrl,
+        appDir,
+        appId,
+        token,
+        source,
+        ignoreStale,
+        output,
+      })
+      return await github.then((result) => ({
+        ...result,
+        deployKey,
+        source,
+        sourceRevision,
+      }))
+    }
+    if (!source && listGitHubRemotes(appDir).length > 0) {
+      output.die(
+        'This app has a GitHub remote but no claimed source. Choose once with `deepspace app source github` (manual GitHub ownership) or `deepspace app source deepspace` (packaged DeepSpace source), then deploy again.',
+        'source_unclaimed',
+      )
+    }
     ensureSpaceRemote(appDir, appId)
     const branch = currentBranch(appDir)
     const workspaceBranchId = workspaceIdFromBranch(branch)
@@ -63,7 +95,9 @@ export async function syncDeployRepository(options: {
     }
 
     const tip = resolveCommit(appDir, `refs/heads/${branch}`)
-    if (!tip) return { commitOid, recoverable, deployKey }
+    if (!tip) {
+      return { commitOid, recoverable, deployKey, source, sourceRevision, baseReleaseId }
+    }
 
     const secretFiles = workspaceBranchId ? [] : trackedSecretFiles(appDir, tip)
     if (workspaceBranchId) {
@@ -147,12 +181,96 @@ export async function syncDeployRepository(options: {
       }
     }
     commitOid = tip
+    if (!source) {
+      const claimed = await getAppSource(deployUrl, token, appId)
+      source = claimed.source
+      sourceRevision = claimed.revision
+    }
   } catch (error: unknown) {
     const failure = deployRepositoryFailure(error)
     output.die(failure.error, failure.code)
   }
 
-  return { commitOid, recoverable, deployKey }
+  return { commitOid, recoverable, deployKey, source, sourceRevision, baseReleaseId }
+}
+
+async function syncGitHubDeploy(options: {
+  deployUrl: string
+  appDir: string
+  appId: string
+  token: string
+  source: Extract<AppSource, { provider: 'github' }>
+  ignoreStale: boolean
+  output: DeployOutput
+}): Promise<Pick<DeployRepositoryState, 'commitOid' | 'recoverable' | 'baseReleaseId'>> {
+  const { deployUrl, appDir, appId, token, source, ignoreStale, output } = options
+  if (!isWorkTreeClean(appDir)) {
+    const refusal = dirtyWorktreeRefusal(currentBranch(appDir))
+    output.die(refusal.error, refusal.code)
+  }
+  const branch = currentBranch(appDir)
+  if (!branch) {
+    const refusal = detachedHeadRefusal()
+    output.die(refusal.error, refusal.code)
+    throw new Error(refusal.error)
+  }
+  const tip = resolveCommit(appDir, 'HEAD')
+  if (!tip) {
+    output.die('The repository has no commit to deploy.', 'no_commits')
+    throw new Error('The repository has no commit to deploy.')
+  }
+  const remote = selectGitHubRemote(appDir, { repository: source.repository })
+  if (!remote) {
+    output.die(
+      `No local GitHub remote points at ${source.repository}. Add one, then deploy again.`,
+      'github_remote_required',
+    )
+    throw new Error(`No local GitHub remote points at ${source.repository}.`)
+  }
+  const secretFiles = trackedSecretFiles(appDir, tip)
+  if (secretFiles.length > 0) {
+    output.die(
+      `Refusing to deploy a GitHub commit that tracks secret file(s): ${secretFiles.join(', ')}. Remove them from Git history, push the repaired branch, then deploy.`,
+      'secret_in_history',
+    )
+  }
+  if (remoteBranchOid(appDir, remote.name, branch) !== tip) {
+    output.die(
+      `GitHub ${source.repository} does not have ${branch} at ${tip.slice(0, 10)}. DeepSpace never pushes GitHub source; publish it manually, then deploy again.`,
+      'github_push_required',
+      {
+        actionRequired: true,
+        action: { cwd: appDir, argv: ['git', 'push', remote.name, branch] },
+      },
+    )
+  }
+
+  const latest = await repoApi(deployUrl, token, appId)
+    .latestRelease()
+    .then((result) => result.release)
+  if (latest?.commitOid && latest.commitOid !== tip) {
+    const known = resolveCommit(appDir, latest.commitOid) !== null
+    const containsLive = known && isAncestor(appDir, latest.commitOid, tip)
+    if ((!known || !containsLive) && !ignoreStale) {
+      output.die(
+        known
+          ? `This GitHub branch does not contain live release #${latest.seq} (${latest.commitOid.slice(0, 10)}). Integrate the published GitHub history, then redeploy.`
+          : `The live release commit ${latest.commitOid.slice(0, 10)} is not in this checkout. Fetch ${source.repository}, integrate it, then redeploy.`,
+        'stale_base',
+        {
+          actionRequired: true,
+          action: { cwd: appDir, argv: ['git', 'fetch', remote.name] },
+        },
+      )
+    }
+    if (!containsLive) {
+      p.log.warn(
+        'Deploying GitHub history that does not contain the live release (--ignore-stale).',
+      )
+    }
+  }
+  p.log.info(`Verified GitHub ${source.repository}:${branch} at ${tip.slice(0, 10)} (no push).`)
+  return { commitOid: tip, recoverable: true, baseReleaseId: latest?.id ?? null }
 }
 
 function classifyRemoteState(

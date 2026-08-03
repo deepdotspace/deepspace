@@ -1,6 +1,6 @@
 /**
  * DEV-2: `kill`'s no-arg port must mirror `dev`'s binding precedence
- * (explicit > worktree > $DEEPSPACE_PORT > launch.json > default). These would
+ * (explicit > $DEEPSPACE_PORT > worktree > launch.json > default). These would
  * fail if any source were dropped — e.g. the earlier regression that ignored
  * $DEEPSPACE_PORT.
  */

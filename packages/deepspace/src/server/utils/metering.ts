@@ -28,6 +28,7 @@
 interface MeteringEnv {
   USAGE_EVENTS?: AnalyticsEngineDataset
   OWNER_USER_ID?: string
+  DEEPSPACE_RESOURCE_ID?: string
   APP_NAME?: string
 }
 
@@ -46,7 +47,12 @@ export function meterUsage(
   try {
     ds.writeDataPoint({
       indexes: [env.OWNER_USER_ID ?? 'unknown'],
-      blobs: [env.APP_NAME ?? 'unknown', kind, fields.id ?? '', fields.op ?? ''],
+      blobs: [
+        env.DEEPSPACE_RESOURCE_ID ?? env.APP_NAME ?? 'unknown',
+        kind,
+        fields.id ?? '',
+        fields.op ?? '',
+      ],
       doubles: [fields.units ?? 0, fields.count ?? 0],
     })
     return true
@@ -190,11 +196,7 @@ export const COST_RATES = {
  *   - `vectorize.storedPerDimPerMonth`: events are per-call deltas, not
  *     monthly snapshots, so a windowed SUM isn't meaningful here.
  */
-export function priceBindingUsageEvent(
-  kind: string,
-  op: string,
-  units: number,
-): number {
+export function priceBindingUsageEvent(kind: string, op: string, units: number): number {
   if (kind === 'ai' && op === 'input') {
     return units * COST_RATES.ai.embedInputPerChar
   }

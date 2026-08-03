@@ -1,96 +1,56 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { resolveExistingAppId } from '../app-identity'
+import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { readLegacyAppId } from '../app-identity'
 
-/** Stub fetch with per-endpoint behavior: the owned-apps list and the gated
- *  per-app analytics probe (`/analytics` → status). */
-function mockEndpoints(opts: {
-  apps?: Array<{ appId: string; name: string | null }>
-  appsOk?: boolean
-  analyticsStatus?: number
-}) {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (url: string) => {
-      if (String(url).includes('/analytics')) {
-        const status = opts.analyticsStatus ?? 404
-        return { ok: status === 200, status, json: async () => ({}) } as unknown as Response
-      }
-      return {
-        ok: opts.appsOk ?? true,
-        status: opts.appsOk === false ? 500 : 200,
-        json: async () => ({ apps: opts.apps ?? [] }),
-      } as unknown as Response
-    }),
-  )
-}
+describe('readLegacyAppId', () => {
+  function withConfig(source: string, run: (dir: string) => void): void {
+    const dir = mkdtempSync(join(tmpdir(), 'ds-legacy-id-'))
+    try {
+      writeFileSync(join(dir, 'wrangler.toml'), source)
+      run(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
 
-afterEach(() => vi.unstubAllGlobals())
-
-describe('resolveExistingAppId — adopt an existing app id instead of minting', () => {
-  it('adopts the caller’s app id for a matching subdomain (the cutover case)', async () => {
-    mockEndpoints({
-      apps: [
-        { appId: 'app_0000000000000000000000OTHER', name: 'otherapp' },
-        { appId: 'app_01KX8ZYZQ88VRTJZFAWPGNCCSX', name: 'videostudio' },
-      ],
-    })
-    expect(await resolveExistingAppId('https://d', 't', 'videostudio')).toEqual({
-      kind: 'adopted',
-      appId: 'app_01KX8ZYZQ88VRTJZFAWPGNCCSX',
-      owned: true,
+  it('resolves matching pre-id Worker and APP_NAME declarations', () => {
+    withConfig('name = "tickets"\n[vars]\nAPP_NAME = "tickets"\n', (dir) => {
+      expect(readLegacyAppId(dir)).toBe('tickets')
     })
   })
 
-  it('adopts the legacy name-as-id when the caller can deploy on-behalf (collaborator/admin)', async () => {
-    // The owned list misses (someone else owns it) but the gated per-app read
-    // authorizes → the backfilled app's id IS the name.
-    mockEndpoints({ apps: [{ appId: 'app_x', name: 'somethingelse' }], analyticsStatus: 200 })
-    expect(await resolveExistingAppId('https://d', 't', 'deepdotspace-site')).toEqual({
-      kind: 'adopted',
-      appId: 'deepdotspace-site',
-      owned: false,
+  it('resolves an explicitly name-shaped DEEPSPACE_APP_ID for migration only', () => {
+    withConfig('name = "tickets"\n[vars]\nDEEPSPACE_APP_ID = "tickets"\n', (dir) => {
+      expect(readLegacyAppId(dir)).toBe('tickets')
     })
   })
 
-  it('reports `taken` when the name belongs to an app the caller cannot deploy', async () => {
-    mockEndpoints({ apps: [], analyticsStatus: 403 })
-    expect(await resolveExistingAppId('https://d', 't', 'videostudio')).toEqual({ kind: 'taken' })
+  it('refuses mismatched legacy declarations instead of guessing', () => {
+    withConfig('name = "worker-a"\n[vars]\nAPP_NAME = "worker-b"\n', (dir) => {
+      expect(() => readLegacyAppId(dir)).toThrow(/does not match/)
+    })
   })
 
-  it('resolves `none` when nothing is registered at this name (→ mint fresh)', async () => {
-    mockEndpoints({ apps: [{ appId: 'app_x', name: 'somethingelse' }], analyticsStatus: 404 })
-    expect(await resolveExistingAppId('https://d', 't', 'brand-new-app')).toEqual({ kind: 'none' })
+  it('does not infer a legacy identity from a Worker name alone', () => {
+    withConfig('name = "tickets"\n[vars]\n', (dir) => {
+      expect(readLegacyAppId(dir)).toBeNull()
+    })
   })
 
-  it('resolves `none` (never throws) when the owned list errors and the probe misses', async () => {
-    mockEndpoints({ appsOk: false, analyticsStatus: 404 })
-    expect(await resolveExistingAppId('https://d', 't', 'videostudio')).toEqual({ kind: 'none' })
+  it('refuses APP_NAME without an independent Worker name declaration', () => {
+    withConfig('[vars]\nAPP_NAME = "tickets"\n', (dir) => {
+      expect(() => readLegacyAppId(dir)).toThrow(/requires both Worker name and APP_NAME/)
+    })
   })
 
-  it('still adopts via the probe when the owned-list call rejects', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: string) => {
-        if (String(url).includes('/analytics')) {
-          return { ok: true, status: 200, json: async () => ({}) } as unknown as Response
-        }
-        throw new Error('network down')
-      }),
+  it('resolves an environment from its own non-inherited declarations', () => {
+    withConfig(
+      'name = "prod"\n[vars]\nAPP_NAME = "prod"\n[env.staging]\nname = "staging"\n[env.staging.vars]\nAPP_NAME = "staging"\n',
+      (dir) => {
+        expect(readLegacyAppId(dir, 'staging')).toBe('staging')
+      },
     )
-    expect(await resolveExistingAppId('https://d', 't', 'videostudio')).toEqual({
-      kind: 'adopted',
-      appId: 'videostudio',
-      owned: false,
-    })
-  })
-
-  it('resolves `none` (never throws) when every call rejects', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => {
-        throw new Error('network down')
-      }),
-    )
-    expect(await resolveExistingAppId('https://d', 't', 'videostudio')).toEqual({ kind: 'none' })
   })
 })

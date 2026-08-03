@@ -77,7 +77,7 @@ export function isRecoverablePushFailure(status: PushRefStatus): boolean {
 }
 
 export interface PushTransportFailure {
-  code: 'app_quota_exceeded' | 'rate_limited'
+  code: 'app_quota_exceeded' | 'source_managed_by_github' | 'rate_limited'
   error: string
 }
 
@@ -91,6 +91,13 @@ export function classifyPushTransportFailure(error: unknown): PushTransportFailu
       error:
         `A first push to this new app hit your plan's active-app quota. ` +
         `Use \`deepspace app list\` to choose an app to undeploy, or upgrade your plan, then retry.`,
+    }
+  }
+  if (/(?:HTTP |error: )422\b/i.test(message)) {
+    return {
+      code: 'source_managed_by_github',
+      error:
+        'This app uses GitHub source. Push with normal Git/GitHub, then run `deepspace deploy`.',
     }
   }
   if (/(?:HTTP |error: )429\b/i.test(message)) {

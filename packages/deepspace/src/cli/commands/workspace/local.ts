@@ -63,6 +63,25 @@ function markManagedWorkspace(worktreeRoot: string, workspaceId: string): boolea
   }
 }
 
+function rollbackUnmarkedWorkspace(
+  appDir: string,
+  worktreeRoot: string,
+  branch: string,
+  createdOid: string,
+): string | null {
+  const removed = runGit(appDir, ['worktree', 'remove', worktreeRoot], { allowFail: true })
+  if (removed.status !== 0) {
+    return `git worktree remove failed: ${removed.stderr.toString('utf-8').trim() || 'unknown git error'}`
+  }
+  const deleted = runGit(appDir, ['update-ref', '-d', `refs/heads/${branch}`, createdOid], {
+    allowFail: true,
+  })
+  if (deleted.status !== 0) {
+    return `the checkout was removed but branch ${branch} remains: ${deleted.stderr.toString('utf-8').trim() || 'unknown git error'}`
+  }
+  return null
+}
+
 /** Only a private Git-admin marker proves that DeepSpace owns this checkout. */
 export function isManagedWorkspaceWorktree(worktreeRoot: string, workspaceId: string): boolean {
   const markerPath = worktreeMarkerPath(worktreeRoot)
@@ -97,10 +116,22 @@ export function materializeWorkspaceWorktree(
   branch: string,
   startPoint: string,
   workspaceId: string,
+  options: { markManaged?: (worktreeRoot: string, workspaceId: string) => boolean } = {},
 ): void {
+  const createdOid = resolveCommit(appDir, startPoint)
+  if (!createdOid) throw new Error(`Could not resolve workspace start point ${startPoint}`)
   addWorktreeNewBranch(appDir, worktreeRoot, branch, startPoint)
+  const marked = (options.markManaged ?? markManagedWorkspace)(worktreeRoot, workspaceId)
+  if (!marked) {
+    const rollbackError = rollbackUnmarkedWorkspace(appDir, worktreeRoot, branch, createdOid)
+    throw new Error(
+      `Could not record DeepSpace ownership for ${worktreeRoot}.` +
+        (rollbackError
+          ? ` Automatic rollback was incomplete: ${rollbackError}`
+          : ' The just-created checkout and branch were rolled back.'),
+    )
+  }
   excludeWorktreeDir(appDir, worktreeRoot)
-  markManagedWorkspace(worktreeRoot, workspaceId)
 }
 
 export function inOwnLinkedWorktree(appDir: string, id: string): boolean {

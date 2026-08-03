@@ -1,10 +1,38 @@
 # deepspace
 
+## 0.9.0
+
+### Minor Changes
+
+- Require canonical app ids at normal backend and runtime boundaries while retaining the owner-only `deepspace app migrate` workflow and permanent physical-resource continuity.
+- Add first-class single-authority GitHub and DeepSpace source control, including
+  manual GitHub verification, provider-aware deploys, and reversible branch/tag
+  transfers through `deepspace app source`.
+- Add the resumable `deepspace app migrate` workflow for GitHub-owned legacy
+  apps. Migrations mint a canonical immutable app id while preserving existing
+  Workers, Durable Objects, files, secrets, releases, billing history, routes,
+  collaborators, and other physical resources in place.
+  Dry-run returns an exact, non-mutating registry re-key inventory, and
+  `--cancel` / `--rollback` provide GitHub-first recovery before any canonical
+  deployment begins.
+
+### Patch Changes
+
+- Report GitHub-owned cloud Git operations as source-policy refusals instead of app-quota errors.
+- Build every SDK entry from one pre-cleaned output directory so concurrent declaration generation cannot remove sibling entry artifacts.
+- Install the AI SDK runtime and provider packages used by `deepspace/worker` as
+  real dependencies. Apps that do not use the AI helpers no longer fail to bundle
+  the Worker because optional provider peers are absent, and an app-owned AI SDK
+  v4 install no longer prevents DeepSpace's v5 provider runtime from installing.
+  Calls that consume `createDeepSpaceAI` models still use the documented v5 API.
+- Keep managed workspace dependencies inside their own Git checkout and roll back a newly created worktree if its private ownership marker cannot be recorded.
+
 ## 0.8.2
 
 ### Patch Changes
 
 - Publish the SDK after verifying its packed artifacts across the supported Node 22.15, 24, and 26 Linux runtimes.
+- Install the AI SDK runtime and provider packages used by `deepspace/worker` as real dependencies, so apps can bundle the Worker without manually installing optional provider peers and an app-owned AI SDK v4 install no longer prevents DeepSpace's v5 provider runtime from installing. Calls that consume `createDeepSpaceAI` models still use the documented v5 API.
 
 ## 0.8.1
 

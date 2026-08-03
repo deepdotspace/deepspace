@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { decodeJwtPayload } from '../jwt'
-import { mintAppId, readAppId, resolveExistingAppId, writeAppId } from '../lib/app-identity'
+import { mintAppId, readAppId, readLegacyAppId, writeAppId } from '../lib/app-identity'
 import { ensureInstallReady } from '../lib/install-status'
 import type { CliAction } from '../lib/output'
 import { preflightNodeVersion } from '../lib/preflight'
@@ -22,6 +22,7 @@ import { syncOneTimeProducts, syncSubscriptionPlans } from './deploy/commerce'
 import { createDeployOutput, type DeployOutput } from './deploy/output'
 import { deployBuiltBundle } from './deploy/request'
 import { syncDeployRepository } from './deploy/repository'
+import { getAppSource } from '../lib/source-api'
 import { loadDeploySecrets, prepareDeploySecrets } from './deploy/secrets'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
@@ -57,20 +58,12 @@ export default defineCommand({
         'Deploy even though hand-edited .dev.vars secrets are absent from the store (they will NOT be deployed, and any a previous deploy set are dropped).',
       default: false,
     },
-    adopt: {
-      type: 'boolean',
-      description:
-        'Confirm adopting an existing app you can deploy but do not own (collaborator/admin ' +
-        'on-behalf) when wrangler.toml has no DEEPSPACE_APP_ID. Without this flag an ' +
-        'interactive prompt asks.',
-      default: false,
-    },
     // Citty maps --no-push to the negation of an argument named `push`.
     push: {
       type: 'boolean',
       description:
-        "Sync the branch to the app's cloud repo before deploying (--no-push to skip; the " +
-        'release then may point at source the platform cannot recover).',
+        'Sync DeepSpace source before deploying. The legacy --no-push escape hatch skips ' +
+        'recoverable source lineage; GitHub apps are verified and never pushed automatically.',
       default: true,
     },
     'ignore-stale': {
@@ -125,47 +118,23 @@ export default defineCommand({
     }
     const appName = nameResult.name
     let appId = readAppId(appDir, envName)
+    if (!appId) {
+      const legacyAppId = readLegacyAppId(appDir, envName)
+      if (legacyAppId) {
+        output.die(
+          `This checkout still uses legacy app identity ${legacyAppId}. Run \`deepspace app migrate --dry-run\`, then complete \`deepspace app migrate\` before deploying.`,
+          'legacy_app_migration_required',
+        )
+      }
+    }
     p.log.info(envName ? `App: ${appName}  (env: ${envName})` : `App: ${appName}`)
 
     const { token, ownerId } = await authenticate(appDir, output)
 
     if (!appId) {
-      const existing = await resolveExistingAppId(DEPLOY_URL, token, appName)
-      if (existing.kind === 'taken') {
-        output.die(
-          `"${appName}" is taken by an app you don't have deploy access to. ` +
-            'Ask the owner to add you as a collaborator (`deepspace app collaborators add`), ' +
-            'or pick a different `name` in wrangler.toml.',
-          'name_taken',
-        )
-      }
-      if (existing.kind === 'adopted' && !existing.owned && !args.adopt) {
-        if (output.nonInteractive) {
-          output.die(
-            `"${appName}" is an existing app owned by another account that you can deploy ` +
-              'on-behalf (collaborator/admin). Confirmation needs --adopt here — ' +
-              're-run with --adopt to deploy it, or pick a different `name` in wrangler.toml ' +
-              'if you meant a new app.',
-            'confirmation_required',
-          )
-        }
-        const confirmed = await p.confirm({
-          message:
-            `"${appName}" is an existing app owned by another account that you can deploy ` +
-            'on-behalf (you are a collaborator or admin). Deploy it? ' +
-            '(Meant a new app? Pick a different `name` in wrangler.toml.)',
-        })
-        if (p.isCancel(confirmed) || !confirmed) {
-          output.die('Deploy cancelled.', 'cancelled')
-        }
-      }
-      appId = existing.kind === 'adopted' ? existing.appId : mintAppId()
+      appId = mintAppId()
       writeAppId(appDir, appId, { wranglerEnv: envName })
-      p.log.info(
-        existing.kind === 'adopted'
-          ? `Adopted existing app id ${appId} for ${appName} — commit wrangler.toml.`
-          : `Minted app id ${appId} — commit wrangler.toml.`,
-      )
+      p.log.info(`Minted app id ${appId} — commit wrangler.toml.`)
     }
     p.log.info(`Id: ${appId}`)
 
@@ -178,6 +147,7 @@ export default defineCommand({
       token,
       output,
     })
+    const sourceState = await getAppSource(DEPLOY_URL, token, appId)
     const repository = await syncDeployRepository({
       deployUrl: DEPLOY_URL,
       appDir,
@@ -186,6 +156,7 @@ export default defineCommand({
       push: args.push !== false,
       ignoreStale: Boolean(args['ignore-stale']),
       output,
+      sourceState,
     })
 
     const spinner = createSpinner()

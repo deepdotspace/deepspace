@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,16 +9,32 @@ describe('resolvesDeepspace', () => {
   const root = mkdtempSync(join(tmpdir(), 'ds-install-'))
   afterAll(() => rmSync(root, { recursive: true, force: true }))
 
-  it('finds node_modules by walking up, matching Node resolution', () => {
-    // A linked worktree nested inside the app has no node_modules of its own;
-    // the gate must accept it because imports resolve against the app's.
+  it('does not cross from a nested linked worktree into the primary checkout', () => {
     const app = join(root, 'app')
+    mkdirSync(app, { recursive: true })
+    execFileSync('git', ['init', '--quiet', '-b', 'main'], { cwd: app })
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: app })
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: app })
+    writeFileSync(join(app, '.gitignore'), 'node_modules\n.deepspace\n')
+    writeFileSync(join(app, 'package.json'), '{}\n')
+    execFileSync('git', ['add', '.gitignore', 'package.json'], { cwd: app })
+    execFileSync('git', ['commit', '--quiet', '-m', 'init'], { cwd: app })
+
     const worktree = join(app, '.deepspace', 'ws', '01abc')
+    execFileSync('git', ['worktree', 'add', '--quiet', '-b', 'ws/test', worktree, 'HEAD'], {
+      cwd: app,
+    })
     mkdirSync(join(app, 'node_modules', 'deepspace'), { recursive: true })
     writeFileSync(join(app, 'node_modules', 'deepspace', 'package.json'), '{}')
-    mkdirSync(worktree, { recursive: true })
+
     expect(resolvesDeepspace(app)).toBe(true)
-    expect(resolvesDeepspace(worktree)).toBe(true)
+    expect(resolvesDeepspace(worktree)).toBe(false)
+
+    const nestedApp = join(worktree, 'apps', 'web')
+    mkdirSync(nestedApp, { recursive: true })
+    mkdirSync(join(worktree, 'node_modules', 'deepspace'), { recursive: true })
+    writeFileSync(join(worktree, 'node_modules', 'deepspace', 'package.json'), '{}')
+    expect(resolvesDeepspace(nestedApp)).toBe(true)
   })
 
   it('returns false when no ancestor has node_modules/deepspace', () => {

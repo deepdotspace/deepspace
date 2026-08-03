@@ -138,6 +138,8 @@ export const RESERVED_BINDING_NAMES = new Set([
   'ASSETS',
   'PLATFORM_WORKER',
   'API_WORKER',
+  'DEEPSPACE_APP_ID',
+  'DEEPSPACE_RESOURCE_ID',
   'APP_NAME',
   'OWNER_USER_ID',
   'AUTH_JWT_PUBLIC_KEY',
@@ -174,7 +176,9 @@ export function validateBindingManifest(
   const seenNames = new Set<string>()
   for (const entry of manifest) {
     if (!entry || typeof entry !== 'object') {
-      errors.push({ reason: `Entry must be an object (got ${entry === null ? 'null' : typeof entry})` })
+      errors.push({
+        reason: `Entry must be an object (got ${entry === null ? 'null' : typeof entry})`,
+      })
       continue
     }
     const e = entry as Record<string, unknown>
@@ -227,7 +231,8 @@ function requiredFieldError(b: CustomBinding): string | null {
     case 'r2_bucket':
       return b.bucket_name ? null : `r2_bucket binding "${b.name}" missing bucket_name (or "auto")`
     case 'kv_namespace': {
-      if (!b.namespace_id) return `kv_namespace binding "${b.name}" missing namespace_id (or "auto")`
+      if (!b.namespace_id)
+        return `kv_namespace binding "${b.name}" missing namespace_id (or "auto")`
       if (b.namespace_id === AUTO_PROVISION_SENTINEL && !b.title) {
         return `kv_namespace binding "${b.name}" with namespace_id="auto" requires "title"`
       }
@@ -296,7 +301,8 @@ export function bindingManifestFromOutputConfig(
       name,
       index_name,
       ...(dimensions != null && { dimensions }),
-      ...(metric && (metric === 'cosine' || metric === 'euclidean' || metric === 'dot-product') && { metric }),
+      ...(metric &&
+        (metric === 'cosine' || metric === 'euclidean' || metric === 'dot-product') && { metric }),
     })
   }
 

@@ -149,6 +149,14 @@ export async function deployBuiltBundle(options: {
     if (shouldSendLineage(repository.commitOid, repository.recoverable)) {
       form.append('commitOid', repository.commitOid as string)
     }
+    if (repository.source) {
+      form.append('sourceProvider', repository.source.provider)
+      form.append('sourceRevision', String(repository.sourceRevision))
+      if (repository.source.provider === 'github') {
+        form.append('sourceRepository', repository.source.repository)
+      }
+    }
+    if (repository.baseReleaseId) form.append('baseReleaseId', repository.baseReleaseId)
     if (ignoreStale) form.append('ignoreStale', 'true')
     form.append('deployKey', repository.deployKey)
     return form

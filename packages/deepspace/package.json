@@ -1,6 +1,6 @@
 {
   "name": "deepspace",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "engines": {
     "node": ">=22.15.0"
   },
@@ -36,14 +36,18 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsup --clean",
+    "build": "node ../../scripts/clean-artifacts.mjs dist --tsbuildinfo && tsup",
     "type-check": "tsc --noEmit",
     "test": "vitest run",
     "clean": "node ../../scripts/clean-artifacts.mjs dist --tsbuildinfo",
     "prepublishOnly": "pnpm build"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^2.0.0",
+    "@ai-sdk/openai": "^2.0.0",
+    "@ai-sdk/openai-compatible": "^1.0.0",
     "@clack/prompts": "^1.2.0",
+    "ai": "^5.0.0",
     "better-auth": "1.6.23",
     "citty": "^0.2.0",
     "cross-spawn": "^7.0.6",
@@ -55,11 +59,7 @@
     "zod": "^4.3.6"
   },
   "peerDependencies": {
-    "@ai-sdk/anthropic": "^2.0.0",
-    "@ai-sdk/openai": "^2.0.0",
-    "@ai-sdk/openai-compatible": "^1.0.0",
     "@playwright/test": ">=1.40.0",
-    "ai": "^5.0.0",
     "clsx": ">=2.0.0",
     "lucide-react": ">=0.400.0",
     "react": "^18.0.0 || ^19.0.0",
@@ -68,18 +68,6 @@
   },
   "peerDependenciesMeta": {
     "@playwright/test": {
-      "optional": true
-    },
-    "ai": {
-      "optional": true
-    },
-    "@ai-sdk/anthropic": {
-      "optional": true
-    },
-    "@ai-sdk/openai": {
-      "optional": true
-    },
-    "@ai-sdk/openai-compatible": {
       "optional": true
     },
     "react": {
@@ -99,9 +87,6 @@
     }
   },
   "devDependencies": {
-    "@ai-sdk/anthropic": "^2.0.0",
-    "@ai-sdk/openai": "^2.0.0",
-    "@ai-sdk/openai-compatible": "^1.0.0",
     "@cloudflare/workers-types": "^4.20241205.0",
     "@playwright/test": "^1.59.1",
     "@types/better-sqlite3": "^7.6.12",

@@ -357,6 +357,41 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
     expect(git(main, ['branch', '--list', BRANCH]).trim()).toBe('')
   })
 
+  it('rolls back a just-created checkout when its ownership marker cannot be written', () => {
+    const main = initRepoWithCommit()
+    const dir = join(main, '.deepspace', 'ws', ID.slice(3).toLowerCase())
+
+    expect(() =>
+      materializeWorkspaceWorktree(main, dir, BRANCH, 'HEAD', ID, {
+        markManaged: () => false,
+      }),
+    ).toThrow(/ownership.*rolled back/i)
+
+    expect(existsSync(dir)).toBe(false)
+    expect(git(main, ['branch', '--list', BRANCH]).trim()).toBe('')
+    expect(git(main, ['worktree', 'list', '--porcelain'])).not.toContain(dir)
+  })
+
+  it('does not delete a just-created branch if it advanced before marker rollback', () => {
+    const main = initRepoWithCommit()
+    const dir = join(main, '.deepspace', 'ws', ID.slice(3).toLowerCase())
+
+    expect(() =>
+      materializeWorkspaceWorktree(main, dir, BRANCH, 'HEAD', ID, {
+        markManaged: (worktreeRoot) => {
+          writeFileSync(join(worktreeRoot, 'advanced.txt'), 'keep\n')
+          git(worktreeRoot, ['add', 'advanced.txt'])
+          git(worktreeRoot, ['commit', '-q', '-m', 'advanced'])
+          return false
+        },
+      }),
+    ).toThrow(/branch .* remains/i)
+
+    expect(existsSync(dir)).toBe(false)
+    expect(git(main, ['branch', '--list', BRANCH]).trim()).toContain(BRANCH)
+    expect(git(main, ['log', '-1', '--format=%s', BRANCH]).trim()).toBe('advanced')
+  })
+
   it('retains an unmarked worktree owned by Codex, Claude, or plain Git', () => {
     const main = initRepoWithCommit()
     const dir = join(main, '.claude', 'worktrees', 'external')

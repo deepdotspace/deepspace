@@ -16,11 +16,15 @@
 /** The singleton registry instance — one DO holds every app/route/collaborator. */
 export const REGISTRY_INSTANCE = 'v1:global'
 
-/** App id shape: a ULID-minted `app_…` id, or a legacy name-as-id. */
-export const APP_ID_RE = /^(app_[0-9A-HJKMNP-TV-Z]{26}|[a-z0-9][a-z0-9_-]{0,63})$/
+/** Public app ids have one canonical ULID-minted shape. */
+export const APP_ID_RE = /^app_[0-9A-HJKMNP-TV-Z]{26}$/
+export const STRICT_APP_ID_RE = APP_ID_RE
 
-/** ONLY a ULID-minted id — surfaces that must not accept a legacy name. */
-export const STRICT_APP_ID_RE = /^app_[0-9A-HJKMNP-TV-Z]{26}$/
+/** Name-shaped ids are accepted only by `deepspace app migrate`. */
+export const LEGACY_APP_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
+
+/** Internal physical locators survive identity migration and are not public ids. */
+export const RESOURCE_ID_RE = /^(app_[0-9A-HJKMNP-TV-Z]{26}|[a-z0-9][a-z0-9_-]{0,63})$/
 
 export class RegistryClientError extends Error {
   constructor(

@@ -11,6 +11,7 @@ import {
   credentialHelperCommand,
   ensureSpaceRemote,
   gitAuthEnv,
+  gitSourceImportEnv,
   repoUrl,
   SPACE_REMOTE,
 } from '../vc-remote'
@@ -87,6 +88,17 @@ describe('gitAuthEnv', () => {
     )
     process.env.DEEPSPACE_DEPLOY_URL = 'https://default.test'
     expect(gitAuthEnv('t').GIT_CONFIG_KEY_0).toBe('http.https://default.test.extraHeader')
+  })
+
+  it('adds a revision-bound import header without replacing bearer auth', () => {
+    delete process.env.GIT_CONFIG_COUNT
+    expect(gitSourceImportEnv('tok', 7, 'https://deploy.test')).toEqual({
+      GIT_CONFIG_COUNT: '2',
+      GIT_CONFIG_KEY_0: 'http.https://deploy.test.extraHeader',
+      GIT_CONFIG_VALUE_0: 'Authorization: Bearer tok',
+      GIT_CONFIG_KEY_1: 'http.https://deploy.test.extraHeader',
+      GIT_CONFIG_VALUE_1: 'X-DeepSpace-Source-Revision: 7',
+    })
   })
 })
 
@@ -168,7 +180,8 @@ describe('ensureSpaceRemote against a real repository', () => {
     const worktreeB = join(configDir, 'claude-b')
     git(['worktree', 'add', '--quiet', '-b', 'agent/a', worktreeA, 'HEAD'])
     git(['worktree', 'add', '--quiet', '-b', 'agent/b', worktreeB, 'HEAD'])
-    const entry = (...parts: string[]) => join(...parts, 'node_modules', 'deepspace', 'dist', 'cli.js')
+    const entry = (...parts: string[]) =>
+      join(...parts, 'node_modules', 'deepspace', 'dist', 'cli.js')
     const entryA = entry(worktreeA)
     const entryB = entry(worktreeB)
     mkdirSync(join(entryA, '..'), { recursive: true })
@@ -184,11 +197,14 @@ describe('ensureSpaceRemote against a real repository', () => {
       ensureSpaceRemote(worktreeB, 'app_01WORKTREES')
 
       rmSync(worktreeA, { recursive: true, force: true })
-      const helperB = runGit(worktreeB, ['config', '--worktree', '--get-all', key])
-        .stdout.toString('utf-8')
+      const helperB = runGit(worktreeB, ['config', '--worktree', '--get-all', key]).stdout.toString(
+        'utf-8',
+      )
       expect(helperB).toContain(entryB)
       expect(helperB).not.toContain(entryA)
-      expect(runGit(worktreeB, ['config', '--local', '--get-all', key], { allowFail: true }).status).not.toBe(0)
+      expect(
+        runGit(worktreeB, ['config', '--local', '--get-all', key], { allowFail: true }).status,
+      ).not.toBe(0)
     } finally {
       process.argv[1] = savedEntry
     }

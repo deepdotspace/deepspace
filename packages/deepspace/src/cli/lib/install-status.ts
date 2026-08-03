@@ -16,8 +16,9 @@ import { Refusal } from './command'
  * The presence of `node_modules/deepspace/package.json` is the ground truth
  * for "ready"; the sentinels only shape the error message.
  */
-import { existsSync, readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { repoToplevel } from './git/repository'
 import { detectPackageManager } from './package-manager'
 
 export type InstallState = 'ready' | 'installing' | 'failed' | 'missing'
@@ -91,18 +92,34 @@ export function ensureInstallReady(appDir: string): void {
 }
 
 /**
- * Ground truth for "dependencies ready", matching Node's resolver: walk up
- * from `fromDir` looking for node_modules/deepspace. This supports ordinary
- * monorepo hoisting; managed worktrees themselves receive an install action
- * and no longer link dependencies from another checkout.
+ * Ground truth for "dependencies ready": walk up from `fromDir` looking for
+ * node_modules/deepspace, but never cross the active Git checkout boundary.
+ * This supports monorepo hoisting inside a checkout without letting a managed
+ * worktree nested below the primary checkout silently use the primary's SDK.
+ * Outside Git, retain Node's ordinary upward lookup.
  */
 export function resolvesDeepspace(fromDir: string): boolean {
-  let dir = fromDir
+  let dir = canonicalPath(fromDir)
+  let checkoutRoot: string | null = null
+  try {
+    checkoutRoot = canonicalPath(repoToplevel(dir))
+  } catch {
+    // Dev/test can still provide the legacy dependency diagnostic outside Git.
+  }
   for (;;) {
     if (existsSync(join(dir, 'node_modules', 'deepspace', 'package.json'))) return true
+    if (dir === checkoutRoot) return false
     const parent = dirname(dir)
     if (parent === dir) return false
     dir = parent
+  }
+}
+
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch {
+    return resolve(path)
   }
 }
 

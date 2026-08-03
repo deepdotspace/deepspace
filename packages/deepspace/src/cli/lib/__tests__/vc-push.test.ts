@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { runGit } from '../git/process'
 import { initRepo } from '../git/repository'
 import {
+  classifyPushTransportFailure,
   isRecoverablePushFailure,
   isThinPackRejection,
   oversizedPushFix,
@@ -164,6 +165,27 @@ describe('push rejection decisions', () => {
     expect(isRecoverablePushFailure('rejected')).toBe(false)
     expect(isRecoverablePushFailure('committed')).toBe(false)
     expect(isRecoverablePushFailure('up_to_date')).toBe(false)
+  })
+
+  it('keeps transport-only source, quota, and rate-limit refusals distinct', () => {
+    expect(
+      classifyPushTransportFailure(
+        new Error("fatal: unable to access 'https://x/': The requested URL returned error: 409"),
+      ),
+    ).toMatchObject({ code: 'app_quota_exceeded' })
+    expect(
+      classifyPushTransportFailure(
+        new Error("fatal: unable to access 'https://x/': The requested URL returned error: 422"),
+      ),
+    ).toMatchObject({
+      code: 'source_managed_by_github',
+      error: expect.stringContaining('normal Git/GitHub'),
+    })
+    expect(
+      classifyPushTransportFailure(
+        new Error("fatal: unable to access 'https://x/': The requested URL returned error: 429"),
+      ),
+    ).toMatchObject({ code: 'rate_limited' })
   })
 
   it('gives an oversized rejection the correction recipe, never a retry action', () => {

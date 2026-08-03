@@ -20,6 +20,11 @@ import { fileURLToPath } from 'node:url'
 import { wrapCommandErrors, errorCode } from './lib/cli-errors'
 import { stopActiveSpinner } from './lib/spinner'
 import { printAction } from './lib/output'
+import {
+  findUnknownCommand,
+  type CommandTreeNode,
+  type UnknownCommand,
+} from './lib/command-suggestions'
 import { DEEPSPACE_ENV } from './env'
 import login from './commands/login'
 import logout from './commands/logout'
@@ -52,6 +57,8 @@ import rollback from './commands/rollback'
 import workspace from './commands/workspace'
 import activity from './commands/activity'
 import gitCredential from './commands/git-credential'
+import source from './commands/source'
+import migrate from './commands/migrate'
 
 // Read own version from package.json so the CLI banner stays in sync with publishes.
 // __dirname of the bundled output is <pkg>/dist; package.json sits one level up.
@@ -132,7 +139,7 @@ const app = defineCommand({
   meta: {
     name: 'app',
     description:
-      'The app itself: create, init, list, undeploy, transfer, collaborators, domain, library, usage',
+      'The app itself: create, init, list, source, migrate, undeploy, transfer, collaborators, domain, library, usage',
   },
   subCommands: {
     create,
@@ -144,6 +151,8 @@ const app = defineCommand({
     domain,
     library,
     usage,
+    source,
+    migrate,
   },
 })
 
@@ -208,39 +217,6 @@ const main = defineCommand({
 // refusal. `--help`/`-h` still goes through runMain so help stays read-only and
 // exits 0 regardless of --json (runCommand would ignore the flag and could run a
 // mutating command); everything else keeps runMain's behavior untouched.
-/** Levenshtein distance, for the did-you-mean hint below. Inputs are command
- *  names (short), so the O(n·m) DP is trivially cheap. */
-function editDistance(a: string, b: string): number {
-  const dp = Array.from({ length: a.length + 1 }, (_, i) => [
-    i,
-    ...new Array<number>(b.length).fill(0),
-  ])
-  for (let j = 1; j <= b.length; j++) dp[0][j] = j
-  for (let i = 1; i <= a.length; i++) {
-    for (let j = 1; j <= b.length; j++) {
-      dp[i][j] = Math.min(
-        dp[i - 1][j] + 1,
-        dp[i][j - 1] + 1,
-        dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
-      )
-    }
-  }
-  return dp[a.length][b.length]
-}
-
-function closestCommand(input: string, candidates: string[]): string | null {
-  let best: string | null = null
-  let bestDist = 4 // farther than 3 edits is a different word, not a typo
-  for (const c of candidates) {
-    const d = editDistance(input.toLowerCase(), c)
-    if (d < bestDist) {
-      best = c
-      bestDist = d
-    }
-  }
-  return best
-}
-
 /**
  * Fail-fast unknown-command guard for the HUMAN path. citty's default for an
  * unknown (sub)command is to print usage and exit 0 — which lets a script or
@@ -253,26 +229,26 @@ function closestCommand(input: string, candidates: string[]): string | null {
  * placed after flags — that arrangement just isn't pre-checked), and a
  * command without subCommands consumes the rest of argv as its own args.
  */
+function commandTree(): Record<string, CommandTreeNode> {
+  return (main.subCommands ?? {}) as Record<string, CommandTreeNode>
+}
+
+function unknownCommandMessage(unknown: UnknownCommand): string {
+  return (
+    `Unknown command: ${unknown.attemptedPath.join(' ')} — ` +
+    `did you mean \`${unknown.suggestion.join(' ')}\`?`
+  )
+}
+
 function assertKnownCommandPath(argv: string[]): void {
-  let table: Record<string, unknown> | undefined = main.subCommands as Record<string, unknown>
-  let path = 'deepspace'
-  for (const tok of argv) {
-    if (!table || tok.startsWith('-')) return
-    const entry: unknown = table[tok]
-    if (!entry) {
-      const hint = closestCommand(tok, Object.keys(table))
-      console.error(
-        `Unknown command: ${path} ${tok}${hint ? ` — did you mean \`${path} ${hint}\`?` : ''}\n` +
-          `Run \`${path} --help\` for the command list.`,
-      )
-      if (hint) {
-        printAction({ cwd: process.cwd(), argv: [...path.split(' '), hint] })
-      }
-      process.exit(1)
-    }
-    path += ` ${tok}`
-    table = (entry as { subCommands?: Record<string, unknown> }).subCommands
-  }
+  const unknown = findUnknownCommand(argv, commandTree())
+  if (!unknown) return
+  console.error(
+    `${unknownCommandMessage(unknown)}\n` +
+      `Run \`${unknown.helpPath.join(' ')} --help\` for the command list.`,
+  )
+  printAction({ cwd: process.cwd(), argv: unknown.suggestion })
+  process.exit(1)
 }
 
 const rawArgs = process.argv.slice(2)
@@ -289,18 +265,14 @@ if (DEEPSPACE_ENV === 'invalid') {
   process.exit(1)
 }
 if (rawArgs.includes('--json') && !wantsHelp) {
-  const first = rawArgs.find((a) => !a.startsWith('-'))
-  // Unknown top-level command: give the MACHINE caller the same did-you-mean
-  // the human path gets — the consumer that most needs it. (Deeper paths fall
-  // through to citty's E_UNKNOWN_COMMAND mapping below.)
-  if (first && !Object.prototype.hasOwnProperty.call(main.subCommands ?? {}, first)) {
-    const hint = closestCommand(first, Object.keys(main.subCommands ?? {}))
+  const unknown = findUnknownCommand(rawArgs, commandTree())
+  if (unknown) {
     console.log(
       JSON.stringify({
         ok: false,
         code: 'unknown_command',
-        error: `Unknown command: deepspace ${first}${hint ? ` — did you mean \`deepspace ${hint}\`?` : ''}`,
-        ...(hint ? { action: { cwd: process.cwd(), argv: ['deepspace', hint] } } : {}),
+        error: unknownCommandMessage(unknown),
+        action: { cwd: process.cwd(), argv: unknown.suggestion },
       }),
     )
     process.exit(1)
@@ -333,7 +305,9 @@ if (rawArgs.includes('--json') && !wantsHelp) {
     process.exit(1)
   })
 } else {
-  // `--help` stays exempt so help probes remain read-only.
-  if (!wantsHelp) assertKnownCommandPath(rawArgs)
+  // Static path validation is read-only, including for help probes. Without
+  // it, `deepspace migrate --help` silently falls back to root help and exits
+  // 0 even though the only valid path is `deepspace app migrate`.
+  assertKnownCommandPath(rawArgs)
   runMain(wrapCommandErrors(main))
 }

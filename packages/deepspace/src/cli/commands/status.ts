@@ -31,6 +31,7 @@ import { errorCode } from '../lib/cli-errors'
 import { installState } from '../lib/install-status'
 import { installCommand } from '../lib/package-manager'
 import { createSpinner } from '../lib/spinner'
+import { getAppSource } from '../lib/source-api'
 
 function timeAgo(iso: string): string {
   const ms = Date.now() - Date.parse(iso)
@@ -221,9 +222,29 @@ export default defineCommand({
         }
         if (token) {
           const api = repoApi(deployBaseUrl(), token, appId)
+          const sourceResult = await observeRemote(getAppSource(deployBaseUrl(), token, appId))
+          const source = sourceResult.ok ? sourceResult.value.source : null
+          const githubSource = source?.provider === 'github'
+          if (!sourceResult.ok) {
+            reportRemoteFailure('Source', 'source', sourceResult.error)
+          } else if (githubSource) {
+            lines.push(['Source', `GitHub · ${source.repository} (manual Git ownership)`])
+            json.source = { ...source, revision: sourceResult.value.revision }
+          } else if (source?.provider === 'deepspace') {
+            lines.push([
+              'Source',
+              `DeepSpace · packaged Git (revision ${sourceResult.value.revision})`,
+            ])
+            json.source = { ...source, revision: sourceResult.value.revision }
+          } else {
+            lines.push(['Source', 'unclaimed · next normal deploy defaults to DeepSpace'])
+            json.source = null
+          }
           const [refsResult, wsResult, releaseResult] = await Promise.all([
-            observeRemote(api.getRefs()),
-            facts.workspaceId
+            githubSource
+              ? Promise.resolve({ ok: true, value: null } as const)
+              : observeRemote(api.getRefs()),
+            facts.workspaceId && !githubSource
               ? observeRemote(api.getWorkspace(facts.workspaceId).then((r) => r.view))
               : Promise.resolve({ ok: true, value: null } as const),
             observeRemote(api.latestRelease().then((r) => r.release)),
@@ -231,7 +252,10 @@ export default defineCommand({
 
           // workspace position
           if (facts.workspaceId) {
-            if (!wsResult.ok) reportRemoteFailure('Workspace', 'workspace', wsResult.error)
+            if (githubSource) {
+              lines.push(['Workspace', 'DeepSpace workspaces are disabled for GitHub source'])
+              json.workspace = { state: 'disabled', provider: 'github' }
+            } else if (!wsResult.ok) reportRemoteFailure('Workspace', 'workspace', wsResult.error)
             else if (wsResult.value) reportWorkspace(wsResult.value)
           }
           function reportWorkspace(view: RemoteWorkspaceView): void {
@@ -257,7 +281,10 @@ export default defineCommand({
           const refs = refsResult.ok ? refsResult.value : undefined
           const trunkRef = refs?.refs.find((r) => `refs/heads/${branch}` === r.name)
           if (!facts.workspaceId && branch) {
-            if (!refsResult.ok) reportRemoteFailure('Trunk', 'trunk', refsResult.error)
+            if (githubSource) {
+              lines.push(['Trunk', `${branch} is owned through normal Git/GitHub`])
+              json.trunk = { state: 'external', provider: 'github', branch }
+            } else if (!refsResult.ok) reportRemoteFailure('Trunk', 'trunk', refsResult.error)
             else {
               const remoteOid = trunkRef?.oid ?? null
               const localOid = resolveCommit(appDir, `refs/heads/${branch}`)
@@ -321,6 +348,8 @@ export default defineCommand({
               createdAt: rel.createdAt,
               url: rel.url,
               byYou,
+              source: rel.source,
+              sourceRevision: rel.sourceRevision,
             }
           }
         }

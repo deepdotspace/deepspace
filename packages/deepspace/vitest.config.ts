@@ -15,5 +15,6 @@ export default defineConfig({
   test: {
     include: ['src/**/__tests__/**/*.test.{ts,tsx}', 'features/**/__tests__/**/*.test.{ts,tsx}'],
     environment: 'node',
+    maxWorkers: 4,
   },
 })

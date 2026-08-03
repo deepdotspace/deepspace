@@ -22,7 +22,7 @@ import { InputError } from './cli-errors'
 
 // Single source: the shared registry client owns the id shape. Import-then-
 // re-export (not a bare `export from`) because line ~151 uses it locally too.
-import { APP_ID_RE } from '../../server/utils/registry-client'
+import { APP_ID_RE, LEGACY_APP_ID_RE } from '../../server/utils/registry-client'
 export { APP_ID_RE }
 
 const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
@@ -57,100 +57,76 @@ export function mintAppId(now = Date.now()): string {
   return `app_${mintUlid(now)}`
 }
 
-/** Outcome of looking for an app already registered at this name. */
-export type ExistingAppResolution =
-  /** A registered app the caller can deploy — reuse its id. `owned` is false
-   *  when access comes from the on-behalf matrix (collaborator/admin) rather
-   *  than ownership; callers must confirm before deploying those. */
-  | { kind: 'adopted'; appId: string; owned: boolean }
-  /** A registered app the caller CANNOT deploy — abort before minting. */
-  | { kind: 'taken' }
-  /** Nothing registered here → mint a fresh id. */
-  | { kind: 'none' }
-
-/**
- * Resolve the app already registered at this subdomain, if any. A repo with no
- * `DEEPSPACE_APP_ID` must NOT blindly mint a fresh id: an app the platform
- * already registered — e.g. one backfilled during the app-identity cutover —
- * owns its route, so a fresh id would collide ("name … is taken by another
- * app"). Two probes:
- *
- * 1. The caller's own apps (`/api/apps`), matched by subdomain — the owner
- *    redeploying a legacy repo.
- * 2. The name itself as a legacy id: backfilled apps use their name as their
- *    appId, so a gated per-app read (`/api/apps/:appId/analytics`, the same
- *    owner / collaborator / admin matrix deploy grants) answers in one call
- *    whether the app exists and whether the caller may deploy it. 200 → adopt
- *    (deploy runs on-behalf when the caller isn't the owner); 403 → the name
- *    belongs to an app the caller can't deploy, so minting would only defer
- *    the failure to a confusing route-claim collision — report `taken` so
- *    deploy can fail with the real reason; 404 → nothing there.
- *
- * Best-effort otherwise: network errors and unexpected responses resolve to
- * `none` so the deploy still proceeds and mints, exactly as before.
- */
-export async function resolveExistingAppId(
-  deployUrl: string,
-  token: string,
-  appName: string,
-): Promise<ExistingAppResolution> {
-  const headers = { Authorization: `Bearer ${token}` }
-
-  try {
-    const res = await fetch(`${deployUrl}/api/apps`, { headers })
-    if (res.ok) {
-      const body = (await res.json()) as {
-        apps?: Array<{ appId?: string; name?: string | null }>
-      }
-      const match = body.apps?.find((a) => a.name === appName)
-      if (match?.appId) return { kind: 'adopted', appId: match.appId, owned: true }
-    }
-  } catch {
-    // fall through to the legacy-id probe
-  }
-
-  try {
-    const res = await fetch(
-      `${deployUrl}/api/apps/${encodeURIComponent(appName)}/analytics?period=1h`,
-      { headers },
-    )
-    // Not in the owned list but the gated read authorizes → on-behalf access
-    // (collaborator or admin). NOT ownership: for an admin this is true of
-    // EVERY registered app, so the caller must confirm before deploying.
-    if (res.ok) return { kind: 'adopted', appId: appName, owned: false }
-    if (res.status === 403) return { kind: 'taken' }
-  } catch {
-    // best-effort: fall through
-  }
-
-  return { kind: 'none' }
-}
-
 interface WranglerVars {
+  name?: unknown
   vars?: Record<string, unknown>
-  env?: Record<string, { vars?: Record<string, unknown> }>
+  env?: Record<string, { name?: unknown; vars?: Record<string, unknown> }>
 }
 
-/** Read DEEPSPACE_APP_ID for the given wrangler env (top-level when omitted).
- *  Env blocks do NOT inherit the top-level id — each env is its own app. */
-export function readAppId(cwd: string = process.cwd(), wranglerEnv?: string): string | null {
+function readWranglerConfig(cwd: string): WranglerVars | null {
   const wranglerPath = join(resolve(cwd), 'wrangler.toml')
   if (!existsSync(wranglerPath)) return null
-  let cfg: WranglerVars
   try {
-    cfg = parseToml(readFileSync(wranglerPath, 'utf-8')) as WranglerVars
+    return parseToml(readFileSync(wranglerPath, 'utf-8')) as WranglerVars
   } catch (err) {
-    // A corrupt wrangler.toml must NOT read as "no id yet" — callers would
-    // tell the user to run `deepspace app init` (a lie) or mint a SECOND id
-    // into the broken file. Surface the real problem.
     throw new InputError(
       `Could not parse ${wranglerPath}: ${err instanceof Error ? err.message : String(err)}`,
       'invalid_config',
     )
   }
+}
+
+/** Read DEEPSPACE_APP_ID for the given wrangler env (top-level when omitted).
+ *  Env blocks do NOT inherit the top-level id — each env is its own app. */
+export function readAppId(cwd: string = process.cwd(), wranglerEnv?: string): string | null {
+  const cfg = readWranglerConfig(cwd)
+  if (!cfg) return null
   const vars = wranglerEnv ? cfg.env?.[wranglerEnv]?.vars : cfg.vars
   const id = vars?.DEEPSPACE_APP_ID
   return typeof id === 'string' && APP_ID_RE.test(id) ? id : null
+}
+
+/**
+ * Resolve a pre-app-id checkout. Old templates identified an app with both
+ * the Worker `name` and `[vars].APP_NAME`; require those values to agree so a
+ * migration never guesses which historical registry row to re-key.
+ */
+export function readLegacyAppId(cwd: string = process.cwd(), wranglerEnv?: string): string | null {
+  const cfg = readWranglerConfig(cwd)
+  if (!cfg) return null
+  const slot = wranglerEnv ? cfg.env?.[wranglerEnv] : cfg
+  if (!slot) return null
+  const declaredId = slot.vars?.DEEPSPACE_APP_ID
+  if (declaredId !== undefined) {
+    if (typeof declaredId === 'string' && LEGACY_APP_ID_RE.test(declaredId)) return declaredId
+    throw new InputError(
+      'DEEPSPACE_APP_ID is present but invalid; correct it before migrating.',
+      'invalid_app_id',
+    )
+  }
+  const appName = typeof slot.vars?.APP_NAME === 'string' ? slot.vars.APP_NAME : null
+  const workerName = typeof slot.name === 'string' ? slot.name : null
+  // APP_NAME was the independent identity declaration in pre-id templates.
+  // A plain Worker config with only `name` is merely uninitialized, not proof
+  // that a legacy registry row exists.
+  if (!appName) return null
+  if (!workerName) {
+    throw new InputError(
+      'Legacy migration requires both Worker name and APP_NAME to be present and identical.',
+      'ambiguous_legacy_app_id',
+    )
+  }
+  if (appName !== workerName) {
+    throw new InputError(
+      `Legacy APP_NAME "${appName}" does not match Worker name "${workerName}"; migration cannot choose safely.`,
+      'ambiguous_legacy_app_id',
+    )
+  }
+  const legacyAppId = appName
+  if (!legacyAppId || !LEGACY_APP_ID_RE.test(legacyAppId) || APP_ID_RE.test(legacyAppId)) {
+    return null
+  }
+  return legacyAppId
 }
 
 /**
@@ -191,9 +167,7 @@ export function writeAppId(
     const nextSection = rest.search(/^\s*\[/m)
     const blockEnd = nextSection === -1 ? src.length : blockStart + nextSection
     const block = src.slice(blockStart, blockEnd)
-    const newBlock = idLineRe.test(block)
-      ? block.replace(idLineRe, line)
-      : `\n${line}${block}`
+    const newBlock = idLineRe.test(block) ? block.replace(idLineRe, line) : `\n${line}${block}`
     src = src.slice(0, blockStart) + newBlock + src.slice(blockEnd)
   } else {
     src = src.trimEnd() + `\n\n${header}\n${line}\n`

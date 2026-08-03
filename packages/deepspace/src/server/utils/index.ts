@@ -2,6 +2,7 @@ export { matchOrigin, platformCorsPatterns } from './cors'
 export { DEPLOYED_APPS_DEFAULTS, parseQuotaLimit } from './plan-quotas'
 export {
   APP_ID_RE,
+  RESOURCE_ID_RE,
   STRICT_APP_ID_RE,
   callRegistry,
   REGISTRY_INSTANCE,

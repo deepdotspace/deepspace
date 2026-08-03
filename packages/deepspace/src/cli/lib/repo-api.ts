@@ -37,6 +37,8 @@ export interface RemoteRelease {
   url: string | null
   kind: 'deploy' | 'rollback'
   createdAt: string
+  source: { provider: 'deepspace' } | { provider: 'github'; repository: string } | null
+  sourceRevision: number | null
 }
 
 export interface RemoteWorkspace {
