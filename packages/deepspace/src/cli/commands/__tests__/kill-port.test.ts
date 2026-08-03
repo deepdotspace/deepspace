@@ -12,8 +12,8 @@ describe('pickKillPort (DEV-2)', () => {
   it('explicit --port wins over everything', () => {
     expect(pickKillPort({ explicit: 3000, worktree: 5190, env: 9090, appLaunch: 8790 })).toBe(3000)
   })
-  it('worktree port wins over env + launch.json (dev ignores $DEEPSPACE_PORT in a worktree)', () => {
-    expect(pickKillPort({ explicit: null, worktree: 5190, env: 9090, appLaunch: 8790 })).toBe(5190)
+  it('$DEEPSPACE_PORT wins over derived worktree and launch.json ports', () => {
+    expect(pickKillPort({ explicit: null, worktree: 5190, env: 9090, appLaunch: 8790 })).toBe(9090)
   })
   it('$DEEPSPACE_PORT wins over launch.json outside a worktree', () => {
     expect(pickKillPort({ explicit: null, worktree: null, env: 9090, appLaunch: 8790 })).toBe(9090)
@@ -22,6 +22,8 @@ describe('pickKillPort (DEV-2)', () => {
     expect(pickKillPort({ explicit: null, worktree: null, env: null, appLaunch: 8790 })).toBe(8790)
   })
   it('falls to the default when nothing else is known', () => {
-    expect(pickKillPort({ explicit: null, worktree: null, env: null, appLaunch: null })).toBe(DEFAULT_PORT)
+    expect(pickKillPort({ explicit: null, worktree: null, env: null, appLaunch: null })).toBe(
+      DEFAULT_PORT,
+    )
   })
 })

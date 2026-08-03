@@ -1,6 +1,6 @@
 /** Remote URL, environment-only auth, and credential-helper behavior. */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -145,16 +145,50 @@ describe('ensureSpaceRemote against a real repository', () => {
     expect(helpers[1]).not.toBe('!deepspace git-credential')
   })
 
-  it('keeps an app-local CLI helper in repository config', () => {
+  it('keeps an app-local CLI helper in worktree-private config', () => {
     const savedEntry = process.argv[1]
     process.argv[1] = join(repo, 'node_modules', 'deepspace', 'dist', 'cli.js')
     try {
       ensureSpaceRemote(repo, 'app_01LOCAL')
       const key = 'credential.https://deploy.test.helper'
-      expect(runGit(repo, ['config', '--local', '--get-all', key]).status).toBe(0)
+      expect(runGit(repo, ['config', '--worktree', '--get-all', key]).status).toBe(0)
+      expect(
+        runGit(repo, ['config', '--local', '--get-all', key], { allowFail: true }).status,
+      ).not.toBe(0)
       expect(
         runGit(repo, ['config', '--global', '--get-all', key], { allowFail: true }).status,
       ).not.toBe(0)
+    } finally {
+      process.argv[1] = savedEntry
+    }
+  })
+
+  it('does not let a deleted client worktree poison a sibling helper', () => {
+    const worktreeA = join(configDir, 'codex-a')
+    const worktreeB = join(configDir, 'claude-b')
+    git(['worktree', 'add', '--quiet', '-b', 'agent/a', worktreeA, 'HEAD'])
+    git(['worktree', 'add', '--quiet', '-b', 'agent/b', worktreeB, 'HEAD'])
+    const entry = (...parts: string[]) => join(...parts, 'node_modules', 'deepspace', 'dist', 'cli.js')
+    const entryA = entry(worktreeA)
+    const entryB = entry(worktreeB)
+    mkdirSync(join(entryA, '..'), { recursive: true })
+    mkdirSync(join(entryB, '..'), { recursive: true })
+    writeFileSync(entryA, '// a\n')
+    writeFileSync(entryB, '// b\n')
+    const savedEntry = process.argv[1]
+    const key = 'credential.https://deploy.test.helper'
+    try {
+      process.argv[1] = entryA
+      ensureSpaceRemote(worktreeA, 'app_01WORKTREES')
+      process.argv[1] = entryB
+      ensureSpaceRemote(worktreeB, 'app_01WORKTREES')
+
+      rmSync(worktreeA, { recursive: true, force: true })
+      const helperB = runGit(worktreeB, ['config', '--worktree', '--get-all', key])
+        .stdout.toString('utf-8')
+      expect(helperB).toContain(entryB)
+      expect(helperB).not.toContain(entryA)
+      expect(runGit(worktreeB, ['config', '--local', '--get-all', key], { allowFail: true }).status).not.toBe(0)
     } finally {
       process.argv[1] = savedEntry
     }

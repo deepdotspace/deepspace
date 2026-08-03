@@ -157,9 +157,12 @@ describe('assembled templates', () => {
           screenshot: 'deepspace test screenshot',
         })
 
-        const agentGuide = readFileSync(join(app, 'CLAUDE.md'), 'utf-8')
+        const agentGuide = readFileSync(join(app, 'AGENTS.md'), 'utf-8')
         expect(agentGuide).toContain('npx deepspace auth login')
         expect(agentGuide).toContain('npx deepspace dev start')
+        expect(readFileSync(join(app, 'CLAUDE.md'), 'utf-8').trim()).toBe(
+          'See [AGENTS.md](./AGENTS.md).',
+        )
       })
     })
   }

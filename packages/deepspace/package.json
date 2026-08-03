@@ -1,6 +1,6 @@
 {
   "name": "deepspace",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "engines": {
     "node": ">=22.15.0"
   },
@@ -47,7 +47,7 @@
     "better-auth": "1.6.23",
     "citty": "^0.2.0",
     "cross-spawn": "^7.0.6",
-    "esbuild": "^0.25.0",
+    "esbuild": "^0.27.0",
     "hono": "^4.6.0",
     "jose": "^6.1.0",
     "smol-toml": "^1.6.1",

@@ -305,7 +305,8 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
     spinner?.stop(`Landed ${id} into ${intoBranch} at ${landedOid.slice(0, 10)}.`)
     const cleanup = keepWorktree ? null : cleanupWorkspaceLocal(appDir, id, intoBranch)
     const inOwnWorktree = !cleanup && inOwnLinkedWorktree(appDir, id)
-    const retainedWorktree = keepWorktree || inOwnWorktree ? appDir : null
+    const retainedWorktree =
+      cleanup?.worktreeRetained ?? (keepWorktree || inOwnWorktree ? appDir : null)
     const data = {
       workspaceId: id,
       into: intoBranch,

@@ -1,8 +1,17 @@
 /** Claude preview launch configuration for local apps and worktrees. */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs'
+import {
+  existsSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+  mkdirSync,
+  renameSync,
+  unlinkSync,
+} from 'node:fs'
 import { join, resolve, dirname, basename, isAbsolute, sep } from 'node:path'
 import { detectAppName } from './app-context'
+import { listWorktrees, repoToplevel } from './git/repository'
 
 /**
  * Atomic launch.json write: temp file + rename, so an interrupted write can
@@ -137,50 +146,92 @@ export function resolveAppLaunchPort(appDir: string): number | null {
 }
 
 /**
- * Detect whether `appDir` lives inside a Claude Code worktree
- * (`<root>/.claude/worktrees/<name>/...`). Returns the main repo root (the
- * directory containing `.claude`) and the worktree name, or null.
+ * Detect whether `appDir` lives inside a registered Git worktree created at
+ * `<root>/.claude/worktrees/<name>`. Returns the checkout whose `.claude`
+ * directory owns that worktree and the worktree name, or null.
  *
  * The Claude desktop preview tool starts dev servers from the session's
  * primary working directory and reads only the MAIN repo's
  * `.claude/launch.json` — a worktree's own launch.json is never read
  * (anthropics/claude-code#56688). Detecting this lets `dev` seed a
- * `cwd`-pinned entry where the tool will actually look.
+ * `cwd`-pinned entry where the tool will actually look. The path shape alone
+ * is deliberately insufficient: both the child and inferred owner must be
+ * registered checkouts of the same repository. That prevents an ordinary
+ * directory merely named `.claude/worktrees/<name>` from changing ports or
+ * mutating an unrelated ancestor's launch configuration.
  */
 export function detectClaudeWorktree(
   appDir: string,
 ): { mainRepoRoot: string; worktreeName: string } | null {
-  const segments = resolve(appDir).split(sep)
-  // Innermost match wins: worktrees are created under the *session root's*
-  // .claude/worktrees, so a nested worktree implies the session is rooted at
-  // the outer worktree — that outer root's launch.json is the one the
-  // session's preview tool reads.
-  for (let i = segments.length - 3; i >= 1; i--) {
-    if (segments[i] === '.claude' && segments[i + 1] === 'worktrees' && segments[i + 2]) {
-      return {
-        mainRepoRoot: segments.slice(0, i).join(sep) || sep,
-        worktreeName: segments[i + 2],
-      }
-    }
+  try {
+    // Git owns the worktree boundary. `appDir` may be any nested app path, so
+    // never infer that boundary from path segments.
+    const worktreeRoot = canonicalPath(repoToplevel(appDir))
+    const registered = new Set(
+      listWorktrees(appDir).map((worktree) => canonicalPath(worktree.path)),
+    )
+    if (!registered.has(worktreeRoot)) return null
+
+    const worktreesDir = dirname(worktreeRoot)
+    const claudeDir = dirname(worktreesDir)
+    if (basename(worktreesDir) !== 'worktrees' || basename(claudeDir) !== '.claude') return null
+
+    // For a nested Claude worktree, the owner may itself be a linked worktree.
+    // Requiring it in `git worktree list` keeps the innermost-session behavior
+    // without trusting a coincidental directory name.
+    const ownerRoot = canonicalPath(dirname(claudeDir))
+    if (!registered.has(ownerRoot)) return null
+
+    return { mainRepoRoot: ownerRoot, worktreeName: basename(worktreeRoot) }
+  } catch {
+    // Non-Git directories, stale worktree registrations, and unreadable paths
+    // are ordinary "not a Claude worktree" states.
+    return null
   }
-  return null
+}
+
+export interface LinkedWorktree {
+  worktreeRoot: string
+  mainRepoRoot: string
+}
+
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch {
+    // One stale unrelated registration must not disable the active checkout.
+    return resolve(path)
+  }
+}
+
+/** Detect any registered linked Git worktree, independent of agent or layout. */
+export function detectLinkedWorktree(appDir: string): LinkedWorktree | null {
+  try {
+    const worktreeRoot = canonicalPath(repoToplevel(appDir))
+    const registered = listWorktrees(appDir).map((worktree) => canonicalPath(worktree.path))
+    const currentIndex = registered.indexOf(worktreeRoot)
+    if (currentIndex <= 0 || !registered[0]) return null
+    return { worktreeRoot, mainRepoRoot: registered[0] }
+  } catch {
+    return null
+  }
 }
 
 const WORKTREE_ENTRY_PREFIX = 'wt-'
 const WORKTREE_PORT_MIN = 5180
-const WORKTREE_PORT_RANGE = 20
+const WORKTREE_PORT_RANGE = 1000
 
 /**
  * Deterministic per-worktree preview port in the worktree band
- * (5180–5199), distinct from the default 5173 so a preview server for the
+ * (5180–6179), distinct from the default 5173 so a preview server for the
  * worktree never collides with a main-repo dev server. Stable across runs
- * for the same worktree name. Hash collisions between worktree names are
+ * for the same canonical worktree path. Hash collisions between worktrees are
  * resolved at write time by `upsertWorktreeLaunchConfig`, which probes past
  * ports already claimed by other launch.json entries.
  */
-export function deriveWorktreePort(worktreeName: string): number {
+export function deriveWorktreePort(worktreeKey: string): number {
   let hash = 0
-  for (const ch of worktreeName) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0
+  for (const ch of worktreeKey) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0
   return WORKTREE_PORT_MIN + (hash % WORKTREE_PORT_RANGE)
 }
 
@@ -189,7 +240,7 @@ export interface WorktreeLaunchOptions {
   port: number
   /**
    * When true, bump the port past any port already claimed by another
-   * launch.json entry (wrapping within 5180–5199). Off for an explicit
+   * launch.json entry (wrapping within 5180–6179). Off for an explicit
    * --port, which is honored verbatim.
    */
   probePort?: boolean
@@ -272,26 +323,28 @@ export function upsertWorktreeLaunchConfig(
 }
 
 /**
- * The port dev/test/kill should default to inside a Claude Code worktree, so
+ * The port dev/test/kill should default to inside any linked Git worktree, so
  * all three commands target the same server (`test` against a different port
  * silently exercises the main repo's code via Playwright's
- * reuseExistingServer). The `wt-<name>` entry in the main repo's launch.json
- * is the source of truth — it includes any probing `dev` applied; fall back
- * to the derived port when it doesn't exist yet. Returns null outside a
- * worktree.
+ * reuseExistingServer). A Claude worktree's `wt-<name>` entry remains the
+ * source of truth when present; every other linked worktree derives a stable
+ * port from its canonical checkout path. Returns null in the primary checkout.
  */
 export function resolveWorktreePort(appDir: string): number | null {
-  const worktree = detectClaudeWorktree(appDir)
-  if (!worktree) return null
-  try {
-    const config = readLaunchFile(join(worktree.mainRepoRoot, '.claude', 'launch.json'))
-    const entry = config?.configurations.find(
-      (c) => c?.name === WORKTREE_ENTRY_PREFIX + worktree.worktreeName,
-    )
-    const port = Number(entry?.port)
-    if (Number.isInteger(port) && port > 0) return port
-  } catch {
-    // malformed launch.json — fall through to the derived port
+  const linked = detectLinkedWorktree(appDir)
+  if (!linked) return null
+  const claude = detectClaudeWorktree(appDir)
+  if (claude) {
+    try {
+      const config = readLaunchFile(join(claude.mainRepoRoot, '.claude', 'launch.json'))
+      const entry = config?.configurations.find(
+        (c) => c?.name === WORKTREE_ENTRY_PREFIX + claude.worktreeName,
+      )
+      const port = Number(entry?.port)
+      if (Number.isInteger(port) && port > 0) return port
+    } catch {
+      // malformed launch.json — fall through to the generic derived port
+    }
   }
-  return deriveWorktreePort(worktree.worktreeName)
+  return deriveWorktreePort(linked.worktreeRoot)
 }

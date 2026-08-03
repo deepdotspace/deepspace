@@ -11,6 +11,7 @@ import {
   cleanupJson,
   cleanupWorkspaceLocal,
   inOwnLinkedWorktree,
+  isManagedWorkspaceWorktree,
   reportCleanupHuman,
 } from './local'
 import {
@@ -57,7 +58,9 @@ export const dropWorkspaceCommand = defineDeepspaceCommand({
 
     const { appDir, api } = await resolveTarget(appArg)
     const id = inferWorkspaceId(appDir, explicitId)
-    if (!keepWorktree && !isWorkTreeClean(appDir)) {
+    const ownLinkedWorktree = inOwnLinkedWorktree(appDir, id)
+    const cleanupOwnsCheckout = !ownLinkedWorktree || isManagedWorkspaceWorktree(appDir, id)
+    if (!keepWorktree && cleanupOwnsCheckout && !isWorkTreeClean(appDir)) {
       const dropArgv = ['deepspace', 'workspace', 'drop', ...(explicitId ? [explicitId] : [])]
       const dropNext = humanCommand(dropArgv)
       throw new Refusal(
@@ -70,8 +73,9 @@ export const dropWorkspaceCommand = defineDeepspaceCommand({
     const { view } = await api.dropWorkspace(id)
     spinner?.message(`Cleaning up ${id} locally…`)
     const cleanup = keepWorktree ? null : cleanupWorkspaceLocal(appDir, id, null)
-    const inOwnWorktree = !cleanup && inOwnLinkedWorktree(appDir, id)
-    const retainedWorktree = keepWorktree || inOwnWorktree ? appDir : null
+    const inOwnWorktree = !cleanup && ownLinkedWorktree
+    const retainedWorktree =
+      cleanup?.worktreeRetained ?? (keepWorktree || inOwnWorktree ? appDir : null)
     const data = {
       workspaceId: id,
       status: view.workspace.status,

@@ -57,8 +57,9 @@ export async function syncDeployRepository(options: {
     }
 
     if (!branch) {
-      commitOid = resolveCommit(appDir, 'HEAD')
-      return { commitOid, recoverable, deployKey }
+      const refusal = detachedHeadRefusal()
+      output.die(refusal.error, refusal.code)
+      throw new Error(refusal.error)
     }
 
     const tip = resolveCommit(appDir, `refs/heads/${branch}`)
@@ -238,5 +239,14 @@ export function dirtyWorktreeRefusal(branch: string | null): {
         ? `Commit them to this workspace branch (${branch}) — WIP commits are fine — then redeploy. `
         : 'Commit them (to a workspace branch if this is work in progress: `deepspace workspace new -t "…"`), then redeploy. ') +
       'Or pass --no-push to deploy without version-control sync — the release then records no source lineage.',
+  }
+}
+
+export function detachedHeadRefusal(): { code: 'detached_head'; error: string } {
+  return {
+    code: 'detached_head',
+    error:
+      'HEAD is detached, so DeepSpace cannot publish this commit to a recoverable branch. ' +
+      'Create or switch to a branch before deploying, or pass `--no-push` to explicitly deploy without source lineage.',
   }
 }

@@ -1,12 +1,9 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 import * as p from '@clack/prompts'
 import spawn from 'cross-spawn'
-import { detectBun, resolveInstall, tailHint } from './install-cmd'
+import { detectBun, resolveInstall } from './install-cmd'
 import type { PreparedProject, Progress } from './project-template'
-
-const SOURCE_DIR = dirname(fileURLToPath(import.meta.url))
 
 // This focused upstream installer intentionally floats: pinning it would make
 // every installer fix require a create-deepspace release.
@@ -32,9 +29,13 @@ export async function completeProjectSetup(
   progress: Progress,
 ): Promise<void> {
   await installAgentSkill(project.appDir, progress)
+  installDependencies(project.appDir)
+  // A newly initialized repo must not become visible to Codex/Claude worktree
+  // creation until its package-manager lockfile exists. Committing before a
+  // detached install finished left every fresh scaffold dirty and made an
+  // immediate native worktree start from an incomplete initial commit.
   commitInitialScaffold(project.appDir, project.initializedGit)
-  const dependencyInstallIsBackground = installDependencies(project.appDir)
-  printNextSteps(project, dependencyInstallIsBackground)
+  printNextSteps(project)
 }
 
 async function installAgentSkill(appDir: string, progress: Progress): Promise<void> {
@@ -102,8 +103,14 @@ function commitInitialScaffold(appDir: string, initializedGit: boolean): void {
   // Only commit repositories created by this process. The explicit fallback
   // identity keeps agent sandboxes without global Git config deploy-ready.
   const added = spawn.sync('git', ['add', '-A'], { cwd: appDir, stdio: 'pipe' })
-  if (added.error || added.status !== 0) return
-  spawn.sync(
+  if (added.error || added.status !== 0) {
+    throw new Error(
+      added.error
+        ? `git add failed to start: ${added.error.message}`
+        : `git add exited with code ${added.status}`,
+    )
+  }
+  const committed = spawn.sync(
     'git',
     [
       '-c',
@@ -117,29 +124,19 @@ function commitInitialScaffold(appDir: string, initializedGit: boolean): void {
     ],
     { cwd: appDir, stdio: 'pipe' },
   )
+  if (committed.error || committed.status !== 0) {
+    throw new Error(
+      committed.error
+        ? `git commit failed to start: ${committed.error.message}`
+        : `git commit exited with code ${committed.status}`,
+    )
+  }
 }
 
-function installDependencies(appDir: string): boolean {
+function installDependencies(appDir: string): void {
   const sentinelDirectory = join(appDir, '.deepspace')
   mkdirSync(sentinelDirectory, { recursive: true })
   writeFileSync(join(sentinelDirectory, 'install.started'), new Date().toISOString() + '\n')
-  const logPath = join(sentinelDirectory, 'install.log')
-
-  // Windows job objects can kill detached descendants when npm create exits;
-  // use a foreground install there. POSIX can safely return immediately.
-  const background = process.platform !== 'win32'
-  if (background) {
-    const workerScript = join(SOURCE_DIR, 'install-worker.js')
-    const worker = spawn(process.execPath, [workerScript, appDir, logPath], {
-      cwd: appDir,
-      detached: true,
-      windowsHide: true,
-      stdio: 'ignore',
-    })
-    if (worker.pid) writeFileSync(join(sentinelDirectory, 'install.pid'), `${worker.pid}\n`)
-    worker.unref()
-    return true
-  }
 
   const { cmd, args } = resolveInstall(detectBun())
   p.log.step(`Installing dependencies (${cmd} ${args.join(' ')})…`)
@@ -153,23 +150,16 @@ function installDependencies(appDir: string): boolean {
     p.log.error(
       'Dependency install failed — run `npm install` (or `bun install`) in the app dir, then retry.',
     )
+    throw new Error(message)
   } else {
     writeFileSync(join(sentinelDirectory, 'install.done'), new Date().toISOString() + '\n')
     p.log.success('Dependencies installed')
   }
-  return false
 }
 
-function printNextSteps(project: PreparedProject, backgroundInstall: boolean): void {
+function printNextSteps(project: PreparedProject): void {
   p.note(
     [
-      ...(backgroundInstall
-        ? [
-            'Installing dependencies in the background.',
-            `Tail: ${tailHint(join('.deepspace', 'install.log'))}`,
-            '',
-          ]
-        : []),
       ...(project.isInPlace ? [] : [`cd ${project.appName}`]),
       'npx deepspace auth login',
       'npx deepspace dev start',

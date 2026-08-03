@@ -1,6 +1,6 @@
 import * as p from '@clack/prompts'
-import { existsSync, realpathSync, statSync, symlinkSync } from 'node:fs'
-import { isAbsolute, join, relative, sep } from 'node:path'
+import { mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { shQuote } from '../../lib/cli-format'
 import { runGit } from '../../lib/git/process'
 import {
@@ -12,6 +12,14 @@ import {
   resolveCommit,
 } from '../../lib/git/repository'
 import { workspaceBranchName, workspaceIdFromBranch } from '../../lib/workspace-id'
+
+const WORKSPACE_MARKER = 'deepspace-workspace.json'
+
+interface ManagedWorkspaceMarker {
+  version: 1
+  workspaceId: string
+  mode: 'managed-linked'
+}
 
 export function excludeWorktreeDir(appDir: string, dir: string): void {
   try {
@@ -29,37 +37,76 @@ export function excludeWorktreeDir(appDir: string, dir: string): void {
   }
 }
 
-export function provisionWorktreeDeps(appDir: string, dir: string): string[] {
-  const linked: string[] = []
+function worktreeMarkerPath(worktreeRoot: string): string | null {
   try {
-    const src = join(appDir, 'node_modules')
-    const dest = join(dir, 'node_modules')
-    if (existsSync(src) && !existsSync(dest)) {
-      symlinkSync(src, dest, process.platform === 'win32' ? 'junction' : 'dir')
-      linked.push('node_modules')
-    }
+    const result = runGit(worktreeRoot, ['rev-parse', '--absolute-git-dir'], { allowFail: true })
+    if (result.status !== 0) return null
+    const gitDir = result.stdout.toString('utf-8').trim()
+    return isAbsolute(gitDir) ? join(gitDir, WORKSPACE_MARKER) : null
   } catch {
-    // Best-effort; the workspace can install its own dependencies.
+    return null
   }
-  return linked
+}
+
+function markManagedWorkspace(worktreeRoot: string, workspaceId: string): boolean {
+  const markerPath = worktreeMarkerPath(worktreeRoot)
+  if (!markerPath) return false
+  const marker: ManagedWorkspaceMarker = { version: 1, workspaceId, mode: 'managed-linked' }
+  const tempPath = `${markerPath}.${process.pid}.tmp`
+  try {
+    mkdirSync(dirname(markerPath), { recursive: true })
+    writeFileSync(tempPath, JSON.stringify(marker) + '\n')
+    renameSync(tempPath, markerPath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Only a private Git-admin marker proves that DeepSpace owns this checkout. */
+export function isManagedWorkspaceWorktree(worktreeRoot: string, workspaceId: string): boolean {
+  const markerPath = worktreeMarkerPath(worktreeRoot)
+  if (!markerPath) return false
+  try {
+    const marker = JSON.parse(readFileSync(markerPath, 'utf-8')) as Partial<ManagedWorkspaceMarker>
+    return (
+      marker.version === 1 && marker.workspaceId === workspaceId && marker.mode === 'managed-linked'
+    )
+  } catch {
+    return false
+  }
+}
+
+/** Stable default independent of whichever Codex/Claude/native checkout invoked us. */
+export function defaultWorkspaceRoot(appDir: string, workspaceId: string): string {
+  const primary = listWorktrees(appDir)[0]
+  if (!primary) throw new Error('Git did not report a primary worktree')
+  return join(primary.path, '.deepspace', 'ws', workspaceId.slice(3).toLowerCase())
+}
+
+/** Map the app's repo-relative location into a newly checked-out whole repository. */
+export function appDirInWorktree(appDir: string, worktreeRoot: string): string {
+  const appRelative = relative(realpathSync(repoToplevel(appDir)), realpathSync(appDir))
+  return appRelative ? join(worktreeRoot, appRelative) : worktreeRoot
 }
 
 /** Create a local workspace checkout and apply its standard local setup. */
 export function materializeWorkspaceWorktree(
   appDir: string,
-  dir: string,
+  worktreeRoot: string,
   branch: string,
   startPoint: string,
-): string[] {
-  addWorktreeNewBranch(appDir, dir, branch, startPoint)
-  excludeWorktreeDir(appDir, dir)
-  return provisionWorktreeDeps(appDir, dir)
+  workspaceId: string,
+): void {
+  addWorktreeNewBranch(appDir, worktreeRoot, branch, startPoint)
+  excludeWorktreeDir(appDir, worktreeRoot)
+  markManagedWorkspace(worktreeRoot, workspaceId)
 }
 
 export function inOwnLinkedWorktree(appDir: string, id: string): boolean {
   if (workspaceIdFromBranch(currentBranch(appDir)) !== id) return false
   try {
-    return statSync(join(appDir, '.git')).isFile()
+    return statSync(join(repoToplevel(appDir), '.git')).isFile()
   } catch {
     return false
   }
@@ -67,6 +114,7 @@ export function inOwnLinkedWorktree(appDir: string, id: string): boolean {
 
 export interface CleanupOutcome {
   worktreeRemoved: string | null
+  worktreeRetained: string | null
   branchDeleted: string | null
   mainDir?: string
   error?: string
@@ -77,6 +125,7 @@ export interface CleanupOutcome {
 export function cleanupJson(outcome: CleanupOutcome): Record<string, unknown> {
   return {
     worktreeRemoved: outcome.worktreeRemoved,
+    worktreeRetained: outcome.worktreeRetained,
     branchDeleted: outcome.branchDeleted,
     ...(outcome.mainDir ? { mainDir: outcome.mainDir } : {}),
     ...(outcome.error ? { error: outcome.error } : {}),
@@ -114,6 +163,7 @@ export function cleanupWorkspaceLocal(
   const branch = workspaceBranchName(id)
   const out: CleanupOutcome = {
     worktreeRemoved: null,
+    worktreeRetained: null,
     branchDeleted: null,
     worktreeDir: null,
     branch,
@@ -124,9 +174,13 @@ export function cleanupWorkspaceLocal(
     const linked = worktrees.find((worktree, index) => index > 0 && worktree.branch === branch)
     if (linked) {
       out.worktreeDir = linked.path
+      if (!isManagedWorkspaceWorktree(linked.path, id)) {
+        out.worktreeRetained = linked.path
+        return out
+      }
       let inside = false
       try {
-        inside = realpathSync(appDir) === realpathSync(linked.path)
+        inside = realpathSync(repoToplevel(appDir)) === realpathSync(linked.path)
       } catch {
         inside = false
       }
@@ -196,6 +250,9 @@ export function reportCleanupHuman(outcome: CleanupOutcome): void {
     outcome.branchDeleted ? `branch ${outcome.branch}` : null,
   ].filter(Boolean)
   if (parts.length) p.log.success(`Removed ${parts.join(' + ')}.`)
+  if (outcome.worktreeRetained) {
+    p.log.info(`Retained externally managed worktree: ${outcome.worktreeRetained}`)
+  }
   if (outcome.worktreeRemoved && outcome.mainDir) {
     p.log.info(`This directory was removed — run: cd ${shQuote(outcome.mainDir)}`)
   }

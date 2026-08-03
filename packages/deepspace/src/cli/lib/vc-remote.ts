@@ -92,7 +92,19 @@ function installCredentialHelper(cwd: string, url: string): void {
     // The empty first value resets inherited helpers. Otherwise Git's approve
     // step could persist the short-lived DeepSpace bearer in an OS keychain.
     const wanted = ['', helper]
-    const scope = entryIsTransient(cwd) ? '--local' : '--global'
+    const transient = entryIsTransient(cwd)
+    const scope = transient ? '--worktree' : '--global'
+    if (transient) {
+      // Repository-local config is shared by every linked worktree. Never pin
+      // an ephemeral Codex/Claude/app-local CLI path there: deleting that
+      // checkout would break plain Git in all siblings. Git's worktree config
+      // keeps the helper beside the checkout whose executable it references.
+      const enabled = runGit(cwd, ['config', '--local', 'extensions.worktreeConfig', 'true'], {
+        allowFail: true,
+      })
+      if (enabled.status !== 0) return
+      runGit(cwd, ['config', '--local', '--unset-all', key], { allowFail: true })
+    }
     const current = runGit(cwd, ['config', scope, '--get-all', key], { allowFail: true })
     if (current.status === 0) {
       const existing = current.stdout

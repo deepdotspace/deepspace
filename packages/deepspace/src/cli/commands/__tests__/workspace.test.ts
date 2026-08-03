@@ -20,9 +20,13 @@ import type { CommandDef } from 'citty'
 import type { RemoteWorkspaceView } from '../../lib/repo-api'
 import workspace from '../workspace'
 import {
+  appDirInWorktree,
   cleanupRefusalMessage,
   cleanupWorkspaceLocal,
+  defaultWorkspaceRoot,
   excludeWorktreeDir,
+  isManagedWorkspaceWorktree,
+  materializeWorkspaceWorktree,
 } from '../workspace/local'
 import { hasLeftoverConflictMarkers, landResumeArgv } from '../workspace/land'
 import { cleanFailedFreshAttachDir, finishedWorkspaceMessage } from '../workspace/attach'
@@ -337,7 +341,7 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
   /** A linked worktree on BRANCH at HEAD, at .deepspace/ws/<id>. */
   function addWorktree(main: string): string {
     const dir = join(main, '.deepspace', 'ws', ID.slice(3).toLowerCase())
-    git(main, ['worktree', 'add', '-q', '-b', BRANCH, dir])
+    materializeWorkspaceWorktree(main, dir, BRANCH, 'HEAD', ID)
     return dir
   }
 
@@ -351,6 +355,22 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
     expect(res.mainDir).toBeUndefined() // not run from inside
     expect(existsSync(dir)).toBe(false)
     expect(git(main, ['branch', '--list', BRANCH]).trim()).toBe('')
+  })
+
+  it('retains an unmarked worktree owned by Codex, Claude, or plain Git', () => {
+    const main = initRepoWithCommit()
+    const dir = join(main, '.claude', 'worktrees', 'external')
+    git(main, ['worktree', 'add', '-q', '-b', BRANCH, dir])
+    expect(isManagedWorkspaceWorktree(dir, ID)).toBe(false)
+
+    const res = cleanupWorkspaceLocal(main, ID, 'main')
+
+    expect(res.error).toBeUndefined()
+    expect(res.worktreeRemoved).toBeNull()
+    expect(res.worktreeRetained).toBe(realpathSync(dir))
+    expect(res.branchDeleted).toBeNull()
+    expect(existsSync(dir)).toBe(true)
+    expect(git(main, ['branch', '--list', BRANCH]).trim()).toContain(BRANCH)
   })
 
   it('reports a structured error instead of force-removing leftover untracked files', () => {
@@ -399,6 +419,30 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
     expect(res.branchDeleted).toBeNull() // bailed before the branch delete
     expect(existsSync(dir)).toBe(true) // still there
     git(main, ['worktree', 'unlock', dir]) // let afterEach clean it
+  })
+})
+
+describe('workspace checkout placement', () => {
+  it('anchors defaults under the primary checkout when invoked from a linked worktree', () => {
+    const main = initRepo()
+    writeFileSync(join(main, 'package.json'), '{}\n')
+    git(main, ['add', 'package.json'])
+    git(main, ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'init'])
+    const linked = join(main, '.codex', 'worktrees', 'probe')
+    git(main, ['worktree', 'add', '-q', '--detach', linked, 'HEAD'])
+    const id = 'ws_01hplacement0000000000000abc'
+
+    expect(defaultWorkspaceRoot(linked, id)).toBe(
+      join(realpathSync(main), '.deepspace', 'ws', id.slice(3).toLowerCase()),
+    )
+  })
+
+  it('preserves a nested app path inside the whole-repository worktree', () => {
+    const main = initRepo()
+    const app = join(main, 'apps', 'web')
+    mkdirSync(app, { recursive: true })
+    const checkout = join(main, '.deepspace', 'ws', 'probe')
+    expect(appDirInWorktree(app, checkout)).toBe(join(checkout, 'apps', 'web'))
   })
 })
 

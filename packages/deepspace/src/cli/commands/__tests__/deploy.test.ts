@@ -7,6 +7,7 @@ import { classifyDevVarsSecrets } from '../deploy/secrets'
 import {
   deployRepositoryFailure,
   dirtyWorktreeRefusal,
+  detachedHeadRefusal,
   pushWithTransientRetry,
   shouldSendLineage,
   workspaceDeployLineage,
@@ -405,5 +406,15 @@ describe('dirtyWorktreeRefusal (deploy is commit-first)', () => {
   it('off a workspace branch, suggests creating one for work in progress', () => {
     expect(dirtyWorktreeRefusal('main').error).toContain('deepspace workspace new')
     expect(dirtyWorktreeRefusal(null).error).toContain('deepspace workspace new')
+  })
+})
+
+describe('detachedHeadRefusal', () => {
+  it('requires a branch unless the caller explicitly opts out of source sync', () => {
+    const refusal = detachedHeadRefusal()
+    expect(refusal.code).toBe('detached_head')
+    expect(refusal.error).toContain('detached')
+    expect(refusal.error).toContain('branch')
+    expect(refusal.error).toContain('--no-push')
   })
 })

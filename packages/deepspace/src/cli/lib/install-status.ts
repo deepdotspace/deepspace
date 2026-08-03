@@ -3,15 +3,15 @@ import { Refusal } from './command'
  * Verifies the app's dependencies are installed before running a command that
  * needs them (dev, test, deploy, add).
  *
- * `create-deepspace` runs `npm install` (and the agent-skill installer) in a
- * detached background process so the user gets their prompt back immediately.
- * The background worker writes three sentinels under `<appDir>/.deepspace/`:
+ * Current `create-deepspace` completes installation before returning and
+ * before its initial commit. Sentinels under `<appDir>/.deepspace/` retain
+ * compatibility with scaffolds created by the older detached installer:
  *
  *   install.started — created before the worker is spawned
- *   install.pid     — the worker's pid (liveness check for a killed install)
+ *   install.pid     — legacy worker pid (liveness check for an older scaffold)
  *   install.done    — written on successful completion
  *   install.err     — written on failure (contains the error message)
- *   install.log     — combined stdout/stderr of the install
+ *   install.log     — legacy combined stdout/stderr
  *
  * The presence of `node_modules/deepspace/package.json` is the ground truth
  * for "ready"; the sentinels only shape the error message.
@@ -55,7 +55,7 @@ export function ensureInstallReady(appDir: string): void {
     const detail = readFileSync(errPath, 'utf-8').trimEnd()
     const log = existsSync(logPath) ? ` Full log: ${logPath}.` : ''
     throw new Refusal(
-      `Background install failed: ${detail}.${log} Run \`npm install\` (or \`bun install\`) manually, then retry.`,
+      `Dependency install failed: ${detail}.${log} Run \`npm install\` (or \`bun install\`) manually, then retry.`,
       'install_failed',
       { action: { cwd: appDir, argv: [detectPackageManager(appDir), 'install'] } },
     )
@@ -63,12 +63,12 @@ export function ensureInstallReady(appDir: string): void {
 
   if (existsSync(startedPath) && !existsSync(donePath)) {
     // A worker that died without writing done/err (OOM, docker stop, laptop
-    // shutdown) must not read as "still installing" forever. Every current
-    // scaffolder writes a valid install.pid before doing background work.
+    // shutdown) must not read as "still installing" forever. Every installer
+    // generation writes a valid install.pid before starting package-manager work.
     if (!installWorkerAlive(sentinelDir)) {
       const log = existsSync(logPath) ? ` See what happened: ${logPath}.` : ''
       throw new Refusal(
-        `The background install is no longer running and never finished.${log} Run \`npm install\` (or \`bun install\`) manually, then retry.`,
+        `The dependency install is no longer running and never finished.${log} Run \`npm install\` (or \`bun install\`) manually, then retry.`,
         'install_failed',
         { action: { cwd: appDir, argv: [detectPackageManager(appDir), 'install'] } },
       )
@@ -76,7 +76,7 @@ export function ensureInstallReady(appDir: string): void {
     // `tail -f` isn't a Windows command — tailHint points PowerShell users at its equivalent.
     const tail = existsSync(logPath) ? ` Tail progress: ${tailHint(logPath)}.` : ''
     throw new Refusal(
-      `Dependencies are still installing in the background.${tail} Retry once it finishes.`,
+      `Dependencies are still installing.${tail} Retry once it finishes.`,
       'install_in_progress',
     )
   }
@@ -92,10 +92,9 @@ export function ensureInstallReady(appDir: string): void {
 
 /**
  * Ground truth for "dependencies ready", matching Node's resolver: walk up
- * from `fromDir` looking for node_modules/deepspace. A linked worktree inside
- * the app (e.g. `.deepspace/ws/<id>`) has no node_modules of its own, but its
- * imports resolve against the app checkout's — so the gate must walk up too,
- * or dev/deploy refuse in exactly the places tsc/vitest work.
+ * from `fromDir` looking for node_modules/deepspace. This supports ordinary
+ * monorepo hoisting; managed worktrees themselves receive an install action
+ * and no longer link dependencies from another checkout.
  */
 export function resolvesDeepspace(fromDir: string): boolean {
   let dir = fromDir

@@ -44,7 +44,7 @@ afterEach(() => {
 })
 
 describe('ensureInstallReady', () => {
-  it('reports a live background install as still installing', () => {
+  it('reports a live dependency install as still installing', () => {
     // Our own pid is definitionally alive.
     const dir = scaffoldDir({ 'install.started': 'x\n', 'install.pid': `${process.pid}\n` })
     expect(runGuard(dir).message).toContain('still installing')
@@ -73,6 +73,6 @@ describe('ensureInstallReady', () => {
 
   it('surfaces install.err as a failed install', () => {
     const dir = scaffoldDir({ 'install.started': 'x\n', 'install.err': 'npm install exited 1\n' })
-    expect(runGuard(dir).message).toContain('Background install failed')
+    expect(runGuard(dir).message).toContain('Dependency install failed')
   })
 })

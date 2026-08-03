@@ -66,13 +66,15 @@ const BOILERPLATE_FILES = new Set([
   '.ds_store',
   'docs',
   '.claude',
+  '.codex',
+  '.agents',
   '.vscode',
   '.idea',
   '.editorconfig',
 ])
 
 const BOILERPLATE_SUMMARY =
-  '.git, .gitignore, README*, LICENSE*, any top-level *.md, docs/, .github/, .claude/, editor dotfiles'
+  '.git, .gitignore, README*, LICENSE*, any top-level *.md, docs/, .github/, agent metadata, editor dotfiles'
 
 /** All selectable templates, default first, then alphabetical. */
 export function listTemplates(): TemplateMeta[] {
@@ -325,6 +327,12 @@ function packLocal(monorepoRoot: string, appDir: string): string {
 
 function initializeGit(appDir: string): boolean {
   if (existsSync(join(appDir, '.git'))) return false
+  const insideParent = spawn.sync('git', ['rev-parse', '--is-inside-work-tree'], {
+    cwd: appDir,
+    stdio: 'pipe',
+    encoding: 'utf-8',
+  })
+  if (insideParent.status === 0 && String(insideParent.stdout).trim() === 'true') return false
   const result = spawn.sync('git', ['init'], { cwd: appDir, stdio: 'pipe' })
   return !result.error && result.status === 0
 }
@@ -346,7 +354,20 @@ function writeLaunchJson(appDir: string, appName: string): void {
   try {
     const claudeDirectory = join(appDir, '.claude')
     mkdirSync(claudeDirectory, { recursive: true })
-    writeFileSync(join(claudeDirectory, 'launch.json'), JSON.stringify(config, null, 2) + '\n')
+    const launchPath = join(claudeDirectory, 'launch.json')
+    if (!existsSync(launchPath)) {
+      writeFileSync(launchPath, JSON.stringify(config, null, 2) + '\n')
+      return
+    }
+    const existing = JSON.parse(readFileSync(launchPath, 'utf-8')) as {
+      version?: string
+      configurations?: Array<Record<string, unknown>>
+    }
+    if (!Array.isArray(existing.configurations)) return
+    if (!existing.configurations.some((entry) => entry.name === appName)) {
+      existing.configurations.push(config.configurations[0])
+      writeFileSync(launchPath, JSON.stringify(existing, null, 2) + '\n')
+    }
   } catch {
     // Ignore launch metadata failures; the scaffolded app remains usable.
   }
@@ -354,27 +375,27 @@ function writeLaunchJson(appDir: string, appName: string): void {
 
 function writeGitignoreIfMissing(appDir: string): void {
   const gitignorePath = join(appDir, '.gitignore')
-  if (existsSync(gitignorePath)) return
-
-  writeFileSync(
-    gitignorePath,
-    [
-      'node_modules',
-      'dist',
-      '.wrangler',
-      '.wrangler.deepspace.*.toml',
-      '.dev.vars',
-      '.dev.vars.*',
-      '.deepspace',
-      '.worker-bundle.js',
-      '*.tgz',
-      'src/router.ts',
-      'src/modals.tsx',
-      '.claude/launch.json',
-      '.claude/worktrees',
-      '',
-    ].join('\n'),
-  )
+  const required = [
+    'node_modules',
+    'dist',
+    '.wrangler',
+    '.wrangler.deepspace.*.toml',
+    '.dev.vars',
+    '.dev.vars.*',
+    '.deepspace',
+    '.worker-bundle.js',
+    '*.tgz',
+    'src/router.ts',
+    'src/modals.tsx',
+    '.claude/launch.json',
+    '.claude/worktrees',
+  ]
+  const current = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf-8') : ''
+  const present = new Set(current.split(/\r?\n/).map((line) => line.trim()))
+  const missing = required.filter((pattern) => !present.has(pattern))
+  if (missing.length === 0) return
+  const separator = current === '' || current.endsWith('\n') ? '' : '\n'
+  writeFileSync(gitignorePath, `${current}${separator}${missing.join('\n')}\n`)
 }
 
 function blockingEntries(directory: string): string[] {

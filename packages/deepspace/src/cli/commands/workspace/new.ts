@@ -1,5 +1,5 @@
 import * as p from '@clack/prompts'
-import { isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
 import { findAppDir } from '../../lib/app-context'
 import { mintUlid } from '../../lib/app-identity'
 import { defineDeepspaceCommand, Refusal } from '../../lib/command'
@@ -8,8 +8,10 @@ import { workspaceBranchName } from '../../lib/workspace-id'
 import { ensureSpaceRemote } from '../../lib/vc-remote'
 import { mintIdempotencyKey } from '../../lib/repo-api'
 import { createSpinner } from '../../lib/spinner'
+import { detectPackageManager } from '../../lib/package-manager'
+import type { CliAction } from '../../lib/output'
 import { fetchTrunk } from './analysis'
-import { materializeWorkspaceWorktree } from './local'
+import { appDirInWorktree, defaultWorkspaceRoot, materializeWorkspaceWorktree } from './local'
 import { APP_ARG, resolveTarget } from './runtime'
 
 export const newWorkspaceCommand = defineDeepspaceCommand({
@@ -108,11 +110,14 @@ export const newWorkspaceCommand = defineDeepspaceCommand({
     })
 
     const dirInput = typeof args.dir === 'string' ? args.dir.trim() : ''
-    const dirArg = dirInput || join('.deepspace', 'ws', id.slice(3).toLowerCase())
-    const dir = isAbsolute(dirArg) ? dirArg : resolve(appDir, dirArg)
-    let provisioned: string[] = []
+    const worktreeRoot = dirInput
+      ? isAbsolute(dirInput)
+        ? dirInput
+        : resolve(appDir, dirInput)
+      : defaultWorkspaceRoot(appDir, id)
+    const dir = appDirInWorktree(appDir, worktreeRoot)
     try {
-      provisioned = materializeWorkspaceWorktree(appDir, dir, branch, baseOid)
+      materializeWorkspaceWorktree(appDir, worktreeRoot, branch, baseOid, id)
     } catch (error) {
       spinner?.stop('Worktree failed.')
       const reason = error instanceof Error ? error.message : String(error)
@@ -125,13 +130,12 @@ export const newWorkspaceCommand = defineDeepspaceCommand({
 
     spinner?.stop(`Workspace ${id} created.`)
     if (!args.json) {
-      if (provisioned.length > 0)
-        p.log.info(`Linked from the main checkout: ${provisioned.join(', ')}`)
       p.log.info(`Work in: cd ${dir}`)
       p.log.info(
         `Then: commit as usual, \`deepspace workspace sync\` to publish, \`deepspace workspace land\` when done.`,
       )
     }
+    const action: CliAction = { cwd: dir, argv: [detectPackageManager(dir), 'install'] }
     return {
       data: {
         workspaceId: id,
@@ -140,8 +144,9 @@ export const newWorkspaceCommand = defineDeepspaceCommand({
         baseOid,
         branch,
         dir,
-        provisioned,
+        worktreeRoot,
       },
+      action,
     }
   },
 })

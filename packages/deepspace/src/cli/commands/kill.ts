@@ -36,9 +36,8 @@ const IS_WIN = process.platform === 'win32'
  * Pick the port `kill` targets, mirroring `dev`'s binding precedence so the two
  * always agree (DEV-2). Pure for testing.
  *   1. explicit --port
- *   2. worktree port (dev ignores $DEEPSPACE_PORT inside a worktree, so we do too)
- *   3. $DEEPSPACE_PORT (dev binds it outside a worktree, over a launch.json that
- *      dev only rewrites for an explicit --port)
+ *   2. $DEEPSPACE_PORT
+ *   3. generic linked-worktree port
  *   4. the app's launch.json port (kept in sync by `dev --port`)
  *   5. the default
  */
@@ -49,8 +48,8 @@ export function pickKillPort(opts: {
   appLaunch: number | null
 }): number {
   if (opts.explicit != null) return opts.explicit
-  if (opts.worktree != null) return opts.worktree
   if (opts.env != null) return opts.env
+  if (opts.worktree != null) return opts.worktree
   return opts.appLaunch ?? DEFAULT_PORT
 }
 
@@ -231,9 +230,9 @@ function enumerateListeners(port: number): { pids: number[]; enumerated: boolean
   // nothing matches, so "ran but empty" is a real "nothing listening".
   const lsof = runLsof(port)
   if (lsof.ran) return { pids: lsof.pids, enumerated: true }
-  // lsof is absent on many container/CI images — `node:22-bookworm` ships none
-  // of lsof/ss/fuser/netstat. /proc needs no external binary and covers Linux;
-  // if it's also unavailable we truly can't tell (enumerated:false).
+  // lsof is absent on many container/CI images — the official Bookworm Node
+  // images ship none of lsof/ss/fuser/netstat. /proc needs no external binary
+  // and covers Linux; if it's also unavailable we truly can't tell (enumerated:false).
   const proc = listenerPidsViaProc(port)
   return { pids: proc.pids, enumerated: proc.available }
 }
@@ -355,7 +354,10 @@ function runPgrep(pgrepArgs: string[]): { pids: number[]; ran: boolean } {
     const r = spawnSync('pgrep', pgrepArgs, { encoding: 'utf-8' })
     if (r.error) return { pids: [], ran: false } // ENOENT: pgrep not installed
     // 0 = matches; 1 = no matches. Both mean pgrep ran.
-    return { pids: r.status === 0 ? parsePidLines(r.stdout) : [], ran: r.status === 0 || r.status === 1 }
+    return {
+      pids: r.status === 0 ? parsePidLines(r.stdout) : [],
+      ran: r.status === 0 || r.status === 1,
+    }
   } catch {
     return { pids: [], ran: false }
   }

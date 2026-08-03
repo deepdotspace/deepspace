@@ -1,6 +1,6 @@
 import * as p from '@clack/prompts'
 import { existsSync, readdirSync, rmSync } from 'node:fs'
-import { isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
 import { ensureToken } from '../../auth'
 import { findAppDir } from '../../lib/app-context'
 import { parseAppArg, resolveAppTarget } from '../../lib/app-target'
@@ -14,7 +14,7 @@ import { createSpinner } from '../../lib/spinner'
 import { errorCode } from '../../lib/cli-errors'
 import type { CliAction } from '../../lib/output'
 import { detectPackageManager } from '../../lib/package-manager'
-import { materializeWorkspaceWorktree } from './local'
+import { appDirInWorktree, defaultWorkspaceRoot, materializeWorkspaceWorktree } from './local'
 import { APP_ARG, resolveTarget } from './runtime'
 
 /** Explain why a finished workspace cannot be attached. */
@@ -117,32 +117,36 @@ export const attachWorkspaceCommand = defineDeepspaceCommand({
         )
       }
       const requestedDir = typeof args.dir === 'string' ? args.dir.trim() : ''
-      const dirArg = requestedDir || join('.deepspace', 'ws', id.slice(3).toLowerCase())
-      const dir = isAbsolute(dirArg) ? dirArg : resolve(appDir, dirArg)
+      const worktreeRoot = requestedDir
+        ? isAbsolute(requestedDir)
+          ? requestedDir
+          : resolve(appDir, requestedDir)
+        : defaultWorkspaceRoot(appDir, id)
+      const dir = appDirInWorktree(appDir, worktreeRoot)
       if (resolveCommit(appDir, `refs/heads/${branch}`)) {
         throw new Refusal(
           `Branch ${branch} already exists locally (this workspace has a worktree here). Find it with \`git worktree list\` and continue there.`,
           'branch_exists',
         )
       }
-      const provisioned = materializeWorkspaceWorktree(appDir, dir, branch, tip)
+      materializeWorkspaceWorktree(appDir, worktreeRoot, branch, tip, id)
       spinner?.stop(`Attached ${id}.`)
       if (!args.json) {
-        if (provisioned.length > 0)
-          p.log.info(`Linked from the main checkout: ${provisioned.join(', ')}`)
         p.log.info(`Task: ${view.workspace.task}`)
         p.log.info(`Work in: cd ${dir}`)
       }
+      const action: CliAction = { cwd: dir, argv: [detectPackageManager(dir), 'install'] }
       return {
         data: {
           workspaceId: id,
           mode: 'worktree',
           dir,
+          worktreeRoot,
           branch,
           tipOid: tip,
           task: view.workspace.task,
-          provisioned,
         },
+        action,
       }
     }
 

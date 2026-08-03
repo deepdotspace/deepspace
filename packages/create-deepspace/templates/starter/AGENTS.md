@@ -1,14 +1,12 @@
-# CLAUDE.md
+# AGENTS.md
 
 **Load the `deepspace` skill before working in this repo.** It is the source
-of truth for the SDK — invoke it via the Skill tool first, then read project
-source for repo-specific details.
+of truth for the SDK; read project source afterward for repo-specific details.
 
-The scaffold installs the skill at `.agents/skills/deepspace/SKILL.md` (with
-a `.claude/skills/deepspace` symlink so Claude Code picks it up). Restart
-your agent session to load it — or Read that SKILL.md directly. If the file
-is missing, scaffold-time install failed (typically a network issue);
-reinstall:
+The scaffold installs the portable skill at
+`.agents/skills/deepspace/SKILL.md`. Restart the agent session to load newly
+installed skills, or read that file directly. If it is missing, scaffold-time
+installation failed (typically a network issue); reinstall:
 
 ```sh
 npx -y skills@latest add deepdotspace/deepspace-skill -y                 # this project
@@ -16,7 +14,7 @@ npx -y skills@latest add deepdotspace/deepspace-skill -g -y              # globa
 npx -y skills@latest add deepdotspace/deepspace-skill --agent codex -y   # specific agent
 ```
 
-If you can't install it at all, read
+If installation is unavailable, read
 <https://github.com/deepdotspace/deepspace-skill/blob/main/skills/deepspace/SKILL.md>.
 
 ## About this project
@@ -39,10 +37,10 @@ recover context and inspect what is live.
 ## Project commands
 
 ```sh
-npx deepspace auth login        # authenticate with app.space
+npx deepspace auth login   # authenticate with app.space
 npx deepspace dev start    # local dev server (vite + miniflare)
 npx deepspace deploy       # deploy to <app>.app.space
-npx deepspace push         # sync code to the app's cloud repo (default VCS — see "Version control")
+npx deepspace push         # sync code to the app's cloud repo
 npx deepspace add --list   # list optional features (messaging, etc.)
 npx deepspace add <feature>
 ```

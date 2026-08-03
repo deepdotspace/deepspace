@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup'
 
 export default defineConfig({
-  entry: { index: 'src/index.ts', 'install-worker': 'src/install-worker.ts' },
+  entry: { index: 'src/index.ts' },
   format: ['esm'],
   sourcemap: true,
   clean: true,

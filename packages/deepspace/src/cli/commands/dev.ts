@@ -9,10 +9,9 @@
  *   deepspace dev start                   # port 5173 (strict)
  *   deepspace dev start --port 5180       # bind to a different port (multi-app dev)
  *
- * Port is `--port` > $DEEPSPACE_PORT > 5173 — except inside a Claude Code
- * worktree, where (unless --port was passed) a stable per-worktree port in
- * 5180–5199 is derived instead, so the preview server never collides with a
- * main-repo dev server. We always pass --strictPort to vite so a busy port
+ * Port is `--port` > $DEEPSPACE_PORT > a stable linked-worktree port > 5173,
+ * so Codex, Claude, and ordinary Git worktrees do not collide with a primary
+ * checkout server. We always pass --strictPort to vite so a busy port
  * fails loudly instead of silently jumping to 5174 (which would diverge from
  * anything Playwright/test config is expecting).
  *
@@ -32,6 +31,7 @@ import { ensureToken } from '../auth'
 import { detectAppName, findAppDir, findChildApps } from '../lib/app-context'
 import {
   detectClaudeWorktree,
+  detectLinkedWorktree,
   deriveWorktreePort,
   upsertWorktreeLaunchConfig,
   writeLaunchConfigIfMissing,
@@ -117,19 +117,19 @@ export default defineDeepspaceCommand({
     // Inside a Claude Code worktree the desktop preview tool reads only the
     // MAIN repo's launch.json and would serve the main repo's stale code
     // (anthropics/claude-code#56688) — so upsert a cwd-pinned entry there.
-    // Only a literal --port counts as explicit and is honored verbatim: an
-    // ambient $DEEPSPACE_PORT (e.g. exported in a shell profile) must not pin
-    // the worktree to the main repo's port — the port is resolved AFTER
-    // worktree detection so a malformed ambient value can't kill dev either.
-    // Otherwise a stable per-worktree port (bumped past other entries' ports)
+    // Explicit --port and $DEEPSPACE_PORT are honored before any derived
+    // worktree default. Otherwise a stable per-worktree port (bumped past
+    // other Claude launch entries' ports)
     // avoids colliding with a main-repo server. This run binds the same port
     // the entry advertises, so the preview tool can attach to an
     // already-running worktree server instead of spawning a duplicate.
     const worktree = detectClaudeWorktree(appDir)
+    const linkedWorktree = detectLinkedWorktree(appDir)
     const explicitPort = Boolean(args.port)
+    const configuredPort = explicitPort || Boolean(process.env.DEEPSPACE_PORT)
     let port =
-      worktree && !explicitPort
-        ? deriveWorktreePort(worktree.worktreeName)
+      linkedWorktree && !configuredPort
+        ? deriveWorktreePort(linkedWorktree.worktreeRoot)
         : resolvePort(args.port as string | undefined)
     if (worktree) {
       const upserted = upsertWorktreeLaunchConfig(
@@ -138,7 +138,7 @@ export default defineDeepspaceCommand({
         appDir,
         {
           port,
-          probePort: !explicitPort,
+          probePort: !configuredPort,
           extraArgs: [...(wranglerEnv ? ['--env', wranglerEnv] : [])],
         },
       )
@@ -152,12 +152,6 @@ export default defineDeepspaceCommand({
           `Warning: could not update ${join(worktree.mainRepoRoot, '.claude', 'launch.json')} ` +
             `(malformed or unwritable) — the Claude preview tool may serve the main repo's code ` +
             `instead of this worktree.`,
-        )
-      }
-      if (!explicitPort && process.env.DEEPSPACE_PORT) {
-        say(
-          `Ignoring DEEPSPACE_PORT=${process.env.DEEPSPACE_PORT} inside a worktree — ` +
-            `using per-worktree port ${port}. Pass --port to override.`,
         )
       }
     }

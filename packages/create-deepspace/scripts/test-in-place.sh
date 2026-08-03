@@ -41,17 +41,7 @@ cleanup() {
     echo "Logs preserved at: $ROOT"
     return
   fi
-  # Each scaffold run spawns a detached background install worker (pid recorded
-  # in .deepspace/install.pid). Kill any still running so they can't re-create
-  # files (bun.lock, node_modules) while — or after — we rm the tree, which
-  # would fail this script despite all scenarios passing.
-  local pidfile pid
-  for pidfile in "$ROOT"/*/action-coding/.deepspace/install.pid; do
-    [[ -f "$pidfile" ]] || continue
-    pid="$(cat "$pidfile" 2>/dev/null)" || continue
-    kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
-  done
-  rm -rf "$ROOT" 2>/dev/null || { sleep 1; rm -rf "$ROOT" 2>/dev/null; } || true
+  rm -rf "$ROOT" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -86,12 +76,16 @@ run_scenario() {
   if [[ "$seed" == "boilerplate" ]]; then
     (cd "$target" && git init -q)
     printf '%s\n* text=auto eol=lf\n' "$SENTINEL" > "$target/.gitattributes"
+    printf '%s\ncustom-cache/\n' "$SENTINEL" > "$target/.gitignore"
   elif [[ "$seed" == "docs-and-md" ]]; then
     (cd "$target" && git init -q)
     printf '%s\n# my project readme\n' "$SENTINEL" > "$target/README.md"
     printf '%s\n# my project agent notes\n' "$SENTINEL" > "$target/CLAUDE.md"
     mkdir -p "$target/docs"
     printf '%s\n# design notes\n' "$SENTINEL" > "$target/docs/notes.md"
+    mkdir -p "$target/.claude"
+    printf '%s\n' '{"version":"0.0.1","configurations":[{"name":"custom-preview","port":7777}]}' \
+      > "$target/.claude/launch.json"
   fi
 
   echo "--- pre-state of $target ---"
@@ -166,7 +160,8 @@ run_scenario() {
     local launch_args
     launch_args=$(node -e '
       const config = require(process.argv[1])
-      console.log(config.configurations?.[0]?.runtimeArgs?.join(" ") ?? "")
+      const entry = config.configurations?.find((candidate) => candidate.name === "action-coding")
+      console.log(entry?.runtimeArgs?.join(" ") ?? "")
     ' "$target/.claude/launch.json")
     if [[ "$launch_args" != 'deepspace dev start --port 5173' ]]; then
       errors+=("launch.json uses stale runtime args: $launch_args")
@@ -203,6 +198,9 @@ run_scenario() {
     elif ! grep -qF "$SENTINEL" "$target/.gitattributes"; then
       errors+=(".gitattributes sentinel '$SENTINEL' missing (file was overwritten)")
     fi
+    if ! grep -qF "$SENTINEL" "$target/.gitignore" || ! grep -qF 'node_modules' "$target/.gitignore"; then
+      errors+=("existing .gitignore was not preserved and supplemented")
+    fi
     if [[ ! -d "$target/.git" ]]; then
       errors+=(".git directory was deleted by scaffold")
     fi
@@ -212,6 +210,12 @@ run_scenario() {
   if [[ "$seed" == "empty" ]]; then
     if [[ ! -d "$target/.git" ]]; then
       errors+=("scaffold did not run 'git init' on empty-seed target")
+    fi
+    if [[ -n "$(git -C "$target" status --porcelain)" ]]; then
+      errors+=("fresh scaffold repository is dirty after setup")
+    fi
+    if ! git -C "$target" ls-files -- bun.lock package-lock.json | grep -q .; then
+      errors+=("fresh scaffold initial commit does not contain a package-manager lockfile")
     fi
   fi
 
@@ -249,6 +253,14 @@ run_scenario() {
       :
     else
       errors+=("log missing 'Kept existing CLAUDE.md' preservation notice")
+    fi
+    local launch_names
+    launch_names=$(node -e '
+      const config = require(process.argv[1])
+      console.log(config.configurations?.map((entry) => entry.name).join("|") ?? "")
+    ' "$target/.claude/launch.json")
+    if [[ "$launch_names" != *custom-preview* || "$launch_names" != *action-coding* ]]; then
+      errors+=("existing .claude/launch.json was not preserved and merged: $launch_names")
     fi
   fi
 

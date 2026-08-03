@@ -1,9 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
+import { basename, join } from 'node:path'
 import {
   detectClaudeWorktree,
+  detectLinkedWorktree,
   deriveWorktreePort,
   resolveWorktreePort,
   resolveAppLaunchPort,
@@ -11,27 +21,79 @@ import {
   writeLaunchConfigIfMissing,
 } from '../lib/launch-config'
 
+const git = (cwd: string, args: string[]): string =>
+  execFileSync('git', args, { cwd, encoding: 'utf-8' })
+
+function initGitRepo(prefix: string): string {
+  const repo = mkdtempSync(join(tmpdir(), prefix))
+  git(repo, ['init', '--quiet', '--initial-branch=main'])
+  git(repo, ['config', 'user.name', 'DeepSpace Test'])
+  git(repo, ['config', 'user.email', 'test@deep.space'])
+  writeFileSync(join(repo, 'tracked.txt'), 'initial\n')
+  git(repo, ['add', 'tracked.txt'])
+  git(repo, ['commit', '--quiet', '-m', 'initial'])
+  return repo
+}
+
+function addClaudeWorktree(owner: string, name: string): string {
+  const worktree = join(owner, '.claude', 'worktrees', name)
+  git(owner, ['worktree', 'add', '--quiet', '-b', `test/${name}`, worktree, 'HEAD'])
+  return worktree
+}
+
 describe('detectClaudeWorktree', () => {
-  // resolve() so the root carries a drive letter on Windows, keeping the
-  // expected values consistent with what production code returns there.
-  const root = resolve(sep, 'Users', 'dev', 'my-app')
+  let root: string
+
+  beforeEach(() => {
+    root = initGitRepo('ds detect wt-')
+  })
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
 
   it('returns null outside a worktree', () => {
     expect(detectClaudeWorktree(root)).toBeNull()
   })
 
   it('detects an app at the worktree root', () => {
-    const appDir = join(root, '.claude', 'worktrees', 'feature-x')
+    const appDir = addClaudeWorktree(root, 'feature-x')
     expect(detectClaudeWorktree(appDir)).toEqual({
-      mainRepoRoot: root,
+      mainRepoRoot: realpathSync(root),
       worktreeName: 'feature-x',
     })
   })
 
   it('detects an app nested below the worktree root', () => {
-    const appDir = join(root, '.claude', 'worktrees', 'feature-x', 'apps', 'web')
+    const worktree = addClaudeWorktree(root, 'feature-x')
+    const appDir = join(worktree, 'apps', 'web')
+    mkdirSync(appDir, { recursive: true })
     expect(detectClaudeWorktree(appDir)).toEqual({
-      mainRepoRoot: root,
+      mainRepoRoot: realpathSync(root),
+      worktreeName: 'feature-x',
+    })
+  })
+
+  it('uses Git identity when the app is reached through a symlink', () => {
+    const worktree = addClaudeWorktree(root, 'feature-x')
+    const alias = join(tmpdir(), `${basename(root)}-alias`)
+    symlinkSync(worktree, alias, 'dir')
+    try {
+      expect(detectClaudeWorktree(alias)).toEqual({
+        mainRepoRoot: realpathSync(root),
+        worktreeName: 'feature-x',
+      })
+    } finally {
+      rmSync(alias, { force: true })
+    }
+  })
+
+  it('ignores fake Claude-shaped segments below a real worktree root', () => {
+    const worktree = addClaudeWorktree(root, 'feature-x')
+    const appDir = join(worktree, 'fixtures', '.claude', 'worktrees', 'not-a-checkout')
+    mkdirSync(appDir, { recursive: true })
+    expect(detectClaudeWorktree(appDir)).toEqual({
+      mainRepoRoot: realpathSync(root),
       worktreeName: 'feature-x',
     })
   })
@@ -40,28 +102,54 @@ describe('detectClaudeWorktree', () => {
     expect(detectClaudeWorktree(join(root, '.claude', 'skills'))).toBeNull()
   })
 
+  it('rejects a matching path that is not a registered Git worktree', () => {
+    const ordinaryDir = join(root, '.claude', 'worktrees', 'ordinary', 'apps', 'web')
+    mkdirSync(ordinaryDir, { recursive: true })
+    expect(detectClaudeWorktree(ordinaryDir)).toBeNull()
+  })
+
   it('uses the innermost worktree for nested worktrees', () => {
     // Nested worktrees are created by a session rooted at the outer worktree,
     // so the outer worktree's launch.json is the one its preview tool reads.
-    const outer = join(root, '.claude', 'worktrees', 'outer')
-    const appDir = join(outer, '.claude', 'worktrees', 'inner')
+    const outer = addClaudeWorktree(root, 'outer')
+    const appDir = addClaudeWorktree(outer, 'inner')
     expect(detectClaudeWorktree(appDir)).toEqual({
-      mainRepoRoot: outer,
+      mainRepoRoot: realpathSync(outer),
       worktreeName: 'inner',
+    })
+  })
+
+  it('detects Codex and arbitrary native worktrees without calling them Claude worktrees', () => {
+    const codexDir = join(root, '.codex', 'worktrees', 'id', 'app')
+    git(root, ['worktree', 'add', '--quiet', '--detach', codexDir, 'HEAD'])
+    expect(detectLinkedWorktree(codexDir)).toEqual({
+      worktreeRoot: realpathSync(codexDir),
+      mainRepoRoot: realpathSync(root),
+    })
+    expect(detectClaudeWorktree(codexDir)).toBeNull()
+  })
+
+  it('still detects an active checkout when another registration is stale', () => {
+    const stale = addClaudeWorktree(root, 'stale')
+    rmSync(stale, { recursive: true, force: true })
+    const active = addClaudeWorktree(root, 'active')
+    expect(detectClaudeWorktree(active)).toEqual({
+      mainRepoRoot: realpathSync(root),
+      worktreeName: 'active',
     })
   })
 })
 
 describe('deriveWorktreePort', () => {
-  it('is stable for the same name', () => {
+  it('is stable for the same canonical worktree key', () => {
     expect(deriveWorktreePort('feature-x')).toBe(deriveWorktreePort('feature-x'))
   })
 
-  it('stays in 5180-5199 and avoids the default 5173', () => {
+  it('stays in 5180-6179 and avoids the default 5173', () => {
     for (const name of ['a', 'feature-x', 'nurture-ui', 'x'.repeat(80)]) {
       const port = deriveWorktreePort(name)
       expect(port).toBeGreaterThanOrEqual(5180)
-      expect(port).toBeLessThanOrEqual(5199)
+      expect(port).toBeLessThanOrEqual(6179)
     }
   })
 })
@@ -483,9 +571,8 @@ describe('resolveWorktreePort', () => {
   let appDir: string
 
   beforeEach(() => {
-    mainRepo = mkdtempSync(join(tmpdir(), 'ds-wtport-'))
-    appDir = join(mainRepo, '.claude', 'worktrees', 'feature-x')
-    mkdirSync(appDir, { recursive: true })
+    mainRepo = initGitRepo('ds-wtport-')
+    appDir = addClaudeWorktree(mainRepo, 'feature-x')
   })
 
   afterEach(() => {
@@ -502,12 +589,22 @@ describe('resolveWorktreePort', () => {
   })
 
   it('falls back to the derived port when no entry exists yet', () => {
-    expect(resolveWorktreePort(appDir)).toBe(deriveWorktreePort('feature-x'))
+    expect(resolveWorktreePort(appDir)).toBe(deriveWorktreePort(realpathSync(appDir)))
   })
 
   it('falls back to the derived port on a malformed launch.json', () => {
     mkdirSync(join(mainRepo, '.claude'), { recursive: true })
     writeFileSync(join(mainRepo, '.claude', 'launch.json'), 'not json {')
-    expect(resolveWorktreePort(appDir)).toBe(deriveWorktreePort('feature-x'))
+    expect(resolveWorktreePort(appDir)).toBe(deriveWorktreePort(realpathSync(appDir)))
+  })
+
+  it('isolates a non-Claude native worktree by canonical checkout path', () => {
+    const native = join(mainRepo, '..', `${basename(mainRepo)}-native`)
+    git(mainRepo, ['worktree', 'add', '--quiet', '--detach', native, 'HEAD'])
+    try {
+      expect(resolveWorktreePort(native)).toBe(deriveWorktreePort(realpathSync(native)))
+    } finally {
+      git(mainRepo, ['worktree', 'remove', '--force', native])
+    }
   })
 })

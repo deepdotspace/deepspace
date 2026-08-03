@@ -168,7 +168,7 @@ export default defineCommand({
         deps === 'ready'
           ? 'installed'
           : deps === 'installing'
-            ? 'still installing (scaffold background install)'
+            ? 'dependency installation is still running'
             : `${deps} — run ${depsInstallCommand}`,
       ])
       json.deps = deps

@@ -11,8 +11,8 @@
  *   deepspace test run all          # everything
  *   deepspace test run <file>       # run specific test file
  *
- * Port is `--port` > $DEEPSPACE_PORT > 5173 — except inside a Claude Code
- * worktree, where (unless --port was passed) the worktree's own port is used
+ * Port is `--port` > $DEEPSPACE_PORT > a stable linked-worktree port > 5173.
+ * In any linked checkout the worktree's own default is used
  * so tests hit the worktree's server, not the main repo's. The chosen port is
  * exported as DEEPSPACE_PORT to the Playwright child so the config +
  * webServer both bind to the same address. Pass a different port per app to
@@ -92,18 +92,13 @@ export default defineDeepspaceCommand({
       throw new Refusal(noAppDirMessage(start, findChildApps(start)), 'no_app_dir')
     }
 
-    // Inside a Claude Code worktree the default port must match the
-    // worktree's dev server (not 5173): Playwright's reuseExistingServer
+    // Inside any linked Git worktree the default port must match that
+    // checkout's dev server (not 5173): Playwright's reuseExistingServer
     // would otherwise attach to the MAIN repo's server and silently test
     // stale code. Explicit --port still wins.
-    const worktreePort = args.port ? null : resolveWorktreePort(appDir)
+    const configuredPort = Boolean(args.port) || Boolean(process.env.DEEPSPACE_PORT)
+    const worktreePort = configuredPort ? null : resolveWorktreePort(appDir)
     const port = worktreePort ?? resolvePort(args.port as string | undefined)
-    if (worktreePort && process.env.DEEPSPACE_PORT) {
-      say(
-        `Ignoring DEEPSPACE_PORT=${process.env.DEEPSPACE_PORT} inside a worktree — ` +
-          `targeting per-worktree port ${port}. Pass --port to override.`,
-      )
-    }
 
     ensureInstallReady(appDir)
 
