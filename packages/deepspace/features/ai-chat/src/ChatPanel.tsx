@@ -20,7 +20,7 @@ import {
   ChevronDown,
   Square,
 } from 'lucide-react'
-import { useQuery } from 'deepspace'
+import { listDeepSpaceAgentModels, useQuery } from 'deepspace'
 import { EmptyState, MessageTurn, ThinkingIndicator } from './ChatPanel.messages'
 import { useStreamingChat } from './ChatPanel.stream'
 
@@ -73,16 +73,12 @@ const DEFAULT_PROMPTS = [
   'List my collections',
 ]
 
-// Keep this picker aligned with ALLOWED_MODELS in src/ai/chat-routes.ts.
-const DEFAULT_MODELS: ModelOption[] = [
-  { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', provider: 'Anthropic' },
-  { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', provider: 'Anthropic' },
-  { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', provider: 'Anthropic' },
-  { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', provider: 'OpenAI' },
-  { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', provider: 'OpenAI' },
-  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', provider: 'OpenAI' },
-  { id: 'gpt-oss-120b', label: 'GPT-OSS 120B', provider: 'Cerebras' },
-]
+// The client picker and server profiles consume the SDK's canonical catalog.
+const DEFAULT_MODELS: ModelOption[] = listDeepSpaceAgentModels('application').map((model) => ({
+  id: model.id,
+  label: model.label,
+  provider: model.providerLabel,
+}))
 
 export function ChatPanel({
   chatId,

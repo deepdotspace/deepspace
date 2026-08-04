@@ -205,6 +205,7 @@ export default defineCommand({
             appId,
             appName,
             url: body.url,
+            docsUrl: body.docsUrl ?? null,
             releaseId: body.releaseId ?? null,
             bundleRetained: body.bundleRetained ?? null,
             edgePropagating: true,
@@ -219,6 +220,7 @@ export default defineCommand({
 
     spinner.stop('Deployed!')
     p.log.success(`Live at: ${body.url}`)
+    if (body.docsUrl) p.log.success(`Docs at: ${body.docsUrl}`)
     await syncCommerce(appDir, appId, token, output.nonInteractive)
     if (output.json) {
       return output.emitJson({
@@ -226,6 +228,7 @@ export default defineCommand({
         appId,
         appName,
         url: body.url ?? null,
+        docsUrl: body.docsUrl ?? null,
         releaseId: body.releaseId ?? null,
         bundleRetained: body.bundleRetained ?? null,
         recoverable: repository.recoverable,

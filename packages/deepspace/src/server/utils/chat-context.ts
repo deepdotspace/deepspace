@@ -8,6 +8,7 @@
  */
 
 import { generateText, type ModelMessage } from 'ai'
+import { DEEPSPACE_AI_DEFAULTS, getDeepSpaceAIModel } from '../../shared/ai-models'
 import { createDeepSpaceAI, type DeepSpaceAIEnv } from './ai'
 
 export interface ChatTurn {
@@ -541,10 +542,11 @@ export function makeDefaultSummarizer(
   options: { authToken?: string } = {},
 ): Summarizer {
   return async (messages) => {
-    const anthropic = createDeepSpaceAI(env, 'anthropic', { authToken: options.authToken })
+    const model = getDeepSpaceAIModel(DEEPSPACE_AI_DEFAULTS.summarization)
+    if (!model) throw new Error('DeepSpace summarization model is missing from the catalog')
+    const provider = createDeepSpaceAI(env, model.provider, { authToken: options.authToken })
     const { text } = await generateText({
-      // Stable alias — provider bug-fix snapshots roll forward without code change.
-      model: anthropic('claude-haiku-4-5'),
+      model: provider(model.id),
       // 2500 gives the model room to finish a sentence after hitting the
       // "under 2000 tokens" soft limit in the prompt.
       maxOutputTokens: 2500,

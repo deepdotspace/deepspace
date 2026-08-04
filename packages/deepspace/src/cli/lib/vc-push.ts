@@ -81,6 +81,34 @@ export interface PushTransportFailure {
   error: string
 }
 
+type PushPackMode = 'default' | 'self-contained'
+
+/**
+ * Build the Git argv for one push attempt.
+ *
+ * `--no-thin` asks Git to include delta bases, but Git may still reuse delta
+ * chains from local history. DeepSpace Source intentionally budgets external
+ * base resolution, so the retry also disables deltification. This produces a
+ * genuinely self-contained pack instead of asking the server to traverse old
+ * packs again.
+ */
+export function buildPushArgs(
+  refspec: string,
+  opts: { force?: boolean } = {},
+  packMode: PushPackMode = 'default',
+): string[] {
+  const selfContained = packMode === 'self-contained'
+  return [
+    ...(selfContained ? ['-c', 'pack.window=0', '-c', 'pack.depth=0'] : []),
+    'push',
+    '--porcelain',
+    ...(opts.force ? ['--force'] : []),
+    ...(selfContained ? ['--no-thin'] : []),
+    SPACE_REMOTE,
+    refspec,
+  ]
+}
+
 /** Classify HTTP failures whose bodies Git's smart-HTTP transport discards. */
 export function classifyPushTransportFailure(error: unknown): PushTransportFailure | null {
   const message = error instanceof Error ? error.message : String(error)
@@ -116,11 +144,11 @@ export function pushToSpace(
   refspec: string,
   opts: { force?: boolean } = {},
 ): PushRefResult {
-  const doPush = (extra: string[]): PushRefResult => {
+  const doPush = (packMode: PushPackMode): PushRefResult => {
     const result = runGitRemote(
       cwd,
       token,
-      ['push', '--porcelain', ...(opts.force ? ['--force'] : []), ...extra, SPACE_REMOTE, refspec],
+      buildPushArgs(refspec, opts, packMode),
       { allowFail: true },
     )
     const parsed = parsePushPorcelain(result.stdout.toString('utf-8'))
@@ -132,8 +160,8 @@ export function pushToSpace(
     }
     return parsed[0]
   }
-  const first = doPush([])
-  return isThinPackRejection(first) ? doPush(['--no-thin']) : first
+  const first = doPush('default')
+  return isThinPackRejection(first) ? doPush('self-contained') : first
 }
 
 /** Matches the server's oversized-object rejection text. */

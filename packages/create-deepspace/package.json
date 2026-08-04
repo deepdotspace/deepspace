@@ -1,6 +1,6 @@
 {
   "name": "create-deepspace",
-  "version": "0.9.3",
+  "version": "0.10.0",
   "engines": {
     "node": ">=22.15.0"
   },
@@ -15,7 +15,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node scripts/copy-sdk-features.mjs",
     "test": "vitest run",
     "test:in-place": "pnpm build && bash scripts/test-in-place.sh",
     "prepublishOnly": "pnpm build"

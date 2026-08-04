@@ -1,7 +1,9 @@
 import * as p from '@clack/prompts'
 import { execSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { buildDocs, type DocsBuildManifest } from '../../../docs'
+import { DEEPSPACE_ENV } from '../../env'
 import {
   bindingManifestFromOutputConfig,
   validateBindingManifest,
@@ -25,7 +27,14 @@ const RESERVED_RUN_WORKER_FIRST = new Set([
   '/internal/*',
   '/v1/*',
   '/_deepspace/*',
+  '/_docs/*',
 ])
+
+const NATIVE_DOCS_RUN_WORKER_FIRST = [
+  '/mcp',
+  '/.well-known/mcp*',
+  '/*.md',
+] as const
 
 export interface DeployAsset {
   path: string
@@ -45,6 +54,7 @@ export interface DeployBundle {
   doManifest: DurableObjectManifestEntry[] | undefined
   customBindings: CustomBindingManifest
   extraRoutes: string[]
+  docsManifest: DocsBuildManifest | undefined
 }
 
 interface OutputWranglerConfig extends Record<string, unknown> {
@@ -140,6 +150,38 @@ export async function buildDeployBundle(options: {
     return output.die(`Client assets not found at ${clientDir}`, 'build_output_missing')
   }
 
+  const docsOutputDir = resetNativeDocsOutput(clientDir)
+  let docsManifest: DocsBuildManifest | undefined
+  if (existsSync(join(appDir, 'docs.json'))) {
+    spinner.start('Building documentation...')
+    try {
+      const docsDomain = DEEPSPACE_ENV === 'staging' ? 'spacestest.com' : 'app.space'
+      const docsHost = `docs.${appName}.${docsDomain}`
+      const docs = buildDocs({
+        appDir,
+        outputDir: docsOutputDir,
+        baseUrl: `https://${docsHost}`,
+      })
+      docsManifest = docs.manifest
+      spinner.stop(`Built ${docs.manifest.pageCount} documentation page(s)`)
+    } catch (error) {
+      spinner.stop('Documentation build failed')
+      const diagnostics =
+        error && typeof error === 'object' && 'diagnostics' in error
+          ? (error as { diagnostics?: Array<{ file?: string; line?: number; message: string }> })
+            .diagnostics
+          : undefined
+      const detail = diagnostics?.length
+        ? diagnostics
+          .map((diagnostic) =>
+            `${diagnostic.file ?? 'docs.json'}${diagnostic.line ? `:${diagnostic.line}` : ''}: ${diagnostic.message}`,
+          )
+          .join('\n')
+        : errorMessage(error)
+      output.die(detail, 'docs_build_failed')
+    }
+  }
+
   spinner.start('Collecting assets...')
   const assets = collectAssets(clientDir)
   spinner.stop(`Collected ${assets.length} assets`)
@@ -171,7 +213,7 @@ export async function buildDeployBundle(options: {
     )
   }
 
-  const extraRoutes = extractRunWorkerFirst(wranglerConfig)
+  const extraRoutes = resolveExtraRunWorkerFirstRoutes(wranglerConfig, docsManifest !== undefined)
   let appMigrations: string[] = []
   try {
     appMigrations = readAppliedAppMigrations(appDir)
@@ -186,21 +228,38 @@ export async function buildDeployBundle(options: {
     doManifest,
     customBindings,
     extraRoutes,
+    docsManifest,
   }
 }
 
-function extractRunWorkerFirst(config: WranglerConfig): string[] {
-  const raw = config.assets?.run_worker_first
-  if (!Array.isArray(raw)) return []
+/** Clear the reserved docs namespace before deciding whether this release enables docs. */
+export function resetNativeDocsOutput(clientDir: string): string {
+  const outputDir = join(clientDir, '_docs')
+  rmSync(outputDir, { recursive: true, force: true })
+  return outputDir
+}
 
+/** Resolve platform routing from app configuration plus SDK-owned native docs routes. */
+export function resolveExtraRunWorkerFirstRoutes(
+  config: WranglerConfig,
+  nativeDocs: boolean,
+): string[] {
+  const raw = config.assets?.run_worker_first
   const routes: string[] = []
   const seen = new Set<string>()
-  for (const entry of raw) {
+  for (const entry of Array.isArray(raw) ? raw : []) {
     if (typeof entry !== 'string') continue
     const route = entry.trim()
     if (!route.startsWith('/') || RESERVED_RUN_WORKER_FIRST.has(route) || seen.has(route)) continue
     seen.add(route)
     routes.push(route)
+  }
+  if (nativeDocs) {
+    for (const route of NATIVE_DOCS_RUN_WORKER_FIRST) {
+      if (seen.has(route)) continue
+      seen.add(route)
+      routes.push(route)
+    }
   }
   return routes
 }

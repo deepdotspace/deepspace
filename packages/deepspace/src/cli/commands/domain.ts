@@ -52,6 +52,7 @@ interface DomainPurchase {
   id: string
   domain: string
   appId: string
+  surface: 'app' | 'docs'
   status: string
   statusError?: string | null
   registeredAt?: string | null
@@ -59,6 +60,16 @@ interface DomainPurchase {
   chargedCents: number
   autoRenew: boolean
   registrar: string
+}
+
+type DomainSurface = DomainPurchase['surface']
+
+function parseSurface(value: unknown, fallback: DomainSurface): DomainSurface {
+  const surface = value === undefined ? fallback : String(value)
+  if (surface !== 'app' && surface !== 'docs') {
+    throw new Refusal('--surface must be "app" or "docs"', 'invalid_surface')
+  }
+  return surface
 }
 
 const api = <T>(token: string, path: string, init?: RequestInit): Promise<T> =>
@@ -156,6 +167,11 @@ const buy = defineDeepspaceCommand({
   args: {
     domain: { type: 'positional', description: 'Domain to buy', required: true },
     app: { type: 'string', description: 'App id or live name (defaults to ./wrangler.toml)' },
+    surface: {
+      type: 'string',
+      description: 'Route the domain to the app or docs surface',
+      default: 'app',
+    },
     yes: { type: 'boolean', description: 'Skip the confirmation prompt', default: false },
     open: {
       type: 'boolean',
@@ -174,6 +190,7 @@ const buy = defineDeepspaceCommand({
     const domain = String(args.domain)
     const token = await ensureToken()
     const appId = await resolveAppTarget(DEPLOY_URL, token, args.app as string | undefined)
+    const surface = parseSurface(args.surface, 'app')
 
     // Re-check pricing
     const priceCheck = await api<{ domains: SearchResult[] }>(token, '/api/domains/check', {
@@ -206,12 +223,12 @@ const buy = defineDeepspaceCommand({
       if (cannotPrompt(args.json)) {
         throw new Refusal(
           `Buying ${domain} for ${price}/yr (auto-renews; non-refundable) and attaching it to ` +
-            `${appId} needs confirmation. Provisioning takes ${expectedTime}. Re-run with --yes.`,
+            `${appId} (${surface} surface) needs confirmation. Provisioning takes ${expectedTime}. Re-run with --yes.`,
           'confirmation_required',
         )
       }
       const ok = await confirm(
-        `Buy ${domain} for ${price}/yr (auto-renews; non-refundable), attach to ${appId}? Provisioning takes ${expectedTime}.`,
+        `Buy ${domain} for ${price}/yr (auto-renews; non-refundable), attach to ${appId} (${surface} surface)? Provisioning takes ${expectedTime}.`,
       )
       if (!ok) {
         console.log('Cancelled.')
@@ -226,7 +243,7 @@ const buy = defineDeepspaceCommand({
       chargedCents: number
     }>(token, '/api/domains/checkout', {
       method: 'POST',
-      body: JSON.stringify({ domain, appId }),
+      body: JSON.stringify({ domain, appId, surface }),
     })
 
     if (!args.json) console.log(`Stripe Checkout: ${checkout.url}`)
@@ -241,7 +258,7 @@ const buy = defineDeepspaceCommand({
     // `domain status` for the result. The human path keeps the live progress.
     if (!args.wait || args.json) {
       return {
-        data: scrubInternal({ ...checkout, expectedTime, registrar: result.registrar, domain }),
+        data: scrubInternal({ ...checkout, expectedTime, registrar: result.registrar, domain, surface }),
         action: cliAction('deepspace', 'app', 'domain', 'status', domain),
       }
     }
@@ -272,9 +289,9 @@ const buy = defineDeepspaceCommand({
           console.log(`  → ${lastStatus}`)
         }
         if (detail.domain.status === 'active') {
-          console.log(`✓ ${domain} is live and pointing at ${appId}`)
+          console.log(`✓ ${domain} is live and pointing at ${appId} (${surface} surface)`)
           return {
-            data: scrubInternal({ ...checkout, status: 'active', domain, appId }),
+            data: scrubInternal({ ...checkout, status: 'active', domain, appId, surface }),
           }
         }
         if (detail.domain.status.startsWith('failed:')) {
@@ -314,11 +331,11 @@ const list = defineDeepspaceCommand({
     }
     if (!args.json) {
       console.log(
-        `DOMAIN                              APP                  STATUS               EXPIRES      AUTO-RENEW`,
+        `DOMAIN                              APP                  SURFACE  STATUS               EXPIRES      AUTO-RENEW`,
       )
       for (const d of result.domains) {
         console.log(
-          `${d.domain.padEnd(35)} ${d.appId.padEnd(20)} ${d.status.padEnd(20)} ${fmtDate(d.expiresAt).padEnd(12)} ${d.autoRenew ? 'on' : 'off'}`,
+          `${d.domain.padEnd(35)} ${d.appId.padEnd(20)} ${d.surface.padEnd(8)} ${d.status.padEnd(20)} ${fmtDate(d.expiresAt).padEnd(12)} ${d.autoRenew ? 'on' : 'off'}`,
         )
       }
     }
@@ -356,6 +373,7 @@ const status = defineDeepspaceCommand({
         `Status:        ${found.status}${found.statusError ? ` (${found.statusError})` : ''}`,
       )
       console.log(`Attached app:  ${found.appId}`)
+      console.log(`Surface:       ${found.surface}`)
       console.log(`Registrar:     ${found.registrar}`)
       console.log(`Registered:    ${fmtDate(found.registeredAt)}`)
       console.log(`Expires:       ${fmtDate(found.expiresAt)}`)
@@ -375,6 +393,7 @@ const attach = defineDeepspaceCommand({
   args: {
     domain: { type: 'positional', description: 'Domain to re-point', required: true },
     app: { type: 'string', description: 'Target app id or live name (defaults to ./wrangler.toml)' },
+    surface: { type: 'string', description: 'Route to the app or docs surface (keeps current by default)' },
   },
   async run({ args }) {
     const domain = String(args.domain)
@@ -385,17 +404,18 @@ const attach = defineDeepspaceCommand({
       args.app as string | undefined,
     )
     const found = await requireDomain(token, domain)
-    const result = await api<{ success: boolean; appId: string }>(
+    const surface = parseSurface(args.surface, found.surface)
+    const result = await api<{ success: boolean; appId: string; surface: DomainSurface }>(
       token,
       `/api/domains/${found.id}/reattach`,
       {
         method: 'POST',
-        body: JSON.stringify({ appId: targetAppId }),
+        body: JSON.stringify({ appId: targetAppId, surface }),
       },
     )
-    if (!args.json) console.log(`✓ ${domain} now points at ${targetAppId}`)
+    if (!args.json) console.log(`✓ ${domain} now points at ${targetAppId} (${result.surface} surface)`)
     // `success` is dropped: the envelope's `ok` already carries it.
-    return { data: { domain, appId: result.appId } }
+    return { data: { domain, appId: result.appId, surface: result.surface } }
   },
 })
 

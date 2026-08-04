@@ -7,7 +7,17 @@
 
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { CanvasRoom, CronRoom, JobRoom, PresenceRoom, RecordRoom, YjsRoom } from 'deepspace/worker'
+import {
+  CanvasRoom,
+  CronRoom,
+  DocsAssistantLimiter,
+  JobRoom,
+  PresenceRoom,
+  RecordRoom,
+  YjsRoom,
+  docsAssistantLimiterManifestEntry,
+  registerDeepSpaceDocs,
+} from 'deepspace/worker'
 import type { DOBindings, DOManifest, Job, JobContext } from 'deepspace/worker'
 import { registerAiChatRoutes } from './src/ai/chat-routes.js'
 import { tasks as cronTasks, runTask as runCronTask } from './src/cron.js'
@@ -30,6 +40,7 @@ export const __DO_MANIFEST__ = [
   { binding: 'PRESENCE_ROOMS', className: 'AppPresenceRoom', sqlite: true },
   { binding: 'CRON_ROOMS', className: 'AppCronRoom', sqlite: true },
   { binding: 'JOB_ROOMS', className: 'AppJobRoom', sqlite: true },
+  docsAssistantLimiterManifestEntry('AppDocsAssistantLimiter'),
 ] as const satisfies DOManifest
 
 export class AppRecordRoom extends RecordRoom<Env> {
@@ -41,6 +52,7 @@ export class AppRecordRoom extends RecordRoom<Env> {
 export class AppYjsRoom extends YjsRoom<Env> {}
 export class AppCanvasRoom extends CanvasRoom<Env> {}
 export class AppPresenceRoom extends PresenceRoom<Env> {}
+export class AppDocsAssistantLimiter extends DocsAssistantLimiter {}
 
 /** Runs the scheduled tasks defined in src/cron.ts. */
 export class AppCronRoom extends CronRoom<Env> {
@@ -111,6 +123,7 @@ registerAuthAndIntegrationRoutes(app)
 registerRealtimeRoutes(app)
 registerActionRoutes(app, resolveAuth)
 registerAiChatRoutes(app, resolveAuth)
+registerDeepSpaceDocs(app, { resolveAuth })
 registerPlatformProxyRoutes(app)
 registerStaticRoutes(app)
 

@@ -13,11 +13,12 @@
  */
 
 import type { Hono } from 'hono'
-import { streamText, stepCountIs } from 'ai'
 import type { ModelMessage } from 'ai'
 import {
-  createDeepSpaceAI,
+  deepSpaceAgentErrorSummary,
   prepareMessagesWithCompaction,
+  resolveDeepSpaceAgentModel,
+  streamDeepSpaceAgent,
   turnsToCoreMessages,
   buildUiParts,
   makeDefaultSummarizer,
@@ -38,37 +39,6 @@ import { buildSystemPrompt, buildTools } from './tools.js'
 import type { Env, AppContext } from '../../worker.js'
 
 type ResolveAuth = (req: Request, env: Env) => Promise<VerifyResult | null>
-
-// Allowlist of models the client may select. Keeps a malicious or stale
-// `modelId` from hitting the fallback pricing tier. Add models here as you
-// expose them in the UI. When adding a new model, test end-to-end first and
-// watch worker logs — reasoning/thinking models occasionally surface chunk
-// types we don't handle yet (we ignore them silently in `applyStreamAction`).
-//
-// IDs use stable aliases (`claude-opus-4-8`) rather than dated snapshots
-// (`claude-opus-4-8-20260715`) so a provider's bug-fix release lands here
-// without a code change. Pin to a snapshot if you need reproducible behavior.
-const ALLOWED_MODELS: Record<string, 'anthropic' | 'openai' | 'cerebras'> = {
-  // Anthropic — covers premium ($5/$25), balanced ($3/$15), cheap ($1/$5).
-  'claude-opus-4-8':    'anthropic',
-  'claude-sonnet-5':    'anthropic',
-  'claude-haiku-4-5':   'anthropic',
-  // OpenAI — chat-completions-compatible only. The `-pro` variants
-  // (gpt-5.4-pro, gpt-5.5-pro) are Responses-API-only (return "not a chat
-  // model" on /v1/chat/completions). Same restriction applies to o1/o3; if
-  // we want them, the proxy needs Responses-API support. Until then keep
-  // the picker to chat-completions-compatible variants.
-  'gpt-5.6-sol':        'openai',
-  'gpt-5.6-terra':      'openai',
-  'gpt-5.6-luna':       'openai',
-  // Cerebras — only `gpt-oss-120b` is on the production tier (~3000 tok/s);
-  // preview models (qwen-3-235b, glm-4.7) are explicitly not for production.
-  'gpt-oss-120b':       'cerebras',
-}
-// Sonnet 5 is the balanced default — capable enough for most tool-using
-// turns, cheaper than Opus (intro $2/$10 per MTok through 2026-08-31,
-// then $3/$15), and the same 1M-token context.
-const DEFAULT_MODEL = 'claude-sonnet-5'
 
 function recordRoomStub(env: Env): DurableObjectStub {
   // Rooms are keyed by the immutable app id — the same `app:${DEEPSPACE_APP_ID}`
@@ -162,11 +132,10 @@ export function registerAiChatRoutes(
     if (content.length > MAX_USER_CONTENT_LENGTH) {
       return c.json({ error: `content exceeds ${MAX_USER_CONTENT_LENGTH} chars` }, 413)
     }
-    // Reject unknown modelId loudly instead of silently falling back to
-    // DEFAULT_MODEL. Silent fallback used to hide drift between this
-    // allowlist and ChatPanel's DEFAULT_MODELS picker — the dev would see
-    // "always Sonnet" output with no clue why.
-    if (modelId !== undefined && !ALLOWED_MODELS[modelId]) {
+    // Resolve through the SDK profile before doing database or provider work.
+    // Omitted ids use the profile default; unknown or incompatible ids fail.
+    const selectedModel = resolveDeepSpaceAgentModel(modelId, 'application')
+    if (!selectedModel) {
       return c.json({ error: `Unknown modelId: ${modelId}` }, 400)
     }
 
@@ -225,8 +194,12 @@ export function registerAiChatRoutes(
     }
 
     // modelId already validated above — fall back to default only when omitted.
-    const usedModelId = modelId ?? DEFAULT_MODEL
-    const ai = createDeepSpaceAI(c.env, ALLOWED_MODELS[usedModelId], { authToken: jwt })
+    const usedModelId = selectedModel.modelId
+    const diagnosticContext = {
+      profile: 'application' as const,
+      provider: selectedModel.provider,
+      modelId: usedModelId,
+    }
     const baseSystem = buildSystemPrompt(c.env.APP_NAME, schemas)
 
     // Compaction inserts at most one summary system message at index 0; fold
@@ -262,26 +235,20 @@ export function registerAiChatRoutes(
     // which broke for users whose clock was ahead of the server.
     const asstId = `asst-${Date.now()}-${crypto.randomUUID()}`
 
-    const result = streamText({
-      model: ai(usedModelId),
+    const { result } = streamDeepSpaceAgent(c.env, {
+      profile: 'application',
+      modelId: usedModelId,
+      authToken: jwt,
       system: systemText,
       messages,
       tools,
-      // GPT-5.x on /v1/chat/completions rejects function tools unless
-      // reasoning_effort is 'none' ("Function tools with reasoning_effort
-      // are not supported ... use /v1/responses or set reasoning_effort to
-      // 'none'"). All allowlisted OpenAI models accept 'none'; other
-      // providers ignore the openai namespace.
-      ...(ALLOWED_MODELS[usedModelId] === 'openai'
-        ? { providerOptions: { openai: { reasoningEffort: 'none' as const } } }
-        : {}),
-      // Cap the multi-step tool loop at five model calls.
-      stopWhen: stepCountIs(5),
       // Cancel provider and tool work with the request. If at least one step
       // completed, AI SDK still calls `onFinish`; a zero-step abort skips it.
       abortSignal: c.req.raw.signal,
       onError: ({ error }) => {
-        console.error('[ai-chat] streamText error:', error)
+        console.error(
+          `[ai-chat] stream error: ${deepSpaceAgentErrorSummary(error, diagnosticContext)}`,
+        )
       },
       onFinish: async ({ text, response }) => {
         const parts = buildUiParts(response.messages as ModelMessage[])

@@ -116,12 +116,12 @@ describe('lintProjectSchemas', () => {
 
   // Pin the shape a freshly scaffolded app actually has: schemas.ts
   // re-exports from sibling src/schemas/*.ts files, and one of those
-  // value-imports from 'deepspace/worker' (resolved via the package's
-  // exports map to dist/worker.js). This is the case a future esbuild-option
-  // change (e.g. packages: 'external') would silently break while the
-  // self-contained fixtures above stay green. Needs a built dist/.
-  it.skipIf(!existsSync(join(PKG_ROOT, 'dist', 'worker.js')))(
-    'lints a starter-shaped app (sibling-file imports + deepspace/worker value import)',
+  // value-imports browser-safe schema constants from the package root. This
+  // is the case a future esbuild-option change (e.g. packages: 'external')
+  // would silently break while the self-contained fixtures above stay green.
+  // Needs a built dist/.
+  it.skipIf(!existsSync(join(PKG_ROOT, 'dist', 'index.js')))(
+    'lints a starter-shaped app with sibling files and a package-root value import',
     async () => {
       const dir = makeAppDir()
       mkdirSync(join(dir, 'src', 'schemas'), { recursive: true })
@@ -130,14 +130,20 @@ describe('lintProjectSchemas', () => {
       writeFileSync(
         join(dir, 'src', 'schemas', 'users-schema.ts'),
         `
-          import { BASE_USERS_SCHEMA, type CollectionSchema } from 'deepspace/worker'
-          export const usersSchema: CollectionSchema = BASE_USERS_SCHEMA
+          import { USERS_COLUMNS, type CollectionSchema } from 'deepspace'
+          export const usersSchema: CollectionSchema = {
+            name: 'users',
+            columns: [...USERS_COLUMNS],
+            permissions: {
+              member: { read: true, create: false, update: 'own', delete: false },
+            },
+          }
         `,
       )
       writeFileSync(
         join(dir, 'src', 'schemas', 'notes-schema.ts'),
         `
-          import type { CollectionSchema } from 'deepspace/worker'
+          import type { CollectionSchema } from 'deepspace'
           export const notesSchema: CollectionSchema = {
             name: 'notes',
             columns: [

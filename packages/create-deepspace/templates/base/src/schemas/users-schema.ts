@@ -1,5 +1,4 @@
-import type { CollectionSchema } from 'deepspace/worker'
-import { USERS_COLUMNS } from 'deepspace/worker'
+import { USERS_COLUMNS, type CollectionSchema } from 'deepspace'
 
 export const usersSchema: CollectionSchema = {
   name: 'users',

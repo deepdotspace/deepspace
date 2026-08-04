@@ -1,5 +1,30 @@
 # deepspace
 
+## 0.10.0
+
+### Minor Changes
+
+- Add repository-native public documentation: deterministic Markdown/MDX and
+  OpenAPI builds, local search, SEO and LLM artifacts, a grounded read-only docs
+  assistant profile, agent-friendly `deepspace docs` commands, same-release
+  deployment and rollback, explicit docs route surfaces, and docs starters in new
+  apps. Publish a stateless, read-only MCP search/read endpoint from the same
+  compiled corpus and docs subdomain for external agents. Add a configurable,
+  responsive native page-action menu for copying Markdown, viewing source,
+  opening the shared docs assistant, and copying the MCP server URL. Consolidate
+  app and docs assistants onto one capability-aware, versioned model catalog and
+  one SDK agent runner, with provider provenance and build-time compatibility
+  validation. Consolidate routing, contextual-action defaults, docs worker setup,
+  and the scaffolded agent UI onto single SDK-owned authorities, while splitting
+  the runtime, config, CLI, stylesheet, and MCP internals into focused modules.
+  Derive docs-owned worker-first routes during deployment so app configuration
+  stays minimal and raw Markdown remains directly browser-readable at the edge.
+  Expose shared user-schema columns from the browser-safe package root so
+  scaffolded schemas do not pull Worker-only modules into client bundles.
+  Rank conversational docs questions with cached, proximity-aware lexical
+  normalization so grounded commands remain discoverable without another search
+  service or agent implementation.
+
 ## 0.9.3
 
 ### Patch Changes

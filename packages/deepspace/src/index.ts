@@ -6,8 +6,10 @@
  * import { RecordProvider, useQuery, useAuth, useMessages, AuthOverlay } from 'deepspace'
  */
 export type { CollectionSchema } from './shared/types'
+export { USERS_COLUMNS } from './shared/users-schema'
 export * from './shared/env'
 export * from './shared/roles'
+export * from './shared/ai-models'
 // Re-export the wire protocol layer (the `MSG` constants object, the
 // `ClientMessage` / `ServerMessage` discriminated unions, `clientBuild`,
 // `dispatch`, `encode`, etc.) so apps that build their own WebSocket

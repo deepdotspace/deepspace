@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { runGit } from '../git/process'
 import { initRepo } from '../git/repository'
 import {
+  buildPushArgs,
   classifyPushTransportFailure,
   isRecoverablePushFailure,
   isThinPackRejection,
@@ -157,6 +158,29 @@ describe('push rejection decisions', () => {
     for (const status of ['committed', 'up_to_date', 'non_fast_forward', 'ref_conflict'] as const) {
       expect(isThinPackRejection({ ...rejected('thin push'), status }), status).toBe(false)
     }
+  })
+
+  it('makes the full-pack retry self-contained instead of reusing historical deltas', () => {
+    expect(buildPushArgs('refs/heads/main:refs/heads/main', {}, 'self-contained')).toEqual([
+      '-c',
+      'pack.window=0',
+      '-c',
+      'pack.depth=0',
+      'push',
+      '--porcelain',
+      '--no-thin',
+      SPACE_REMOTE,
+      'refs/heads/main:refs/heads/main',
+    ])
+    expect(
+      buildPushArgs('refs/heads/main:refs/heads/main', { force: true }, 'self-contained'),
+    ).toContain('--force')
+    expect(buildPushArgs('refs/heads/main:refs/heads/main')).toEqual([
+      'push',
+      '--porcelain',
+      SPACE_REMOTE,
+      'refs/heads/main:refs/heads/main',
+    ])
   })
 
   it('marks only pull-recoverable divergence statuses recoverable', () => {

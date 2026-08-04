@@ -58,7 +58,8 @@ export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
     // Land the signed-in user in the app, not on the static landing. `/` is a
     // static page (no auth/realtime providers), so redirecting there after auth
     // would strand the user; `/home` is the dynamic app boundary.
-    const appHome = `${appOrigin}/home`
+    const returnPath = c.req.header('x-deepspace-surface') === 'docs' ? '/' : '/home'
+    const appHome = `${appOrigin}${returnPath}`
 
     if (!code) return c.redirect(appHome)
 
@@ -84,11 +85,7 @@ export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
 
   app.all('/api/auth/sign-out', async (c) => {
     try {
-      await authWorkerFetch(c.env, '/api/auth/sign-out', {
-        method: c.req.method,
-        headers: c.req.raw.headers,
-        body: c.req.method !== 'GET' && c.req.method !== 'HEAD' ? c.req.raw.body : undefined,
-      })
+      await authWorkerFetch(c.env, '/api/auth/sign-out', forwardedRequest(c.req.raw))
     } catch {
       // Still expire the app-scoped cookie below. A network/auth-worker
       // failure must not leave the browser immediately signed back in.
@@ -107,11 +104,7 @@ export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
   // Auth proxy → auth-worker (same-origin cookies).
   app.all('/api/auth/*', async (c) => {
     const url = new URL(c.req.url)
-    const res = await authWorkerFetch(c.env, url.pathname + url.search, {
-      method: c.req.method,
-      headers: c.req.raw.headers,
-      body: c.req.method !== 'GET' && c.req.method !== 'HEAD' ? c.req.raw.body : undefined,
-    })
+    const res = await authWorkerFetch(c.env, url.pathname + url.search, forwardedRequest(c.req.raw))
     const headers = new Headers(res.headers)
     const setCookie = headers.get('set-cookie')
     if (setCookie) {
@@ -227,6 +220,14 @@ export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
   })
 }
 
+function forwardedRequest(request: Request): RequestInit {
+  return {
+    method: request.method,
+    headers: request.headers,
+    body: request.method !== 'GET' && request.method !== 'HEAD' ? request.body : undefined,
+  }
+}
+
 interface ProxyRoute {
   method: string
   path: string
@@ -328,6 +329,18 @@ export function registerStaticRoutes(app: Hono<AppContext>): void {
     const response = await c.env.ASSETS.fetch(c.req.raw)
     if (response.status === 404) {
       const url = new URL(c.req.url)
+      // Docs hosts are registry-authorized and rewritten by the dispatcher
+      // into the isolated /_docs asset namespace. Never fall back from that
+      // namespace to the application SPA: an unknown public docs URL should
+      // render the docs 404, not leak the app shell.
+      if (url.pathname.startsWith('/_docs/')) {
+        url.pathname = '/_docs/404.html'
+        const notFound = await c.env.ASSETS.fetch(new Request(url.toString(), c.req.raw))
+        return new Response(notFound.body, {
+          status: 404,
+          headers: notFound.headers,
+        })
+      }
       url.pathname = '/index.html'
       return c.env.ASSETS.fetch(new Request(url.toString(), c.req.raw))
     }

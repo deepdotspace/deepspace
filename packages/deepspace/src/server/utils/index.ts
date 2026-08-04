@@ -19,6 +19,7 @@ export {
   type DeepSpaceAIEnv,
   type DeepSpaceAIOptions,
 } from './ai'
+export * from './agent'
 export { composioTools, type ComposioToolsOptions } from './composio-tools'
 export {
   apiWorkerFetch,
@@ -49,6 +50,13 @@ export {
   type Summarizer,
 } from './chat-context'
 export * from './chat-history'
+export * from './docs-assistant'
+export * from './docs-assistant-limiter'
+export * from './docs-assistant-routes'
+export * from './docs-mcp-routes'
+export * from './docs-routes'
+export * from './docs-published-corpus'
+export * from './docs-public-limiter'
 export {
   meterUsage,
   meterAi,

@@ -13,11 +13,12 @@
  *
  * Usage (inside a request handler, e.g. /api/ai/chat):
  *
- *   import { composioTools, createDeepSpaceAI } from 'deepspace/worker'
+ *   import { composioTools, streamDeepSpaceAgent } from 'deepspace/worker'
  *   const jwt = c.req.header('Authorization')!.slice(7)
  *   const tools = await composioTools(c.env, { toolkit: 'gmail', authToken: jwt })
- *   const ai = createDeepSpaceAI(c.env, 'anthropic', { authToken: jwt })
- *   const result = streamText({ model: ai('claude-sonnet-5'), prompt, tools })
+ *   const { result } = streamDeepSpaceAgent(c.env, {
+ *     profile: 'application', authToken: jwt, prompt, tools,
+ *   })
  *
  * Merge with your own tools: `tools: { ...buildTools(executor), ...composio }`.
  */

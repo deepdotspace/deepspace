@@ -613,6 +613,9 @@ describe('ai-chat feature assembly', () => {
       for (const file of ['ChatPanel.tsx', 'ChatPanel.messages.tsx', 'ChatPanel.stream.ts']) {
         expect(existsSync(join(dir, 'src', 'components', file)), file).toBe(true)
       }
+      expect(existsSync(join(dir, 'src', 'ai', 'models.ts'))).toBe(false)
+      expect(readFileSync(join(dir, 'src', 'components', 'ChatPanel.tsx'), 'utf8'))
+        .toContain("from 'deepspace'")
     } finally {
       cleanup()
     }

@@ -1,0 +1,29 @@
+---
+title: Welcome
+description: Start building with __APP_NAME__.
+---
+
+# Welcome
+
+This documentation is built from the same DeepSpace repository and deploys with
+the same immutable release as __APP_NAME__.
+
+<Note title="Agent native">
+Run `deepspace docs validate --json` before deployment. The validator checks the
+configuration, navigation, links, safe MDX components, and API descriptions.
+</Note>
+
+## Develop locally
+
+```bash
+deepspace docs dev
+```
+
+## Publish
+
+```bash
+deepspace deploy
+```
+
+When docs are present, the deploy result includes the public docs URL. The docs
+route and the app route point to the same app id and release bundle.

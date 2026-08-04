@@ -11,6 +11,7 @@ import type {
   PermissionLevel,
   RolePermissions,
 } from '../../shared/types'
+import { USERS_COLUMNS } from '../../shared/users-schema'
 
 export type {
   CollectionSchema,
@@ -19,6 +20,7 @@ export type {
   PermissionLevel,
   RolePermissions,
 } from '../../shared/types'
+export { USERS_COLUMNS } from '../../shared/users-schema'
 
 // ============================================================================
 // Column Definitions
@@ -360,16 +362,6 @@ export const SYSTEM_MANAGED_COLUMNS = new Set([
   'createdAt',
   'lastSeenAt',
 ])
-
-/** Standard user columns. Apps spread these into their users schema. */
-export const USERS_COLUMNS: ColumnDefinition[] = [
-  { name: 'email', storage: 'text', interpretation: 'plain' },
-  { name: 'name', storage: 'text', interpretation: 'plain' },
-  { name: 'imageUrl', storage: 'text', interpretation: 'plain' },
-  { name: 'role', storage: 'text', interpretation: 'plain' },
-  { name: 'createdAt', storage: 'text', interpretation: { kind: 'datetime' } },
-  { name: 'lastSeenAt', storage: 'text', interpretation: { kind: 'datetime' } },
-]
 
 export const BASE_USERS_SCHEMA: CollectionSchema = {
   name: 'users',

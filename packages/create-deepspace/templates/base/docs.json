@@ -1,0 +1,23 @@
+{
+  "$schema": "https://deep.space/docs.schema.json",
+  "name": "__APP_NAME__",
+  "description": "Documentation for __APP_NAME__.",
+  "source": "docs",
+  "output": "dist/_docs",
+  "theme": {
+    "accent": "#6d5efc",
+    "defaultMode": "system"
+  },
+  "navigation": [
+    {
+      "group": "Get started",
+      "pages": ["index"]
+    }
+  ],
+  "assistant": {
+    "access": "disabled"
+  },
+  "mcp": {
+    "access": "public"
+  }
+}

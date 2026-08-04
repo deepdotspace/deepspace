@@ -31,6 +31,7 @@ export interface DeployCommitResponse {
   staleBaseGuard?: string
   releaseId?: string
   bundleRetained?: boolean
+  docsUrl?: string
 }
 
 export async function deployBuiltBundle(options: {
@@ -145,6 +146,8 @@ export async function deployBuiltBundle(options: {
     if (bundle.extraRoutes.length) {
       form.append('extraRunWorkerFirst', JSON.stringify(bundle.extraRoutes))
     }
+    if (bundle.docsManifest) form.append('docsManifest', JSON.stringify(bundle.docsManifest))
+    form.append('docsState', bundle.docsManifest ? 'enabled' : 'disabled')
     form.append('name', appName)
     if (confirmRename) form.append('confirmRename', 'true')
     if (shouldSendLineage(repository.commitOid, repository.recoverable)) {
