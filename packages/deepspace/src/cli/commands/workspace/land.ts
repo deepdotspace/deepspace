@@ -303,7 +303,9 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
 
     await api.landWorkspace(id, { landedOid, intoRef })
     spinner?.stop(`Landed ${id} into ${intoBranch} at ${landedOid.slice(0, 10)}.`)
-    const cleanup = keepWorktree ? null : cleanupWorkspaceLocal(appDir, id, intoBranch)
+    const cleanup = keepWorktree
+      ? null
+      : cleanupWorkspaceLocal(appDir, id, intoBranch, { expectedBranchOid: landedOid })
     const inOwnWorktree = !cleanup && inOwnLinkedWorktree(appDir, id)
     const retainedWorktree =
       cleanup?.worktreeRetained ?? (keepWorktree || inOwnWorktree ? appDir : null)

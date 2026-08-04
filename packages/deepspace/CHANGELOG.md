@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.9.3
+
+### Patch Changes
+
+- Prevent workspace cleanup from deleting unpublished or concurrently advanced commits.
+
 ## 0.9.2
 
 ### Patch Changes

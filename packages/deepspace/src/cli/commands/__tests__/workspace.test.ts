@@ -25,6 +25,7 @@ import {
   cleanupWorkspaceLocal,
   defaultWorkspaceRoot,
   excludeWorktreeDir,
+  inspectWorkspaceCleanup,
   isManagedWorkspaceWorktree,
   materializeWorkspaceWorktree,
 } from '../workspace/local'
@@ -32,6 +33,7 @@ import { hasLeftoverConflictMarkers, landResumeArgv } from '../workspace/land'
 import { cleanFailedFreshAttachDir, finishedWorkspaceMessage } from '../workspace/attach'
 import { overlapsWith } from '../workspace/analysis'
 import { withWorkspaceOverlaps } from '../workspace/list'
+import { isWorkspaceTipPublished, workspaceUnsyncedRefusal } from '../workspace/drop'
 
 const git = (cwd: string, args: string[]): string =>
   execFileSync('git', args, { cwd, encoding: 'utf-8' })
@@ -357,6 +359,26 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
     expect(git(main, ['branch', '--list', BRANCH]).trim()).toBe('')
   })
 
+  it('retains the branch when it advances after the caller approved an older tip', () => {
+    const main = initRepoWithCommit()
+    const dir = addWorktree(main)
+    const approvedTip = git(main, ['rev-parse', BRANCH]).trim()
+
+    writeFileSync(join(dir, 'concurrent.txt'), 'new agent work\n')
+    git(dir, ['add', 'concurrent.txt'])
+    git(dir, ['commit', '-q', '-m', 'concurrent work'])
+    const advancedTip = git(main, ['rev-parse', BRANCH]).trim()
+
+    const res = cleanupWorkspaceLocal(main, ID, 'main', {
+      expectedBranchOid: approvedTip,
+    })
+
+    expect(res.worktreeRemoved).toBeTruthy()
+    expect(res.branchDeleted).toBeNull()
+    expect(res.error).toMatch(/advanced.*retained/i)
+    expect(git(main, ['rev-parse', BRANCH]).trim()).toBe(advancedTip)
+  })
+
   it('rolls back a just-created checkout when its ownership marker cannot be written', () => {
     const main = initRepoWithCommit()
     const dir = join(main, '.deepspace', 'ws', ID.slice(3).toLowerCase())
@@ -397,6 +419,10 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
     const dir = join(main, '.claude', 'worktrees', 'external')
     git(main, ['worktree', 'add', '-q', '-b', BRANCH, dir])
     expect(isManagedWorkspaceWorktree(dir, ID)).toBe(false)
+
+    const inspection = inspectWorkspaceCleanup(main, ID)
+    expect(inspection.checkout).toEqual({ kind: 'external-linked', dir: realpathSync(dir) })
+    expect(inspection.willDeleteBranch).toBe(false)
 
     const res = cleanupWorkspaceLocal(main, ID, 'main')
 
@@ -454,6 +480,46 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
     expect(res.branchDeleted).toBeNull() // bailed before the branch delete
     expect(existsSync(dir)).toBe(true) // still there
     git(main, ['worktree', 'unlock', dir]) // let afterEach clean it
+  })
+})
+
+describe('workspace drop safety', () => {
+  const ID = 'ws_01ABCDEFGHJKMNPQRSTVWXYZ00'
+  const BRANCH = `ws/${ID.slice(3).toLowerCase()}`
+  const APP_ID = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
+
+  it('distinguishes an unpublished descendant from commits contained by a published tip', () => {
+    const main = initRepo()
+    git(main, ['config', 'user.email', 't@t'])
+    git(main, ['config', 'user.name', 't'])
+    writeFileSync(join(main, 'f.txt'), 'base\n')
+    git(main, ['add', 'f.txt'])
+    git(main, ['commit', '-q', '-m', 'base'])
+    const base = git(main, ['rev-parse', 'HEAD']).trim()
+    git(main, ['switch', '-q', '-c', BRANCH])
+    writeFileSync(join(main, 'f.txt'), 'local\n')
+    git(main, ['commit', '-q', '-am', 'local'])
+    const local = git(main, ['rev-parse', 'HEAD']).trim()
+
+    expect(isWorkspaceTipPublished(main, local, [base])).toBe(false)
+    expect(isWorkspaceTipPublished(main, base, [local])).toBe(true)
+  })
+
+  it('returns an exit-1 refusal whose recovery action preserves app and workspace targeting', () => {
+    const workspaceDir = '/worktrees/safe'
+    const refusal = workspaceUnsyncedRefusal({
+      appId: APP_ID,
+      id: ID,
+      branch: BRANCH,
+      workspaceDir,
+    })
+
+    expect(refusal.actionRequired).toBe(false)
+    expect(refusal.action).toEqual({
+      cwd: workspaceDir,
+      argv: ['deepspace', 'workspace', 'sync', '--app', APP_ID, '--workspace', ID],
+    })
+    expect(refusal.message).toMatch(/then re-run.*workspace drop/i)
   })
 })
 

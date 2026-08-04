@@ -143,6 +143,53 @@ export function inOwnLinkedWorktree(appDir: string, id: string): boolean {
   }
 }
 
+export type WorkspaceCheckout =
+  | { kind: 'none'; dir: null }
+  | { kind: 'primary'; dir: string }
+  | { kind: 'managed-linked'; dir: string }
+  | { kind: 'external-linked'; dir: string }
+
+export interface WorkspaceCleanupInspection {
+  branch: string
+  branchOid: string | null
+  checkout: WorkspaceCheckout
+  willDeleteBranch: boolean
+}
+
+/** Describe exactly which local state default workspace cleanup owns. */
+export function inspectWorkspaceCleanup(appDir: string, id: string): WorkspaceCleanupInspection {
+  const branch = workspaceBranchName(id)
+  const branchOid = resolveCommit(appDir, `refs/heads/${branch}`)
+  const worktrees = listWorktrees(appDir)
+  const checkoutIndex = worktrees.findIndex((worktree) => worktree.branch === branch)
+  if (checkoutIndex < 0) {
+    return {
+      branch,
+      branchOid,
+      checkout: { kind: 'none', dir: null },
+      willDeleteBranch: branchOid !== null,
+    }
+  }
+
+  const dir = worktrees[checkoutIndex].path
+  if (checkoutIndex === 0) {
+    return {
+      branch,
+      branchOid,
+      checkout: { kind: 'primary', dir },
+      willDeleteBranch: branchOid !== null,
+    }
+  }
+
+  const managed = isManagedWorkspaceWorktree(dir, id)
+  return {
+    branch,
+    branchOid,
+    checkout: { kind: managed ? 'managed-linked' : 'external-linked', dir },
+    willDeleteBranch: branchOid !== null && managed,
+  }
+}
+
 export interface CleanupOutcome {
   worktreeRemoved: string | null
   worktreeRetained: string | null
@@ -151,6 +198,13 @@ export interface CleanupOutcome {
   error?: string
   worktreeDir: string | null
   branch: string
+}
+
+export interface CleanupWorkspaceOptions {
+  /** The only branch tip cleanup is authorized to delete. */
+  expectedBranchOid?: string
+  /** Preserve all local state when preflight found an externally owned checkout. */
+  retainLocal?: boolean
 }
 
 export function cleanupJson(outcome: CleanupOutcome): Record<string, unknown> {
@@ -163,11 +217,41 @@ export function cleanupJson(outcome: CleanupOutcome): Record<string, unknown> {
   }
 }
 
-function deleteWsBranch(cwd: string, branch: string, out: CleanupOutcome): void {
-  const del = runGit(cwd, ['branch', '-D', branch], { allowFail: true })
-  if (del.status === 0) out.branchDeleted = branch
-  else
-    out.error ??= `git branch -D ${branch} failed: ${del.stderr.toString('utf-8').trim() || 'unknown git error'}`
+function deleteWsBranch(
+  cwd: string,
+  branch: string,
+  expectedOid: string | null,
+  out: CleanupOutcome,
+): void {
+  const ref = `refs/heads/${branch}`
+  const currentOid = resolveCommit(cwd, ref)
+  if (!currentOid) return
+  const approvedOid = expectedOid ?? currentOid
+  if (currentOid !== approvedOid) {
+    out.error ??=
+      `branch ${branch} advanced from ${approvedOid.slice(0, 10)} to ${currentOid.slice(0, 10)} ` +
+      'during cleanup; retained the branch'
+    return
+  }
+
+  // Compare-and-swap is the final data-loss guard. A commit can arrive after
+  // every earlier cleanliness/publication check, so delete only the exact tip
+  // the caller approved.
+  const del = runGit(cwd, ['update-ref', '-d', ref, approvedOid], { allowFail: true })
+  if (del.status === 0) {
+    out.branchDeleted = branch
+    runGit(cwd, ['config', '--remove-section', `branch.${branch}`], { allowFail: true })
+    return
+  }
+
+  const afterOid = resolveCommit(cwd, ref)
+  if (afterOid && afterOid !== approvedOid) {
+    out.error ??=
+      `branch ${branch} advanced from ${approvedOid.slice(0, 10)} to ${afterOid.slice(0, 10)} ` +
+      'during cleanup; retained the branch'
+  } else if (afterOid) {
+    out.error ??= `could not delete branch ${branch}: ${del.stderr.toString('utf-8').trim() || 'unknown git error'}`
+  }
 }
 
 function switchOffWsBranch(mainDir: string, trunkBranch: string | null): boolean {
@@ -190,14 +274,21 @@ export function cleanupWorkspaceLocal(
   appDir: string,
   id: string,
   trunkBranch: string | null,
+  options: CleanupWorkspaceOptions = {},
 ): CleanupOutcome {
-  const branch = workspaceBranchName(id)
+  const inspection = inspectWorkspaceCleanup(appDir, id)
+  const { branch } = inspection
+  const expectedBranchOid = options.expectedBranchOid ?? inspection.branchOid
   const out: CleanupOutcome = {
     worktreeRemoved: null,
     worktreeRetained: null,
     branchDeleted: null,
     worktreeDir: null,
     branch,
+  }
+  if (options.retainLocal) {
+    out.worktreeRetained = inspection.checkout.dir
+    return out
   }
   try {
     const worktrees = listWorktrees(appDir)
@@ -225,14 +316,15 @@ export function cleanupWorkspaceLocal(
         return out
       }
       out.worktreeRemoved = linked.path
-      deleteWsBranch(mainDir, branch, out)
+      out.worktreeDir = null
+      deleteWsBranch(mainDir, branch, expectedBranchOid, out)
       return out
     }
     if (currentBranch(mainDir) === branch && !switchOffWsBranch(mainDir, trunkBranch)) {
       out.error = `could not switch off ${branch} to delete it`
       return out
     }
-    if (resolveCommit(mainDir, `refs/heads/${branch}`)) deleteWsBranch(mainDir, branch, out)
+    deleteWsBranch(mainDir, branch, expectedBranchOid, out)
     return out
   } catch (err) {
     out.error = err instanceof Error ? err.message : String(err)
