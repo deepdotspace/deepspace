@@ -1,6 +1,6 @@
 {
   "name": "deepspace",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "engines": {
     "node": ">=22.15.0"
   },
@@ -28,14 +28,6 @@
     "./testing": {
       "types": "./dist/testing.d.ts",
       "import": "./dist/testing.js"
-    },
-    "./docs": {
-      "types": "./dist/docs.d.ts",
-      "import": "./dist/docs.js"
-    },
-    "./docs/react": {
-      "types": "./dist/docs-react.d.ts",
-      "import": "./dist/docs-react.js"
     }
   },
   "files": [
@@ -55,25 +47,14 @@
     "@ai-sdk/openai": "^2.0.0",
     "@ai-sdk/openai-compatible": "^1.0.0",
     "@clack/prompts": "^1.2.0",
-    "@mdx-js/mdx": "^3.1.1",
-    "acorn": "^8.16.0",
     "ai": "^5.0.0",
     "better-auth": "1.6.23",
     "citty": "^0.2.0",
     "cross-spawn": "^7.0.6",
     "esbuild": "^0.27.0",
-    "highlight.js": "^11.11.1",
     "hono": "^4.6.0",
     "jose": "^6.1.0",
-    "marked": "^18.0.7",
-    "mdast-util-gfm": "^3.1.0",
-    "mdast-util-to-markdown": "^2.1.2",
-    "rehype-highlight": "^7.0.2",
-    "remark-frontmatter": "^5.0.0",
-    "remark-gfm": "^4.0.1",
-    "sanitize-html": "^2.17.6",
     "smol-toml": "^1.6.1",
-    "yaml": "^2.9.0",
     "yjs": "^13.6.0",
     "zod": "^4.3.6"
   },
@@ -112,7 +93,6 @@
     "@types/cross-spawn": "^6.0.6",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@types/sanitize-html": "^2.16.1",
     "better-sqlite3": "^12.0.0",
     "clsx": "^2.1.1",
     "framer-motion": "^12.38.0",

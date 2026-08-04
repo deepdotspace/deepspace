@@ -10,9 +10,12 @@
  *    Catches "renamed a base ui export file", "overlay imports a deleted
  *    module", and route-group moves that broke `../` depths.
  *
- * 2. Canonical feature assembly: the copilot app receives editable ChatPanel
- *    files from the SDK feature at scaffold time; no second maintained agent
- *    implementation exists in the overlay.
+ * 2. Fork drift: the copilot template intentionally ships owned COPIES of
+ *    the ai-chat feature's ChatPanel subsystem and schema wrapper
+ *    (copy-paste-ownable is the template model — no runtime install). The
+ *    copies must stay byte-identical to their feature sources so fixes land in one place and
+ *    propagate by re-copying; this already failed once (a model-lineup
+ *    refresh updated the feature but not the template).
  */
 import { describe, it, expect, afterAll } from 'vitest'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
@@ -102,21 +105,17 @@ describe('assembled templates', () => {
       it('assembles worker routes in security-sensitive order', () => {
         const app = makeAssembled(overlay)
         const worker = readFileSync(join(app, 'worker.ts'), 'utf-8')
-        const vite = readFileSync(join(app, 'vite.config.ts'), 'utf-8')
         const registrations = [
           'registerAuthAndIntegrationRoutes(app)',
           'registerRealtimeRoutes(app)',
           'registerActionRoutes(app, resolveAuth)',
           'registerAiChatRoutes(app, resolveAuth)',
-          'registerDeepSpaceDocs(app, { resolveAuth })',
           'registerPlatformProxyRoutes(app)',
           'registerStaticRoutes(app)',
         ]
         const positions = registrations.map((registration) => worker.indexOf(registration))
         expect(positions.every((position) => position >= 0)).toBe(true)
         expect(positions).toEqual([...positions].sort((left, right) => left - right))
-        expect(vite).toContain("import { deepSpaceDocs } from 'deepspace/docs'")
-        expect(vite).toContain('deepSpaceDocs()')
 
         const httpRoutes = readFileSync(join(app, 'src/server/http-routes.ts'), 'utf-8')
         expect(httpRoutes.indexOf("app.all('/api/auth/sign-out'")).toBeLessThan(
@@ -124,14 +123,6 @@ describe('assembled templates', () => {
         )
         expect(httpRoutes).toContain("headers.delete('x-user-id')")
         expect(httpRoutes).toContain("headers.delete('x-app-identity-token')")
-
-        const agentRoute = readFileSync(join(app, 'src/ai/chat-routes.ts'), 'utf-8')
-        expect(agentRoute).toContain('streamDeepSpaceAgent')
-        expect(existsSync(join(app, 'src/ai/models.ts'))).toBe(false)
-
-        const wrangler = readFileSync(join(app, 'wrangler.toml'), 'utf-8')
-        expect(wrangler).not.toContain('"/mcp"')
-        expect(wrangler).not.toContain('"/.well-known/mcp*"')
       })
 
       it('has no dangling relative or @/ imports', () => {
@@ -267,35 +258,33 @@ describe('installable feature UI quality', () => {
   })
 })
 
-describe('copilot assembles from the canonical ai-chat feature', () => {
-  const assembled = makeAssembled('copilot')
-  const pairs: Array<[assembled: string, feature: string, overlay: string]> = [
+describe('copilot fork stays in sync with the ai-chat feature', () => {
+  const pairs: Array<[template: string, feature: string]> = [
     [
-      join(assembled, 'src', 'components', 'chat', 'ChatPanel.tsx'),
-      join(FEATURES_DIR, 'ai-chat', 'src', 'ChatPanel.tsx'),
       join(TEMPLATES_DIR, 'copilot', 'src', 'components', 'chat', 'ChatPanel.tsx'),
+      join(FEATURES_DIR, 'ai-chat', 'src', 'ChatPanel.tsx'),
     ],
     [
-      join(assembled, 'src', 'components', 'chat', 'ChatPanel.messages.tsx'),
-      join(FEATURES_DIR, 'ai-chat', 'src', 'ChatPanel.messages.tsx'),
       join(TEMPLATES_DIR, 'copilot', 'src', 'components', 'chat', 'ChatPanel.messages.tsx'),
+      join(FEATURES_DIR, 'ai-chat', 'src', 'ChatPanel.messages.tsx'),
     ],
     [
-      join(assembled, 'src', 'components', 'chat', 'ChatPanel.stream.ts'),
-      join(FEATURES_DIR, 'ai-chat', 'src', 'ChatPanel.stream.ts'),
       join(TEMPLATES_DIR, 'copilot', 'src', 'components', 'chat', 'ChatPanel.stream.ts'),
+      join(FEATURES_DIR, 'ai-chat', 'src', 'ChatPanel.stream.ts'),
     ],
     [
-      join(assembled, 'src', 'schemas', 'ai-chat-schema.ts'),
-      join(FEATURES_DIR, 'ai-chat', 'src', 'ai-chat-schema.ts'),
       join(TEMPLATES_DIR, 'copilot', 'src', 'schemas', 'ai-chat-schema.ts'),
+      join(FEATURES_DIR, 'ai-chat', 'src', 'ai-chat-schema.ts'),
     ],
   ]
 
-  for (const [assembledCopy, featureSource, overlayCopy] of pairs) {
-    it(`${assembledCopy.split('/').slice(-1)[0]} has one maintained source`, () => {
-      expect(existsSync(overlayCopy), 'the overlay must not maintain an agent copy').toBe(false)
-      expect(readFileSync(assembledCopy, 'utf-8')).toBe(readFileSync(featureSource, 'utf-8'))
+  for (const [templateCopy, featureSource] of pairs) {
+    it(`${templateCopy.split('/').slice(-1)[0]} matches its feature source`, () => {
+      expect(
+        readFileSync(templateCopy, 'utf-8'),
+        `template copy has drifted from the feature source — apply the change to ` +
+          `${featureSource} and re-copy it over ${templateCopy} (or vice versa)`,
+      ).toBe(readFileSync(featureSource, 'utf-8'))
     })
   }
 })

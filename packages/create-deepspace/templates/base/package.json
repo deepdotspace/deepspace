@@ -11,8 +11,6 @@
   "type": "module",
   "files": [
     "src/",
-    "docs/",
-    "docs.json",
     "worker.ts",
     "wrangler.toml",
     "index.html",

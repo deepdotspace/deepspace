@@ -3,8 +3,7 @@
  *
  * Scaffolds a new DeepSpace app from an embedded template, gives it a local
  * immutable identity, installs the agent skill, and starts dependency setup.
- * Maintained feature source remains canonical in the `deepspace` SDK; the
- * creator package carries a build-time snapshot for editable scaffolds.
+ * Features remain in the `deepspace` SDK package rather than copied source.
  */
 
 import { readFileSync } from 'node:fs'

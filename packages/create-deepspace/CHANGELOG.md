@@ -1,5 +1,12 @@
 # create-deepspace
 
+## 0.10.1
+
+### Patch Changes
+
+- Withdraw the agent-native documentation release while its CLI packaging and
+  workspace-token integration are rebuilt and verified end to end.
+
 ## 0.10.0
 
 ### Minor Changes

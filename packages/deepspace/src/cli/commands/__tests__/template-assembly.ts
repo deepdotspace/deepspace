@@ -6,7 +6,7 @@
  * metadata, never shipped). Kept in ONE helper so every test that needs a
  * "real" scaffolded app builds it the same way.
  */
-import { cpSync, mkdirSync, readdirSync } from 'node:fs'
+import { cpSync, readdirSync } from 'node:fs'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -31,17 +31,5 @@ export function assembleTemplate(overlay: string, destDir: string): void {
   for (const entry of readdirSync(overlayDir)) {
     if (entry === 'template.json') continue
     cpSync(join(overlayDir, entry), join(destDir, entry), { recursive: true })
-  }
-  if (overlay === 'copilot') {
-    for (const [source, destination] of [
-      ['ChatPanel.tsx', 'src/components/chat/ChatPanel.tsx'],
-      ['ChatPanel.messages.tsx', 'src/components/chat/ChatPanel.messages.tsx'],
-      ['ChatPanel.stream.ts', 'src/components/chat/ChatPanel.stream.ts'],
-      ['ai-chat-schema.ts', 'src/schemas/ai-chat-schema.ts'],
-    ] as const) {
-      const target = join(destDir, destination)
-      mkdirSync(dirname(target), { recursive: true })
-      cpSync(join(FEATURES_DIR, 'ai-chat', 'src', source), target)
-    }
   }
 }

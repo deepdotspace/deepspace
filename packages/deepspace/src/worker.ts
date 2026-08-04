@@ -8,8 +8,6 @@
 export * from './server/rooms'
 export * from './server/schemas'
 export * from './shared/protocol'
-export * from './shared/ai-models'
-export { isDocsResourcePath } from './shared/docs-routing'
 export * from './server/utils'
 export * from './server/auth'
 export { SYSTEM_COLLECTIONS } from './server/handlers/yjs'

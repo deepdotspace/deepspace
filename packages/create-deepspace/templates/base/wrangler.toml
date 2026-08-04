@@ -6,7 +6,7 @@ main = "worker.ts"
 [assets]
 directory = "dist"
 binding = "ASSETS"
-html_handling = "none"
+not_found_handling = "single-page-application"
 run_worker_first = ["/api/*", "/ws/*", "/internal/*", "/v1/*", "/_deepspace/*"]
 
 # The app's immutable identity (docs: app-identity). `name` above is just the
@@ -18,7 +18,7 @@ APP_NAME = "__APP_NAME__"
 
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["AppRecordRoom", "AppYjsRoom", "AppCanvasRoom", "AppPresenceRoom", "AppCronRoom", "AppJobRoom", "AppDocsAssistantLimiter"]
+new_sqlite_classes = ["AppRecordRoom", "AppYjsRoom", "AppCanvasRoom", "AppPresenceRoom", "AppCronRoom", "AppJobRoom"]
 
 [durable_objects]
 bindings = [
@@ -28,7 +28,6 @@ bindings = [
   { name = "PRESENCE_ROOMS", class_name = "AppPresenceRoom" },
   { name = "CRON_ROOMS", class_name = "AppCronRoom" },
   { name = "JOB_ROOMS", class_name = "AppJobRoom" },
-  { name = "DOCS_ASSISTANT_LIMITER", class_name = "AppDocsAssistantLimiter" },
 ]
 
 # For per-app resources (D1, KV, Vectorize, R2, Queues), set the id field to

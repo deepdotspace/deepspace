@@ -31,23 +31,6 @@ export default defineConfig([
     },
   },
   {
-    // The public docs primitives and compiler-only hydration/SSR entries share
-    // chunks so a custom docs.tsx never carries a second copy of the shell.
-    entry: {
-      'docs-client-core': 'src/docs/runtime/client.tsx',
-      'docs-react': 'src/docs/runtime/public.tsx',
-      'docs-server-core': 'src/docs/runtime/server.tsx',
-    },
-    format: ['esm'],
-    dts: true,
-    sourcemap: true,
-    external: ['react', 'react-dom', 'react-dom/client', 'react-dom/server', 'react/jsx-runtime'],
-    esbuildOptions(options) {
-      options.jsx = 'automatic'
-      options.alias = alias
-    },
-  },
-  {
     entry: { worker: 'src/worker.ts' },
     format: ['esm'],
     dts: true,
@@ -94,35 +77,6 @@ export default defineConfig([
     sourcemap: true,
     external: ['@playwright/test', /^node:.*/],
     esbuildOptions(options) {
-      options.alias = alias
-    },
-  },
-  {
-    // Node-side public docs compiler. Kept out of the browser/worker entries so
-    // filesystem and parser dependencies never enter customer runtime bundles.
-    entry: { docs: 'src/docs/index.ts' },
-    format: ['esm'],
-    dts: true,
-    sourcemap: true,
-    external: [/^node:.*/],
-    esbuildOptions(options) {
-      options.alias = alias
-    },
-  },
-  {
-    // Hydrates the server-rendered Orbit surface. This is deliberately a
-    // standalone IIFE so generated docs need no app framework or CDN runtime.
-    entry: { 'docs-runtime': 'src/docs/runtime/auto-client.tsx' },
-    format: ['iife'],
-    platform: 'browser',
-    dts: false,
-    minify: true,
-    sourcemap: false,
-    splitting: false,
-    outExtension: () => ({ js: '.js' }),
-    define: { 'process.env.NODE_ENV': '"production"' },
-    esbuildOptions(options) {
-      options.jsx = 'automatic'
       options.alias = alias
     },
   },

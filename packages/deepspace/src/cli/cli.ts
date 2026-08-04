@@ -56,7 +56,6 @@ import rollback from './commands/rollback'
 import workspace from './commands/workspace'
 import activity from './commands/activity'
 import gitCredential from './commands/git-credential'
-import docs from './commands/docs'
 import source from './commands/source'
 import migrate from './commands/migrate'
 
@@ -195,7 +194,6 @@ const main = defineCommand({
     add,
     secrets,
     integrations,
-    docs,
     auth,
     app,
     feedback,

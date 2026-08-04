@@ -23,10 +23,9 @@
  * Usage:
  *
  *   // Server-side autonomous — no auth config needed
- *   import { createDeepSpaceAI, DEEPSPACE_AI_DEFAULTS, getDeepSpaceAIModel } from 'deepspace/worker'
- *   const selected = getDeepSpaceAIModel(DEEPSPACE_AI_DEFAULTS.directGeneration)!
- *   const provider = createDeepSpaceAI(env, selected.provider)
- *   const result = await generateText({ model: provider(selected.id), ... })
+ *   import { createDeepSpaceAI } from 'deepspace/worker'
+ *   const cerebras = createDeepSpaceAI(env, 'cerebras')
+ *   const result = await generateText({ model: cerebras('llama-3.3-70b'), ... })
  *
  *   // User-initiated (inside a request handler)
  *   const jwt = c.req.header('Authorization')!.slice(7)
@@ -36,7 +35,6 @@
 import { createAnthropic } from '@ai-sdk/anthropic'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
-import type { DeepSpaceAIProvider } from '../../shared/ai-models'
 import { resolveApiTransport, type ApiWorkerEnv } from './proxies'
 import type { LanguageModel } from 'ai'
 
@@ -46,6 +44,8 @@ import type { LanguageModel } from 'ai'
  * paths into the published `dist/index.d.ts`.
  */
 export type DeepSpaceModelFactory = (modelId: string) => LanguageModel
+
+type Provider = 'anthropic' | 'openai' | 'cerebras'
 
 export interface DeepSpaceAIEnv extends ApiWorkerEnv {
   /**
@@ -101,7 +101,7 @@ function withDefaultAnthropicMaxTokens(body: RequestInit['body']): RequestInit['
  */
 export function createDeepSpaceAI(
   env: DeepSpaceAIEnv,
-  provider: DeepSpaceAIProvider,
+  provider: Provider,
   options: DeepSpaceAIOptions = {},
 ): DeepSpaceModelFactory {
   const transport = resolveApiTransport(env)

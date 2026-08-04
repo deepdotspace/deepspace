@@ -247,48 +247,13 @@ function copyTemplate(template: string, appDir: string): string[] {
   return preserved
 }
 
-export function assembleTemplate(name: string, destination: string): void {
+function assembleTemplate(name: string, destination: string): void {
   cpSync(BASE_TEMPLATE_DIR, destination, { recursive: true })
   const overlayDirectory = join(TEMPLATES_DIR, name)
   for (const entry of readdirSync(overlayDirectory)) {
     if (entry === 'template.json') continue
     cpSync(join(overlayDirectory, entry), join(destination, entry), { recursive: true })
   }
-  installCanonicalFeatureSources(name, destination)
-}
-
-const COPILOT_AI_CHAT_FILES = [
-  ['ChatPanel.tsx', 'src/components/chat/ChatPanel.tsx'],
-  ['ChatPanel.messages.tsx', 'src/components/chat/ChatPanel.messages.tsx'],
-  ['ChatPanel.stream.ts', 'src/components/chat/ChatPanel.stream.ts'],
-  ['ai-chat-schema.ts', 'src/schemas/ai-chat-schema.ts'],
-] as const
-
-/**
- * Templates stay copy-paste-ownable without maintaining a second agent UI.
- * The creator build snapshots the canonical SDK source into its own artifact,
- * then copies it into the assembled app only when that template needs it.
- */
-function installCanonicalFeatureSources(name: string, destination: string): void {
-  if (name !== 'copilot') return
-  const sourceDirectory = resolveDeepSpaceFeatureDirectory('ai-chat')
-  for (const [sourceName, destinationPath] of COPILOT_AI_CHAT_FILES) {
-    const target = join(destination, destinationPath)
-    mkdirSync(dirname(target), { recursive: true })
-    cpSync(join(sourceDirectory, 'src', sourceName), target)
-  }
-}
-
-export function resolveDeepSpaceFeatureDirectory(
-  feature: string,
-  sourceDirectory = SOURCE_DIR,
-): string {
-  const workspacePackage = resolve(sourceDirectory, '..', '..', 'deepspace')
-  const workspaceFeature = join(workspacePackage, 'features', feature)
-  if (existsSync(workspaceFeature)) return workspaceFeature
-  const bundledFeature = join(sourceDirectory, 'features', feature)
-  if (existsSync(bundledFeature)) return bundledFeature
-  throw new Error(`create-deepspace does not ship the canonical '${feature}' feature source`)
 }
 
 function configurePackageJson(
@@ -418,7 +383,6 @@ function writeGitignoreIfMissing(appDir: string): void {
     '.dev.vars',
     '.dev.vars.*',
     '.deepspace',
-    'public/_docs',
     '.worker-bundle.js',
     '*.tgz',
     'src/router.ts',
@@ -463,7 +427,6 @@ function replaceInDir(directory: string, search: string, replacement: string): v
     '.html',
     '.css',
     '.md',
-    '.mdx',
   ])
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name)

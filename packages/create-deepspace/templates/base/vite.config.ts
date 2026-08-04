@@ -4,11 +4,9 @@ import react from '@vitejs/plugin-react'
 import generouted from '@generouted/react-router/plugin'
 import { cloudflare } from '@cloudflare/vite-plugin'
 import checker from 'vite-plugin-checker'
-import { deepSpaceDocs } from 'deepspace/docs'
 
 export default defineConfig({
   plugins: [
-    deepSpaceDocs(),
     react(),
     generouted(),
     cloudflare(),
@@ -42,6 +40,5 @@ export default defineConfig({
     // ai, which import deepspace/worker — are not dragged into the client optimizer.
     // Dev-only; `vite build` ignores optimizeDeps.
     entries: ['./index.html', './src/pages/**/*.tsx'],
-    include: ['@generouted/react-router/lazy'],
   },
 })
