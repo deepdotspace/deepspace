@@ -1,7 +1,23 @@
-import { lstatSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  ftruncateSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  writeSync,
+} from 'node:fs'
 import { join } from 'node:path'
-import { repoToplevel } from './git/repository'
-import { gitLine, runGit, splitNulFields } from './git/process'
+import {
+  CANONICAL_APP_IDENTITY_MIGRATION_ID,
+  validateAppMigrationIds,
+} from '../../../shared/protocol/app-migrations'
+import { repoToplevel } from '../../lib/git/repository'
+import { gitLine, runGit, splitNulFields } from '../../lib/git/process'
+
+export const APP_MIGRATIONS_MANIFEST = 'deepspace.migrations.json'
 
 export interface AppMigrationDefinition {
   id: string
@@ -25,7 +41,7 @@ export interface AppMigrationPlan {
   changedFiles: string[]
   blockers: AppMigrationBlocker[]
   /** Internal content snapshot used to make plan/apply deterministic. */
-  edits: Array<{ path: string; before: string; after: string }>
+  edits: Array<{ path: string; before: string | null; after: string }>
 }
 
 interface SourceTransformResult {
@@ -38,15 +54,13 @@ interface SourceMigration extends AppMigrationDefinition {
   findBlockers(source: string, file: string): AppMigrationBlocker[]
 }
 
-const CANONICAL_IDENTITY_WIRE_ID = '2026-08-canonical-app-identity-wire'
-
 /**
  * Ordered migration registry. Future breaking releases add a structural,
  * idempotent step here; callers keep using `deepspace app migrate`.
  */
 const SOURCE_MIGRATIONS: readonly SourceMigration[] = [
   {
-    id: CANONICAL_IDENTITY_WIRE_ID,
+    id: CANONICAL_APP_IDENTITY_MIGRATION_ID,
     description: 'Use the immutable app id for authenticated platform requests',
     transform: migrateCanonicalIdentityWire,
     findBlockers: findLegacyIdentityWireBlockers,
@@ -57,10 +71,31 @@ export const APP_MIGRATION_DEFINITIONS: readonly AppMigrationDefinition[] = SOUR
   ({ id, description }) => ({ id, description }),
 )
 
+/** Read migration state without consulting Git, so ordinary GitHub deploy stays manual. */
+export function readAppliedAppMigrations(appDir: string): string[] {
+  const path = join(appDir, APP_MIGRATIONS_MANIFEST)
+  if (!existsSync(path)) return []
+  const source = readRegularFile(path)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(source)
+  } catch {
+    throw new Error(`${APP_MIGRATIONS_MANIFEST} must contain valid JSON`)
+  }
+  const validation = validateAppMigrationIds(parsed)
+  if (!validation.valid) {
+    throw new Error(`${APP_MIGRATIONS_MANIFEST}: ${validation.reason}`)
+  }
+  return validation.ids
+}
+
 /** Build an in-memory migration plan without changing the checkout. */
 export function planAppMigrations(appDir: string): AppMigrationPlan {
   const repo = repoToplevel(appDir)
   const appPrefix = gitLine(appDir, ['rev-parse', '--show-prefix'])
+  const appliedIds = readAppliedAppMigrations(appDir)
+  const applied = new Set(appliedIds)
+  const pendingMigrations = SOURCE_MIGRATIONS.filter((migration) => !applied.has(migration.id))
   const tracked = splitNulFields(runGit(repo, ['ls-files', '-z']).stdout)
   const perMigration = new Map<string, PlannedAppMigration>()
   const blockers: AppMigrationBlocker[] = []
@@ -77,9 +112,9 @@ export function planAppMigrations(appDir: string): AppMigrationPlan {
     }
     if (!stat.isFile() || stat.isSymbolicLink()) continue
 
-    const before = readFileSync(absolutePath, 'utf-8')
+    const before = readRegularFile(absolutePath)
     let after = before
-    for (const migration of SOURCE_MIGRATIONS) {
+    for (const migration of pendingMigrations) {
       const result = migration.transform(after)
       after = result.source
       if (result.replacements > 0) {
@@ -98,11 +133,23 @@ export function planAppMigrations(appDir: string): AppMigrationPlan {
     if (after !== before) edits.push({ path: repoPath, before, after })
   }
 
+  const pending = pendingMigrations.map((migration) => {
+    const planned = perMigration.get(migration.id)
+    return planned
+      ? { ...planned, files: [...new Set(planned.files)].sort() }
+      : { id: migration.id, description: migration.description, files: [], replacements: 0 }
+  })
+
+  if (pending.length > 0 && blockers.length === 0) {
+    const manifestPath = `${appPrefix}${APP_MIGRATIONS_MANIFEST}`
+    const absoluteManifestPath = join(repo, manifestPath)
+    const before = existsSync(absoluteManifestPath) ? readRegularFile(absoluteManifestPath) : null
+    const after = `${JSON.stringify([...appliedIds, ...pending.map(({ id }) => id)], null, 2)}\n`
+    if (before !== after) edits.push({ path: manifestPath, before, after })
+  }
+
   return {
-    pending: SOURCE_MIGRATIONS.flatMap((migration) => {
-      const planned = perMigration.get(migration.id)
-      return planned ? [{ ...planned, files: [...new Set(planned.files)].sort() }] : []
-    }),
+    pending,
     changedFiles: edits.map((edit) => edit.path).sort(),
     blockers,
     edits,
@@ -117,11 +164,64 @@ export function applyAppMigrationPlan(appDir: string, plan: AppMigrationPlan): v
   const repo = repoToplevel(appDir)
   for (const edit of plan.edits) {
     const absolutePath = join(repo, edit.path)
-    if (readFileSync(absolutePath, 'utf-8') !== edit.before) {
+    const current = existsSync(absolutePath) ? readRegularFile(absolutePath) : null
+    if (current !== edit.before) {
       throw new Error(`Migration input changed after planning: ${edit.path}`)
     }
   }
-  for (const edit of plan.edits) writeFileSync(join(repo, edit.path), edit.after)
+  for (const edit of plan.edits) writeRegularFile(join(repo, edit.path), edit.before, edit.after)
+}
+
+/** Read through a descriptor and prove the path still names that regular file. */
+function readRegularFile(path: string): string {
+  const before = lstatSync(path)
+  if (!before.isFile() || before.isSymbolicLink()) {
+    throw new Error(`Migration input must be a regular file, not a symlink: ${path}`)
+  }
+  const fd = openSync(path, constants.O_RDONLY)
+  try {
+    const opened = fstatSync(fd)
+    const after = lstatSync(path)
+    if (!opened.isFile() || opened.dev !== after.dev || opened.ino !== after.ino) {
+      throw new Error(`Migration input changed while opening: ${path}`)
+    }
+    return readFileSync(fd, 'utf-8')
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** Revalidate and write the same opened inode; new files use exclusive creation. */
+function writeRegularFile(path: string, before: string | null, after: string): void {
+  if (before === null) {
+    const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o644)
+    try {
+      writeSync(fd, after, 0, 'utf-8')
+    } finally {
+      closeSync(fd)
+    }
+    return
+  }
+
+  const pathStat = lstatSync(path)
+  if (!pathStat.isFile() || pathStat.isSymbolicLink()) {
+    throw new Error(`Migration input must be a regular file, not a symlink: ${path}`)
+  }
+  const fd = openSync(path, constants.O_RDWR)
+  try {
+    const opened = fstatSync(fd)
+    const currentPath = lstatSync(path)
+    if (!opened.isFile() || opened.dev !== currentPath.dev || opened.ino !== currentPath.ino) {
+      throw new Error(`Migration input changed while opening: ${path}`)
+    }
+    if (readFileSync(fd, 'utf-8') !== before) {
+      throw new Error(`Migration input changed after planning: ${path}`)
+    }
+    ftruncateSync(fd, 0)
+    writeSync(fd, after, 0, 'utf-8')
+  } finally {
+    closeSync(fd)
+  }
 }
 
 function isSourcePath(repoPath: string, appPrefix: string): boolean {
@@ -236,7 +336,7 @@ function findLegacyIdentityWireBlockers(source: string, file: string): AppMigrat
       continue
     }
     blockers.push({
-      migrationId: CANONICAL_IDENTITY_WIRE_ID,
+      migrationId: CANONICAL_APP_IDENTITY_MIGRATION_ID,
       file,
       line: index + 1,
       message:

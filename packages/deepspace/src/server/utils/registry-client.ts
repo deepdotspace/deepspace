@@ -20,9 +20,6 @@ export const REGISTRY_INSTANCE = 'v1:global'
 export const APP_ID_RE = /^app_[0-9A-HJKMNP-TV-Z]{26}$/
 export const STRICT_APP_ID_RE = APP_ID_RE
 
-/** Name-shaped ids are accepted only by `deepspace app migrate`. */
-export const LEGACY_APP_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
-
 /** Internal physical locators survive identity migration and are not public ids. */
 export const RESOURCE_ID_RE = /^(app_[0-9A-HJKMNP-TV-Z]{26}|[a-z0-9][a-z0-9_-]{0,63})$/
 

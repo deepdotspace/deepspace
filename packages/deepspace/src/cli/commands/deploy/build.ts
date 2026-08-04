@@ -7,6 +7,7 @@ import {
   validateBindingManifest,
   type CustomBindingManifest,
 } from '../../../server/rooms/binding-manifest'
+import { readAppliedAppMigrations } from '../migrate/app-migrations'
 import { removeMacosJunk } from '../../lib/macos-junk'
 import { formatSchemaLintFindings, lintProjectSchemas } from '../../lib/schema-lint'
 import type { Spinner } from '../../lib/spinner'
@@ -40,6 +41,7 @@ export interface DurableObjectManifestEntry {
 export interface DeployBundle {
   assets: DeployAsset[]
   workerJs: string
+  appMigrations: string[]
   doManifest: DurableObjectManifestEntry[] | undefined
   customBindings: CustomBindingManifest
   extraRoutes: string[]
@@ -170,10 +172,17 @@ export async function buildDeployBundle(options: {
   }
 
   const extraRoutes = extractRunWorkerFirst(wranglerConfig)
+  let appMigrations: string[] = []
+  try {
+    appMigrations = readAppliedAppMigrations(appDir)
+  } catch (error) {
+    output.die(errorMessage(error), 'invalid_migration_manifest')
+  }
 
   return {
     assets,
     workerJs,
+    appMigrations,
     doManifest,
     customBindings,
     extraRoutes,

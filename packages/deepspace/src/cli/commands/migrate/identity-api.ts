@@ -1,4 +1,4 @@
-import { apiFetch, ApiError } from './api'
+import { apiFetch, ApiError } from '../../lib/api'
 
 export type IdentityMigrationStatus = 'prepared' | 'committed' | 'verified' | 'rolled_back'
 
@@ -12,7 +12,6 @@ export interface IdentityMigration {
   status: IdentityMigrationStatus
   preparedAt: string
   committedAt: string | null
-  deployStartedAt: string | null
   verifiedAt: string | null
   rolledBackAt: string | null
   commitOid: string | null
@@ -160,7 +159,7 @@ export async function cancelIdentityMigration(
   )
 }
 
-export async function rollbackIdentityMigration(
+export async function verifyIdentityMigration(
   deployUrl: string,
   token: string,
   appId: string,
@@ -168,7 +167,7 @@ export async function rollbackIdentityMigration(
   const result = await apiFetch<{ migration: IdentityMigration }>(
     deployUrl,
     token,
-    `/api/apps/${encodeURIComponent(appId)}/identity-migration/rollback`,
+    `/api/apps/${encodeURIComponent(appId)}/identity-migration/verify`,
     { method: 'POST' },
   )
   return result.migration

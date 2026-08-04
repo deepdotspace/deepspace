@@ -92,6 +92,28 @@ describe('lintProjectSchemas', () => {
     expect(findings![0]).toContain('[notes] visibilityField is declared')
   })
 
+  it('does not flag a server-written owner field when ordinary clients cannot create rows', async () => {
+    const dir = makeAppDir(`
+      export const schemas = [
+        {
+          name: 'notifications',
+          columns: [
+            { name: 'recipientId', storage: 'text', immutable: true },
+            { name: 'body', storage: 'text' },
+          ],
+          ownerField: 'recipientId',
+          permissions: {
+            '*': { read: false, create: false, update: false, delete: false },
+            member: { read: 'own', create: false, update: 'own', delete: 'own' },
+            admin: { read: true, create: true, update: true, delete: true },
+            owner: { read: true, create: true, update: true, delete: true },
+          },
+        },
+      ]
+    `)
+    expect(await lintProjectSchemas(dir)).toEqual([])
+  })
+
   // Pin the shape a freshly scaffolded app actually has: schemas.ts
   // re-exports from sibling src/schemas/*.ts files, and one of those
   // value-imports from 'deepspace/worker' (resolved via the package's

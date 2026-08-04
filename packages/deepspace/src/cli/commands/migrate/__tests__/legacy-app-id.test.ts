@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readLegacyAppId } from '../app-identity'
+import { readLegacyAppId } from '../legacy-app-id'
 
 describe('readLegacyAppId', () => {
   function withConfig(source: string, run: (dir: string) => void): void {

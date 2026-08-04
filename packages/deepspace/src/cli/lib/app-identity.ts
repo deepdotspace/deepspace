@@ -22,7 +22,7 @@ import { InputError } from './cli-errors'
 
 // Single source: the shared registry client owns the id shape. Import-then-
 // re-export (not a bare `export from`) because line ~151 uses it locally too.
-import { APP_ID_RE, LEGACY_APP_ID_RE } from '../../server/utils/registry-client'
+import { APP_ID_RE } from '../../server/utils/registry-client'
 export { APP_ID_RE }
 
 const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
@@ -57,17 +57,17 @@ export function mintAppId(now = Date.now()): string {
   return `app_${mintUlid(now)}`
 }
 
-interface WranglerVars {
+export interface WranglerIdentityConfig {
   name?: unknown
   vars?: Record<string, unknown>
   env?: Record<string, { name?: unknown; vars?: Record<string, unknown> }>
 }
 
-function readWranglerConfig(cwd: string): WranglerVars | null {
+export function readWranglerIdentityConfig(cwd: string): WranglerIdentityConfig | null {
   const wranglerPath = join(resolve(cwd), 'wrangler.toml')
   if (!existsSync(wranglerPath)) return null
   try {
-    return parseToml(readFileSync(wranglerPath, 'utf-8')) as WranglerVars
+    return parseToml(readFileSync(wranglerPath, 'utf-8')) as WranglerIdentityConfig
   } catch (err) {
     throw new InputError(
       `Could not parse ${wranglerPath}: ${err instanceof Error ? err.message : String(err)}`,
@@ -79,54 +79,11 @@ function readWranglerConfig(cwd: string): WranglerVars | null {
 /** Read DEEPSPACE_APP_ID for the given wrangler env (top-level when omitted).
  *  Env blocks do NOT inherit the top-level id — each env is its own app. */
 export function readAppId(cwd: string = process.cwd(), wranglerEnv?: string): string | null {
-  const cfg = readWranglerConfig(cwd)
+  const cfg = readWranglerIdentityConfig(cwd)
   if (!cfg) return null
   const vars = wranglerEnv ? cfg.env?.[wranglerEnv]?.vars : cfg.vars
   const id = vars?.DEEPSPACE_APP_ID
   return typeof id === 'string' && APP_ID_RE.test(id) ? id : null
-}
-
-/**
- * Resolve a pre-app-id checkout. Old templates identified an app with both
- * the Worker `name` and `[vars].APP_NAME`; require those values to agree so a
- * migration never guesses which historical registry row to re-key.
- */
-export function readLegacyAppId(cwd: string = process.cwd(), wranglerEnv?: string): string | null {
-  const cfg = readWranglerConfig(cwd)
-  if (!cfg) return null
-  const slot = wranglerEnv ? cfg.env?.[wranglerEnv] : cfg
-  if (!slot) return null
-  const declaredId = slot.vars?.DEEPSPACE_APP_ID
-  if (declaredId !== undefined) {
-    if (typeof declaredId === 'string' && LEGACY_APP_ID_RE.test(declaredId)) return declaredId
-    throw new InputError(
-      'DEEPSPACE_APP_ID is present but invalid; correct it before migrating.',
-      'invalid_app_id',
-    )
-  }
-  const appName = typeof slot.vars?.APP_NAME === 'string' ? slot.vars.APP_NAME : null
-  const workerName = typeof slot.name === 'string' ? slot.name : null
-  // APP_NAME was the independent identity declaration in pre-id templates.
-  // A plain Worker config with only `name` is merely uninitialized, not proof
-  // that a legacy registry row exists.
-  if (!appName) return null
-  if (!workerName) {
-    throw new InputError(
-      'Legacy migration requires both Worker name and APP_NAME to be present and identical.',
-      'ambiguous_legacy_app_id',
-    )
-  }
-  if (appName !== workerName) {
-    throw new InputError(
-      `Legacy APP_NAME "${appName}" does not match Worker name "${workerName}"; migration cannot choose safely.`,
-      'ambiguous_legacy_app_id',
-    )
-  }
-  const legacyAppId = appName
-  if (!legacyAppId || !LEGACY_APP_ID_RE.test(legacyAppId) || APP_ID_RE.test(legacyAppId)) {
-    return null
-  }
-  return legacyAppId
 }
 
 /**

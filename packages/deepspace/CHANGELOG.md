@@ -1,5 +1,29 @@
 # deepspace
 
+## 0.9.2
+
+### Patch Changes
+
+- Restore traditional manual deployment for GitHub-authoritative apps: ordinary
+  deploys now ship the local working tree, including uncommitted changes, without
+  Git verification, commits, pushes, or recoverable commit lineage. Commit-first
+  sync and workspace lineage remain exclusive to DeepSpace source.
+
+  Track versioned app migrations in `deepspace.migrations.json` and carry that
+  manifest in normal deploy bundles and release metadata. Migration completion is
+  now independent of Git commit lineage, so the same `deepspace app migrate`
+  workflow works for manual GitHub deploys and packaged DeepSpace-source deploys.
+  Legacy identity orchestration now lives under the migration command/control
+  plane: prepared journals can be canceled, committed cutovers recover forward,
+  and ordinary deploy, rollback, ownership, source, and deployment-recording
+  paths carry no migration-specific state hooks.
+
+  Bind the bundled messaging schemas' owner fields to the authenticated caller,
+  and avoid false-positive owner-field warnings for collections ordinary clients
+  cannot create. New apps use Vitest 4 with a standalone unit-test configuration
+  so Vite's Cloudflare Worker plugin cannot leak into the Node test runner, and
+  include the current app-migration manifest.
+
 ## 0.9.1
 
 ### Patch Changes

@@ -3,7 +3,8 @@
  *
  * The cloud repo is the platform-native remote every DeepSpace app gets,
  * keyed by its immutable app id: collaborators pull/clone from it without
- * GitHub, and deploys link releases to its commits.
+ * GitHub, and DeepSpace-source deploys link releases to its commits. GitHub-
+ * source deploys retain their traditional local-working-tree behavior.
  * Local work stays plain `git` — this command only moves committed history,
  * and the transfer itself IS `git push` (the wrapper adds app resolution,
  * auth injection, and machine-readable output).

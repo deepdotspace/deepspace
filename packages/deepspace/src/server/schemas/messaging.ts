@@ -18,8 +18,18 @@ export const CHANNELS_SCHEMA: CollectionSchema = {
   columns: [
     { name: 'name', storage: 'text', interpretation: 'plain' },
     { name: 'description', storage: 'text', interpretation: 'plain' },
-    { name: 'type', storage: 'text', interpretation: { kind: 'select', options: ['public', 'private', 'dm'] } },
-    { name: 'createdBy', storage: 'text', interpretation: 'plain' },
+    {
+      name: 'type',
+      storage: 'text',
+      interpretation: { kind: 'select', options: ['public', 'private', 'dm'] },
+    },
+    {
+      name: 'createdBy',
+      storage: 'text',
+      interpretation: 'plain',
+      userBound: true,
+      immutable: true,
+    },
     { name: 'archived', storage: 'number', interpretation: { kind: 'boolean' } },
   ],
   ownerField: 'createdBy',
@@ -35,7 +45,13 @@ export const MESSAGES_SCHEMA: CollectionSchema = {
   columns: [
     { name: 'channelId', storage: 'text', interpretation: 'plain' },
     { name: 'content', storage: 'text', interpretation: 'plain' },
-    { name: 'authorId', storage: 'text', interpretation: 'plain' },
+    {
+      name: 'authorId',
+      storage: 'text',
+      interpretation: 'plain',
+      userBound: true,
+      immutable: true,
+    },
     { name: 'parentMessageId', storage: 'text', interpretation: 'plain' },
     { name: 'edited', storage: 'number', interpretation: { kind: 'boolean' } },
     { name: 'editedAt', storage: 'text', interpretation: { kind: 'datetime' } },
@@ -58,7 +74,7 @@ export const REACTIONS_SCHEMA: CollectionSchema = {
     { name: 'messageId', storage: 'text', interpretation: 'plain' },
     { name: 'channelId', storage: 'text', interpretation: 'plain' },
     { name: 'emoji', storage: 'text', interpretation: 'plain' },
-    { name: 'userId', storage: 'text', interpretation: 'plain' },
+    { name: 'userId', storage: 'text', interpretation: 'plain', userBound: true, immutable: true },
   ],
   ownerField: 'userId',
   uniqueOn: ['messageId', 'emoji', 'userId'],
@@ -73,7 +89,7 @@ export const CHANNEL_MEMBERS_SCHEMA: CollectionSchema = {
   name: 'channel-members',
   columns: [
     { name: 'channelId', storage: 'text', interpretation: 'plain' },
-    { name: 'userId', storage: 'text', interpretation: 'plain' },
+    { name: 'userId', storage: 'text', interpretation: 'plain', userBound: true, immutable: true },
     { name: 'joinedAt', storage: 'text', interpretation: { kind: 'datetime' } },
   ],
   ownerField: 'userId',
@@ -88,10 +104,33 @@ export const CHANNEL_MEMBERS_SCHEMA: CollectionSchema = {
 export const CHANNEL_INVITATIONS_SCHEMA: CollectionSchema = {
   name: 'channel-invitations',
   columns: [
-    { name: 'channelId', storage: 'text', interpretation: 'plain', required: true, immutable: true },
-    { name: 'invitedUserId', storage: 'text', interpretation: 'plain', required: true, immutable: true },
-    { name: 'invitedBy', storage: 'text', interpretation: 'plain', userBound: true, immutable: true },
-    { name: 'status', storage: 'text', interpretation: { kind: 'select', options: ['pending', 'accepted', 'declined'] }, required: true },
+    {
+      name: 'channelId',
+      storage: 'text',
+      interpretation: 'plain',
+      required: true,
+      immutable: true,
+    },
+    {
+      name: 'invitedUserId',
+      storage: 'text',
+      interpretation: 'plain',
+      required: true,
+      immutable: true,
+    },
+    {
+      name: 'invitedBy',
+      storage: 'text',
+      interpretation: 'plain',
+      userBound: true,
+      immutable: true,
+    },
+    {
+      name: 'status',
+      storage: 'text',
+      interpretation: { kind: 'select', options: ['pending', 'accepted', 'declined'] },
+      required: true,
+    },
   ],
   uniqueOn: ['channelId', 'invitedUserId'],
   permissions: {
@@ -105,7 +144,7 @@ export const READ_RECEIPTS_SCHEMA: CollectionSchema = {
   name: 'read-receipts',
   columns: [
     { name: 'channelId', storage: 'text', interpretation: 'plain' },
-    { name: 'userId', storage: 'text', interpretation: 'plain' },
+    { name: 'userId', storage: 'text', interpretation: 'plain', userBound: true, immutable: true },
     { name: 'lastReadAt', storage: 'text', interpretation: { kind: 'datetime' } },
   ],
   ownerField: 'userId',

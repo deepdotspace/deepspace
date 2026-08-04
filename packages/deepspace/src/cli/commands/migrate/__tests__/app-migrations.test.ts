@@ -1,15 +1,30 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { applyAppMigrationPlan, planAppMigrations } from '../app-migrations'
+import {
+  APP_MIGRATIONS_MANIFEST,
+  applyAppMigrationPlan,
+  planAppMigrations,
+  readAppliedAppMigrations,
+} from '../app-migrations'
 
 let repo: string | undefined
+let outside: string | undefined
 
 afterEach(() => {
   if (repo) rmSync(repo, { recursive: true, force: true })
+  if (outside) rmSync(outside, { recursive: true, force: true })
   repo = undefined
+  outside = undefined
 })
 
 function makeRepo(worker: string): string {
@@ -47,6 +62,7 @@ if (route.injectAppName) use(route)
         replacements: 5,
       }),
     ])
+    expect(plan.changedFiles).toEqual([APP_MIGRATIONS_MANIFEST, 'worker.ts'])
 
     applyAppMigrationPlan(dir, plan)
     const migrated = readFileSync(join(dir, 'worker.ts'), 'utf-8')
@@ -62,10 +78,11 @@ if (route.injectAppName) use(route)
       'Inject appId into the query string and reject caller-supplied appId',
     )
     expect(migrated).toContain('idFromName(`app:${env.APP_NAME}`)')
+    expect(readAppliedAppMigrations(dir)).toEqual(['2026-08-canonical-app-identity-wire'])
     expect(planAppMigrations(dir).pending).toEqual([])
   })
 
-  it('leaves current identity code and legacy-header sanitization untouched', () => {
+  it('records current identity code without rewriting it', () => {
     const dir = makeRepo(`interface Env {
   readonly DEEPSPACE_APP_ID?: string
   APP_NAME: string
@@ -74,8 +91,16 @@ headers.delete(  'x-app-name')
 headers.set('x-app-id', env.DEEPSPACE_APP_ID)
 `)
     const plan = planAppMigrations(dir)
-    expect(plan.pending).toEqual([])
+    expect(plan.pending).toEqual([
+      expect.objectContaining({
+        id: '2026-08-canonical-app-identity-wire',
+        files: [],
+        replacements: 0,
+      }),
+    ])
     expect(plan.blockers).toEqual([])
+    applyAppMigrationPlan(dir, plan)
+    expect(readAppliedAppMigrations(dir)).toEqual(['2026-08-canonical-app-identity-wire'])
   })
 
   it('blocks an unknown legacy wire form instead of guessing', () => {
@@ -86,7 +111,9 @@ headers.set(
 )
 `)
     const plan = planAppMigrations(dir)
-    expect(plan.pending).toEqual([])
+    expect(plan.pending).toEqual([
+      expect.objectContaining({ id: '2026-08-canonical-app-identity-wire' }),
+    ])
     expect(plan.blockers).toEqual([
       expect.objectContaining({
         migrationId: '2026-08-canonical-app-identity-wire',
@@ -99,5 +126,49 @@ headers.set(
         line: 3,
       }),
     ])
+  })
+
+  it('preserves migration ids written by a newer CLI', () => {
+    const dir = makeRepo(`headers.set('x-app-name', env.APP_NAME)\n`)
+    writeFileSync(join(dir, APP_MIGRATIONS_MANIFEST), '["2027-01-future"]\n')
+
+    const plan = planAppMigrations(dir)
+    applyAppMigrationPlan(dir, plan)
+
+    expect(readAppliedAppMigrations(dir)).toEqual([
+      '2027-01-future',
+      '2026-08-canonical-app-identity-wire',
+    ])
+  })
+
+  it('rejects a malformed migration manifest', () => {
+    const dir = makeRepo('export default {}\n')
+    writeFileSync(join(dir, APP_MIGRATIONS_MANIFEST), '{not json}\n')
+    expect(() => planAppMigrations(dir)).toThrow('must contain valid JSON')
+  })
+
+  it('rejects a tracked migration manifest symlink without reading its target', () => {
+    const dir = makeRepo('export default {}\n')
+    outside = realpathSync(mkdtempSync(join(tmpdir(), 'ds-app-migrations-outside-')))
+    const target = join(outside, 'external.json')
+    writeFileSync(target, '[]\n')
+    symlinkSync(target, join(dir, APP_MIGRATIONS_MANIFEST))
+    execFileSync('git', ['add', APP_MIGRATIONS_MANIFEST], { cwd: dir })
+
+    expect(() => planAppMigrations(dir)).toThrow('must be a regular file, not a symlink')
+    expect(readFileSync(target, 'utf-8')).toBe('[]\n')
+  })
+
+  it('does not follow a manifest symlink introduced after planning', () => {
+    const dir = makeRepo(`headers.set('x-app-name', env.APP_NAME)\n`)
+    const plan = planAppMigrations(dir)
+    outside = realpathSync(mkdtempSync(join(tmpdir(), 'ds-app-migrations-outside-')))
+    const target = join(outside, 'external.json')
+    writeFileSync(target, '[]\n')
+    symlinkSync(target, join(dir, APP_MIGRATIONS_MANIFEST))
+
+    expect(() => applyAppMigrationPlan(dir, plan)).toThrow('must be a regular file, not a symlink')
+    expect(readFileSync(target, 'utf-8')).toBe('[]\n')
+    expect(readFileSync(join(dir, 'worker.ts'), 'utf-8')).toContain("'x-app-name'")
   })
 })

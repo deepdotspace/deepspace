@@ -2,36 +2,38 @@
 
 import { ensureToken } from '../auth'
 import { findAppDir } from '../lib/app-context'
-import { mintAppId, readAppId, readLegacyAppId, writeAppId } from '../lib/app-identity'
+import { mintAppId, readAppId, writeAppId } from '../lib/app-identity'
 import {
   APP_MIGRATION_DEFINITIONS,
   applyAppMigrationPlan,
   planAppMigrations,
   type AppMigrationPlan,
-} from '../lib/app-migrations'
+} from './migrate/app-migrations'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import {
   assertSyncableRepo,
   currentBranch,
-  isAncestor,
   isWorkTreeClean,
   repoToplevel,
   resolveCommit,
 } from '../lib/git/repository'
 import { statusFiles } from '../lib/git/safety'
-import { gitLine, runGit, splitNulFields } from '../lib/git/process'
+import { gitLine, runGit } from '../lib/git/process'
 import {
   cancelIdentityMigration,
   commitIdentityMigration,
   getIdentityMigration,
   inspectIdentityMigration,
   prepareIdentityMigration,
-  rollbackIdentityMigration,
+  verifyIdentityMigration,
   type IdentityMigration,
-} from '../lib/identity-migration-api'
+} from './migrate/identity-api'
+import { readLegacyAppId } from './migrate/legacy-app-id'
 import { repoApi } from '../lib/repo-api'
 import { selectGitHubRemote, remoteBranchOid, type GitHubRemote } from '../lib/source-control'
+import { getAppSource } from '../lib/source-api'
 import { deployBaseUrl } from '../lib/vc-remote'
+import { validateAppMigrationIds } from '../../shared/protocol/app-migrations'
 
 const STRICT_APP_ID_RE = /^app_[0-9A-HJKMNP-TV-Z]{26}$/
 
@@ -62,21 +64,12 @@ export default defineDeepspaceCommand({
       description: 'Cancel a prepared migration after restoring and publishing the legacy id',
       default: false,
     },
-    rollback: {
-      type: 'boolean',
-      description: 'Roll back a committed migration before any canonical deploy starts',
-      default: false,
-    },
   },
   async run({ args }) {
-    const recoveryMode =
-      args.cancel === true ? 'cancel' : args.rollback === true ? 'rollback' : null
-    const exclusiveModes = [args['dry-run'], args.cancel, args.rollback].filter(Boolean).length
+    const recoveryMode = args.cancel === true ? 'cancel' : null
+    const exclusiveModes = [args['dry-run'], args.cancel].filter(Boolean).length
     if (exclusiveModes > 1) {
-      throw new Refusal(
-        'Use only one of --dry-run, --cancel, or --rollback.',
-        'conflicting_migration_mode',
-      )
+      throw new Refusal('Use only one of --dry-run or --cancel.', 'conflicting_migration_mode')
     }
     const appDir = findAppDir()
     if (!appDir) {
@@ -142,12 +135,18 @@ export default defineDeepspaceCommand({
           applyAppMigrationPlan(appDir, sourcePlan)
           throw sourceMigrationCommitRequired(appDir, sourcePlan)
         }
-        await requireSourceMigrationDeploy(appDir, currentAppId, deployUrl, token)
+        await requireSourceMigrationDeploy(appDir, currentAppId, deployUrl, token, {
+          envName,
+          remoteName: typeof args.remote === 'string' ? args.remote : undefined,
+        })
         reportUpToDate(currentAppId, args.json)
         return { data: { status: 'up_to_date', appId: currentAppId } }
       }
       if (sourcePlan.pending.length === 0 && existingMigration.status === 'verified') {
-        await requireSourceMigrationDeploy(appDir, currentAppId, deployUrl, token)
+        await requireSourceMigrationDeploy(appDir, currentAppId, deployUrl, token, {
+          envName,
+          remoteName: typeof args.remote === 'string' ? args.remote : undefined,
+        })
       }
       if (args['dry-run']) {
         reportMigration(existingMigration, args.json)
@@ -260,7 +259,7 @@ export default defineDeepspaceCommand({
 })
 
 async function recoverMigration(input: {
-  mode: 'cancel' | 'rollback'
+  mode: 'cancel'
   appDir: string
   envName?: string
   remoteName?: string
@@ -270,16 +269,8 @@ async function recoverMigration(input: {
   migration: IdentityMigration
   json: boolean
 }) {
-  const { mode, appDir, envName, remoteName, currentAppId, token, deployUrl, migration, json } =
-    input
+  const { appDir, envName, remoteName, currentAppId, token, deployUrl, migration, json } = input
 
-  if (migration.status === 'verified' || migration.deployStartedAt) {
-    throw new Refusal(
-      'A canonical deployment has started. Registry rollback is no longer safe; use the forward-recovery procedure to repair or redeploy the canonical app.',
-      'forward_recovery_required',
-      { extra: { migration } },
-    )
-  }
   if (migration.status === 'rolled_back') {
     if (currentAppId !== migration.legacyAppId) {
       writeAppId(appDir, migration.legacyAppId, { wranglerEnv: envName, force: true })
@@ -288,17 +279,10 @@ async function recoverMigration(input: {
     reportMigration(migration, json)
     return { data: { status: 'rolled_back', migration } }
   }
-  if (mode === 'cancel' && migration.status !== 'prepared') {
+  if (migration.status !== 'prepared') {
     throw new Refusal(
-      'This migration is committed. Use --rollback before any canonical deploy starts.',
-      'migration_rollback_required',
-      { extra: { migration } },
-    )
-  }
-  if (mode === 'rollback' && migration.status !== 'committed') {
-    throw new Refusal(
-      'This migration is only prepared. Use --cancel instead.',
-      'migration_cancel_required',
+      'This migration is already committed. Complete it by deploying the canonical app.',
+      'forward_recovery_required',
       { extra: { migration } },
     )
   }
@@ -313,15 +297,9 @@ async function recoverMigration(input: {
   const remote = requireGitHubRemote(appDir, remoteName, migration.repository)
   requirePublishedHead(appDir, remote)
 
-  if (mode === 'cancel') {
-    await cancelIdentityMigration(deployUrl, token, migration.legacyAppId)
-    if (!json) console.log(`Canceled ${migration.legacyAppId} → ${migration.appId}.`)
-    return { data: { status: 'cancelled', legacyAppId: migration.legacyAppId } }
-  }
-
-  const rolledBack = await rollbackIdentityMigration(deployUrl, token, migration.appId)
-  reportMigration(rolledBack, json)
-  return { data: { status: 'rolled_back', migration: rolledBack } }
+  await cancelIdentityMigration(deployUrl, token, migration.legacyAppId)
+  if (!json) console.log(`Canceled ${migration.legacyAppId} → ${migration.appId}.`)
+  return { data: { status: 'cancelled', legacyAppId: migration.legacyAppId } }
 }
 
 async function continuePreparedMigration(input: {
@@ -345,7 +323,14 @@ async function continuePreparedMigration(input: {
     return { data: { status: 'verified', migration } }
   }
   if (migration.status === 'committed') {
-    throw deployRequired(appDir, migration, envName)
+    await requireSourceMigrationDeploy(appDir, migration.appId, deployUrl, token, {
+      envName,
+      remoteName,
+      after: migration.committedAt ?? undefined,
+    })
+    const verified = await verifyIdentityMigration(deployUrl, token, migration.appId)
+    reportMigration(verified, json)
+    return { data: { status: 'verified', migration: verified } }
   }
 
   if (!isWorkTreeClean(appDir)) {
@@ -476,8 +461,6 @@ function sourceMigrationCommitRequired(appDir: string, plan: AppMigrationPlan): 
           '--only',
           '--message',
           'Apply DeepSpace app migrations',
-          '--message',
-          `DeepSpace-Migrations: ${migrationIds.join(',')}`,
           '--',
           ...plan.changedFiles,
         ],
@@ -492,71 +475,48 @@ async function requireSourceMigrationDeploy(
   appId: string,
   deployUrl: string,
   token: string,
+  options: { envName?: string; remoteName?: string; after?: string } = {},
 ): Promise<void> {
-  if (!isWorkTreeClean(appDir)) {
-    throw new Refusal(
-      'Commit or discard local changes before checking app migration deployment state.',
-      'dirty_worktree',
-    )
-  }
-  const head = resolveCommit(appDir, 'HEAD')
-  if (!head) return
-  const repo = repoToplevel(appDir)
-  const knownIds = new Set(APP_MIGRATION_DEFINITIONS.map((migration) => migration.id))
-  const migrationCommits = splitNulFields(
-    runGit(repo, [
-      'log',
-      '--format=%H%x00',
-      '--extended-regexp',
-      '--grep',
-      `^DeepSpace-Migrations:.*(${[...knownIds].join('|')})`,
-    ]).stdout,
-  )
-    .map((oid) => oid.trim())
-    .filter((oid) => /^[0-9a-f]{40}$/.test(oid))
-  if (migrationCommits.length === 0) return
-
   const { release } = await repoApi(deployUrl, token, appId).latestRelease()
-  if (release?.commitOid === head) return
-
-  const liveCommit = release?.commitOid ?? null
-  if (
-    liveCommit &&
-    (resolveCommit(appDir, liveCommit) === null || !isAncestor(appDir, liveCommit, head))
-  ) {
-    throw new Refusal(
-      `The live release commit ${liveCommit.slice(0, 10)} is not an ancestor of this checkout, so migration deployment state cannot be proven. Fetch and integrate the live source history first.`,
-      'migration_lineage_unknown',
-      { extra: { appId, liveCommitOid: liveCommit, commitOid: head } },
-    )
-  }
-  const undeployedMigrationCommits = migrationCommits.filter(
-    (oid) => !liveCommit || (oid !== liveCommit && isAncestor(appDir, liveCommit, oid)),
+  const deployedIds = releaseMigrationIds(release?.config)
+  const pendingIds = APP_MIGRATION_DEFINITIONS.map(({ id }) => id).filter(
+    (id) => !deployedIds.has(id),
   )
-  const pendingIds = [
-    ...new Set(
-      undeployedMigrationCommits.flatMap((oid) => {
-        const message = runGit(repo, ['show', '-s', '--format=%B', oid]).stdout.toString('utf-8')
-        return [...message.matchAll(/^DeepSpace-Migrations:\s*(.+)$/gm)].flatMap((match) =>
-          (match[1] ?? '')
-            .split(',')
-            .map((id) => id.trim())
-            .filter((id) => knownIds.has(id)),
-        )
-      }),
-    ),
-  ]
-  if (pendingIds.length === 0) return
+  const releaseAfterCutover =
+    options.after === undefined ||
+    (typeof release?.createdAt === 'string' &&
+      Number.isFinite(Date.parse(release.createdAt)) &&
+      Date.parse(release.createdAt) > Date.parse(options.after))
+  if (pendingIds.length === 0 && releaseAfterCutover) return
+
+  const sourceState = await getAppSource(deployUrl, token, appId)
+  if (sourceState.source?.provider === 'github') {
+    const remote = requireGitHubRemote(appDir, options.remoteName, sourceState.source.repository)
+    requirePublishedHead(appDir, remote)
+  }
 
   throw new Refusal(
-    `App migrations ${pendingIds.join(', ')} are committed but are not in the live release. Deploy them, then rerun.`,
+    pendingIds.length > 0
+      ? `App migrations ${pendingIds.join(', ')} are not in the live release. Deploy them, then rerun.`
+      : 'The canonical app has not been deployed since its identity cutover. Deploy it, then rerun.',
     'migration_deploy_required',
     {
       actionRequired: true,
-      action: { cwd: appDir, argv: ['deepspace', 'deploy'] },
-      extra: { appId, sourceMigrations: pendingIds, commitOid: head },
+      action: {
+        cwd: appDir,
+        argv: ['deepspace', 'deploy', ...(options.envName ? ['--env', options.envName] : [])],
+      },
+      extra: { appId, sourceMigrations: pendingIds, after: options.after ?? null },
     },
   )
+}
+
+function releaseMigrationIds(config: unknown): Set<string> {
+  if (config === null || typeof config !== 'object' || Array.isArray(config)) return new Set()
+  const validation = validateAppMigrationIds(
+    (config as { appMigrations?: unknown }).appMigrations ?? [],
+  )
+  return new Set(validation.valid ? validation.ids : [])
 }
 
 function requireSourceMigrationWorktree(appDir: string, allowDirtyWrangler = false): void {

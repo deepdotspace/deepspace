@@ -97,7 +97,7 @@ export function classifyPushTransportFailure(error: unknown): PushTransportFailu
     return {
       code: 'source_managed_by_github',
       error:
-        'This app uses GitHub source. Push with normal Git/GitHub, then run `deepspace deploy`.',
+        'This app uses GitHub source. Manage commits with normal Git/GitHub; `deepspace deploy` ships the local working tree without changing Git.',
     }
   }
   if (/(?:HTTP |error: )429\b/i.test(message)) {

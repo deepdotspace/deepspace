@@ -6,13 +6,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import migrate from '../migrate'
 import * as authModule from '../../auth'
 import * as appContext from '../../lib/app-context'
-import * as migrationApi from '../../lib/identity-migration-api'
+import * as migrationApi from '../migrate/identity-api'
 import * as repoApiModule from '../../lib/repo-api'
 import * as sourceControl from '../../lib/source-control'
+import * as sourceApi from '../../lib/source-api'
 
 const LEGACY_ID = 'deepdotspace-site'
 const APP_ID = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
 const REPOSITORY = 'deepdotspace/deepdotspace-site'
+const SOURCE_MIGRATION_ID = '2026-08-canonical-app-identity-wire'
 let repo: string | undefined
 
 afterEach(() => {
@@ -29,6 +31,10 @@ function makeRepo(appId = LEGACY_ID): { dir: string; oid: string } {
   writeFileSync(
     join(dir, 'wrangler.toml'),
     `name = "deepdotspace-site"\n\n[vars]\nDEEPSPACE_APP_ID = "${appId}"\n`,
+  )
+  writeFileSync(
+    join(dir, 'deepspace.migrations.json'),
+    `${JSON.stringify([SOURCE_MIGRATION_ID])}\n`,
   )
   execFileSync('git', ['add', '-A'], { cwd: dir })
   execFileSync('git', ['commit', '-q', '-m', 'source'], { cwd: dir })
@@ -47,7 +53,6 @@ function migration(status: migrationApi.IdentityMigration['status'] = 'prepared'
     status,
     preparedAt: '2026-08-03T00:00:00.000Z',
     committedAt: status === 'prepared' ? null : '2026-08-03T00:01:00.000Z',
-    deployStartedAt: status === 'verified' ? '2026-08-03T00:01:30.000Z' : null,
     verifiedAt: status === 'verified' ? '2026-08-03T00:02:00.000Z' : null,
     rolledBackAt: status === 'rolled_back' ? '2026-08-03T00:02:00.000Z' : null,
     commitOid: status === 'prepared' ? null : 'a'.repeat(40),
@@ -136,6 +141,21 @@ function arrangeRepo(dir: string, oid: string): void {
     url: `git@github.com:${REPOSITORY}.git`,
   })
   vi.spyOn(sourceControl, 'remoteBranchOid').mockReturnValue(oid)
+  vi.spyOn(sourceApi, 'getAppSource').mockResolvedValue({
+    appId: APP_ID,
+    source: { provider: 'github', repository: REPOSITORY },
+    revision: 1,
+    registered: true,
+  })
+  vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
+    latestRelease: vi.fn().mockResolvedValue({
+      release: {
+        commitOid: null,
+        createdAt: '2099-08-03T00:02:00.000Z',
+        config: { appMigrations: [SOURCE_MIGRATION_ID] },
+      },
+    }),
+  } as never)
 }
 
 describe('legacy app identity migration workflow', () => {
@@ -201,7 +221,8 @@ describe('legacy app identity migration workflow', () => {
       join(repo, 'worker.ts'),
       `interface Env {\n  APP_NAME: string\n}\nheaders.set('x-app-name', env.APP_NAME)\n`,
     )
-    execFileSync('git', ['add', 'worker.ts'], { cwd: repo })
+    writeFileSync(join(repo, 'deepspace.migrations.json'), '[]\n')
+    execFileSync('git', ['add', 'worker.ts', 'deepspace.migrations.json'], { cwd: repo })
     execFileSync('git', ['commit', '-q', '-m', 'legacy worker'], { cwd: repo })
     const oid = execFileSync('git', ['rev-parse', 'HEAD'], {
       cwd: repo,
@@ -293,7 +314,8 @@ describe('legacy app identity migration workflow', () => {
       join(repo, 'worker.ts'),
       `interface Env {\n  APP_NAME: string\n}\nconst room = \`app:\${env.APP_NAME}\`\nheaders.set('x-app-name', env.APP_NAME)\n`,
     )
-    execFileSync('git', ['add', 'worker.ts'], { cwd: repo })
+    writeFileSync(join(repo, 'deepspace.migrations.json'), '[]\n')
+    execFileSync('git', ['add', 'worker.ts', 'deepspace.migrations.json'], { cwd: repo })
     execFileSync('git', ['commit', '-q', '-m', 'legacy worker'], { cwd: repo })
     const oid = execFileSync('git', ['rev-parse', 'HEAD'], {
       cwd: repo,
@@ -456,60 +478,61 @@ describe('legacy app identity migration workflow', () => {
     expect(exits).toEqual([0])
   })
 
-  it('stages rollback by restoring the legacy id before touching committed registry state', async () => {
+  it('keeps a committed migration forward-only when cancellation is requested', async () => {
     const made = makeRepo(APP_ID)
     repo = made.dir
     arrangeRepo(repo, made.oid)
     vi.spyOn(migrationApi, 'getIdentityMigration').mockResolvedValue(migration('committed'))
-    const rollback = vi.spyOn(migrationApi, 'rollbackIdentityMigration')
+    const cancel = vi.spyOn(migrationApi, 'cancelIdentityMigration')
 
-    const { output, exits } = await runMigrateJson({ rollback: true })
+    const { output, exits } = await runMigrateJson({ cancel: true })
 
-    expect(output).toMatchObject({ ok: false, code: 'migration_restore_commit_required' })
-    expect(readFileSync(join(repo, 'wrangler.toml'), 'utf-8')).toContain(
-      `DEEPSPACE_APP_ID = "${LEGACY_ID}"`,
-    )
-    expect(rollback).not.toHaveBeenCalled()
-    expect(exits).toEqual([2])
+    expect(output).toMatchObject({ ok: false, code: 'forward_recovery_required' })
+    expect(cancel).not.toHaveBeenCalled()
+    expect(exits).toEqual([1])
   })
 
-  it('rolls committed registry state back only after GitHub has the restored legacy config', async () => {
-    const made = makeRepo()
+  it('verifies a committed migration after its migration manifest is live', async () => {
+    const made = makeRepo(APP_ID)
     repo = made.dir
     arrangeRepo(repo, made.oid)
-    const committed = migration('committed')
-    vi.spyOn(migrationApi, 'getIdentityMigration').mockResolvedValue(committed)
-    const rollback = vi
-      .spyOn(migrationApi, 'rollbackIdentityMigration')
-      .mockResolvedValue(migration('rolled_back'))
+    vi.spyOn(migrationApi, 'getIdentityMigration').mockResolvedValue(migration('committed'))
+    const verify = vi
+      .spyOn(migrationApi, 'verifyIdentityMigration')
+      .mockResolvedValue(migration('verified'))
 
-    const { output, exits } = await runMigrateJson({ rollback: true })
+    const { output, exits } = await runMigrateJson()
 
-    expect(rollback).toHaveBeenCalledWith(expect.any(String), 'token', APP_ID)
+    expect(verify).toHaveBeenCalledWith(expect.any(String), 'token', APP_ID)
     expect(output).toMatchObject({
       ok: true,
-      status: 'rolled_back',
-      migration: { legacyAppId: LEGACY_ID, appId: APP_ID, status: 'rolled_back' },
+      status: 'verified',
+      migration: { legacyAppId: LEGACY_ID, appId: APP_ID, status: 'verified' },
     })
     expect(exits).toEqual([0])
   })
 
-  it('refuses simple rollback after any canonical deploy intent was recorded', async () => {
+  it('does not verify from a migration manifest deployed before the identity cutover', async () => {
     const made = makeRepo(APP_ID)
     repo = made.dir
-    vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
-    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
-    vi.spyOn(migrationApi, 'getIdentityMigration').mockResolvedValue({
-      ...migration('committed'),
-      deployStartedAt: '2026-08-03T00:01:30.000Z',
-    })
-    const rollback = vi.spyOn(migrationApi, 'rollbackIdentityMigration')
+    arrangeRepo(repo, made.oid)
+    vi.spyOn(migrationApi, 'getIdentityMigration').mockResolvedValue(migration('committed'))
+    vi.mocked(repoApiModule.repoApi).mockReturnValue({
+      latestRelease: vi.fn().mockResolvedValue({
+        release: {
+          commitOid: null,
+          createdAt: '2026-08-03T00:00:30.000Z',
+          config: { appMigrations: [SOURCE_MIGRATION_ID] },
+        },
+      }),
+    } as never)
+    const verify = vi.spyOn(migrationApi, 'verifyIdentityMigration')
 
-    const { output, exits } = await runMigrateJson({ rollback: true })
+    const { output, exits } = await runMigrateJson()
 
-    expect(output).toMatchObject({ ok: false, code: 'forward_recovery_required' })
-    expect(rollback).not.toHaveBeenCalled()
-    expect(exits).toEqual([1])
+    expect(output).toMatchObject({ ok: false, code: 'migration_deploy_required' })
+    expect(verify).not.toHaveBeenCalled()
+    expect(exits).toEqual([2])
   })
 
   it('reopens a rolled-back migration with the same reserved identity', async () => {
@@ -539,8 +562,7 @@ describe('legacy app identity migration workflow', () => {
   it('reports modern apps without creating a migration', async () => {
     const made = makeRepo(APP_ID)
     repo = made.dir
-    vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
-    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    arrangeRepo(repo, made.oid)
     vi.spyOn(migrationApi, 'getIdentityMigration').mockResolvedValue(null)
 
     const { output, exits } = await runMigrateJson()
@@ -555,7 +577,8 @@ describe('legacy app identity migration workflow', () => {
       join(repo, 'worker.ts'),
       `interface Env {\n  APP_NAME: string\n}\nheaders.set('x-app-name', env.APP_NAME)\n`,
     )
-    execFileSync('git', ['add', 'worker.ts'], { cwd: repo })
+    writeFileSync(join(repo, 'deepspace.migrations.json'), '[]\n')
+    execFileSync('git', ['add', 'worker.ts', 'deepspace.migrations.json'], { cwd: repo })
     execFileSync('git', ['commit', '-q', '-m', 'legacy worker'], { cwd: repo })
     const oid = execFileSync('git', ['rev-parse', 'HEAD'], {
       cwd: repo,
@@ -576,9 +599,8 @@ describe('legacy app identity migration workflow', () => {
           '--only',
           '--message',
           'Apply DeepSpace app migrations',
-          '--message',
-          'DeepSpace-Migrations: 2026-08-canonical-app-identity-wire',
           '--',
+          'deepspace.migrations.json',
           'worker.ts',
         ],
       },
@@ -587,10 +609,13 @@ describe('legacy app identity migration workflow', () => {
     expect(readFileSync(join(repo, 'worker.ts'), 'utf-8')).toContain(
       "headers.set('x-app-id', env.DEEPSPACE_APP_ID)",
     )
+    expect(JSON.parse(readFileSync(join(repo, 'deepspace.migrations.json'), 'utf-8'))).toEqual([
+      SOURCE_MIGRATION_ID,
+    ])
     expect(exits).toEqual([2])
   })
 
-  it('requires deploy while a committed source migration is newer than the live release', async () => {
+  it('requires deploy while the live release lacks an applied source migration', async () => {
     const made = makeRepo(APP_ID)
     repo = made.dir
     writeFileSync(
@@ -598,28 +623,16 @@ describe('legacy app identity migration workflow', () => {
       `interface Env {\n  APP_NAME: string\n  DEEPSPACE_APP_ID: string\n}\nheaders.set('x-app-id', env.DEEPSPACE_APP_ID)\n`,
     )
     execFileSync('git', ['add', 'worker.ts'], { cwd: repo })
-    execFileSync(
-      'git',
-      [
-        'commit',
-        '-q',
-        '-m',
-        'Apply DeepSpace app migrations',
-        '-m',
-        'DeepSpace-Migrations: 2026-08-canonical-app-identity-wire',
-      ],
-      { cwd: repo },
-    )
+    execFileSync('git', ['commit', '-q', '-m', 'current worker'], { cwd: repo })
     const head = execFileSync('git', ['rev-parse', 'HEAD'], {
       cwd: repo,
       encoding: 'utf-8',
     }).trim()
-    vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
-    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    arrangeRepo(repo, head)
     vi.spyOn(migrationApi, 'getIdentityMigration').mockResolvedValue(null)
-    vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
+    vi.mocked(repoApiModule.repoApi).mockReturnValue({
       latestRelease: vi.fn().mockResolvedValue({
-        release: { commitOid: made.oid },
+        release: { commitOid: null, config: { appMigrations: [] } },
       }),
     } as never)
 
@@ -631,8 +644,7 @@ describe('legacy app identity migration workflow', () => {
       actionRequired: true,
       action: { cwd: repo, argv: ['deepspace', 'deploy'] },
       appId: APP_ID,
-      sourceMigrations: ['2026-08-canonical-app-identity-wire'],
-      commitOid: head,
+      sourceMigrations: [SOURCE_MIGRATION_ID],
     })
     expect(exits).toEqual([2])
   })

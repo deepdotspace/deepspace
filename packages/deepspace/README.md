@@ -132,20 +132,22 @@ legacy GitHub app whose `DEEPSPACE_APP_ID` is still name-shaped, it also lists
 the exact registry rows that will be re-keyed and the physical stores that
 remain at the existing resource id. The command applies only transformations
 it recognizes safely, pauses for normal commit/push, and finishes with one
-deploy. Source migration commits carry a machine-readable Git trailer, so the
-next run can compare them with the live release and return the deploy action
-without a local state file. Rerun after each returned action; when nothing is
-pending it reports `up_to_date`. This is the same workflow for GitHub and
-DeepSpace source; only their normal push behavior differs. `APP_NAME`-based
+deploy. Applied steps live in the checked-in `deepspace.migrations.json`
+manifest. Normal deploy bundles record that manifest in the release, so the
+next run can determine whether the migration is live without depending on Git
+commit lineage. Rerun after each returned action; when nothing is pending it
+reports `up_to_date`. This is the same workflow for GitHub and DeepSpace
+source; only their normal push behavior differs. `APP_NAME`-based
 legacy room and storage addresses are retained; canonical `DEEPSPACE_APP_ID`
 is used only for logical identity and platform authentication.
 
 Keep deploy, release rollback, and undeploy idle from the mutating command until
 that returned deploy begins; normal app traffic continues throughout.
-Before that deploy starts, `--cancel` reverses a prepared migration and
-`--rollback` reverses a committed migration; both require the restored legacy
-configuration to be committed and pushed first. DeepSpace never writes the
-GitHub repository.
+Before the registry cutover commits, `--cancel` reverses a prepared migration
+after the restored legacy configuration is committed and pushed. After the
+cutover, recovery is deliberately forward-only: deploy the canonical app and
+rerun `deepspace app migrate` to verify the live release. DeepSpace never
+writes the GitHub repository.
 
 ## Debugging
 

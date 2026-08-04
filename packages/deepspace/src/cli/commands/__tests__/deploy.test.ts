@@ -1,5 +1,9 @@
 /** Deploy CLI decision and request helpers, imported from their owning modules. */
 
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { blankSelectorRefusal, staleBaseGuardFields } from '../deploy'
 import { packAssetGroups, postWithRetry } from '../deploy/request'
@@ -10,8 +14,10 @@ import {
   detachedHeadRefusal,
   pushWithTransientRetry,
   shouldSendLineage,
+  syncDeployRepository,
   workspaceDeployLineage,
 } from '../deploy/repository'
+import type { DeployOutput } from '../deploy/output'
 import type { PushRefResult } from '../../lib/vc-push'
 import { GitError } from '../../lib/git/process'
 
@@ -388,7 +394,7 @@ describe('workspace deploy lineage', () => {
   })
 })
 
-describe('dirtyWorktreeRefusal (deploy is commit-first)', () => {
+describe('dirtyWorktreeRefusal (DeepSpace source deploy is commit-first)', () => {
   it('refuses with the stable code and names BOTH escapes (commit, or --no-push)', () => {
     const r = dirtyWorktreeRefusal('main')
     expect(r.code).toBe('dirty_worktree')
@@ -406,6 +412,67 @@ describe('dirtyWorktreeRefusal (deploy is commit-first)', () => {
   it('off a workspace branch, suggests creating one for work in progress', () => {
     expect(dirtyWorktreeRefusal('main').error).toContain('deepspace workspace new')
     expect(dirtyWorktreeRefusal(null).error).toContain('deepspace workspace new')
+  })
+})
+
+describe('manual GitHub deploy', () => {
+  it('deploys a dirty GitHub working tree without GitHub verification or release lineage', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ds-deploy-no-push-github-'))
+    try {
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo })
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo })
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo })
+      writeFileSync(join(repo, 'app.txt'), 'committed\n')
+      execFileSync('git', ['add', 'app.txt'], { cwd: repo })
+      execFileSync('git', ['commit', '-q', '-m', 'source'], { cwd: repo })
+      const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: repo,
+        encoding: 'utf-8',
+      }).trim()
+      writeFileSync(join(repo, 'app.txt'), 'local manual deploy\n')
+
+      const output: DeployOutput = {
+        json: true,
+        nonInteractive: true,
+        emitJson: vi.fn(),
+        showIntro: vi.fn(),
+        die(message, code): never {
+          throw new Error(`${code}: ${message}`)
+        },
+      }
+      const result = await syncDeployRepository({
+        deployUrl: 'https://deploy.test',
+        appDir: repo,
+        appId: 'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
+        token: 'test-token',
+        push: true,
+        ignoreStale: false,
+        output,
+        sourceState: {
+          appId: 'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
+          source: { provider: 'github', repository: 'deepdotspace/example' },
+          revision: 3,
+          registered: true,
+        },
+      })
+
+      expect(result).toMatchObject({
+        commitOid: null,
+        recoverable: false,
+        source: { provider: 'github', repository: 'deepdotspace/example' },
+        sourceRevision: 3,
+        baseReleaseId: null,
+      })
+      expect(shouldSendLineage(result.commitOid, result.recoverable)).toBe(false)
+      expect(
+        execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf-8' }).trim(),
+      ).toBe(head)
+      expect(execFileSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf-8' })).toBe(
+        ' M app.txt\n',
+      )
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
   })
 })
 

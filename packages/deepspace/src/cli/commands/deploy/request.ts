@@ -136,6 +136,7 @@ export async function deployBuiltBundle(options: {
     )
     form.append('uploadId', uploadId)
     form.append('totalGroups', String(totalGroups))
+    form.append('appMigrations', JSON.stringify(bundle.appMigrations))
     if (bundle.doManifest) form.append('doManifest', JSON.stringify(bundle.doManifest))
     if (bundle.customBindings.length) {
       form.append('bindingManifest', JSON.stringify(bundle.customBindings))

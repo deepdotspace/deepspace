@@ -421,14 +421,22 @@ export function lintSchema(schema: CollectionSchema): string[] {
     }
   }
 
-  // ownerField declared but the named column isn't userBound — easy to
-  // create a row claiming someone else's ownership.
+  // An ordinary client role that can create rows must not be able to claim
+  // someone else's ownership. Server-written collections legitimately carry
+  // a recipient/subject id instead: their non-privileged roles all have
+  // create:false, while owner/admin writes are already fully trusted.
   if (schema.ownerField) {
     const col = schema.columns.find((c) => c.name === schema.ownerField)
-    if (col && !col.userBound) {
+    const spoofableRoles = Object.entries(schema.permissions)
+      .filter(
+        ([role, permissions]) =>
+          role !== 'owner' && role !== 'admin' && permissions.create === true,
+      )
+      .map(([role]) => role)
+    if (col && !col.userBound && spoofableRoles.length > 0) {
       warnings.push(
         `[${schema.name}] ownerField is '${schema.ownerField}' but that column is not marked userBound: true. ` +
-          `A client can create a row with someone else's id in this field, bypassing 'own' permission checks. ` +
+          `Client role(s) ${spoofableRoles.join(', ')} can create a row with someone else's id in this field, bypassing 'own' permission checks. ` +
           `Add userBound: true (and ideally immutable: true) to the column.`,
       )
     }

@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { decodeJwtPayload } from '../jwt'
-import { mintAppId, readAppId, readLegacyAppId, writeAppId } from '../lib/app-identity'
+import { mintAppId, readAppId, writeAppId } from '../lib/app-identity'
 import { ensureInstallReady } from '../lib/install-status'
 import type { CliAction } from '../lib/output'
 import { preflightNodeVersion } from '../lib/preflight'
@@ -24,6 +24,7 @@ import { deployBuiltBundle } from './deploy/request'
 import { syncDeployRepository } from './deploy/repository'
 import { getAppSource } from '../lib/source-api'
 import { loadDeploySecrets, prepareDeploySecrets } from './deploy/secrets'
+import { legacyDeployRefusal } from './migrate/legacy-app-id'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
@@ -62,8 +63,8 @@ export default defineCommand({
     push: {
       type: 'boolean',
       description:
-        'Sync DeepSpace source before deploying. The legacy --no-push escape hatch skips ' +
-        'recoverable source lineage; GitHub apps are verified and never pushed automatically.',
+        'Sync DeepSpace source before deploying. GitHub source always deploys the local ' +
+        'working tree without Git operations; --no-push opts DeepSpace source out of sync.',
       default: true,
     },
     'ignore-stale': {
@@ -119,13 +120,8 @@ export default defineCommand({
     const appName = nameResult.name
     let appId = readAppId(appDir, envName)
     if (!appId) {
-      const legacyAppId = readLegacyAppId(appDir, envName)
-      if (legacyAppId) {
-        output.die(
-          `This checkout still uses legacy app identity ${legacyAppId}. Run \`deepspace app migrate --dry-run\`, then complete \`deepspace app migrate\` before deploying.`,
-          'legacy_app_migration_required',
-        )
-      }
+      const refusal = legacyDeployRefusal(appDir, envName)
+      if (refusal) output.die(refusal.error, refusal.code)
     }
     p.log.info(envName ? `App: ${appName}  (env: ${envName})` : `App: ${appName}`)
 
