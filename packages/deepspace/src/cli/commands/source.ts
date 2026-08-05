@@ -29,9 +29,10 @@ import {
   gitSourceImportEnv,
   runGitRemote,
   SPACE_REMOTE,
+  spacePrivateRef,
 } from '../lib/vc-remote'
 
-const TRANSFER_PREFIX = 'refs/deepspace/source-transfer'
+const TRANSFER_PREFIX = spacePrivateRef('source-transfer')
 
 export default defineDeepspaceCommand({
   meta: {

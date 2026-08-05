@@ -5,7 +5,12 @@ import { runGit } from '../../lib/git/process'
 import { isPlausibleBranchName, isWorkTreeClean, resolveCommit } from '../../lib/git/repository'
 import { committedSecretRefusal } from '../../lib/git/safety'
 import { pushToSpace } from '../../lib/vc-push'
-import { ensureSpaceRemote, runGitRemote, SPACE_REMOTE } from '../../lib/vc-remote'
+import {
+  ensureSpaceRemote,
+  runGitRemote,
+  SPACE_REMOTE,
+  spaceTrackingRef,
+} from '../../lib/vc-remote'
 import { resolveValidationCommand, runValidationCommand } from '../../lib/validation'
 import { createSpinner } from '../../lib/spinner'
 import { humanCommand } from '../../lib/cli-format'
@@ -151,7 +156,7 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
       )
     }
     const intoRef = `refs/heads/${intoBranch}`
-    const remoteRef = `refs/remotes/space/${intoBranch}`
+    const remoteRef = spaceTrackingRef(intoBranch)
     runGitRemote(appDir, token, ['fetch', '--quiet', SPACE_REMOTE, `+${intoRef}:${remoteRef}`], {
       allowFail: true,
     })

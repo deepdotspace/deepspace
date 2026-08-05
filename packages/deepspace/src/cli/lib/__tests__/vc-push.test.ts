@@ -131,6 +131,13 @@ describe('pushToSpace against real repositories', () => {
     expect(result.status).toBe('rejected')
     expect(result.reason).toContain('pre-receive hook declined')
   })
+
+  it('can push through an isolated staging remote', () => {
+    runGit(repo, ['remote', 'add', 'space-staging', bare])
+    expect(pushToSpace(repo, 'tok', 'refs/heads/main:refs/heads/main', {
+      remote: 'space-staging',
+    }).status).toBe('committed')
+  })
 })
 
 describe('push rejection decisions', () => {

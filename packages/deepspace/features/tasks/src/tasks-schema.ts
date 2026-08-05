@@ -8,7 +8,7 @@
  * - Admin-only grading workflow
  */
 
-import type { CollectionSchema } from 'deepspace/worker'
+import type { CollectionSchema } from 'deepspace/schema'
 
 export const challengesSchema: CollectionSchema = {
   name: 'challenges',

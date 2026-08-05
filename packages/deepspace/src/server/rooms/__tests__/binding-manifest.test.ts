@@ -20,6 +20,12 @@ describe('validateBindingManifest', () => {
       { type: 'vectorize', name: 'VECTORS', index_name: 'unison-candidates' },
       { type: 'r2_bucket', name: 'FILES', bucket_name: 'unison-search-files' },
       { type: 'browser_rendering', name: 'BROWSER' },
+      {
+        type: 'ratelimit',
+        name: 'PUBLIC_LIMITER',
+        namespace_id: '2001',
+        simple: { limit: 12, period: 60 },
+      },
     ])
     expect(r.valid).toBe(true)
   })
@@ -109,6 +115,7 @@ describe('validateBindingManifest', () => {
         'API_WORKER',
         'DEEPSPACE_APP_ID',
         'DEEPSPACE_RESOURCE_ID',
+        'DEEPSPACE_RELEASE_OPERATION_ID',
         'APP_NAME',
         'OWNER_USER_ID',
         'AUTH_JWT_PUBLIC_KEY',
@@ -160,6 +167,36 @@ describe('bindingManifestFromOutputConfig', () => {
       { type: 'analytics_engine', name: 'EVENTS', dataset: 'd' },
       { type: 'hyperdrive', name: 'PG', id: 'hd-id' },
     ])
+  })
+
+  it('extracts Wrangler rate-limit bindings', () => {
+    expect(
+      bindingManifestFromOutputConfig({
+        ratelimits: [
+          {
+            name: 'PUBLIC_LIMITER',
+            namespace_id: '2001',
+            simple: { limit: 12, period: 60 },
+          },
+        ],
+      }),
+    ).toEqual([
+      {
+        type: 'ratelimit',
+        name: 'PUBLIC_LIMITER',
+        namespace_id: '2001',
+        simple: { limit: 12, period: 60 },
+      },
+    ])
+  })
+
+  it('rejects malformed rate-limit configurations', () => {
+    for (const binding of [
+      { type: 'ratelimit', name: 'R', namespace_id: 'nope', simple: { limit: 12, period: 60 } },
+      { type: 'ratelimit', name: 'R', namespace_id: '2001', simple: { limit: 0, period: 60 } },
+      { type: 'ratelimit', name: 'R', namespace_id: '2001', simple: { limit: 12, period: 30 } },
+    ])
+      expect(validateBindingManifest([binding]).valid).toBe(false)
   })
 
   it('analytics_engine: dataset is optional', () => {

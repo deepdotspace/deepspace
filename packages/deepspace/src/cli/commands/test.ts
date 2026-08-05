@@ -47,6 +47,7 @@ import {
   type PreparedWranglerEnvConfig,
 } from '../lib/wrangler-env'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
+import { syncTestAccountStore } from '../lib/test-account-service'
 // Same refusal text `dev` uses — one source so the two can't drift.
 import { noAppDirMessage } from './dev'
 
@@ -145,6 +146,15 @@ export default defineDeepspaceCommand({
       generatedSecretsCache,
       sharedDevVarsCache,
     })
+
+    if (suite !== 'unit') {
+      try {
+        const { removed } = await syncTestAccountStore()
+        if (removed > 0) say(`Removed ${removed} stale test account credential(s).`)
+      } catch (error) {
+        say(`Warning: could not reconcile test accounts: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
 
     if (suite !== 'unit') {
       preflightWindowsWorkerd(appDir)

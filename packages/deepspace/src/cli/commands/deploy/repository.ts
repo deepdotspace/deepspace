@@ -10,7 +10,7 @@ import {
 import { trackedSecretFiles } from '../../lib/git/safety'
 import { mintIdempotencyKey, repoApi, type RemoteWorkspace } from '../../lib/repo-api'
 import { classifyPushTransportFailure, pushToSpace, type PushRefResult } from '../../lib/vc-push'
-import { ensureSpaceRemote, runGitRemote, SPACE_REMOTE } from '../../lib/vc-remote'
+import { ensureSpaceRemote, runGitRemote, spaceRemoteName } from '../../lib/vc-remote'
 import { workspaceIdFromBranch } from '../../lib/workspace-id'
 import { errorCode } from '../../lib/cli-errors'
 import { listGitHubRemotes } from '../../lib/source-control'
@@ -69,7 +69,8 @@ export async function syncDeployRepository(options: {
         'source_unclaimed',
       )
     }
-    ensureSpaceRemote(appDir, appId)
+    const sourceRemote = spaceRemoteName()
+    ensureSpaceRemote(appDir, appId, sourceRemote)
     const branch = currentBranch(appDir)
     const workspaceBranchId = workspaceIdFromBranch(branch)
 
@@ -119,7 +120,9 @@ export async function syncDeployRepository(options: {
       )
     } else {
       const pushResult = await pushWithTransientRetry(() =>
-        pushToSpace(appDir, token, `refs/heads/${branch}:refs/heads/${branch}`),
+        pushToSpace(appDir, token, `refs/heads/${branch}:refs/heads/${branch}`, {
+          remote: sourceRemote,
+        }),
       )
       if (pushResult.status === 'committed' || pushResult.status === 'up_to_date') {
         recoverable = true
@@ -132,7 +135,7 @@ export async function syncDeployRepository(options: {
           'vc_push_rejected',
         )
       } else {
-        const remoteState = classifyRemoteState(appDir, token, branch, tip)
+        const remoteState = classifyRemoteState(appDir, token, branch, tip, sourceRemote)
         if (remoteState.strictlyBehind && !ignoreStale) {
           let behind = 'several'
           try {
@@ -189,16 +192,18 @@ function classifyRemoteState(
   token: string,
   branch: string,
   localTip: string,
+  remote: string,
 ): { remoteTip: string | null; strictlyBehind: boolean } {
   let remoteTip: string | null = null
+  const remoteRef = `refs/remotes/${remote}/${branch}`
   try {
     runGitRemote(appDir, token, [
       'fetch',
       '--quiet',
-      SPACE_REMOTE,
-      `+refs/heads/${branch}:refs/remotes/space/${branch}`,
+      remote,
+      `+refs/heads/${branch}:${remoteRef}`,
     ])
-    remoteTip = resolveCommit(appDir, `refs/remotes/space/${branch}`)
+    remoteTip = resolveCommit(appDir, remoteRef)
     return {
       remoteTip,
       strictlyBehind:

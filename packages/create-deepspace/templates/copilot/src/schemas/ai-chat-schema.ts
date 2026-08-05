@@ -5,7 +5,6 @@
  * Spread into the app's schemas array: ...aiChatSchemas
  */
 
-import type { CollectionSchema } from 'deepspace/worker'
-import { AI_CHATS_SCHEMA, AI_MESSAGES_SCHEMA } from 'deepspace/worker'
+import { AI_CHATS_SCHEMA, AI_MESSAGES_SCHEMA, type CollectionSchema } from 'deepspace/schema'
 
 export const aiChatSchemas: CollectionSchema[] = [AI_CHATS_SCHEMA, AI_MESSAGES_SCHEMA]

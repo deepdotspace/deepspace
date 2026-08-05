@@ -2,8 +2,8 @@
  * Test Items Schema — exercises RBAC and CRUD for e2e testing.
  */
 
-import type { CollectionSchema } from 'deepspace/worker'
-import { ROLE_ANONYMOUS } from 'deepspace/worker'
+import { ROLE_ANONYMOUS } from 'deepspace'
+import type { CollectionSchema } from 'deepspace/schema'
 
 export const testItemsSchema: CollectionSchema = {
   name: 'test-items',

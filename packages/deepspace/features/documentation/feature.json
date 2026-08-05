@@ -1,0 +1,68 @@
+{
+  "id": "documentation",
+  "name": "Documentation",
+  "category": "publishing",
+  "description": "Publish Markdown and MDX documentation with search, API references, and an AI assistant",
+  "details": "Adds public documentation at /docs to this app's normal development and deployment lifecycle. Markdown is the default; MDX and an optional root documentation.tsx can import arbitrary app code without a plugin layer.",
+  "files": [
+    {
+      "src": "documentation.json",
+      "dest": "documentation.json"
+    },
+    {
+      "src": "content/index.mdx",
+      "dest": "documentation/index.mdx"
+    },
+    {
+      "src": "content/quickstart.mdx",
+      "dest": "documentation/quickstart.mdx"
+    }
+  ],
+  "ignore": ["public/_documentation", "public/_documentation-root"],
+  "wrangler": {
+    "runWorkerFirst": true,
+    "rateLimits": [
+      {
+        "name": "DOCUMENTATION_CLIENT_RATE_LIMITER",
+        "namespaceId": "2001",
+        "limit": 12,
+        "period": 60
+      },
+      {
+        "name": "DOCUMENTATION_APP_RATE_LIMITER",
+        "namespaceId": "2002",
+        "limit": 120,
+        "period": 60
+      }
+    ]
+  },
+  "code": [
+    {
+      "file": "vite.config.ts",
+      "import": "import { deepSpaceDocumentation } from 'deepspace/documentation'",
+      "marker": "  plugins: [",
+      "insert": "    deepSpaceDocumentation(),"
+    },
+    {
+      "file": "worker.ts",
+      "import": "import documentationConfig from './documentation.json'\nimport { registerDeepSpaceDocumentation } from 'deepspace/worker'",
+      "marker": "registerPlatformProxyRoutes(app)",
+      "placement": "before",
+      "insert": "registerDeepSpaceDocumentation(app, { resolveAuth, config: documentationConfig })"
+    }
+  ],
+  "instructions": [
+    "Edit documentation.json to set your name, navigation, branding, assistant access, and optional custom documentation domains.",
+    "Write Markdown or MDX in documentation/. Add a root documentation.tsx only when you want to wrap or replace the default React surface."
+  ],
+  "patterns": [
+    "The feature is served at /docs on the app's existing hostname.",
+    "A hostname listed in documentation.json domains serves the same release at that hostname's root after you explicitly attach it to the app.",
+    "Documentation builds only when documentation.json exists; apps without this feature are unaffected.",
+    "MDX may import app components directly. documentation.tsx is the single optional shell customization point."
+  ],
+  "agentNotes": [
+    "Treat documentation.json, documentation/**/*.md, documentation/**/*.mdx, and optional documentation.tsx as one app-owned documentation feature.",
+    "Use ordinary deepspace dev start and deepspace deploy commands; there is no separate documentation command namespace."
+  ]
+}

@@ -8,7 +8,13 @@ import { defineDeepspaceCommand, Refusal } from '../../lib/command'
 import { runGit } from '../../lib/git/process'
 import { resolveCommit, switchToNewBranch } from '../../lib/git/repository'
 import { isWorkspaceId, workspaceBranchName } from '../../lib/workspace-id'
-import { deployBaseUrl, ensureSpaceRemote, runGitRemote, SPACE_REMOTE } from '../../lib/vc-remote'
+import {
+  deployBaseUrl,
+  ensureSpaceRemote,
+  runGitRemote,
+  SPACE_REMOTE,
+  spacePrivateRef,
+} from '../../lib/vc-remote'
 import { repoApi, type RemoteWorkspaceView } from '../../lib/repo-api'
 import { createSpinner } from '../../lib/spinner'
 import { errorCode } from '../../lib/cli-errors'
@@ -102,11 +108,12 @@ export const attachWorkspaceCommand = defineDeepspaceCommand({
         })
       }
       ensureSpaceRemote(appDir, appId)
+      const localWorkspaceRef = spacePrivateRef(`workspaces/${id}`)
       runGitRemote(appDir, token, [
         'fetch',
         '--quiet',
         SPACE_REMOTE,
-        `+${view.workspace.ref}:${view.workspace.ref}`,
+        `+${view.workspace.ref}:${localWorkspaceRef}`,
       ])
       const tip = view.tipOid ?? view.workspace.baseOid
       if (!resolveCommit(appDir, tip)) {
@@ -184,11 +191,12 @@ export const attachWorkspaceCommand = defineDeepspaceCommand({
     try {
       runGit(process.cwd(), ['init', '--quiet', dir])
       ensureSpaceRemote(dir, appId)
+      const localWorkspaceRef = spacePrivateRef(`workspaces/${id}`)
       runGitRemote(dir, token, [
         'fetch',
         '--quiet',
         SPACE_REMOTE,
-        `+${view.workspace.ref}:${view.workspace.ref}`,
+        `+${view.workspace.ref}:${localWorkspaceRef}`,
       ])
       tip = view.tipOid ?? view.workspace.baseOid
       if (!resolveCommit(dir, tip)) {

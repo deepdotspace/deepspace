@@ -24,9 +24,7 @@ import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { apiFetch, ApiError } from '../lib/api'
 import { InputError } from '../lib/cli-errors'
-import { findAppDir } from '../lib/app-context'
-import { resolveAppTarget } from '../lib/app-target'
-import { readAppId } from '../lib/app-identity'
+import { resolveAppTarget, assertAppTargetResolvable } from '../lib/app-target'
 // Whitelisted wire DTO + level set — shared with the platform reader and the
 // dashboard (packages/deepspace/src/shared/log-events.ts) so they can't drift.
 import { LOG_LEVELS, type AppLogEvent, type AppLogsResponse } from '../../shared/log-events'
@@ -239,34 +237,10 @@ export default defineCommand({
     },
   },
   async run({ args }) {
+    const envArg = args.env as string | undefined
+    assertAppTargetResolvable(args.app, { wranglerEnv: envArg })
     const token = await ensureToken()
-
-    const wranglerEnv = args.env?.trim() || undefined
-    // --app and --env are two different ways to name the target. Combining them
-    // is ambiguous — and previously --env was silently ignored when --app was
-    // also passed — so fail fast rather than tail the wrong app.
-    if (args.app && wranglerEnv) {
-      throw new InputError(
-        'Pass either --app or --env, not both — --env reads the [env.<name>] block’s own app id, --app names an app directly.',
-        'ambiguous_target',
-      )
-    }
-    let appId: string
-    if (!args.app && wranglerEnv) {
-      // `--env <name>` targets the [env.<name>] block's own app id (a staging
-      // deploy is its own app) — same convention as `secrets --env`.
-      const appDir = findAppDir()
-      const id = appDir ? readAppId(appDir, wranglerEnv) : null
-      if (!id) {
-        throw new InputError(
-          `No app id for env "${wranglerEnv}" — wrangler.toml has no [env.${wranglerEnv}] block with its own DEEPSPACE_APP_ID.`,
-          'no_app_id_for_env',
-        )
-      }
-      appId = id
-    } else {
-      appId = await resolveAppTarget(DEPLOY_URL, token, args.app)
-    }
+    const appId = await resolveAppTarget(DEPLOY_URL, token, args.app, { wranglerEnv: envArg })
 
     if (args.level && !(LOG_LEVELS as readonly string[]).includes(args.level)) {
       throw new InputError(`Invalid --level "${args.level}". Use: ${LOG_LEVELS.join(', ')}`, 'invalid_level')

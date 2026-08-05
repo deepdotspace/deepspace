@@ -15,7 +15,7 @@
 import * as p from '@clack/prompts'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
-import { resolveAppTarget, assertAppTargetResolvable } from '../lib/app-target'
+import { resolveAppTarget, assertAppTargetResolvable, parseWranglerEnvArg } from '../lib/app-target'
 import { apiFetch, ApiError } from '../lib/api'
 import { mintIdempotencyKey, repoApi } from '../lib/repo-api'
 import { createSpinner } from '../lib/spinner'
@@ -72,6 +72,12 @@ export default defineDeepspaceCommand({
       description: 'App id or subdomain name (default: the surrounding app directory)',
       required: false,
     },
+    env: {
+      type: 'string',
+      alias: 'e',
+      description: "wrangler.toml [env.<name>] slot — selects that environment's app id",
+      required: false,
+    },
     'allow-do-deletion': {
       type: 'boolean',
       description:
@@ -82,6 +88,7 @@ export default defineDeepspaceCommand({
   },
   async run({ args }) {
     const appArg = args.app as string | undefined
+    const envArg = args.env as string | undefined
     // An explicitly-blank release id must not silently auto-pick the previous
     // release (a mutating op) — an unset `rollback "$VAR"` would roll back to an
     // unintended target. Absent (no positional) still auto-picks by design.
@@ -99,11 +106,12 @@ export default defineDeepspaceCommand({
     }
     // Blank --app / missing app context is a client-side error — reject it
     // BEFORE the token read so it never surfaces as not_authenticated.
-    assertAppTargetResolvable(appArg)
+    assertAppTargetResolvable(appArg, { wranglerEnv: envArg })
+    const { wranglerEnv } = parseWranglerEnvArg(envArg)
     const spinner = args.json ? null : createSpinner()
     spinner?.start('Preparing rollback…')
     const token = await ensureToken()
-    const appId = await resolveAppTarget(DEPLOY_URL, token, appArg)
+    const appId = await resolveAppTarget(DEPLOY_URL, token, appArg, { wranglerEnv: envArg })
     const api = repoApi(DEPLOY_URL, token, appId)
 
     let releaseId = args.release ? String(args.release).trim() : ''
@@ -189,6 +197,7 @@ export default defineDeepspaceCommand({
         bundleRetained: result.bundleRetained ?? null,
         url: result.url ?? null,
         versionId: result.versionId ?? null,
+        wranglerEnv: wranglerEnv ?? null,
         ...(doClassGuard ? { doClassGuard } : {}),
       },
     }

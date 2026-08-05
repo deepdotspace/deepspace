@@ -8,7 +8,13 @@
 export * from './server/rooms'
 export * from './server/schemas'
 export * from './shared/protocol'
+export * from './shared/ai-models'
 export * from './server/utils'
+export {
+  registerDeepSpaceDocumentation,
+  type DeepSpaceDocumentationRouteEnv,
+  type DeepSpaceDocumentationRouteOptions,
+} from './documentation/worker/routes'
 export * from './server/auth'
 export { SYSTEM_COLLECTIONS } from './server/handlers/yjs'
 // Client-error ingestion (opt-in): the Worker route registrar + its handler,

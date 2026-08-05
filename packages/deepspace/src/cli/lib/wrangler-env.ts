@@ -77,6 +77,7 @@ const NON_INHERITABLE_ENV_KEYS = new Set([
   'r2_buckets',
   'ai_search_namespaces',
   'ai_search',
+  'ratelimits',
   'vectorize',
   'services',
   'queues',
@@ -231,6 +232,16 @@ function flattenWranglerEnvConfig(config: TomlRecord, envName: string): TomlReco
   }
   for (const [key, value] of Object.entries(envBlock)) {
     flattened[key] = value
+  }
+  // Durable Object declarations contain class bindings, not shared resource ids.
+  // A named worker gets its own namespaces, so preserving the declarations is
+  // both safe and required for SDK features to work outside the default env.
+  if (!('durable_objects' in envBlock) && config.durable_objects) {
+    flattened.durable_objects = config.durable_objects
+  }
+  const envVars = asTomlRecord(envBlock.vars) ?? {}
+  if (!('APP_NAME' in envVars) && typeof envBlock.name === 'string') {
+    flattened.vars = { ...envVars, APP_NAME: envBlock.name }
   }
   return flattened
 }

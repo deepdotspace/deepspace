@@ -2,6 +2,8 @@ import * as p from '@clack/prompts'
 import { execSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { readDocumentationDeployManifest } from '../../../documentation/deploy'
+import { DEEPSPACE_ENV } from '../../env'
 import {
   bindingManifestFromOutputConfig,
   validateBindingManifest,
@@ -15,7 +17,6 @@ import {
   prepareWranglerEnvConfig,
   wranglerViteEnv,
   type PreparedWranglerEnvConfig,
-  type WranglerConfig,
 } from '../../lib/wrangler-env'
 import type { DeployOutput } from './output'
 
@@ -25,6 +26,10 @@ const RESERVED_RUN_WORKER_FIRST = new Set([
   '/internal/*',
   '/v1/*',
   '/_deepspace/*',
+  '/_documentation',
+  '/_documentation/*',
+  '/_documentation-root',
+  '/_documentation-root/*',
 ])
 
 export interface DeployAsset {
@@ -40,17 +45,23 @@ export interface DurableObjectManifestEntry {
 
 export interface DeployBundle {
   assets: DeployAsset[]
+  assetConfig: DeployAssetConfig
   workerJs: string
   appMigrations: string[]
   doManifest: DurableObjectManifestEntry[] | undefined
   customBindings: CustomBindingManifest
-  extraRoutes: string[]
+  extraRoutes: true | string[]
+}
+
+export interface DeployAssetConfig {
+  _headers?: string
+  _redirects?: string
 }
 
 interface OutputWranglerConfig extends Record<string, unknown> {
   name?: string
   main: string
-  assets?: { directory: string }
+  assets?: { directory: string; run_worker_first?: unknown }
   durable_objects?: { bindings: Array<{ name: string; class_name: string }> }
   migrations?: Array<{ new_sqlite_classes?: string[] }>
 }
@@ -60,11 +71,10 @@ export async function buildDeployBundle(options: {
   appName: string
   envName: string | undefined
   sharedDevVarsCache: boolean
-  wranglerConfig: WranglerConfig
   output: DeployOutput
   spinner: Spinner
 }): Promise<DeployBundle> {
-  const { appDir, appName, envName, sharedDevVarsCache, wranglerConfig, output, spinner } = options
+  const { appDir, appName, envName, sharedDevVarsCache, output, spinner } = options
   const junk = removeMacosJunk(appDir)
   if (junk > 0) p.log.info(`Removed ${junk} macOS metadata file(s) (._*, .DS_Store)`)
 
@@ -79,10 +89,15 @@ export async function buildDeployBundle(options: {
     preparedWranglerConfig = prepareWranglerEnvConfig(appDir, envName, {
       sharedDevVarsCache,
     })
+    const appDomain = DEEPSPACE_ENV === 'staging' ? 'spacestest.com' : 'app.space'
     execSync('npx vite build', {
       cwd: appDir,
       stdio: 'pipe',
-      env: wranglerViteEnv(process.env, preparedWranglerConfig),
+      env: {
+        ...wranglerViteEnv(process.env, preparedWranglerConfig),
+        // The Vite plugin's one documentation compile stamps release URLs.
+        DEEPSPACE_DOCUMENTATION_BASE_URL: `https://${appName}.${appDomain}/docs`,
+      },
     })
   } catch (error: unknown) {
     spinner.stop('Build failed')
@@ -140,8 +155,16 @@ export async function buildDeployBundle(options: {
     return output.die(`Client assets not found at ${clientDir}`, 'build_output_missing')
   }
 
+  try {
+    const manifest = readDocumentationDeployManifest(appDir, clientDir)
+    if (manifest) p.log.info(`Documentation: ${manifest.pageCount} page(s)`)
+  } catch (error) {
+    output.die(errorMessage(error), 'documentation_build_failed')
+  }
+
   spinner.start('Collecting assets...')
   const assets = collectAssets(clientDir)
+  const assetConfig = readDeployAssetConfig(clientDir)
   spinner.stop(`Collected ${assets.length} assets`)
   const workerJs = readFileSync(workerBundlePath, 'utf-8')
 
@@ -171,7 +194,10 @@ export async function buildDeployBundle(options: {
     )
   }
 
-  const extraRoutes = extractRunWorkerFirst(wranglerConfig)
+  // The Cloudflare build output is the selected environment's resolved
+  // configuration and therefore the same routing authority used by local
+  // development. Do not infer routing from feature files here.
+  const extraRoutes = resolveDeployRunWorkerFirst(outputConfig)
   let appMigrations: string[] = []
   try {
     appMigrations = readAppliedAppMigrations(appDir)
@@ -181,6 +207,7 @@ export async function buildDeployBundle(options: {
 
   return {
     assets,
+    assetConfig,
     workerJs,
     appMigrations,
     doManifest,
@@ -189,9 +216,10 @@ export async function buildDeployBundle(options: {
   }
 }
 
-function extractRunWorkerFirst(config: WranglerConfig): string[] {
-  const raw = config.assets?.run_worker_first
-  if (!Array.isArray(raw)) return []
+type WorkerFirstConfig = { assets?: { run_worker_first?: unknown } }
+
+export function extractRunWorkerFirst(config: WorkerFirstConfig): string[] {
+  const raw = Array.isArray(config.assets?.run_worker_first) ? config.assets.run_worker_first : []
 
   const routes: string[] = []
   const seen = new Set<string>()
@@ -205,11 +233,17 @@ function extractRunWorkerFirst(config: WranglerConfig): string[] {
   return routes
 }
 
+export function resolveDeployRunWorkerFirst(config: WorkerFirstConfig): true | string[] {
+  if (config.assets?.run_worker_first === true) return true
+  const routes = extractRunWorkerFirst(config)
+  return routes
+}
+
 function collectAssets(dir: string): DeployAsset[] {
   const assets: DeployAsset[] = []
   const walk = (currentDir: string, prefix: string): void => {
     for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
-      if (entry.name === '.assetsignore') continue
+      if (isDeployAssetControlFile(entry.name)) continue
       const fullPath = join(currentDir, entry.name)
       const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name
       if (entry.isDirectory()) {
@@ -224,6 +258,21 @@ function collectAssets(dir: string): DeployAsset[] {
   }
   walk(dir, '')
   return assets
+}
+
+export function readDeployAssetConfig(clientDir: string): DeployAssetConfig {
+  const config: DeployAssetConfig = {}
+  for (const [file, key] of [['_headers', '_headers'], ['_redirects', '_redirects']] as const) {
+    const filePath = join(clientDir, file)
+    if (!existsSync(filePath)) continue
+    const content = readFileSync(filePath, 'utf8')
+    if (content.trim()) config[key] = content
+  }
+  return config
+}
+
+export function isDeployAssetControlFile(name: string): boolean {
+  return name === '.assetsignore' || name === '_headers' || name === '_redirects'
 }
 
 function errorMessage(error: unknown): string {

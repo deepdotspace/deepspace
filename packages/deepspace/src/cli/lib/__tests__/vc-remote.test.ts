@@ -13,8 +13,39 @@ import {
   gitAuthEnv,
   gitSourceImportEnv,
   repoUrl,
+  spacePrivateRef,
+  spaceRemoteName,
+  spaceTrackingRef,
   SPACE_REMOTE,
 } from '../vc-remote'
+
+describe('source environment isolation', () => {
+  it('assigns distinct remotes and client-only refs to production and staging', () => {
+    expect(spaceRemoteName('production')).toBe('space')
+    expect(spaceRemoteName('staging')).toBe('space-staging')
+    expect(spaceRemoteName('invalid')).toBe('space-invalid')
+    expect(spaceTrackingRef('main', spaceRemoteName('production'))).toBe('refs/remotes/space/main')
+    expect(spaceTrackingRef('main', spaceRemoteName('staging'))).toBe('refs/remotes/space-staging/main')
+    expect(spacePrivateRef('pushed/main', 'production')).toBe('refs/deepspace/pushed/main')
+    expect(spacePrivateRef('pushed/main', 'staging')).toBe('refs/deepspace/staging/pushed/main')
+  })
+
+  it('binds the process-wide defaults to staging before commands load', async () => {
+    const savedEnvironment = process.env.DEEPSPACE_ENV
+    process.env.DEEPSPACE_ENV = 'staging'
+    vi.resetModules()
+    try {
+      const staging = await import('../vc-remote')
+      expect(staging.SPACE_REMOTE).toBe('space-staging')
+      expect(staging.spaceTrackingRef('main')).toBe('refs/remotes/space-staging/main')
+      expect(staging.spacePrivateRef('pushed/main')).toBe('refs/deepspace/staging/pushed/main')
+    } finally {
+      if (savedEnvironment === undefined) delete process.env.DEEPSPACE_ENV
+      else process.env.DEEPSPACE_ENV = savedEnvironment
+      vi.resetModules()
+    }
+  })
+})
 
 describe('credential-helper command safety', () => {
   it('shell-quotes every path and pins the running node plus CLI entry', () => {
@@ -29,6 +60,7 @@ describe('credential-helper command safety', () => {
       expect(command).toContain('git-credential')
       expect(command).not.toMatch(/!deepspace /)
       expect(command).toContain(process.execPath.split(/[\\/]/).pop() as string)
+      expect(credentialHelperCommand('staging')).toContain('!DEEPSPACE_ENV=staging ')
     } finally {
       process.env.PATH = savedPath
     }
@@ -155,6 +187,35 @@ describe('ensureSpaceRemote against a real repository', () => {
     expect(helpers[1]).toContain('git-credential')
     expect(helpers[1]).toContain(process.execPath)
     expect(helpers[1]).not.toBe('!deepspace git-credential')
+  })
+
+  it('keeps a staging source remote separate from production', () => {
+    const productionUrl = ensureSpaceRemote(repo, 'app_01PRODUCTION')
+    const stagingUrl = ensureSpaceRemote(repo, 'app_01STAGING', 'space-staging')
+
+    expect(git(['remote', 'get-url', SPACE_REMOTE])).toBe(productionUrl)
+    expect(git(['remote', 'get-url', 'space-staging'])).toBe(stagingUrl)
+    expect(stagingUrl).toContain('app_01STAGING')
+  })
+
+  it('replaces a staging-pinned helper before production authentication', () => {
+    const key = 'credential.https://deploy.test.helper'
+    runGit(repo, ['config', '--global', '--add', key, ''])
+    runGit(repo, [
+      'config',
+      '--global',
+      '--add',
+      key,
+      `!DEEPSPACE_ENV=staging ${shQuote(process.execPath)} ${shQuote(process.argv[1])} git-credential`,
+    ])
+
+    ensureSpaceRemote(repo, 'app_01PRODUCTION')
+
+    const helpers = runGit(repo, ['config', '--global', '--get-all', key])
+      .stdout.toString('utf-8').split('\n').slice(0, -1)
+    expect(helpers).toHaveLength(2)
+    expect(helpers[1]).not.toContain('DEEPSPACE_ENV=staging')
+    expect(helpers[1]).toContain('git-credential')
   })
 
   it('keeps an app-local CLI helper in worktree-private config', () => {

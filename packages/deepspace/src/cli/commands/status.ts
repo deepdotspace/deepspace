@@ -31,7 +31,10 @@ import { errorCode } from '../lib/cli-errors'
 import { installState } from '../lib/install-status'
 import { installCommand } from '../lib/package-manager'
 import { createSpinner } from '../lib/spinner'
+import { InputError } from '../lib/cli-errors'
+import { readWranglerConfig, resolveAppNameForEnv } from '../lib/wrangler-env'
 import { getAppSource } from '../lib/source-api'
+import { parseWranglerEnvArg } from '../lib/app-target'
 
 function timeAgo(iso: string): string {
   const ms = Date.now() - Date.parse(iso)
@@ -68,6 +71,18 @@ export function statusRemoteFailure(error: unknown): {
   }
 }
 
+export function resolveStatusApp(
+  appDir: string,
+  wranglerEnv?: string,
+): { appName: string; appId: string | null } {
+  if (!wranglerEnv) {
+    return { appName: detectAppName(appDir) ?? '(unnamed)', appId: readAppId(appDir) }
+  }
+  const resolved = resolveAppNameForEnv(readWranglerConfig(appDir), wranglerEnv)
+  if (!resolved.ok) throw new InputError(resolved.reason, 'invalid_env')
+  return { appName: resolved.name, appId: readAppId(appDir, wranglerEnv) }
+}
+
 export default defineCommand({
   meta: {
     name: 'status',
@@ -79,8 +94,16 @@ export default defineCommand({
       description: 'Emit a single-line JSON result for scripts/agents',
       default: false,
     },
+    env: {
+      type: 'string',
+      alias: 'e',
+      description: 'wrangler.toml [env.<name>] slot — reads that environment’s app identity',
+      required: false,
+    },
   },
   async run({ args }) {
+    const { wranglerEnv, error: envError } = parseWranglerEnvArg(args.env)
+    if (envError) throw new InputError(envError, 'invalid_env')
     const lines: Array<[string, string]> = []
     const facts = {
       loggedIn: false,
@@ -152,15 +175,15 @@ export default defineCommand({
       lines.push(['App', 'not inside a DeepSpace app directory'])
       json.inApp = false
     } else {
-      const appName = detectAppName(appDir) ?? '(unnamed)'
-      const appId = readAppId(appDir)
+      const { appName, appId } = resolveStatusApp(appDir, wranglerEnv)
       lines.push([
         'App',
-        `${appName}${appId ? ` (${appId})` : ' — no DEEPSPACE_APP_ID; run `deepspace app init`'}`,
+        `${appName}${wranglerEnv ? ` [env.${wranglerEnv}]` : ''}${appId ? ` (${appId})` : ' — no DEEPSPACE_APP_ID; run `deepspace app init`'}`,
       ])
       json.inApp = true
       json.appName = appName
       json.appId = appId
+      if (wranglerEnv) json.wranglerEnv = wranglerEnv
 
       const deps = installState(appDir)
       const depsInstallCommand = installCommand(appDir)

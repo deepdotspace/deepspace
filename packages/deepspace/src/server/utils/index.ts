@@ -19,6 +19,7 @@ export {
   type DeepSpaceAIEnv,
   type DeepSpaceAIOptions,
 } from './ai'
+export * from './agent'
 export { composioTools, type ComposioToolsOptions } from './composio-tools'
 export {
   apiWorkerFetch,

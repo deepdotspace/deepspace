@@ -7,7 +7,7 @@
  * Add schemas by creating a file in src/schemas/ and importing it here.
  */
 
-import type { CollectionSchema } from 'deepspace/worker'
+import type { CollectionSchema } from 'deepspace/schema'
 import { usersSchema } from './schemas/users-schema'
 import { settingsSchema } from './schemas/admin-schema'
 import { aiChatSchemas } from './schemas/ai-chat-schema'

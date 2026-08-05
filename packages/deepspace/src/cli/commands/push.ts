@@ -40,7 +40,13 @@ import {
   oversizedPushFix,
   pushToSpace,
 } from '../lib/vc-push'
-import { deployBaseUrl, ensureSpaceRemote, runGitRemote, SPACE_REMOTE } from '../lib/vc-remote'
+import {
+  deployBaseUrl,
+  ensureSpaceRemote,
+  runGitRemote,
+  SPACE_REMOTE,
+  spacePrivateRef,
+} from '../lib/vc-remote'
 import { createSpinner } from '../lib/spinner'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import type { CliAction } from '../lib/output'
@@ -253,9 +259,9 @@ export default defineDeepspaceCommand({
       // the orphan protection this file's header describes for `deepspace push
       // --force` (a plain `git push --force` is out of our reach — see header).
       // Two ingredients:
-      //   1. lastPushed = a PRIVATE ref (refs/deepspace/pushed/<branch>) that ONLY
+      //   1. lastPushed = an environment-private ref that only
       //      our own successful push writes (see below). The obvious candidate,
-      //      refs/remotes/space/<branch>, is force-advanced by `deepspace pull`,
+      //      the remote-tracking ref is force-advanced by `deepspace pull`,
       //      deploy, workspace fetches, and a bare `git fetch space` — so using it
       //      would let the pull-then-retry flow the refusal itself recommends
       //      poison the baseline and wave a clobber through. The workspace path is
@@ -266,7 +272,7 @@ export default defineDeepspaceCommand({
       // Refuse if force-pushing would orphan the peer's work.
       if (force) {
         spinner?.message(`Checking the cloud ${branch} tip before force-push…`)
-        const lastPushed = resolveCommit(appDir, `refs/deepspace/pushed/${branch}`)
+        const lastPushed = resolveCommit(appDir, spacePrivateRef(`pushed/${branch}`))
         let remoteTip: string | null = null
         try {
           runGitRemote(appDir, token, [
@@ -343,9 +349,9 @@ export default defineDeepspaceCommand({
         // Record what THIS client just published, in a PRIVATE ref that only our
         // own successful push writes — the "last pushed by me" baseline the
         // --force orphan guard above reads. A bare `git fetch` / `deepspace pull`
-        // never advances it (unlike refs/remotes/space/<branch>), so the guard
+        // never advances it (unlike the remote-tracking ref), so the guard
         // can't be poisoned into misreading a peer's tip as our own line.
-        updateRef(appDir, `refs/deepspace/pushed/${branch}`, tipOid)
+        updateRef(appDir, spacePrivateRef(`pushed/${branch}`), tipOid)
       }
       // A moved/diverged ref is a recovery state, not a dead end: nothing was
       // pushed, and `deepspace pull` is the one re-entry command. Carry that as

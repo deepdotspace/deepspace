@@ -12,6 +12,7 @@ import {
   resolveCommit,
 } from '../../lib/git/repository'
 import { workspaceBranchName, workspaceIdFromBranch } from '../../lib/workspace-id'
+import { spaceTrackingRef } from '../../lib/vc-remote'
 
 const WORKSPACE_MARKER = 'deepspace-workspace.json'
 
@@ -259,7 +260,7 @@ function switchOffWsBranch(mainDir: string, trunkBranch: string | null): boolean
     if (resolveCommit(mainDir, `refs/heads/${trunkBranch}`)) {
       return runGit(mainDir, ['switch', '--quiet', trunkBranch], { allowFail: true }).status === 0
     }
-    const remote = resolveCommit(mainDir, `refs/remotes/space/${trunkBranch}`)
+    const remote = resolveCommit(mainDir, spaceTrackingRef(trunkBranch))
     if (remote) {
       return (
         runGit(mainDir, ['switch', '--quiet', '-c', trunkBranch, remote], { allowFail: true })

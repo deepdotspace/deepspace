@@ -5,7 +5,7 @@
  * Spread into the app's schemas array: ...messagingSchemas
  */
 
-import type { CollectionSchema } from 'deepspace/worker'
+import type { CollectionSchema } from 'deepspace/schema'
 import {
   CHANNELS_SCHEMA,
   MESSAGES_SCHEMA,
@@ -13,7 +13,7 @@ import {
   CHANNEL_MEMBERS_SCHEMA,
   CHANNEL_INVITATIONS_SCHEMA,
   READ_RECEIPTS_SCHEMA,
-} from 'deepspace/worker'
+} from 'deepspace/schema'
 
 export const messagingSchemas: CollectionSchema[] = [
   CHANNELS_SCHEMA,

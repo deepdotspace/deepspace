@@ -2,9 +2,9 @@
  * `deepspace pull` — bring cloud-repo history into the local git repo.
  *
  * A real `git fetch` moves what's missing into `.git/objects` and updates
- * the tracking ref (`refs/remotes/space/<branch>`); then integrate
+ * the environment-private remote-tracking ref; then integrate
  * conservatively: fast-forward when that's all it takes, otherwise leave the
- * merge to the caller (`git merge refs/remotes/space/<branch>` — the objects
+ * merge to the caller (`git merge refs/remotes/<source>/<branch>` — the objects
  * are already local, so that merge needs no network). Never touches a dirty
  * worktree.
  */
@@ -28,7 +28,13 @@ import {
 } from '../lib/git/repository'
 import { workspaceIdFromBranch } from '../lib/workspace-id'
 import { shQuote } from '../lib/cli-format'
-import { deployBaseUrl, ensureSpaceRemote, runGitRemote, SPACE_REMOTE } from '../lib/vc-remote'
+import {
+  deployBaseUrl,
+  ensureSpaceRemote,
+  runGitRemote,
+  SPACE_REMOTE,
+  spaceTrackingRef,
+} from '../lib/vc-remote'
 import { repoApi } from '../lib/repo-api'
 import { createSpinner } from '../lib/spinner'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
@@ -74,7 +80,7 @@ export function workspaceBranchPullRefusal(
   // Git allows branch names with shell metacharacters ($(), ;, &, spaces); quote
   // the interpolated ref so an agent copy-pasting this "run this" line can't
   // shell-expand a collaborator-controlled name. Never a machine contract.
-  const merge = `git merge refs/remotes/space/${shQuote(trunk)}`
+  const merge = `git merge ${spaceTrackingRef(shQuote(trunk))}`
   return {
     code: 'workspace_branch',
     trunk,
@@ -120,8 +126,8 @@ export function divergedMergeAdvice(branch: string, hasSelectedCheckout: boolean
   // collaborator-controlled name. Human rendering only, never a machine contract.
   const b = shQuote(branch)
   return hasSelectedCheckout
-    ? `git merge refs/remotes/space/${b}`
-    : `git checkout ${b} && git merge refs/remotes/space/${b}`
+    ? `git merge ${spaceTrackingRef(b)}`
+    : `git checkout ${b} && git merge ${spaceTrackingRef(b)}`
 }
 
 export default defineDeepspaceCommand({
@@ -216,11 +222,12 @@ export default defineDeepspaceCommand({
     const wsRefusal = workspaceBranchPullRefusal(branch, trunkBranch)
     if (wsRefusal) {
       const trunkRef = `refs/heads/${wsRefusal.trunk}`
+      const trunkTrackingRef = spaceTrackingRef(wsRefusal.trunk)
       runGitRemote(appDir, token, [
         'fetch',
         '--quiet',
         SPACE_REMOTE,
-        `+${trunkRef}:refs/remotes/space/${wsRefusal.trunk}`,
+        `+${trunkRef}:${trunkTrackingRef}`,
       ])
       spinner?.stop('Workspace branch.')
       const { path: branchWorktreePath } = selectedBranchCheckout()
@@ -245,7 +252,7 @@ export default defineDeepspaceCommand({
         branchWorktreePath && selectedCheckoutClean
           ? {
               cwd: branchWorktreePath,
-              argv: ['git', 'merge', `refs/remotes/space/${wsRefusal.trunk}`],
+              argv: ['git', 'merge', trunkTrackingRef],
             }
           : canCheckoutHere
             ? { cwd: appDir, argv: ['git', 'checkout', branch] }
@@ -281,17 +288,18 @@ export default defineDeepspaceCommand({
     // Real git does the transfer; `+` force-updates the tracking ref (a
     // remote-tracking ref always mirrors the remote, rewrites included).
     spinner?.message(`Fetching ${branch} from the cloud repo…`)
+    const trackingRef = spaceTrackingRef(branch)
     runGitRemote(appDir, token, [
       'fetch',
       '--quiet',
       SPACE_REMOTE,
-      `+${refName}:refs/remotes/space/${branch}`,
+      `+${refName}:${trackingRef}`,
     ])
-    const remoteOid = resolveCommit(appDir, `refs/remotes/space/${branch}`)
+    const remoteOid = resolveCommit(appDir, trackingRef)
     if (!remoteOid) {
       spinner?.stop('Fetch failed.')
       throw new Refusal(
-        `Fetched, but refs/remotes/space/${branch} did not materialize — retry; if it persists, report it with \`deepspace feedback\`.`,
+        `Fetched, but ${trackingRef} did not materialize — retry; if it persists, report it with \`deepspace feedback\`.`,
         'fetch_incomplete',
       )
     }
@@ -342,8 +350,8 @@ export default defineDeepspaceCommand({
     // Render the integration once, exhaustively. Summary, refusal code, and
     // structured action belong to the same outcome branch so they cannot drift.
     const qBranch = shQuote(branch)
-    const ffRef = `git merge --ff-only refs/remotes/space/${qBranch}`
-    const mergeRef = `git merge refs/remotes/space/${qBranch}`
+    const ffRef = `git merge --ff-only ${spaceTrackingRef(qBranch)}`
+    const mergeRef = `git merge ${spaceTrackingRef(qBranch)}`
     const pullCommand = targetedVcCommand('pull', appId, branch)
     const pushCommand = targetedVcCommand('push', appId, branch)
     const selectedCheckoutClean = branchWorktreePath !== null && isWorkTreeClean(branchWorktreePath)
@@ -366,25 +374,25 @@ export default defineDeepspaceCommand({
         if (branchWorktreePath && selectedCheckoutClean) {
           const mergeAdvice = divergedMergeAdvice(branch, true)
           line =
-            `Fetched space/${branch}. ${branch} and the cloud repo diverged — run ` +
+            `Fetched ${SPACE_REMOTE}/${branch}. ${branch} and the cloud repo diverged — run ` +
             `\`${mergeAdvice}\` in ${branchWorktreePath} (no network needed), then \`${pushCommand}\`.`
           recoveryAction = {
             cwd: branchWorktreePath,
-            argv: ['git', 'merge', `refs/remotes/space/${branch}`],
+            argv: ['git', 'merge', trackingRef],
           }
         } else if (branchWorktreePath) {
           line =
-            `Fetched space/${branch}. ${branch} and the cloud repo diverged, but its checkout ` +
+            `Fetched ${SPACE_REMOTE}/${branch}. ${branch} and the cloud repo diverged, but its checkout ` +
             `(${branchWorktreePath}) is dirty. Commit or stash there, then rerun ` +
             `\`${pullCommand}\` from that checkout.`
         } else if (canCheckoutHere) {
           line =
-            `Fetched space/${branch}. ${branch} and the cloud repo diverged, but ${branch} is ` +
+            `Fetched ${SPACE_REMOTE}/${branch}. ${branch} and the cloud repo diverged, but ${branch} is ` +
             `not checked out. Check it out here, then rerun \`${pullCommand}\` to receive the merge step.`
           recoveryAction = { cwd: appDir, argv: ['git', 'checkout', branch] }
         } else {
           line =
-            `Fetched space/${branch}. ${branch} and the cloud repo diverged, but ${branch} is ` +
+            `Fetched ${SPACE_REMOTE}/${branch}. ${branch} and the cloud repo diverged, but ${branch} is ` +
             `not checked out and this checkout is dirty. Commit or stash first (or use a clean ` +
             `worktree), check out ${qBranch}, then rerun \`${pullCommand}\`.`
         }
@@ -393,13 +401,13 @@ export default defineDeepspaceCommand({
         codeForState = 'dirty_worktree'
         // A commit diverges the branch, while a stash preserves fast-forward.
         line =
-          `Fetched space/${branch}, but the worktree is dirty. Either stash → \`${ffRef}\` → ` +
+          `Fetched ${SPACE_REMOTE}/${branch}, but the worktree is dirty. Either stash → \`${ffRef}\` → ` +
           `\`git stash pop\`, or commit first → \`${mergeRef}\` (or \`git rebase\`).`
         break
       case 'fetched_only_unborn':
         codeForState = 'dirty_worktree'
         line =
-          `Fetched space/${branch} and created ${branch}, but the worktree has uncommitted files. ` +
+          `Fetched ${SPACE_REMOTE}/${branch} and created ${branch}, but the worktree has uncommitted files. ` +
           `Preserve them in a commit or stash (including untracked files), then restore the checkout; ` +
           `do not run reset --hard until \`git status\` confirms nothing worth keeping remains.`
         break
@@ -407,13 +415,13 @@ export default defineDeepspaceCommand({
         codeForState = 'branch_in_worktree'
         if (branchWorktreePath && selectedCheckoutClean) {
           line =
-            `Fetched space/${branch}, but ${branch} is checked out in another worktree ` +
+            `Fetched ${SPACE_REMOTE}/${branch}, but ${branch} is checked out in another worktree ` +
             `(${branchWorktreePath}) — its ref was left untouched to keep that worktree in sync. ` +
             `Run \`${pullCommand}\` from there.`
           recoveryAction = targetedVcAction('pull', branchWorktreePath, appId, branch)
         } else {
           line =
-            `Fetched space/${branch}, but its checkout ` +
+            `Fetched ${SPACE_REMOTE}/${branch}, but its checkout ` +
             `(${branchWorktreePath ?? 'a linked worktree'}) is dirty, so the ref and worktree were ` +
             `left untouched. Commit or stash there, then run \`${pullCommand}\` from that checkout.`
         }
@@ -427,10 +435,10 @@ export default defineDeepspaceCommand({
     // unavailable checkout states require judgment and remain ordinary,
     // actionless refusals even though the fetch itself succeeded.
     const actionRequired = recoveryAction !== undefined
-    spinner?.stop(codeForState ? `Fetched space/${branch}.` : line)
+    spinner?.stop(codeForState ? `Fetched ${SPACE_REMOTE}/${branch}.` : line)
     // Completeness: appId and the fetched remote oid are --json facts the
     // summary line doesn't always carry — say them in the text too.
-    if (!args.json) p.log.info(`App: ${appId} · space/${branch} at ${remoteOid.slice(0, 10)}`)
+    if (!args.json) p.log.info(`App: ${appId} · ${SPACE_REMOTE}/${branch} at ${remoteOid.slice(0, 10)}`)
     if (codeForState) {
       // Every blocked integration is ok:false. Only one with an executable
       // continuation adds actionRequired and exits 2; judgment states exit 1.

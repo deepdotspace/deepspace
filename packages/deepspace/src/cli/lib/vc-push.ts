@@ -114,13 +114,13 @@ export function pushToSpace(
   cwd: string,
   token: string,
   refspec: string,
-  opts: { force?: boolean } = {},
+  opts: { force?: boolean; remote?: string } = {},
 ): PushRefResult {
   const doPush = (extra: string[]): PushRefResult => {
     const result = runGitRemote(
       cwd,
       token,
-      ['push', '--porcelain', ...(opts.force ? ['--force'] : []), ...extra, SPACE_REMOTE, refspec],
+      ['push', '--porcelain', ...(opts.force ? ['--force'] : []), ...extra, opts.remote ?? SPACE_REMOTE, refspec],
       { allowFail: true },
     )
     const parsed = parsePushPorcelain(result.stdout.toString('utf-8'))

@@ -47,6 +47,24 @@ interface FeatureAction {
   importPath: string
 }
 
+interface FeatureCodeInsertion {
+  file: string
+  marker: string
+  insert: string
+  placement?: 'before' | 'after'
+  import?: string
+}
+
+interface FeatureWranglerIntegration {
+  runWorkerFirst?: boolean
+  rateLimits?: Array<{
+    name: string
+    namespaceId: string
+    limit: number
+    period: 10 | 60
+  }>
+}
+
 export interface FeatureConfig {
   id: string
   name: string
@@ -55,9 +73,12 @@ export interface FeatureConfig {
   details?: string
   internal?: boolean
   files: FeatureFile[]
+  ignore?: string[]
   route?: { path?: string; protected?: boolean }
   schema?: FeatureSchema
   actions?: FeatureAction[]
+  code?: FeatureCodeInsertion[]
+  wrangler?: FeatureWranglerIntegration
   css?: string[]
   dependencies?: Record<string, string>
   devDependencies?: Record<string, string>
@@ -83,7 +104,7 @@ interface DependencyAddition {
   version: unknown
 }
 
-type IntegrationArea = 'schema' | 'actions' | 'css' | 'nav'
+type IntegrationArea = 'schema' | 'actions' | 'code' | 'css' | 'nav' | 'wrangler'
 
 interface UnresolvedIntegration {
   area: IntegrationArea
@@ -456,6 +477,179 @@ function integrateActions(
   return unresolved
 }
 
+function integrateCode(
+  config: FeatureConfig,
+  targetDir: string,
+  emit: FeatureInstallerOutput,
+): UnresolvedIntegration[] {
+  const unresolved: UnresolvedIntegration[] = []
+  for (const insertion of config.code ?? []) {
+    const targetPath = join(targetDir, insertion.file)
+    if (!existsSync(targetPath)) {
+      unresolved.push({
+        area: 'code',
+        reason: `${insertion.file} was not found.`,
+        steps: [`Add ${insertion.insert.trim()} to ${insertion.file}.`],
+      })
+      continue
+    }
+
+    const original = readFileSync(targetPath, 'utf-8')
+    if (original.includes(insertion.insert.trim())) {
+      emit(`   Integration already present: ${insertion.file}`)
+      continue
+    }
+    const markerIndex = original.indexOf(insertion.marker)
+    if (markerIndex < 0) {
+      unresolved.push({
+        area: 'code',
+        reason: `${insertion.file} does not contain the expected insertion point.`,
+        steps: [
+          ...(insertion.import ? [`Add ${insertion.import} to ${insertion.file}.`] : []),
+          `Add ${insertion.insert.trim()} to ${insertion.file}.`,
+        ],
+      })
+      continue
+    }
+
+    let content = original
+    if (insertion.import && !content.includes(insertion.import)) {
+      const importIndex = content.search(/^import\s/m)
+      content = `${content.slice(0, importIndex < 0 ? 0 : importIndex)}${insertion.import}\n${
+        content.slice(importIndex < 0 ? 0 : importIndex)
+      }`
+    }
+    const currentMarkerIndex = content.indexOf(insertion.marker)
+    const insertAt =
+      insertion.placement === 'before'
+        ? currentMarkerIndex
+        : currentMarkerIndex + insertion.marker.length
+    const prefix = insertion.placement === 'before' ? '' : '\n'
+    const suffix = insertion.placement === 'before' ? '\n' : ''
+    content = `${content.slice(0, insertAt)}${prefix}${insertion.insert}${suffix}${content.slice(insertAt)}`
+    writeFileSync(targetPath, content)
+    emit(`   Integrated: ${insertion.file}`)
+  }
+  return unresolved
+}
+
+function integrateIgnore(config: FeatureConfig, targetDir: string): void {
+  if (!config.ignore?.length) return
+  const targetPath = join(targetDir, '.gitignore')
+  const current = existsSync(targetPath) ? readFileSync(targetPath, 'utf-8') : ''
+  const present = new Set(current.split(/\r?\n/).map((line) => line.trim()))
+  const missing = config.ignore.filter((pattern) => !present.has(pattern))
+  if (missing.length === 0) return
+  const separator = current === '' || current.endsWith('\n') ? '' : '\n'
+  writeFileSync(targetPath, `${current}${separator}${missing.join('\n')}\n`)
+}
+
+function integrateWrangler(
+  config: FeatureConfig,
+  targetDir: string,
+  emit: FeatureInstallerOutput,
+): UnresolvedIntegration[] {
+  const runWorkerFirst = config.wrangler?.runWorkerFirst === true
+  const rateLimits = config.wrangler?.rateLimits ?? []
+  if (!runWorkerFirst && rateLimits.length === 0) return []
+  const targetPath = join(targetDir, 'wrangler.toml')
+  const steps = [
+    ...(runWorkerFirst ? ['Set assets.run_worker_first = true in wrangler.toml.'] : []),
+    ...rateLimits.map((binding) => `Add the ${binding.name} rate-limit binding to wrangler.toml.`),
+  ]
+  if (!existsSync(targetPath)) {
+    return [{ area: 'wrangler', reason: 'wrangler.toml was not found.', steps }]
+  }
+
+  let source = readFileSync(targetPath, 'utf-8')
+  if (runWorkerFirst && !/^\[assets\]\s*$/m.test(source)) {
+    return [{ area: 'wrangler', reason: 'wrangler.toml has no [assets] section.', steps }]
+  }
+
+  let changed = false
+  if (runWorkerFirst) {
+    const updated = setRunWorkerFirst(source)
+    changed ||= updated !== source
+    source = updated
+  }
+
+  const scopes = ['', ...wranglerEnvironmentNames(source)]
+  for (const scope of scopes) {
+    for (const binding of rateLimits) {
+      if (hasRateLimitBinding(source, scope, binding.name)) continue
+      source = `${source.trimEnd()}\n\n${rateLimitBindingBlock(scope, binding)}\n`
+      changed = true
+    }
+  }
+
+  if (changed) {
+    writeFileSync(targetPath, source)
+    emit('   Integrated: wrangler.toml')
+  } else emit('   Integration already present: wrangler.toml')
+  return []
+}
+
+function setRunWorkerFirst(source: string): string {
+  const headers = [...source.matchAll(/^\[(?:env\.[^\]]+\.)?assets\]\s*$/gm)]
+  for (const header of headers.reverse()) {
+    const start = header.index
+    const bodyStart = start + header[0].length
+    const nextHeader = source.slice(bodyStart).search(/^\[\[?[^\]]+\]\]?\s*$/m)
+    const end = nextHeader < 0 ? source.length : bodyStart + nextHeader
+    const section = source.slice(start, end)
+    if (/^\s*run_worker_first\s*=\s*true(?:\s*#.*)?$/m.test(section)) continue
+    // Quoted strings are consumed atomically so a `]` inside a route string
+    // cannot truncate the array match.
+    const setting =
+      /^(\s*)run_worker_first\s*=\s*(?:false|\[(?:[^\]"']|"(?:[^"\\]|\\[\s\S])*"|'[^']*')*\])(\s*(?:#.*)?)$/m
+    const updated = setting.test(section)
+      ? section.replace(setting, '$1run_worker_first = true$2')
+      : section.replace(/^\[(?:env\.[^\]]+\.)?assets\]\s*$/m, '$&\nrun_worker_first = true')
+    source = source.slice(0, start) + updated + source.slice(end)
+  }
+  return source
+}
+
+function wranglerEnvironmentNames(source: string): string[] {
+  return [
+    ...new Set(
+      [...source.matchAll(/^\[\[?env\.([^.\]]+)(?:\.|\]\]?\s*$)/gm)].map((match) => match[1]),
+    ),
+  ]
+}
+
+function hasRateLimitBinding(source: string, scope: string, name: string): boolean {
+  const header = scope ? `[[env.${scope}.ratelimits]]` : '[[ratelimits]]'
+  // Tolerate hand-reformatted spacing and either TOML string quoting so a
+  // reinstall never appends a duplicate block Wrangler would reject.
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const namePattern = new RegExp(
+    `^\\s*name\\s*=\\s*(?:"${escaped}"|'${escaped}')\\s*(?:#.*)?$`,
+    'm',
+  )
+  let offset = 0
+  while ((offset = source.indexOf(header, offset)) >= 0) {
+    const end = source.slice(offset + header.length).search(/^\[/m)
+    const blockEnd = end < 0 ? source.length : offset + header.length + end
+    if (namePattern.test(source.slice(offset, blockEnd))) return true
+    offset += header.length
+  }
+  return false
+}
+
+function rateLimitBindingBlock(
+  scope: string,
+  binding: NonNullable<FeatureWranglerIntegration['rateLimits']>[number],
+): string {
+  const header = scope ? `[[env.${scope}.ratelimits]]` : '[[ratelimits]]'
+  return [
+    header,
+    `name = ${JSON.stringify(binding.name)}`,
+    `namespace_id = ${JSON.stringify(binding.namespaceId)}`,
+    `simple = { limit = ${binding.limit}, period = ${binding.period} }`,
+  ].join('\n')
+}
+
 function integrateCss(
   packageRoot: string,
   config: FeatureConfig,
@@ -779,6 +973,7 @@ export function installFeature(options: FeatureInstallOptions): FeatureInstallOu
   emit(`   Target: ${targetDir}`)
 
   const installedFiles = installFiles(packageRoot, config, targetDir, emit)
+  integrateIgnore(config, targetDir)
   emit('')
   emit(
     `Copied ${installedFiles.copied} file(s)${
@@ -789,6 +984,8 @@ export function installFeature(options: FeatureInstallOptions): FeatureInstallOu
   const unresolvedIntegrations = [
     ...integrateSchema(config, targetDir, emit),
     ...integrateActions(config, targetDir, emit),
+    ...integrateWrangler(config, targetDir, emit),
+    ...integrateCode(config, targetDir, emit),
     ...integrateCss(packageRoot, config, targetDir, emit),
     ...integrateRoute(config, targetDir, emit),
   ]

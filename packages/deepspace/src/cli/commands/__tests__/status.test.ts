@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { ApiError } from '../../lib/api'
-import { statusRemoteFailure } from '../status'
+import { resolveStatusApp, statusRemoteFailure } from '../status'
 
 describe('statusRemoteFailure', () => {
   it('preserves an app-not-found response instead of calling it unreachable', () => {
@@ -41,6 +44,30 @@ describe('statusRemoteFailure', () => {
     expect(statusRemoteFailure(new Error('socket closed'))).toEqual({
       human: 'socket closed',
       json: { state: 'unavailable', error: 'socket closed' },
+    })
+  })
+})
+
+describe('resolveStatusApp', () => {
+  it('selects the name and app id from one named Wrangler environment', () => {
+    const appDir = mkdtempSync(join(tmpdir(), 'deepspace-status-env-'))
+    writeFileSync(
+      join(appDir, 'wrangler.toml'),
+      `
+name = "example"
+[vars]
+DEEPSPACE_APP_ID = "app_production"
+
+[env.staging]
+name = "example-staging"
+[env.staging.vars]
+DEEPSPACE_APP_ID = "app_01KZ84H3TC7ZX9P8V829MDFY5Y"
+`,
+    )
+
+    expect(resolveStatusApp(appDir, 'staging')).toEqual({
+      appName: 'example-staging',
+      appId: 'app_01KZ84H3TC7ZX9P8V829MDFY5Y',
     })
   })
 })

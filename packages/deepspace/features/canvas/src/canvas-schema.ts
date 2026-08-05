@@ -6,7 +6,7 @@
  * not in RecordRoom. This schema is just for document metadata.
  */
 
-import type { CollectionSchema } from 'deepspace/worker'
+import type { CollectionSchema } from 'deepspace/schema'
 
 export const canvasSchema: CollectionSchema = {
   name: 'canvases',

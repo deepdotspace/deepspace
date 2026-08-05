@@ -32,8 +32,9 @@ const CATEGORY_LABELS: Record<string, string> = {
   layout: 'Layouts',
   display: 'Display',
   landing: 'Landing Page Sections',
+  publishing: 'Publishing',
 }
-const CATEGORY_ORDER = ['assistant', 'data', 'nav', 'layout', 'display', 'landing']
+const CATEGORY_ORDER = ['assistant', 'data', 'publishing', 'nav', 'layout', 'display', 'landing']
 
 interface FeatureInstallerModule {
   installFeature(options: FeatureInstallOptions): FeatureInstallOutcome

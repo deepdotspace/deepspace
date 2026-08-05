@@ -15,6 +15,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { parse as parseToml } from 'smol-toml'
 
 import addCommand, {
   isDeepSpaceApp,
@@ -237,20 +238,128 @@ describe('feature-owned dependencies', () => {
   })
 })
 
-describe('docs feature assembly', () => {
+describe('documents feature assembly', () => {
   it('uses the public Yjs hook without installing a feature-owned fork', () => {
     const { dir, cleanup } = makeApp()
     try {
-      const { status } = installInto(dir, ['docs'])
+      const { status } = installInto(dir, ['documents'])
       expect(status).toBe(0)
 
-      const page = readFileSync(join(dir, 'src/pages/(app)/(protected)/docs/[docId].tsx'), 'utf-8')
+      const page = readFileSync(
+        join(dir, 'src/pages/(app)/(protected)/documents/[docId].tsx'),
+        'utf-8',
+      )
       expect(page).toContain('useYjsRoom')
       expect(page).toContain("from 'deepspace'")
       expect(page).not.toContain('useYjsRoomWithAwareness')
       expect(
-        existsSync(join(dir, 'src/pages/(app)/(protected)/docs/use-yjs-room-with-awareness.ts')),
+        existsSync(
+          join(dir, 'src/pages/(app)/(protected)/documents/use-yjs-room-with-awareness.ts'),
+        ),
       ).toBe(false)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('documentation feature assembly', () => {
+  it('enables /docs with config and Markdown without adding an application route', () => {
+    const { dir, cleanup } = makeApp()
+    try {
+      const navPath = join(dir, 'src/nav.ts')
+      const navBefore = readFileSync(navPath, 'utf-8')
+      const { status } = installInto(dir, ['documentation'])
+
+      expect(status).toBe(0)
+      expect(JSON.parse(readFileSync(join(dir, 'documentation.json'), 'utf-8'))).toMatchObject({
+        name: 'Documentation',
+        domains: [],
+      })
+      expect(readFileSync(join(dir, 'documentation/index.mdx'), 'utf-8')).toContain(
+        'This site is compiled from Markdown and MDX',
+      )
+      expect(readFileSync(join(dir, 'documentation/index.mdx'), 'utf-8')).not.toContain('\n# ')
+      expect(readFileSync(navPath, 'utf-8')).toBe(navBefore)
+      expect(readFileSync(join(dir, 'vite.config.ts'), 'utf-8')).toContain(
+        'deepSpaceDocumentation()',
+      )
+      expect(readFileSync(join(dir, '.gitignore'), 'utf-8')).toContain('public/_documentation')
+      expect(readFileSync(join(dir, '.gitignore'), 'utf-8')).toContain('public/_documentation-root')
+      const worker = readFileSync(join(dir, 'worker.ts'), 'utf-8')
+      expect(worker).not.toContain('DocumentationAssistantLimiter')
+      expect(worker).toContain("import documentationConfig from './documentation.json'")
+      expect(worker).toContain(
+        'registerDeepSpaceDocumentation(app, { resolveAuth, config: documentationConfig })',
+      )
+      const wrangler = readFileSync(join(dir, 'wrangler.toml'), 'utf-8')
+      expect(wrangler).not.toContain('documentation-v1')
+      expect(wrangler).toContain('name = "DOCUMENTATION_CLIENT_RATE_LIMITER"')
+      expect(wrangler).toContain('namespace_id = "2001"')
+      expect(wrangler).toContain('simple = { limit = 12, period = 60 }')
+      expect(wrangler).toContain('name = "DOCUMENTATION_APP_RATE_LIMITER"')
+      expect(wrangler).toContain('namespace_id = "2002"')
+      expect(wrangler).toContain('simple = { limit = 120, period = 60 }')
+      expect(wrangler).not.toContain('type = "ratelimit"')
+      expect(wrangler).toContain('run_worker_first = true')
+      expect(wrangler).not.toContain('run_worker_first = [')
+      expect(parseToml(wrangler).ratelimits).toEqual([
+        {
+          name: 'DOCUMENTATION_CLIENT_RATE_LIMITER',
+          namespace_id: '2001',
+          simple: { limit: 12, period: 60 },
+        },
+        {
+          name: 'DOCUMENTATION_APP_RATE_LIMITER',
+          namespace_id: '2002',
+          simple: { limit: 120, period: 60 },
+        },
+      ])
+
+      expect(installInto(dir, ['documentation']).status).toBe(0)
+      expect(readFileSync(join(dir, 'wrangler.toml'), 'utf-8')).toBe(wrangler)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('replaces path lists with one worker-owned routing contract', () => {
+    const { dir, cleanup } = makeApp()
+    try {
+      const wranglerPath = join(dir, 'wrangler.toml')
+      const initial = readFileSync(wranglerPath, 'utf-8').replace(
+        'run_worker_first = [',
+        'run_worker_first = [\n  "/docs",\n  "/docs/*",',
+      )
+      writeFileSync(wranglerPath, initial)
+
+      expect(installInto(dir, ['documentation']).status).toBe(0)
+      const wrangler = readFileSync(wranglerPath, 'utf-8')
+      expect(wrangler).toContain('run_worker_first = true')
+      expect(wrangler).not.toContain('run_worker_first = [')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('installs the same worker routing and rate limits into named environments', () => {
+    const { dir, cleanup } = makeApp()
+    try {
+      const wranglerPath = join(dir, 'wrangler.toml')
+      writeFileSync(
+        wranglerPath,
+        `${readFileSync(wranglerPath, 'utf-8').trimEnd()}\n\n[env.staging.assets]\ndirectory = "./dist"\nrun_worker_first = ["/api/*"]\n`,
+      )
+
+      expect(installInto(dir, ['documentation']).status).toBe(0)
+      const wrangler = readFileSync(wranglerPath, 'utf-8')
+      expect(wrangler).toMatch(/\[env\.staging\.assets\][\s\S]*?run_worker_first = true/u)
+      expect(wrangler.match(/name = "DOCUMENTATION_CLIENT_RATE_LIMITER"/gu)).toHaveLength(2)
+      expect(wrangler.match(/name = "DOCUMENTATION_APP_RATE_LIMITER"/gu)).toHaveLength(2)
+      expect(wrangler).toContain('[[env.staging.ratelimits]]')
+
+      expect(installInto(dir, ['documentation']).status).toBe(0)
+      expect(readFileSync(wranglerPath, 'utf-8')).toBe(wrangler)
     } finally {
       cleanup()
     }

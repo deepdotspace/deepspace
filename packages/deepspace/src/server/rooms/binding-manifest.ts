@@ -70,6 +70,12 @@ export type CustomBinding =
   | { type: 'browser_rendering'; name: string }
   | { type: 'analytics_engine'; name: string; dataset?: string }
   | { type: 'hyperdrive'; name: string; id: string }
+  | {
+      type: 'ratelimit'
+      name: string
+      namespace_id: string
+      simple: { limit: number; period: 10 | 60 }
+    }
 
 export type CustomBindingManifest = CustomBinding[]
 
@@ -121,6 +127,7 @@ export const ALLOWED_BINDING_TYPES = new Set([
   'browser_rendering',
   'analytics_engine',
   'hyperdrive',
+  'ratelimit',
 ])
 
 /**
@@ -140,6 +147,7 @@ export const RESERVED_BINDING_NAMES = new Set([
   'API_WORKER',
   'DEEPSPACE_APP_ID',
   'DEEPSPACE_RESOURCE_ID',
+  'DEEPSPACE_RELEASE_OPERATION_ID',
   'APP_NAME',
   'OWNER_USER_ID',
   'AUTH_JWT_PUBLIC_KEY',
@@ -253,6 +261,17 @@ function requiredFieldError(b: CustomBinding): string | null {
       if (!b.id) return `hyperdrive binding "${b.name}" missing id`
       if (b.id === AUTO_PROVISION_SENTINEL) {
         return `hyperdrive binding "${b.name}": auto-provisioning not yet supported (provide a real id)`
+      }
+      return null
+    case 'ratelimit':
+      if (!/^\d+$/u.test(b.namespace_id) || Number(b.namespace_id) <= 0) {
+        return `ratelimit binding "${b.name}" requires a positive integer namespace_id string`
+      }
+      if (!Number.isInteger(b.simple?.limit) || b.simple.limit <= 0) {
+        return `ratelimit binding "${b.name}" requires simple.limit (positive integer)`
+      }
+      if (b.simple.period !== 10 && b.simple.period !== 60) {
+        return `ratelimit binding "${b.name}" requires simple.period (10 or 60)`
       }
       return null
     case 'ai':
@@ -369,6 +388,18 @@ export function bindingManifestFromOutputConfig(
     const name = pluckString(h, 'binding')
     const id = pluckString(h, 'id')
     if (name && id) out.push({ type: 'hyperdrive', name, id })
+  }
+
+  // Wrangler resolves its native `ratelimits` table into the Vite build
+  // output. Translate it to the Workers upload binding only at this boundary.
+  for (const r of asObjectArray(outputConfig.ratelimits)) {
+    const name = pluckString(r, 'name')
+    const namespace_id = pluckString(r, 'namespace_id')
+    const simple = isObject(r.simple) ? r.simple : null
+    const limit = pluckNumber(simple, 'limit')
+    const period = pluckNumber(simple, 'period')
+    if (!name || !namespace_id || limit === null || (period !== 10 && period !== 60)) continue
+    out.push({ type: 'ratelimit', name, namespace_id, simple: { limit, period } })
   }
 
   return out

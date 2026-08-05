@@ -31,6 +31,29 @@ export default defineConfig([
     },
   },
   {
+    entry: { schema: 'src/schema.ts' },
+    format: ['esm'],
+    dts: true,
+    sourcemap: true,
+  },
+  {
+    // Public React primitives used by an app-owned documentation.tsx. These resolve
+    // React from the target app and never enter the CLI bundle.
+    entry: {
+      'documentation-client-core': 'src/documentation/runtime/client.tsx',
+      'documentation-react': 'src/documentation/runtime/public.tsx',
+      'documentation-server-core': 'src/documentation/runtime/server.tsx',
+    },
+    format: ['esm'],
+    dts: true,
+    sourcemap: true,
+    external: ['react', 'react-dom', 'react-dom/client', 'react-dom/server', 'react/jsx-runtime'],
+    esbuildOptions(options) {
+      options.jsx = 'automatic'
+      options.alias = alias
+    },
+  },
+  {
     entry: { worker: 'src/worker.ts' },
     format: ['esm'],
     dts: true,
@@ -80,8 +103,54 @@ export default defineConfig([
       options.alias = alias
     },
   },
+  {
+    // Node-only documentation compiler. Its source graph contains no React
+    // import; rendering and hydration are isolated artifacts below.
+    entry: { documentation: 'src/documentation/index.ts' },
+    format: ['esm'],
+    dts: true,
+    sourcemap: true,
+    external: [/^node:.*/],
+    esbuildOptions(options) {
+      options.alias = alias
+    },
+  },
+  {
+    // Default SSR is CommonJS because react-dom/server contains CommonJS
+    // builtin loads that cannot be safely embedded in an ESM CLI artifact.
+    entry: { 'documentation-default-renderer': 'src/documentation/runtime/default-renderer.tsx' },
+    format: ['cjs'],
+    platform: 'node',
+    dts: false,
+    sourcemap: false,
+    splitting: false,
+    minify: true,
+    noExternal: ['react', 'react-dom'],
+    outExtension: () => ({ js: '.cjs' }),
+    define: { 'process.env.NODE_ENV': '"production"' },
+    esbuildOptions(options) {
+      options.jsx = 'automatic'
+      options.alias = alias
+    },
+  },
+  {
+    // Self-contained browser hydration runtime for generated documentation.
+    entry: { 'documentation-runtime': 'src/documentation/runtime/auto-client.tsx' },
+    format: ['iife'],
+    platform: 'browser',
+    dts: false,
+    minify: true,
+    sourcemap: false,
+    splitting: false,
+    outExtension: () => ({ js: '.js' }),
+    define: { 'process.env.NODE_ENV': '"production"' },
+    esbuildOptions(options) {
+      options.jsx = 'automatic'
+      options.alias = alias
+    },
+  },
   // Server entry: helpers app authors import inside their own worker
-  // (refundInvoice, requireSubscription, room handlers, etc.). Docs reference
+  // (refundInvoice, requireSubscription, room handlers, etc.). Documentation references
   // `import { ... } from 'deepspace/server'`, so this also needs a matching
   // `exports['./server']` in package.json.
   {

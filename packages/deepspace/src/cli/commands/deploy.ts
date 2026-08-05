@@ -161,7 +161,6 @@ export default defineCommand({
       appName,
       envName,
       sharedDevVarsCache: secretsCache.linked !== null,
-      wranglerConfig,
       output,
       spinner,
     })

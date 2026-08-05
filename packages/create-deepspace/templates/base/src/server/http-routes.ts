@@ -325,9 +325,12 @@ export function registerPlatformProxyRoutes(app: Hono<AppContext>): void {
 /** Register the SPA fallback last so it cannot shadow worker routes. */
 export function registerStaticRoutes(app: Hono<AppContext>): void {
   app.get('*', async (c) => {
+    const url = new URL(c.req.url)
+    if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
+      return c.json({ error: 'not_found' }, 404)
+    }
     const response = await c.env.ASSETS.fetch(c.req.raw)
     if (response.status === 404) {
-      const url = new URL(c.req.url)
       url.pathname = '/index.html'
       return c.env.ASSETS.fetch(new Request(url.toString(), c.req.raw))
     }

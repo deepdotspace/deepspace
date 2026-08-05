@@ -41,6 +41,11 @@ interface AppListEntry {
   name: string | null
 }
 
+export interface AppTargetOptions {
+  /** Raw `--env` value. Preserve blank-vs-absent so blank never falls back to production. */
+  wranglerEnv?: string
+}
+
 /** Find an app id or subdomain name in the caller's registry list. */
 export function matchAppSelector(apps: AppListEntry[], selector: string): string | null {
   const byId = apps.find((app) => app.appId === selector)
@@ -84,18 +89,18 @@ export async function resolveAppTarget(
   deployUrl: string,
   token: string,
   explicit: string | undefined,
+  options: AppTargetOptions = {},
 ): Promise<string> {
+  assertAppTargetResolvable(explicit, options)
   const { app, error } = parseAppArg(explicit)
   if (error) throw new InputError(error, 'invalid_app')
   if (app !== undefined) return resolveAppSelector(deployUrl, token, app)
+  const { wranglerEnv } = parseWranglerEnvArg(options.wranglerEnv)
   const appDir = findAppDir()
-  const id = appDir ? readAppId(appDir) : null
-  if (!id) {
-    throw new InputError(
-      'No app id. Run from an app directory whose wrangler.toml carries DEEPSPACE_APP_ID, or pass --app <id or name>.',
-      'not_in_app_repo',
-    )
-  }
+  const id = appDir ? readAppId(appDir, wranglerEnv) : null
+  // `assertAppTargetResolvable` already produced the precise failure. Keeping
+  // this guard makes the filesystem race explicit without weakening the type.
+  if (!id) throw appTargetMissingError(wranglerEnv)
   return id
 }
 
@@ -125,19 +130,54 @@ export function parseAppArg(raw: string | undefined): { app?: string; error?: st
   return { app: selector }
 }
 
+/** Preserve absent-vs-blank for a named Wrangler environment. */
+export function parseWranglerEnvArg(raw: string | undefined): {
+  wranglerEnv?: string
+  error?: string
+} {
+  if (raw === undefined) return {}
+  const wranglerEnv = raw.trim()
+  if (!wranglerEnv) {
+    return {
+      error:
+        '--env was given an empty environment name — pass a wrangler.toml environment name, or omit --env to use the top-level app.',
+    }
+  }
+  return { wranglerEnv }
+}
+
+function appTargetMissingError(wranglerEnv: string | undefined): InputError {
+  if (wranglerEnv) {
+    return new InputError(
+      `No app id for env "${wranglerEnv}" — wrangler.toml has no [env.${wranglerEnv}] block with its own DEEPSPACE_APP_ID.`,
+      'no_app_id_for_env',
+    )
+  }
+  return new InputError(
+    'No app id. Run from an app directory whose wrangler.toml carries DEEPSPACE_APP_ID, or pass --app <id or name>.',
+    'not_in_app_repo',
+  )
+}
+
 /** Validate that a target is locally determinable before reading credentials. */
-export function assertAppTargetResolvable(appArg: string | undefined): void {
+export function assertAppTargetResolvable(
+  appArg: string | undefined,
+  options: AppTargetOptions = {},
+): void {
   const { app, error } = parseAppArg(appArg)
   if (error) throw new InputError(error, 'invalid_app')
+  const { wranglerEnv, error: envError } = parseWranglerEnvArg(options.wranglerEnv)
+  if (envError) throw new InputError(envError, 'invalid_env')
+  if (app !== undefined && wranglerEnv) {
+    throw new InputError(
+      "Pass either --app or --env, not both — --env reads the [env.<name>] block's own app id, while --app names an app directly.",
+      'ambiguous_target',
+    )
+  }
   if (app !== undefined) return
 
   const appDir = findAppDir()
-  if (!appDir || !readAppId(appDir)) {
-    throw new InputError(
-      'No app id. Run from an app directory whose wrangler.toml carries DEEPSPACE_APP_ID, or pass --app <id or name>.',
-      'not_in_app_repo',
-    )
-  }
+  if (!appDir || !readAppId(appDir, wranglerEnv)) throw appTargetMissingError(wranglerEnv)
 }
 
 /** Warn before an explicit unknown id can be registered by push or deploy. */

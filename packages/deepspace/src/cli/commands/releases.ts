@@ -12,7 +12,7 @@
 import * as p from '@clack/prompts'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
-import { resolveAppTarget, assertAppTargetResolvable } from '../lib/app-target'
+import { resolveAppTarget, assertAppTargetResolvable, parseWranglerEnvArg } from '../lib/app-target'
 import { repoApi } from '../lib/repo-api'
 import { parseLimitArg } from '../lib/citty-args'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
@@ -32,6 +32,12 @@ export default defineDeepspaceCommand({
       description: 'App id or subdomain name (default: the surrounding app directory)',
       required: false,
     },
+    env: {
+      type: 'string',
+      alias: 'e',
+      description: "wrangler.toml [env.<name>] slot — selects that environment's app id",
+      required: false,
+    },
     limit: {
       type: 'string',
       description: 'Max entries (default 20)',
@@ -40,15 +46,17 @@ export default defineDeepspaceCommand({
   },
   async run({ args }) {
     const appArg = args.app as string | undefined
+    const envArg = args.env as string | undefined
     const { limit, error: limitError } = parseLimitArg(args.limit)
     if (limitError) throw new Refusal(limitError, 'invalid_limit')
     // Blank --app / missing app context is a client-side error — reject it
     // BEFORE the token read so it never surfaces as not_authenticated.
-    assertAppTargetResolvable(appArg)
+    assertAppTargetResolvable(appArg, { wranglerEnv: envArg })
+    const { wranglerEnv } = parseWranglerEnvArg(envArg)
     const spinner = args.json ? null : createSpinner()
     spinner?.start('Loading release history…')
     const token = await ensureToken()
-    const appId = await resolveAppTarget(DEPLOY_URL, token, appArg)
+    const appId = await resolveAppTarget(DEPLOY_URL, token, appArg, { wranglerEnv: envArg })
     const { releases } = await repoApi(DEPLOY_URL, token, appId).listReleases(limit)
     spinner?.stop(`Loaded ${releases.length} ${releases.length === 1 ? 'release' : 'releases'}.`)
 
@@ -63,11 +71,13 @@ export default defineDeepspaceCommand({
             `#${r.seq}  ${r.id}  ${r.kind.padEnd(8)}  ${r.createdAt}  ${r.actor}  ${source}  ${rollback}`,
           )
         }
-        p.log.info('Roll back an available release with: deepspace rollback <release-id>')
+        p.log.info(
+          `Roll back an available release with: deepspace rollback <release-id>${wranglerEnv ? ` --env ${wranglerEnv}` : ''}`,
+        )
       }
     }
     // No `next`: a listing is terminal — the follow-up depends on which row you
     // pick, and the human path already names `deepspace rollback <release-id>`.
-    return { data: { appId, releases } }
+    return { data: { appId, wranglerEnv: wranglerEnv ?? null, releases } }
   },
 })

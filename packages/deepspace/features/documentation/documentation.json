@@ -1,0 +1,18 @@
+{
+  "name": "Documentation",
+  "description": "Documentation for this DeepSpace app",
+  "domains": [],
+  "navigation": [
+    {
+      "group": "Get started",
+      "pages": ["index", "quickstart"]
+    }
+  ],
+  "assistant": {
+    "access": "authenticated",
+    "suggestions": [
+      "How do I get started?",
+      "What can I build?"
+    ]
+  }
+}

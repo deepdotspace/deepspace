@@ -6,12 +6,35 @@
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, relative, resolve } from 'node:path'
-import { PLATFORM_URLS } from '../env'
+import { DEEPSPACE_ENV, PLATFORM_URLS, type DeepSpaceEnvironment } from '../env'
 import { shQuote } from './cli-format'
 import { runGit } from './git/process'
 
-/** The remote name the platform repo lives under in every synced clone. */
-export const SPACE_REMOTE = 'space'
+/** Resolve the source remote without allowing staging to re-aim production state. */
+export function spaceRemoteName(environment: DeepSpaceEnvironment = DEEPSPACE_ENV): string {
+  if (environment === 'staging') return 'space-staging'
+  if (environment === 'production') return 'space'
+  return 'space-invalid'
+}
+
+/** The source remote for this CLI process. */
+export const SPACE_REMOTE = spaceRemoteName()
+
+/** The environment-private tracking ref corresponding to a cloud branch. */
+export function spaceTrackingRef(branch: string, remote = SPACE_REMOTE): string {
+  return `refs/remotes/${remote}/${branch}`
+}
+
+/** Keep client-only source bookkeeping separate between production and staging. */
+export function spacePrivateRef(
+  path: string,
+  environment: DeepSpaceEnvironment = DEEPSPACE_ENV,
+): string {
+  const root = environment === 'production'
+    ? 'refs/deepspace'
+    : `refs/deepspace/${environment}`
+  return `${root}/${path}`
+}
 
 /** The deploy worker base URL, honoring the per-command override convention. */
 export function deployBaseUrl(): string {
@@ -82,18 +105,21 @@ function entryIsTransient(cwd: string): boolean {
 function helperEntryUsable(command: string): boolean {
   // Quoted paths containing a single quote deliberately fall through to false;
   // re-aiming that rare form is simpler and safer than partially parsing shell.
-  const match = /^!'([^']*)' '([^']*)' git-credential$/.exec(command)
-  return match !== null && existsSync(match[1]) && existsSync(match[2])
+  const match = /^!(?:DEEPSPACE_ENV=(production|staging) )?'([^']*)' '([^']*)' git-credential$/.exec(command)
+  const expectedEnvironment = DEEPSPACE_ENV === 'production' ? undefined : DEEPSPACE_ENV
+  if (!match || match[1] !== expectedEnvironment) return false
+  return existsSync(match[2]) && existsSync(match[3])
 }
 
 /**
  * Pin the exact node binary and CLI entry, avoiding PATH and stale global CLI
  * shadowing. `shQuote` neutralizes every shell metacharacter in those paths.
  */
-export function credentialHelperCommand(): string {
+export function credentialHelperCommand(environment: DeepSpaceEnvironment = DEEPSPACE_ENV): string {
   const entry = process.argv[1]
   if (!entry) throw new Error('CLI entry path is unavailable')
-  return `!${shQuote(process.execPath)} ${shQuote(entry)} git-credential`
+  const environmentPrefix = environment === 'staging' ? 'DEEPSPACE_ENV=staging ' : ''
+  return `!${environmentPrefix}${shQuote(process.execPath)} ${shQuote(entry)} git-credential`
 }
 
 /**
@@ -156,22 +182,22 @@ function installCredentialHelper(cwd: string, url: string): void {
   }
 }
 
-/** Point `space` at this app and install the host-scoped credential helper. */
-export function ensureSpaceRemote(cwd: string, appId: string): string {
+/** Point one platform source remote at this app and install its host-scoped credential helper. */
+export function ensureSpaceRemote(cwd: string, appId: string, remote = SPACE_REMOTE): string {
   const url = repoUrl(appId)
-  const current = runGit(cwd, ['remote', 'get-url', SPACE_REMOTE], { allowFail: true })
+  const current = runGit(cwd, ['remote', 'get-url', remote], { allowFail: true })
   if (current.status !== 0) {
-    runGit(cwd, ['remote', 'add', SPACE_REMOTE, url])
+    runGit(cwd, ['remote', 'add', remote, url])
   } else {
     const existing = current.stdout.toString('utf-8').trim()
     if (existing !== url) {
       const priorApp = appIdFromRepoUrl(existing)
       if (priorApp && priorApp !== appId && !process.argv.includes('--json')) {
         process.stderr.write(
-          `warning: remote '${SPACE_REMOTE}' was pointed at app ${priorApp}; re-aiming it at ${appId}.\n`,
+          `warning: remote '${remote}' was pointed at app ${priorApp}; re-aiming it at ${appId}.\n`,
         )
       }
-      runGit(cwd, ['remote', 'set-url', SPACE_REMOTE, url])
+      runGit(cwd, ['remote', 'set-url', remote, url])
     }
   }
   installCredentialHelper(cwd, url)

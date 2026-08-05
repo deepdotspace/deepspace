@@ -19,84 +19,21 @@
 
 import { defineCommand } from 'citty'
 import * as p from '@clack/prompts'
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
-import { join } from 'node:path'
-import { homedir } from 'node:os'
-import { ensureToken, SESSION_PATH } from '../auth'
-import { PLATFORM_URLS } from '../env'
+import { ensureToken } from '../auth'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
-
-const SESSION_COOKIE = '__Secure-better-auth.session_token'
-
-const AUTH_URL = process.env.DEEPSPACE_AUTH_URL ?? PLATFORM_URLS.auth
-const DIR = join(homedir(), '.deepspace')
-const ACCOUNTS_PATH = join(DIR, 'test-accounts.json')
-
-// ── Local credential store ─────────────────────────────────────────
-
-interface StoredAccount {
-  id: string
-  email: string
-  password: string
-  userId: string
-  name?: string
-  label?: string | null
-  createdAt: number
-}
-
-function loadAccounts(): StoredAccount[] {
-  if (!existsSync(ACCOUNTS_PATH)) return []
-  try {
-    return JSON.parse(readFileSync(ACCOUNTS_PATH, 'utf-8'))
-  } catch {
-    return []
-  }
-}
-
-function saveAccounts(accounts: StoredAccount[]) {
-  mkdirSync(DIR, { recursive: true })
-  writeFileSync(ACCOUNTS_PATH, JSON.stringify(accounts, null, 2), { mode: 0o600 })
-}
-
-// ── Helpers ────────────────────────────────────────────────────────
-
-function sessionCookie(): string {
-  const token = readFileSync(SESSION_PATH, 'utf-8').trim()
-  return `${SESSION_COOKIE}=${encodeURIComponent(token)}`
-}
-
-interface RemoteAccount {
-  id: string
-  email: string
-  userId: string
-  label: string | null
-  createdAt: number
-}
-
-async function fetchRemoteAccounts(): Promise<RemoteAccount[]> {
-  const res = await fetch(`${AUTH_URL}/api/auth/test-accounts`, {
-    headers: { Cookie: sessionCookie(), Origin: AUTH_URL },
-  })
-  const data = (await res.json().catch(() => ({}))) as {
-    accounts?: RemoteAccount[]
-    error?: string
-  }
-  if (!res.ok || !data.accounts) {
-    throw new Error(data.error ?? 'Failed to list test accounts')
-  }
-  return data.accounts
-}
-
-async function deleteRemote(id: string): Promise<void> {
-  const res = await fetch(`${AUTH_URL}/api/auth/test-accounts/${id}`, {
-    method: 'DELETE',
-    headers: { Cookie: sessionCookie(), Origin: AUTH_URL },
-  })
-  if (!res.ok) {
-    const data = (await res.json().catch(() => ({}))) as { error?: string }
-    throw new Error(data.error ?? `DELETE returned ${res.status}`)
-  }
-}
+import {
+  createRemoteTestAccount,
+  deleteRemoteTestAccount,
+  fetchRemoteTestAccounts,
+  syncTestAccountStore,
+} from '../lib/test-account-service'
+import {
+  loadAllTestAccounts,
+  removeTestAccounts,
+  TEST_ACCOUNTS_PATH,
+  upsertTestAccount,
+  type RemoteTestAccount,
+} from '../../testing/accounts'
 
 // ── Subcommands ────────────────────────────────────────────────────
 
@@ -129,64 +66,40 @@ const create = defineDeepspaceCommand({
   },
   async run({ args }) {
     await ensureToken()
+    const email = args.email as string
+    const password = args.password as string
+    const name = args.name as string | undefined
+    const label = args.label as string | undefined
 
-    const res = await fetch(`${AUTH_URL}/api/auth/test-accounts`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Cookie: sessionCookie(),
-        Origin: AUTH_URL,
-      },
-      body: JSON.stringify({
-        email: args.email,
-        password: args.password,
-        name: args.name,
-        label: args.label,
-      }),
-    })
-
-    const data = (await res.json().catch(() => ({}))) as {
-      id?: string
-      email?: string
-      userId?: string
-      label?: string | null
-      createdAt?: number
-      error?: string
-    }
-
-    if (!res.ok || !data.id) {
-      throw new Refusal(`Failed: ${data.error ?? 'Unknown error'}`, 'test_account_create_failed')
-    }
-
-    const account = data as {
-      id: string
-      email: string
-      userId: string
-      label: string | null
-      createdAt: number
+    let account: RemoteTestAccount
+    try {
+      account = await createRemoteTestAccount({ email, password, name, label })
+    } catch (error) {
+      throw new Refusal(
+        `Failed: ${error instanceof Error ? error.message : String(error)}`,
+        'test_account_create_failed',
+      )
     }
 
     // Save credentials locally
-    const accounts = loadAccounts()
-    accounts.push({
+    upsertTestAccount({
       id: account.id,
-      email: args.email as string,
-      password: args.password as string,
+      email,
+      password,
       userId: account.userId,
-      name: args.name as string | undefined,
+      name,
       label: account.label,
       createdAt: account.createdAt,
     })
-    saveAccounts(accounts)
 
     if (!args.json) {
       console.log(`Created test account:`)
       console.log(`  ID:       ${account.id}`)
       console.log(`  Email:    ${account.email}`)
-      console.log(`  Password: ${args.password}`)
+      console.log(`  Password: ${password}`)
       console.log(`  UserID:   ${account.userId}`)
       if (account.label) console.log(`  Label:    ${account.label}`)
-      console.log(`\nSaved to ${ACCOUNTS_PATH}`)
+      console.log(`\nSaved to ${TEST_ACCOUNTS_PATH}`)
     }
 
     return {
@@ -196,11 +109,11 @@ const create = defineDeepspaceCommand({
         // The password is already echoed on the human path and stored 0600 in
         // ACCOUNTS_PATH — withholding it from --json would only force scripts
         // to parse the file themselves.
-        password: args.password,
+        password,
         userId: account.userId,
         label: account.label ?? null,
         createdAt: account.createdAt,
-        savedTo: ACCOUNTS_PATH,
+        savedTo: TEST_ACCOUNTS_PATH,
       },
     }
   },
@@ -214,15 +127,15 @@ const list = defineDeepspaceCommand({
   async run({ args }) {
     await ensureToken()
 
-    let remote: RemoteAccount[]
+    let remote: RemoteTestAccount[]
     try {
-      remote = await fetchRemoteAccounts()
+      remote = (await syncTestAccountStore()).accounts
     } catch (err) {
       throw new Refusal(`Failed: ${(err as Error).message}`, 'test_accounts_list_failed')
     }
 
     // Merge with local credentials (passwords are only stored locally)
-    const local = loadAccounts()
+    const local = loadAllTestAccounts()
     const localByEmail = new Map(local.map((a) => [a.email, a]))
 
     if (remote.length === 0) {
@@ -297,9 +210,9 @@ const del = defineDeepspaceCommand({
     const targetEmail = args.email as string | undefined
 
     if (targetEmail && !targetId) {
-      let remote: RemoteAccount[]
+      let remote: RemoteTestAccount[]
       try {
-        remote = await fetchRemoteAccounts()
+        remote = await fetchRemoteTestAccounts()
       } catch (err) {
         throw new Refusal(`Failed: ${(err as Error).message}`, 'test_accounts_list_failed')
       }
@@ -313,16 +226,13 @@ const del = defineDeepspaceCommand({
     }
 
     try {
-      await deleteRemote(targetId!)
+      await deleteRemoteTestAccount(targetId!)
     } catch (err) {
       throw new Refusal(`Failed: ${(err as Error).message}`, 'test_account_delete_failed')
     }
 
     // Remove from local store
-    const accounts = loadAccounts().filter(
-      (a) => a.id !== targetId && (!targetEmail || a.email !== targetEmail),
-    )
-    saveAccounts(accounts)
+    removeTestAccounts([targetId!], targetEmail ? [targetEmail] : [])
 
     if (!args.json) {
       console.log(`Test account deleted${targetEmail ? `: ${targetEmail}` : `: ${targetId}`}`)
@@ -352,9 +262,9 @@ const clear = defineDeepspaceCommand({
     const label = args.label as string | undefined
     await ensureToken()
 
-    let remote: RemoteAccount[]
+    let remote: RemoteTestAccount[]
     try {
-      remote = await fetchRemoteAccounts()
+      remote = await fetchRemoteTestAccounts()
     } catch (err) {
       throw new Refusal(`Failed: ${(err as Error).message}`, 'test_accounts_list_failed')
     }
@@ -394,7 +304,7 @@ const clear = defineDeepspaceCommand({
     const failures: Array<{ email: string; error: string }> = []
     for (const a of targets) {
       try {
-        await deleteRemote(a.id)
+        await deleteRemoteTestAccount(a.id)
         ok++
       } catch (err) {
         failures.push({ email: a.email, error: (err as Error).message })
@@ -402,10 +312,8 @@ const clear = defineDeepspaceCommand({
     }
 
     // Sync local store with what's actually deleted.
-    const deletedIds = new Set(
-      targets.filter((t) => !failures.find((f) => f.email === t.email)).map((t) => t.id),
-    )
-    saveAccounts(loadAccounts().filter((a) => !deletedIds.has(a.id)))
+    const deleted = targets.filter((target) => !failures.some((failure) => failure.email === target.email))
+    removeTestAccounts(deleted.map((target) => target.id), deleted.map((target) => target.email))
 
     if (failures.length > 0) {
       // A partial delete still failed overall — carry the per-account reasons

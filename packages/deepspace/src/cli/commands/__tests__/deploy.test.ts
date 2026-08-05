@@ -6,6 +6,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { blankSelectorRefusal, staleBaseGuardFields } from '../deploy'
+import {
+  extractRunWorkerFirst,
+  isDeployAssetControlFile,
+  readDeployAssetConfig,
+  resolveDeployRunWorkerFirst,
+} from '../deploy/build'
 import { packAssetGroups, postWithRetry } from '../deploy/request'
 import { classifyDevVarsSecrets } from '../deploy/secrets'
 import {
@@ -22,6 +28,53 @@ import type { PushRefResult } from '../../lib/vc-push'
 import { GitError } from '../../lib/git/process'
 
 type Asset = { path: string; contentBase64: string }
+
+describe('extractRunWorkerFirst', () => {
+  it('forwards documentation routes only when the app declares them', () => {
+    expect(extractRunWorkerFirst({})).toEqual([])
+    expect(extractRunWorkerFirst({ assets: { run_worker_first: ['/docs', '/docs/*'] } })).toEqual([
+      '/docs',
+      '/docs/*',
+    ])
+  })
+
+  it('filters platform-reserved, invalid, and duplicate routes', () => {
+    expect(
+      extractRunWorkerFirst({
+        assets: {
+          run_worker_first: ['/api/*', '/docs', '/docs', 'not-a-route', '/oauth/*'],
+        },
+      }),
+    ).toEqual(['/docs', '/oauth/*'])
+  })
+
+  it('uses only the environment-resolved Wrangler routing contract', () => {
+    expect(resolveDeployRunWorkerFirst({})).toEqual([])
+    expect(resolveDeployRunWorkerFirst({ assets: { run_worker_first: true } })).toBe(true)
+    expect(
+      resolveDeployRunWorkerFirst({ assets: { run_worker_first: ['/docs', '/docs/*'] } }),
+    ).toEqual(['/docs', '/docs/*'])
+  })
+})
+
+describe('static asset control files', () => {
+  it('moves Cloudflare control files into deploy metadata instead of public assets', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'deepspace-asset-config-'))
+    try {
+      writeFileSync(join(dir, '_headers'), '/*\n  X-Content-Type-Options: nosniff\n')
+      writeFileSync(join(dir, '_redirects'), '/old /new 301\n')
+      expect(readDeployAssetConfig(dir)).toEqual({
+        _headers: '/*\n  X-Content-Type-Options: nosniff\n',
+        _redirects: '/old /new 301\n',
+      })
+      expect(isDeployAssetControlFile('_headers')).toBe(true)
+      expect(isDeployAssetControlFile('_redirects')).toBe(true)
+      expect(isDeployAssetControlFile('index.html')).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
 
 /** An asset whose serialized JSON is at least `bytes` long (content padded). */
 function assetOfSize(path: string, bytes: number): Asset {

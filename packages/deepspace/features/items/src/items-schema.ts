@@ -8,7 +8,7 @@
  * - Basic CRUD with role-based permissions
  */
 
-import type { CollectionSchema } from 'deepspace/worker'
+import type { CollectionSchema } from 'deepspace/schema'
 
 export const itemsSchema: CollectionSchema = {
   name: 'items',

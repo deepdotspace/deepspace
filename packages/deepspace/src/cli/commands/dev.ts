@@ -70,6 +70,10 @@ export function noAppDirMessage(start: string, children: string[]): string {
   return lines.join('\n')
 }
 
+export function devExitSucceeded(code: number | null, stopping: boolean): boolean {
+  return stopping || code === null || code === 0
+}
+
 export default defineDeepspaceCommand({
   meta: {
     name: 'dev',
@@ -261,7 +265,9 @@ export default defineDeepspaceCommand({
       stdio: 'inherit',
       env: wranglerViteEnv(process.env, wranglerConfig, { DEEPSPACE_PORT: String(port) }),
     })
+    let stopping = false
     const stop = () => {
+      stopping = true
       wranglerConfig.cleanup()
       vite.kill()
     }
@@ -277,9 +283,11 @@ export default defineDeepspaceCommand({
         res(c)
       })
     })
+    process.off('SIGINT', stop)
+    process.off('SIGTERM', stop)
     // A signal-terminated vite reports code null — that's Ctrl-C, i.e. the
     // normal way this command ends, so it stays a success.
-    if (code !== null && code !== 0) {
+    if (!devExitSucceeded(code, stopping)) {
       throw new Refusal(`Dev server exited with code ${code}.`, 'dev_server_failed', {
         extra: { port, appDir, exitCode: code },
       })

@@ -35,6 +35,7 @@
 import { createAnthropic } from '@ai-sdk/anthropic'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
+import type { DeepSpaceAIProvider } from '../../shared/ai-models'
 import { resolveApiTransport, type ApiWorkerEnv } from './proxies'
 import type { LanguageModel } from 'ai'
 
@@ -44,8 +45,6 @@ import type { LanguageModel } from 'ai'
  * paths into the published `dist/index.d.ts`.
  */
 export type DeepSpaceModelFactory = (modelId: string) => LanguageModel
-
-type Provider = 'anthropic' | 'openai' | 'cerebras'
 
 export interface DeepSpaceAIEnv extends ApiWorkerEnv {
   /**
@@ -101,7 +100,7 @@ function withDefaultAnthropicMaxTokens(body: RequestInit['body']): RequestInit['
  */
 export function createDeepSpaceAI(
   env: DeepSpaceAIEnv,
-  provider: Provider,
+  provider: DeepSpaceAIProvider,
   options: DeepSpaceAIOptions = {},
 ): DeepSpaceModelFactory {
   const transport = resolveApiTransport(env)

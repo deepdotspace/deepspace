@@ -133,6 +133,9 @@ describe('prepareWranglerEnvConfig', () => {
           'compatibility_date = "2025-01-01"',
           '[vars]',
           'APP_NAME = "hopkins"',
+          '[[durable_objects.bindings]]',
+          'name = "ROOMS"',
+          'class_name = "RecordRoom"',
           '[env.staging]',
           'name = "hopkins-staging"',
           'route = "staging.example.com/*"',
@@ -158,6 +161,8 @@ describe('prepareWranglerEnvConfig', () => {
       expect(generated).toContain('APP_NAME = "hopkins-staging"')
       expect(generated).not.toContain('[env.staging')
       expect(generated).not.toContain('APP_NAME = "hopkins"\n')
+      expect(generated).toContain('name = "ROOMS"')
+      expect(generated).toContain('class_name = "RecordRoom"')
 
       const childEnv = wranglerViteEnv({ CLOUDFLARE_ENV: 'staging', KEEP: 'yes' }, prepared, {
         DEEPSPACE_PORT: '5173',
@@ -172,6 +177,59 @@ describe('prepareWranglerEnvConfig', () => {
       expect(readFileSync(join(dir, '.dev.vars.staging'), 'utf-8')).toBe(
         'OLD_SECRET=keep-for-user\n',
       )
+    })
+  })
+
+  it('lets an environment explicitly replace top-level Durable Object bindings', () => {
+    withTempDir((dir) => {
+      writeFileSync(
+        join(dir, 'wrangler.toml'),
+        [
+          'name = "hopkins"',
+          '[[durable_objects.bindings]]',
+          'name = "ROOMS"',
+          'class_name = "RecordRoom"',
+          '[env.staging]',
+          'name = "hopkins-staging"',
+          '[[env.staging.durable_objects.bindings]]',
+          'name = "STAGING_ROOMS"',
+          'class_name = "StagingRecordRoom"',
+        ].join('\n'),
+      )
+
+      const prepared = prepareWranglerEnvConfig(dir, 'staging', { sharedDevVarsCache: true })
+      const generated = readFileSync(prepared.configPath!, 'utf-8')
+      expect(generated).toContain('name = "STAGING_ROOMS"')
+      expect(generated).not.toContain('name = "ROOMS"')
+      expect(generated).toContain('APP_NAME = "hopkins-staging"')
+      prepared.cleanup()
+    })
+  })
+
+  it('does not inherit native rate-limit bindings into a named environment', () => {
+    withTempDir((dir) => {
+      writeFileSync(
+        join(dir, 'wrangler.toml'),
+        [
+          'name = "hopkins"',
+          '[[ratelimits]]',
+          'name = "PRODUCTION_LIMITER"',
+          'namespace_id = "1001"',
+          'simple = { limit = 10, period = 60 }',
+          '[env.staging]',
+          'name = "hopkins-staging"',
+          '[[env.staging.ratelimits]]',
+          'name = "STAGING_LIMITER"',
+          'namespace_id = "1002"',
+          'simple = { limit = 20, period = 60 }',
+        ].join('\n'),
+      )
+
+      const prepared = prepareWranglerEnvConfig(dir, 'staging', { sharedDevVarsCache: true })
+      const generated = readFileSync(prepared.configPath!, 'utf-8')
+      expect(generated).toContain('name = "STAGING_LIMITER"')
+      expect(generated).not.toContain('name = "PRODUCTION_LIMITER"')
+      prepared.cleanup()
     })
   })
 

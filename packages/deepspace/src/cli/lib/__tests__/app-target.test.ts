@@ -1,7 +1,12 @@
 import { afterEach, describe, it, expect, vi } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
+  assertAppTargetResolvable,
   matchAppSelector,
   parseAppArg,
+  parseWranglerEnvArg,
   resolveAppSelector,
   resolveAppTarget,
   requireAppIdArg,
@@ -85,7 +90,73 @@ describe('--app blank guard wiring (throws code:"invalid_app" before any fs/netw
     expect(thrownCode(() => requireAppIdArg('   '))).toBe('invalid_app')
     expect(thrownCode(() => requireAppIdArg(''))).toBe('invalid_app')
   })
+})
 
+describe('named-environment app targets', () => {
+  const topLevelId = 'app_01ARZ3NDEKTSV4RRFFQ69G5FAV'
+  const stagingId = 'app_01H00000000000000000000000'
+
+  async function inApp<T>(run: () => Promise<T> | T): Promise<T> {
+    const originalCwd = process.cwd()
+    const appDir = mkdtempSync(join(tmpdir(), 'deepspace-app-target-'))
+    writeFileSync(
+      join(appDir, 'wrangler.toml'),
+      [
+        'name = "production-app"',
+        '[vars]',
+        `DEEPSPACE_APP_ID = "${topLevelId}"`,
+        '[env.staging]',
+        'name = "staging-app"',
+        '[env.staging.vars]',
+        `DEEPSPACE_APP_ID = "${stagingId}"`,
+      ].join('\n'),
+    )
+    process.chdir(appDir)
+    try {
+      return await run()
+    } finally {
+      process.chdir(originalCwd)
+      rmSync(appDir, { recursive: true, force: true })
+    }
+  }
+
+  it('preserves blank-vs-absent environment names', () => {
+    expect(parseWranglerEnvArg(undefined)).toEqual({})
+    expect(parseWranglerEnvArg('  staging  ')).toEqual({ wranglerEnv: 'staging' })
+    expect(parseWranglerEnvArg('   ').error).toMatch(/empty environment name/)
+  })
+
+  it('resolves the selected environment identity without network access', async () => {
+    await inApp(async () => {
+      await expect(
+        resolveAppTarget('https://deploy.test', 'token', undefined, {
+          wranglerEnv: 'staging',
+        }),
+      ).resolves.toBe(stagingId)
+      await expect(resolveAppTarget('https://deploy.test', 'token', undefined)).resolves.toBe(
+        topLevelId,
+      )
+    })
+  })
+
+  it('refuses missing environments instead of falling back to the top-level app', async () => {
+    await inApp(async () => {
+      await expect(
+        resolveAppTarget('https://deploy.test', 'token', undefined, { wranglerEnv: 'preview' }),
+      ).rejects.toMatchObject({ code: 'no_app_id_for_env' })
+    })
+  })
+
+  it('refuses --app with --env and a blank --env before authentication', async () => {
+    await inApp(() => {
+      expect(
+        thrownCode(() => assertAppTargetResolvable(topLevelId, { wranglerEnv: 'staging' })),
+      ).toBe('ambiguous_target')
+      expect(thrownCode(() => assertAppTargetResolvable(undefined, { wranglerEnv: '  ' }))).toBe(
+        'invalid_env',
+      )
+    })
+  })
 })
 
 describe('matchAppSelector', () => {

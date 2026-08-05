@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import * as p from '@clack/prompts'
 import spawn from 'cross-spawn'
@@ -9,6 +9,31 @@ import type { PreparedProject, Progress } from './project-template'
 // every installer fix require a create-deepspace release.
 const SKILLS_INSTALLER_PACKAGE = 'skills@latest'
 const SKILL_REPOSITORY = 'deepdotspace/deepspace-skill'
+
+interface InstallerCommand {
+  command: string
+  args: string[]
+}
+
+/** Avoid a nested `npx` shim when the creator itself is running under npm exec. */
+export function agentSkillInstallerCommand(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): InstallerCommand {
+  const args = [
+    'exec',
+    '--yes',
+    `--package=${SKILLS_INSTALLER_PACKAGE}`,
+    '--',
+    'skills',
+    'add',
+    SKILL_REPOSITORY,
+    '-y',
+  ]
+  const npmExecPath = environment.npm_execpath
+  return npmExecPath && /(?:^|[/\\])npm-cli\.(?:c?js|mjs)$/i.test(npmExecPath)
+    ? { command: process.execPath, args: [npmExecPath, ...args] }
+    : { command: 'npm', args }
+}
 
 export function createProgress(): Progress {
   // Clack repaints a TTY spinner with carriage returns. In agent/CI logs those
@@ -45,7 +70,8 @@ async function installAgentSkill(appDir: string, progress: Progress): Promise<vo
     // or it can silently skip Claude Code's symlink.
     mkdirSync(join(appDir, '.claude'), { recursive: true })
     await new Promise<void>((resolve, reject) => {
-      const child = spawn('npx', ['-y', SKILLS_INSTALLER_PACKAGE, 'add', SKILL_REPOSITORY, '-y'], {
+      const installer = agentSkillInstallerCommand()
+      const child = spawn(installer.command, installer.args, {
         cwd: appDir,
         stdio: ['ignore', 'pipe', 'pipe'],
       })
@@ -78,6 +104,7 @@ async function installAgentSkill(appDir: string, progress: Progress): Promise<vo
       })
       child.on('error', reject)
     })
+    ensureClaudeSkillLink(appDir)
     progress.stop('DeepSpace agent skill installed')
   } catch (error) {
     progress.stop(
@@ -94,6 +121,32 @@ async function installAgentSkill(appDir: string, progress: Progress): Promise<vo
     } catch {
       // The progress message still tells the user how to recover.
     }
+  }
+}
+
+/** Keep every supported agent pointed at the one portable project skill. */
+export function ensureClaudeSkillLink(appDir: string): void {
+  const source = join(appDir, '.agents', 'skills', 'deepspace')
+  if (!existsSync(source)) throw new Error('skills installer did not create .agents/skills/deepspace')
+  const link = join(appDir, '.claude', 'skills', 'deepspace')
+  mkdirSync(join(link, '..'), { recursive: true })
+  if (existsSync(link) || lstatExists(link)) {
+    if (lstatSync(link).isSymbolicLink()) return
+    rmSync(link, { recursive: true, force: true })
+  }
+  symlinkSync(
+    process.platform === 'win32' ? source : '../../.agents/skills/deepspace',
+    link,
+    process.platform === 'win32' ? 'junction' : 'dir',
+  )
+}
+
+function lstatExists(path: string): boolean {
+  try {
+    lstatSync(path)
+    return true
+  } catch {
+    return false
   }
 }
 

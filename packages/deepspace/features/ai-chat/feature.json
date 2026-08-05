@@ -36,8 +36,8 @@
   ],
   "patterns": [
     "ChatPanel takes `chatId` (or null). Parent owns chat lifecycle (create / select / delete); pass `disabled` while a parent-driven create is in flight so the panel doesn't kick off its own auto-create.",
-    "ChatPanel's DEFAULT_MODELS and worker.ts's ALLOWED_MODELS must stay in sync — add entries to both when introducing a new model.",
+    "ChatPanel and the server agent both consume the SDK's canonical model catalog; never add a second model allowlist in app code.",
     "Compaction summary is stored on the ai-chats row (compactedSummary, compactedThroughId). The summarizer is user-billed by default; pass `makeDefaultSummarizer(c.env)` with no authToken in worker.ts to absorb the cost as the developer instead.",
-    "Tool execution is server-side and per-user RBAC-enforced (records.* tools see only what the caller would see). `stopWhen: stepCountIs(5)` caps tool-use rounds per turn."
+    "Tool execution is server-side and per-user RBAC-enforced (records.* tools see only what the caller would see). The canonical runner enforces at most 20 tool calls per turn."
   ]
 }

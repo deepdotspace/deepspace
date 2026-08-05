@@ -1,6 +1,6 @@
 {
   "name": "create-deepspace",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "engines": {
     "node": ">=22.15.0"
   },

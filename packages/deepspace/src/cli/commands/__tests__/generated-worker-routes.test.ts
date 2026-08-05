@@ -233,6 +233,15 @@ describe('generated worker route owners', () => {
     } as Fetcher
     const staticApp = new Hono<TestContext>()
     registerStaticRoutes(staticApp)
+    const missingApi = await staticApp.request(
+      'https://app.test/api/definitely-not-a-real-route',
+      undefined,
+      env({ ASSETS: assets }),
+    )
+    expect(missingApi.status).toBe(404)
+    expect(await missingApi.json()).toEqual({ error: 'not_found' })
+    expect(assetRequests).toEqual([])
+
     const fallback = await staticApp.request(
       'https://app.test/client/route',
       undefined,

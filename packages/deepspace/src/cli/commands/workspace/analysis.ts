@@ -9,10 +9,16 @@ import {
   resolveCommit,
 } from '../../lib/git/repository'
 import type { RemoteRefsResult, RemoteWorkspaceView, RepoApi } from '../../lib/repo-api'
-import { ensureSpaceRemote, runGitRemote, SPACE_REMOTE } from '../../lib/vc-remote'
+import {
+  ensureSpaceRemote,
+  runGitRemote,
+  SPACE_REMOTE,
+  spacePrivateRef,
+  spaceTrackingRef,
+} from '../../lib/vc-remote'
 
 const MAX_OVERLAP_PATHS = 20
-const PEER_REF_PREFIX = 'refs/deepspace/peers/'
+const PEER_REF_PREFIX = `${spacePrivateRef('peers')}/`
 
 export function peerWorkspaceRef(workspaceId: string): string {
   return `${PEER_REF_PREFIX}${workspaceId}`
@@ -37,7 +43,7 @@ export function fetchTrunk(
 ): { branch: string; ref: string; oid: string } | null {
   if (!head?.startsWith('refs/heads/')) return null
   const branch = head.slice('refs/heads/'.length)
-  const remoteRef = `refs/remotes/space/${branch}`
+  const remoteRef = spaceTrackingRef(branch)
   runGitRemote(appDir, token, ['fetch', '--quiet', SPACE_REMOTE, `+${head}:${remoteRef}`])
   const oid = resolveCommit(appDir, remoteRef)
   return oid ? { branch, ref: remoteRef, oid } : null
@@ -48,7 +54,7 @@ export function localTrunkOid(appDir: string, refs: RemoteRefsResult | null): st
   if (!head?.startsWith('refs/heads/')) return null
   const advertised = refs?.refs.find((ref) => ref.name === head)?.oid ?? null
   if (advertised && resolveCommit(appDir, advertised)) return advertised
-  return resolveCommit(appDir, `refs/remotes/space/${head.slice('refs/heads/'.length)}`)
+  return resolveCommit(appDir, spaceTrackingRef(head.slice('refs/heads/'.length)))
 }
 
 function fetchPeerWorkspaceRefs(appDir: string, token: string): void {

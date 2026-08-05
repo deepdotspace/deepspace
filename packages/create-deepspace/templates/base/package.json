@@ -55,7 +55,7 @@
     "react-router-dom": "^7.1.0",
     "tailwind-merge": "^2.6.0",
     "yjs": "^13.6.0",
-    "zod": "^3.25.76"
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@playwright/test": "^1.50.0",

@@ -62,7 +62,9 @@ export async function deployBuiltBundle(options: {
   } = options
 
   spinner.start(`Deploying ${appName}...`)
-  if (bundle.extraRoutes.length) {
+  if (bundle.extraRoutes === true) {
+    p.log.info('Worker-first routing: all requests')
+  } else if (bundle.extraRoutes.length) {
     p.log.info(`Custom worker-first routes: ${bundle.extraRoutes.join(', ')}`)
   }
   const assetGroups = packAssetGroups(bundle.assets, GROUP_BYTES)
@@ -142,8 +144,11 @@ export async function deployBuiltBundle(options: {
       form.append('bindingManifest', JSON.stringify(bundle.customBindings))
     }
     if (secrets.names.length) form.append('userSecrets', JSON.stringify(secrets.values))
-    if (bundle.extraRoutes.length) {
+    if (bundle.extraRoutes === true || bundle.extraRoutes.length) {
       form.append('extraRunWorkerFirst', JSON.stringify(bundle.extraRoutes))
+    }
+    if (Object.keys(bundle.assetConfig).length) {
+      form.append('assetConfig', JSON.stringify(bundle.assetConfig))
     }
     form.append('name', appName)
     if (confirmRename) form.append('confirmRename', 'true')
@@ -187,15 +192,6 @@ export async function deployBuiltBundle(options: {
   }
 
   let body = (await response.json().catch(() => ({}))) as DeployCommitResponse
-  for (
-    let attempt = 0;
-    response.status === 503 && body.code === 'release_finalization_pending' && attempt < 3;
-    attempt++
-  ) {
-    await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt))
-    response = await postCommit()
-    body = (await response.json().catch(() => ({}))) as DeployCommitResponse
-  }
 
   if (response.status === 409 && body.code === 'rename_required' && !confirmRename) {
     spinner.stop('Rename confirmation needed')
