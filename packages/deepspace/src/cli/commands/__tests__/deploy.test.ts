@@ -1,18 +1,26 @@
 /** Deploy CLI decision and request helpers, imported from their owning modules. */
 
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { blankSelectorRefusal, staleBaseGuardFields } from '../deploy'
 import {
+  collectAssets,
   extractRunWorkerFirst,
   isDeployAssetControlFile,
   readDeployAssetConfig,
   resolveDeployRunWorkerFirst,
 } from '../deploy/build'
-import { packAssetGroups, postWithRetry } from '../deploy/request'
+import {
+  assetManifest,
+  formatDeployWorkerError,
+  isDeployServiceResourceLimit,
+  postWithRetry,
+  uploadDeployAssets,
+} from '../deploy/request'
 import { classifyDevVarsSecrets } from '../deploy/secrets'
 import {
   deployRepositoryFailure,
@@ -26,8 +34,6 @@ import {
 import type { DeployOutput } from '../deploy/output'
 import type { PushRefResult } from '../../lib/vc-push'
 import { GitError } from '../../lib/git/process'
-
-type Asset = { path: string; contentBase64: string }
 
 describe('extractRunWorkerFirst', () => {
   it('forwards documentation routes only when the app declares them', () => {
@@ -76,12 +82,6 @@ describe('static asset control files', () => {
   })
 })
 
-/** An asset whose serialized JSON is at least `bytes` long (content padded). */
-function assetOfSize(path: string, bytes: number): Asset {
-  const overhead = JSON.stringify({ path, contentBase64: '' }).length
-  return { path, contentBase64: 'A'.repeat(Math.max(0, bytes - overhead)) }
-}
-
 describe('blankSelectorRefusal (pre-auth blank deploy selector)', () => {
   // A present-but-blank target selector is refused pre-auth with a true code so an
   // unset `--env "$VAR"` can't silently deploy prod, nor `deploy "$DIR"` the cwd.
@@ -99,62 +99,239 @@ describe('blankSelectorRefusal (pre-auth blank deploy selector)', () => {
   })
 })
 
-describe('packAssetGroups', () => {
-  it('returns no groups for an empty asset list', () => {
-    expect(packAssetGroups([], 1000)).toEqual([])
-  })
+describe('content-addressed asset collection', () => {
+  it('addresses every built file by the SHA-256 of its bytes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'deepspace-assets-'))
+    try {
+      writeFileSync(join(dir, 'index.html'), '<html/>')
+      mkdirSync(join(dir, 'nested'))
+      writeFileSync(join(dir, 'nested', 'app.js'), 'console.log(1)')
+      // Control files are metadata, never public assets.
+      writeFileSync(join(dir, '_headers'), '/*\n  X-Frame-Options: DENY\n')
 
-  it('keeps a single small asset in one group', () => {
-    const assets: Asset[] = [{ path: '/a', contentBase64: 'aGk=' }]
-    expect(packAssetGroups(assets, 1000)).toEqual([assets])
-  })
-
-  it('packs multiple small assets that fit under the cap into one group', () => {
-    const assets: Asset[] = [
-      { path: '/a', contentBase64: 'aA==' },
-      { path: '/b', contentBase64: 'bA==' },
-      { path: '/c', contentBase64: 'cA==' },
-    ]
-    const groups = packAssetGroups(assets, 1000)
-    expect(groups).toHaveLength(1)
-    expect(groups[0]).toEqual(assets)
-  })
-
-  it('splits into multiple groups, losing or reordering nothing', () => {
-    // ~100B each, 60B cap forces one asset per group.
-    const assets = Array.from({ length: 6 }, (_, i) => assetOfSize(`/file-${i}`, 100))
-    const groups = packAssetGroups(assets, 60)
-    expect(groups.length).toBeGreaterThan(1)
-    // Flattening the groups in order reproduces the input exactly.
-    expect(groups.flat()).toEqual(assets)
-  })
-
-  it('never lets a multi-asset group exceed the cap', () => {
-    const assets = Array.from({ length: 20 }, (_, i) => assetOfSize(`/file-${i}`, 50))
-    const cap = 200
-    const groups = packAssetGroups(assets, cap)
-    for (const group of groups) {
-      // The whole point of the cap: a group with >1 asset must serialize under it.
-      // (A lone asset bigger than the cap is the documented exception below.)
-      if (group.length > 1) {
-        expect(Buffer.byteLength(JSON.stringify(group), 'utf-8')).toBeLessThanOrEqual(cap)
+      const assets = collectAssets(dir)
+      expect(assets.map((asset) => asset.path).sort()).toEqual(['/index.html', '/nested/app.js'])
+      for (const asset of assets) {
+        const bytes = readFileSync(asset.sourcePath)
+        expect(asset.hash).toBe(createHash('sha256').update(bytes).digest('hex'))
+        expect(asset.size).toBe(bytes.byteLength)
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
-    expect(groups.flat()).toEqual(assets)
   })
 
-  it('never splits a single oversized asset — it gets its own group', () => {
-    const big = assetOfSize('/huge', 500)
-    const assets: Asset[] = [
-      { path: '/small-1', contentBase64: 'AA==' },
-      big,
-      { path: '/small-2', contentBase64: 'BB==' },
-    ]
-    const groups = packAssetGroups(assets, 100)
-    // The oversized asset is alone in its own group (not split, not merged).
-    const bigGroup = groups.find((g) => g.includes(big))
-    expect(bigGroup).toEqual([big])
-    expect(groups.flat()).toEqual(assets)
+  it('gives identical content one hash, so the manifest dedupes on the wire', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'deepspace-assets-dup-'))
+    try {
+      writeFileSync(join(dir, 'a.txt'), 'same bytes')
+      writeFileSync(join(dir, 'b.txt'), 'same bytes')
+      const manifest = assetManifest(collectAssets(dir))
+      expect(manifest).toHaveLength(2)
+      expect(new Set(manifest.map((entry) => entry.hash)).size).toBe(1)
+      // The manifest carries no file contents at all.
+      expect(JSON.stringify(manifest)).not.toMatch(/same bytes/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('uploadDeployAssets', () => {
+  const SILENT_SPINNER = { start: vi.fn(), stop: vi.fn(), message: vi.fn() }
+
+  function testOutput(): DeployOutput {
+    return {
+      json: true,
+      nonInteractive: true,
+      emitJson: vi.fn(),
+      showIntro: vi.fn(),
+      die(message, code): never {
+        throw new Error(`${code}: ${message}`)
+      },
+    }
+  }
+
+  function buildAssets(files: Record<string, string>): {
+    dir: string
+    assets: ReturnType<typeof collectAssets>
+  } {
+    const dir = mkdtempSync(join(tmpdir(), 'deepspace-upload-'))
+    for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body)
+    return { dir, assets: collectAssets(dir) }
+  }
+
+  const run = (assets: ReturnType<typeof collectAssets>, output = testOutput()) =>
+    uploadDeployAssets({
+      deployUrl: 'https://deploy.test',
+      appId: 'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
+      token: 'tok',
+      assets,
+      output,
+      spinner: SILENT_SPINNER,
+    })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('declares every unique hash and uploads only what the plan asks for', async () => {
+    const { dir, assets } = buildAssets({
+      'a.txt': 'alpha',
+      'b.txt': 'beta',
+      // Same content as a.txt: one hash on the wire, one upload.
+      'c.txt': 'alpha',
+    })
+    try {
+      const alpha = assets.find((asset) => asset.path === '/a.txt')!
+      let planned: Array<{ hash: string; size: number }> = []
+      const uploaded: string[] = []
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string, init?: RequestInit) => {
+          if (String(url).endsWith('/asset-plan')) {
+            planned = (JSON.parse(String(init!.body)) as { assets: typeof planned }).assets
+            return Response.json({ missing: [alpha.hash] })
+          }
+          uploaded.push(String(url).split('/').pop()!)
+          expect(init!.method).toBe('PUT')
+          expect(new Uint8Array(init!.body as Uint8Array)).toEqual(
+            new Uint8Array(readFileSync(alpha.sourcePath)),
+          )
+          return Response.json({ ok: true })
+        }),
+      )
+
+      await run(assets)
+      expect(planned.map((entry) => entry.hash).sort()).toEqual(
+        [...new Set(assets.map((asset) => asset.hash))].sort(),
+      )
+      expect(uploaded).toEqual([alpha.hash])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('uploads every missing hash exactly once across the worker pool', async () => {
+    const files = Object.fromEntries(
+      Array.from({ length: 11 }, (_, index) => [`f${index}.txt`, `body-${index}`]),
+    )
+    const { dir, assets } = buildAssets(files)
+    try {
+      const uploaded: string[] = []
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string) => {
+          if (String(url).endsWith('/asset-plan')) {
+            return Response.json({ missing: assets.map((asset) => asset.hash) })
+          }
+          uploaded.push(String(url).split('/').pop()!)
+          return Response.json({ ok: true })
+        }),
+      )
+
+      await run(assets)
+      expect(uploaded.sort()).toEqual(assets.map((asset) => asset.hash).sort())
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('surfaces the platform’s own refusal instead of a generic upload failure', async () => {
+    const { dir, assets } = buildAssets({ 'a.txt': 'alpha' })
+    try {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string) =>
+          String(url).endsWith('/asset-plan')
+            ? Response.json({ missing: [assets[0].hash] })
+            : Response.json(
+                { error: 'Asset content hash mismatch', code: 'hash_mismatch' },
+                { status: 400 },
+              ),
+        ),
+      )
+      await expect(run(assets)).rejects.toThrow(/hash_mismatch: Asset content hash mismatch/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a plan naming content this build does not have', async () => {
+    const { dir, assets } = buildAssets({ 'a.txt': 'alpha' })
+    try {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => Response.json({ missing: ['f'.repeat(64)] })),
+      )
+      await expect(run(assets)).rejects.toThrow(/not part of this build/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('reports a refused plan with the platform’s message and code', async () => {
+    const { dir, assets } = buildAssets({ 'a.txt': 'alpha' })
+    try {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          Response.json(
+            { error: 'This deploy’s assets total too much', code: 'assets_too_large' },
+            { status: 413 },
+          ),
+        ),
+      )
+      await expect(run(assets)).rejects.toThrow(/assets_too_large: This deploy’s assets total/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('moves no bytes for a deploy with no assets at all', async () => {
+    const fetchStub = vi.fn(async () => Response.json({ missing: [] }))
+    vi.stubGlobal('fetch', fetchStub)
+    await run([])
+    expect(fetchStub).toHaveBeenCalledTimes(1)
+    const [, init] = fetchStub.mock.calls[0] as unknown as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({ assets: [] })
+  })
+})
+
+describe('deploy failure reporting', () => {
+  const HTML_1101 =
+    '<!DOCTYPE html><html><body>Error 1101 Ray ID: abc — Worker threw exception</body></html>'
+
+  it('names a deploy-service resource limit instead of blaming Cloudflare', () => {
+    expect(isDeployServiceResourceLimit(500, HTML_1101)).toBe(true)
+    const message = formatDeployWorkerError(500, HTML_1101)
+    expect(message).toMatch(/DeepSpace deploy service hit a resource limit/)
+    expect(message).not.toMatch(/Cloudflare Dashboard\/API/)
+  })
+
+  it('classifies an exceeded-resources 1102 the same way', () => {
+    const body = 'Error 1102 Ray ID: def — Worker exceeded resource limits'
+    expect(isDeployServiceResourceLimit(500, body)).toBe(true)
+    expect(formatDeployWorkerError(500, body)).toMatch(/DeepSpace deploy service/)
+  })
+
+  it('still reports a relayed Cloudflare control-plane error as a Cloudflare incident', () => {
+    const message = formatDeployWorkerError(500, 'Worker deploy failed (500): upstream broke')
+    expect(message).toMatch(/Cloudflare Dashboard\/API/)
+    expect(message).not.toMatch(/DeepSpace deploy service hit a resource limit/)
+  })
+
+  it('does not mistake an app id or byte count containing 1101 for a limit failure', () => {
+    expect(isDeployServiceResourceLimit(409, 'assets total 11012 bytes')).toBe(false)
+  })
+
+  it('prints the platform’s CLI-update instruction verbatim', () => {
+    const instruction = 'Your deepspace CLI is out of date — update to deploy.'
+    expect(formatDeployWorkerError(410, instruction, 'cli_outdated')).toBe(instruction)
+  })
+
+  it('passes a plain client-side refusal through unchanged', () => {
+    expect(formatDeployWorkerError(409, 'App is suspended')).toBe('App is suspended')
   })
 })
 

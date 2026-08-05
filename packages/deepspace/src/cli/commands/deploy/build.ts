@@ -1,5 +1,6 @@
 import * as p from '@clack/prompts'
 import { execSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { readDocumentationDeployManifest } from '../../../documentation/deploy'
@@ -33,8 +34,13 @@ const RESERVED_RUN_WORKER_FIRST = new Set([
 ])
 
 export interface DeployAsset {
+  /** Public path the asset serves at, e.g. `/index.html`. */
   path: string
-  contentBase64: string
+  /** Full lowercase SHA-256 hex of the file's bytes — its store address. */
+  hash: string
+  size: number
+  /** Absolute path on disk; the upload streams from here, never from memory. */
+  sourcePath: string
 }
 
 export interface DurableObjectManifestEntry {
@@ -239,7 +245,12 @@ export function resolveDeployRunWorkerFirst(config: WorkerFirstConfig): true | s
   return routes
 }
 
-function collectAssets(dir: string): DeployAsset[] {
+/**
+ * Walk the built client directory and address every file by content. Hashing
+ * happens here so the deploy can ask the platform which bytes it already has
+ * before moving any of them.
+ */
+export function collectAssets(dir: string): DeployAsset[] {
   const assets: DeployAsset[] = []
   const walk = (currentDir: string, prefix: string): void => {
     for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
@@ -249,9 +260,12 @@ function collectAssets(dir: string): DeployAsset[] {
       if (entry.isDirectory()) {
         walk(fullPath, relativePath)
       } else {
+        const bytes = readFileSync(fullPath)
         assets.push({
           path: `/${relativePath}`,
-          contentBase64: readFileSync(fullPath).toString('base64'),
+          hash: createHash('sha256').update(bytes).digest('hex'),
+          size: bytes.byteLength,
+          sourcePath: fullPath,
         })
       }
     }

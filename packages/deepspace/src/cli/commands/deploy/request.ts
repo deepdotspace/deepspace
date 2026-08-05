@@ -1,8 +1,8 @@
 import * as p from '@clack/prompts'
-import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { printAction, withSlug, type CliAction } from '../../lib/output'
 import type { Spinner } from '../../lib/spinner'
-import type { DeployBundle } from './build'
+import type { DeployAsset, DeployBundle } from './build'
 import type { DeployOutput } from './output'
 import { shouldSendLineage, type DeployRepositoryState } from './repository'
 import type { DeploySecretsPayload } from './secrets'
@@ -13,12 +13,26 @@ const CLOUDFLARE_DEPLOY_ERROR_HINT =
   'incident or Workers for Platforms entitlement outage. Already deployed apps ' +
   'should keep serving; wait for Cloudflare to recover and retry.'
 
-const MAX_GROUP_BYTES = 40 * 1024 * 1024
-const GROUP_BYTES = (() => {
-  const configured = Number(process.env.DEEPSPACE_DEPLOY_GROUP_BYTES)
-  const bytes = Number.isInteger(configured) && configured > 0 ? configured : 3 * 1024 * 1024
-  return Math.min(bytes, MAX_GROUP_BYTES)
-})()
+const DEPLOY_SERVICE_LIMIT_HINT =
+  'The DeepSpace deploy service hit a resource limit processing this deploy ' +
+  '(the deploy worker was terminated before it could answer). This is a ' +
+  'DeepSpace-side failure, not a Cloudflare incident — your app was not ' +
+  'changed. Retry; if it keeps happening, report the app id and asset count.'
+
+/**
+ * The asset-transport contract this CLI speaks. A deploy worker that does not
+ * advertise it cannot accept these uploads at all.
+ *
+ * This is a bespoke handshake because it is the only version gate the CLI has
+ * today; the general CLI-staleness check being built alongside it will
+ * subsume the "which platform am I talking to" half, leaving this to name the
+ * one capability the upload path depends on.
+ */
+const REQUIRED_ASSET_TRANSPORT = 'content-addressed-v1'
+
+/** Parallel asset uploads. Enough to saturate a normal uplink without
+ *  making a failure ambiguous across many in-flight requests. */
+const UPLOAD_CONCURRENCY = 4
 
 export interface DeployCommitResponse {
   success?: boolean
@@ -67,42 +81,9 @@ export async function deployBuiltBundle(options: {
   } else if (bundle.extraRoutes.length) {
     p.log.info(`Custom worker-first routes: ${bundle.extraRoutes.join(', ')}`)
   }
-  const assetGroups = packAssetGroups(bundle.assets, GROUP_BYTES)
-  if (assetGroups.length === 0) assetGroups.push([])
-  const uploadId = randomUUID()
-  const totalGroups = assetGroups.length
-  try {
-    for (let index = 0; index < totalGroups; index++) {
-      const groupJson = JSON.stringify(assetGroups[index])
-      spinner.message(`Uploading assets — group ${index + 1}/${totalGroups}...`)
-      const groupResponse = await postWithRetry(
-        `${deployUrl}/api/deploy/${appId}/assets` +
-          `?uploadId=${uploadId}&groupIndex=${index}&totalGroups=${totalGroups}`,
-        () => ({
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: groupJson,
-        }),
-      )
-      if (!groupResponse.ok) {
-        const errorBody = (await groupResponse.json().catch(() => ({}))) as { error?: string }
-        await abortStagedUpload(deployUrl, appId, uploadId, totalGroups, token)
-        spinner.stop('Deploy failed')
-        output.die(
-          `Asset upload failed on group ${index + 1}/${totalGroups}: ` +
-            `${errorBody.error ?? `HTTP ${groupResponse.status}`}`,
-          'upload_failed',
-        )
-      }
-    }
-  } catch (error: unknown) {
-    await abortStagedUpload(deployUrl, appId, uploadId, totalGroups, token)
-    spinner.stop('Deploy failed')
-    output.die(`Asset upload failed (network): ${errorMessage(error)}`, 'upload_failed')
-  }
+
+  await requireAssetTransport(deployUrl, spinner, output)
+  await uploadDeployAssets({ deployUrl, appId, token, assets: bundle.assets, output, spinner })
   spinner.message(`Deploying ${appName}...`)
 
   let confirmRename = options.rename
@@ -113,7 +94,6 @@ export async function deployBuiltBundle(options: {
     actionRequired = false,
     action?: CliAction,
   ): Promise<never> => {
-    await abortStagedUpload(deployUrl, appId, uploadId, totalGroups, token)
     if (stopLabel !== null) spinner.stop(stopLabel)
     p.cancel(code ? withSlug(message, code) : message)
     if (action) printAction(action)
@@ -136,8 +116,7 @@ export async function deployBuiltBundle(options: {
       new Blob([bundle.workerJs], { type: 'application/javascript' }),
       'worker.js',
     )
-    form.append('uploadId', uploadId)
-    form.append('totalGroups', String(totalGroups))
+    form.append('assetManifest', JSON.stringify(assetManifest(bundle.assets)))
     form.append('appMigrations', JSON.stringify(bundle.appMigrations))
     if (bundle.doManifest) form.append('doManifest', JSON.stringify(bundle.doManifest))
     if (bundle.customBindings.length) {
@@ -229,7 +208,11 @@ export async function deployBuiltBundle(options: {
     )
   }
   if (!response.ok || !body.success) {
-    await bail(formatDeployWorkerError(response.status, body.error), 'Deploy failed', body.code)
+    await bail(
+      formatDeployWorkerError(response.status, body.error, body.code),
+      'Deploy failed',
+      body.code,
+    )
   }
 
   if (body.onBehalfOfOwner) {
@@ -249,26 +232,193 @@ export async function deployBuiltBundle(options: {
   return body
 }
 
-async function abortStagedUpload(
+export function assetManifest(
+  assets: DeployAsset[],
+): Array<{ path: string; hash: string; size: number }> {
+  return assets.map((asset) => ({ path: asset.path, hash: asset.hash, size: asset.size }))
+}
+
+/**
+ * Refuse to start against a deploy service that predates this transport.
+ * Failing here costs nothing; failing halfway through an upload wastes the
+ * user's bandwidth and leaves them guessing.
+ */
+async function requireAssetTransport(
   deployUrl: string,
-  appId: string,
-  uploadId: string,
-  totalGroups: number,
-  token: string,
+  spinner: Spinner,
+  output: DeployOutput,
 ): Promise<void> {
+  let advertised: unknown
   try {
-    await fetch(
-      `${deployUrl}/api/deploy/${appId}/assets` +
-        `?uploadId=${uploadId}&totalGroups=${totalGroups}`,
-      { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } },
+    const response = await fetch(`${deployUrl}/api/health`)
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const body = (await response.json()) as { capabilities?: { assetTransport?: unknown } }
+    advertised = body.capabilities?.assetTransport
+  } catch (error: unknown) {
+    spinner.stop('Deploy failed')
+    output.die(
+      `Could not reach the DeepSpace deploy service at ${deployUrl} to check its ` +
+        `capabilities: ${errorMessage(error)}`,
+      'deploy_service_unreachable',
     )
-  } catch {
-    // Staged groups are also covered by the R2 lifecycle rule.
+  }
+  if (advertised !== REQUIRED_ASSET_TRANSPORT) {
+    spinner.stop('Deploy failed')
+    output.die(
+      `The DeepSpace deploy service at ${deployUrl} does not support this CLI's asset ` +
+        `transport (needs "${REQUIRED_ASSET_TRANSPORT}", found ` +
+        `${advertised === undefined ? 'none' : `"${String(advertised)}"`}). ` +
+        'Wait for the platform to finish updating, or pin an older deepspace CLI.',
+      'asset_transport_unsupported',
+    )
   }
 }
 
-function formatDeployWorkerError(status: number, error: string | undefined): string {
+/** Ask which content the platform is missing, then upload only that. */
+export async function uploadDeployAssets(options: {
+  deployUrl: string
+  appId: string
+  token: string
+  assets: DeployAsset[]
+  output: DeployOutput
+  spinner: Spinner
+}): Promise<void> {
+  const { deployUrl, appId, token, assets, spinner } = options
+  // Annotated so `die`'s `never` return still ends control flow here.
+  const output: DeployOutput = options.output
+  const byHash = new Map(assets.map((asset) => [asset.hash, asset]))
+
+  spinner.message('Checking which assets are already uploaded...')
+  let planResponse: Response
+  try {
+    planResponse = await postWithRetry(`${deployUrl}/api/deploy/${appId}/asset-plan`, () => ({
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        assets: [...byHash.values()].map((asset) => ({ hash: asset.hash, size: asset.size })),
+      }),
+    }))
+  } catch (error: unknown) {
+    spinner.stop('Deploy failed')
+    output.die(`Asset plan failed (network): ${errorMessage(error)}`, 'upload_failed')
+  }
+  const planBody = (await planResponse.json().catch(() => ({}))) as {
+    missing?: string[]
+    error?: string
+    code?: string
+  }
+  if (!planResponse.ok) {
+    spinner.stop('Deploy failed')
+    output.die(
+      formatDeployWorkerError(planResponse.status, planBody.error, planBody.code),
+      planBody.code ?? 'upload_failed',
+    )
+  }
+
+  const missing: DeployAsset[] = []
+  for (const hash of planBody.missing ?? []) {
+    const asset = byHash.get(hash)
+    // The plan can only name content this build declared. Anything else means
+    // the two sides disagree about what is being deployed, and quietly
+    // skipping it would ship an app missing a file.
+    if (!asset) {
+      spinner.stop('Deploy failed')
+      output.die(
+        `The deploy service asked for asset ${hash}, which is not part of this build. ` +
+          'Re-run the deploy; if it persists, report the app id.',
+        'upload_failed',
+      )
+    }
+    missing.push(asset)
+  }
+  if (missing.length === 0) {
+    p.log.info(`Assets: ${byHash.size} file(s), all already uploaded`)
+    return
+  }
+  const missingBytes = missing.reduce((total, asset) => total + asset.size, 0)
+  p.log.info(
+    `Assets: ${byHash.size} file(s), uploading ${missing.length} ` +
+      `(${Math.ceil(missingBytes / 1024)} KiB); the rest are already stored`,
+  )
+
+  let uploaded = 0
+  const next = (): DeployAsset | undefined => missing.pop()
+  const worker = async (): Promise<void> => {
+    for (let asset = next(); asset; asset = next()) {
+      const response = await postWithRetry(
+        `${deployUrl}/api/deploy/${appId}/assets/${asset.hash}`,
+        () => ({
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/octet-stream',
+          },
+          // Read whole, per attempt. The platform matches Content-Length
+          // against the plan before it touches storage, and a stream body
+          // would be sent chunked with no length at all; a retry also needs a
+          // body it can send again.
+          body: readFileSync(asset.sourcePath),
+        }),
+      )
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { error?: string; code?: string }
+        throw new AssetUploadError(
+          body.error ?? `Upload of ${asset.path} failed: HTTP ${response.status}`,
+          body.code ?? 'upload_failed',
+          response.status,
+        )
+      }
+      uploaded++
+      spinner.message(`Uploading assets — ${uploaded}/${uploaded + missing.length}...`)
+    }
+  }
+
+  try {
+    await Promise.all(
+      Array.from({ length: Math.min(UPLOAD_CONCURRENCY, missing.length) }, worker),
+    )
+  } catch (error: unknown) {
+    spinner.stop('Deploy failed')
+    if (error instanceof AssetUploadError) {
+      output.die(formatDeployWorkerError(error.status, error.message, error.code), error.code)
+    }
+    output.die(`Asset upload failed (network): ${errorMessage(error)}`, 'upload_failed')
+  }
+}
+
+class AssetUploadError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly status: number,
+  ) {
+    super(message)
+  }
+}
+
+/**
+ * Cloudflare's 1101/1102 interstitials are HTML from the edge, not a relayed
+ * API error: they mean OUR deploy worker died (exception or CPU/memory limit).
+ * Reporting them as a Cloudflare incident sent users to a status page for a
+ * DeepSpace bug, so they get their own message.
+ */
+export function isDeployServiceResourceLimit(status: number, error: string | undefined): boolean {
+  if (!error) return status === 500 || status === 502
+  return /\b110[12]\b/.test(error) && /worker|error code/i.test(error)
+}
+
+export function formatDeployWorkerError(
+  status: number,
+  error: string | undefined,
+  code?: string,
+): string {
   const detail = error ?? `Deployment error (${status})`
+  // The platform's own upgrade instruction is the whole message; wrapping it
+  // in incident boilerplate would bury the one action that fixes it.
+  if (code === 'cli_outdated') return detail
+  if (isDeployServiceResourceLimit(status, error)) {
+    return `${DEPLOY_SERVICE_LIMIT_HINT}\n\nUnderlying error: ${detail}`
+  }
   if (
     status < 500 &&
     ![
@@ -286,25 +436,6 @@ function formatDeployWorkerError(status: number, error: string | undefined): str
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-/** Pack whole asset entries into request groups under the serialized byte cap. */
-export function packAssetGroups<T>(assets: T[], maxBytes: number): T[][] {
-  const groups: T[][] = []
-  let current: T[] = []
-  let currentBytes = 2
-  for (const asset of assets) {
-    const entryBytes = Buffer.byteLength(JSON.stringify(asset), 'utf-8') + 1
-    if (current.length > 0 && currentBytes + entryBytes > maxBytes) {
-      groups.push(current)
-      current = []
-      currentBytes = 2
-    }
-    current.push(asset)
-    currentBytes += entryBytes
-  }
-  if (current.length > 0) groups.push(current)
-  return groups
 }
 
 /** Retry rebuilt request bodies on network failures and eligible transient responses. */
