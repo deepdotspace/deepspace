@@ -1,4 +1,5 @@
 import { defineConfig } from 'tsup'
+import { cpSync } from 'fs'
 import { resolve } from 'path'
 
 const alias = { '@': resolve(__dirname, 'src') }
@@ -113,6 +114,13 @@ export default defineConfig([
     external: [/^node:.*/],
     esbuildOptions(options) {
       options.alias = alias
+    },
+    // The compiler reads these bytes relative to its own module URL, so the
+    // published layout must mirror the source tree's `fonts/` sibling.
+    onSuccess: async () => {
+      cpSync(resolve(__dirname, 'src/documentation/fonts'), resolve(__dirname, 'dist/fonts'), {
+        recursive: true,
+      })
     },
   },
   {

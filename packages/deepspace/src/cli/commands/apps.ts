@@ -43,12 +43,23 @@ export default defineDeepspaceCommand({
       if (!apps.length) {
         console.log('No apps yet. Create one with `npx create-deepspace <name>` and `deepspace deploy`.')
       } else {
-        const nameWidth = Math.max(4, ...apps.map((a) => (a.name ?? '—').length))
-        const idWidth = Math.max(6, ...apps.map((a) => a.appId.length))
-        console.log(`${'NAME'.padEnd(nameWidth)}  ${'APP ID'.padEnd(idWidth)}  URL`)
-        for (const a of apps) {
+        // Active apps hold quota slots — list them first so "which app do I
+        // undeploy?" is answerable without scanning released registrations.
+        const rows = [...apps].sort(
+          (left, right) =>
+            Number(right.status !== 'undeployed') - Number(left.status !== 'undeployed'),
+        )
+        const nameWidth = Math.max(4, ...rows.map((a) => (a.name ?? '—').length))
+        const statusWidth = Math.max(6, ...rows.map((a) => a.status.length))
+        const idWidth = Math.max(6, ...rows.map((a) => a.appId.length))
+        console.log(
+          `${'NAME'.padEnd(nameWidth)}  ${'STATUS'.padEnd(statusWidth)}  ${'APP ID'.padEnd(idWidth)}  URL`,
+        )
+        for (const a of rows) {
           const url = a.url ?? '(not deployed)'
-          console.log(`${(a.name ?? '—').padEnd(nameWidth)}  ${a.appId.padEnd(idWidth)}  ${url}`)
+          console.log(
+            `${(a.name ?? '—').padEnd(nameWidth)}  ${a.status.padEnd(statusWidth)}  ${a.appId.padEnd(idWidth)}  ${url}`,
+          )
         }
       }
     }

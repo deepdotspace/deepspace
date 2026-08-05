@@ -218,7 +218,8 @@ export interface DocumentationSearchEntry {
   route: string
   title: string
   description?: string
-  headings: string[]
+  /** Carries ids so search can offer section results, not only whole pages. */
+  headings: DocumentationHeading[]
   text: string
 }
 

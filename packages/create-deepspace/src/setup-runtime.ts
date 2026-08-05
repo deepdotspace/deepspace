@@ -191,7 +191,7 @@ function installDependencies(appDir: string): void {
   mkdirSync(sentinelDirectory, { recursive: true })
   writeFileSync(join(sentinelDirectory, 'install.started'), new Date().toISOString() + '\n')
 
-  const { cmd, args } = resolveInstall(detectBun())
+  const { cmd, args } = resolveInstall(detectBun(), process.env.npm_config_user_agent)
   p.log.step(`Installing dependencies (${cmd} ${args.join(' ')})…`)
   writeFileSync(join(sentinelDirectory, 'install.pid'), `${process.pid}\n`)
   const result = spawn.sync(cmd, args, { cwd: appDir, stdio: 'inherit' })

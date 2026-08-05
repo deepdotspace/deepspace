@@ -34,15 +34,13 @@ export function AssistantLauncher({
   onInputChange,
   onOpen,
   onSubmit,
-  open,
 }: {
   input: string
   name: string
   onInputChange: (value: string) => void
   onOpen: () => void
   onSubmit: (question: string) => void
-  open: boolean
-}): ReactElement | null {
+}): ReactElement {
   const subject = documentationSubject(name)
   const submit = (event: FormEvent): void => {
     event.preventDefault()
@@ -50,14 +48,15 @@ export function AssistantLauncher({
     if (!question) return
     onSubmit(question)
   }
-  if (open) return null
   return (
     <form
       className="documentation-assistant-launcher"
       id="deepspace-documentation-assistant-launcher"
       onSubmit={submit}
     >
-      <button className="documentation-launcher-agent" type="button" onClick={onOpen} aria-label={`Open the ${subject} agent`}>Ask {name}</button>
+      <button className="documentation-launcher-agent" type="button" onClick={onOpen} aria-label={`Open the ${subject} agent`}>
+        Ask <span className="documentation-launcher-agent-name">{name}</span>
+      </button>
       <input
         aria-label={`Ask the ${subject} agent`}
         id="deepspace-documentation-assistant-launcher-input"
@@ -66,6 +65,7 @@ export function AssistantLauncher({
         placeholder="Ask anything…"
         value={input}
       />
+      <span aria-hidden="true" className="documentation-launcher-hint"><kbd>⌘</kbd><kbd>I</kbd></span>
       <button className="documentation-launcher-send" type="submit" disabled={!input.trim()} aria-label="Send question to documentation agent"><SendIcon /></button>
     </form>
   )

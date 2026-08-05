@@ -86,7 +86,23 @@ export function DocumentationApp({
         <DesktopSidebar data={data} />
         <main className="documentation-main" id="documentation-content">
           <div className="documentation-reader-grid">
-            <Article data={data} onAssistantOpen={openAssistant}>{children}</Article>
+            <div className="documentation-reader-column">
+              <Article
+                data={data}
+                launcher={assistantAccess && !assistantOpen ? (
+                  <div className="documentation-launcher-dock">
+                    <AssistantLauncher
+                      input={assistantDraft}
+                      name={data.config.name}
+                      onOpen={() => openAssistant()}
+                      onInputChange={setAssistantDraft}
+                      onSubmit={(question) => openAssistant(question, true)}
+                    />
+                  </div>
+                ) : undefined}
+                onAssistantOpen={openAssistant}
+              >{children}</Article>
+            </div>
             <ContextRail data={data} />
           </div>
         </main>
@@ -106,28 +122,18 @@ export function DocumentationApp({
         open={searchOpen}
       />
       {assistantAccess && (
-        <>
-          <AssistantLauncher
-            input={assistantDraft}
-            name={data.config.name}
-            onOpen={() => openAssistant()}
-            onInputChange={setAssistantDraft}
-            onSubmit={(question) => openAssistant(question, true)}
-            open={assistantOpen}
-          />
-          <DocumentationAssistant
-            access={assistantAccess}
-            basePath={data.basePath}
-            input={assistantDraft}
-            name={data.config.name}
-            onClose={() => setAssistantOpen(false)}
-            onInputChange={setAssistantDraft}
-            open={assistantOpen}
-            route={data.page.route}
-            seed={assistantSeed}
-            suggestions={data.config.assistant.suggestions}
-          />
-        </>
+        <DocumentationAssistant
+          access={assistantAccess}
+          basePath={data.basePath}
+          input={assistantDraft}
+          name={data.config.name}
+          onClose={() => setAssistantOpen(false)}
+          onInputChange={setAssistantDraft}
+          open={assistantOpen}
+          route={data.page.route}
+          seed={assistantSeed}
+          suggestions={data.config.assistant.suggestions}
+        />
       )}
     </div>
   )

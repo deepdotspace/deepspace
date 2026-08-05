@@ -438,7 +438,7 @@ export async function refreshSecretsCache(
   token: string,
   appId: string,
   wranglerEnv: string | undefined,
-): Promise<{ pulled: PulledSecretsCache; rendered: string; summary: string } | null> {
+): Promise<{ pulled: PulledSecretsCache; rendered: string; summary: string | null } | null> {
   const configName = defaultConfigNameForEnv(wranglerEnv)
   const pulled = await pullAppSecretsCache(deployUrl, token, appId, configName)
   if (!pulled) return null
@@ -446,6 +446,7 @@ export async function refreshSecretsCache(
   return {
     pulled,
     rendered: renderSecretsCache(pulled.values, pulled),
-    summary: `Secrets: ${pulled.configName} (${count} secret${count === 1 ? '' : 's'})`,
+    // An empty store is the common case and not worth a status line.
+    summary: count ? `Secrets: ${pulled.configName} (${count} secret${count === 1 ? '' : 's'})` : null,
   }
 }

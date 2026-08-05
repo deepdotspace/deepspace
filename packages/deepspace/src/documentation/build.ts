@@ -14,6 +14,7 @@ import {
 } from './artifacts'
 import { validateDocumentation } from './graph'
 import { buildCustomDocumentationRuntime, runtimeEntry } from './custom-runtime'
+import { readBundledFont, resolveDocumentationFonts } from './fonts'
 import { DocumentationOutput } from './output'
 import { artifactPathsForRoute } from './routing'
 import { documentationPublicPath, normalizeDocumentationBasePath } from './routing'
@@ -22,6 +23,7 @@ import { createDocumentationSkillArtifacts } from './skill'
 import {
   createPageRuntime,
   createNotFoundPage,
+  renderDocumentationFavicon,
   renderPage,
   renderRedirect,
   DOCUMENTATION_CSS,
@@ -98,6 +100,10 @@ export function buildDocumentation(options: BuildDocumentationOptions): Document
   } : {}, notFoundRuntime))
   write('assets/documentation.css', DOCUMENTATION_CSS.trimStart())
   write('assets/documentation-theme.js', DOCUMENTATION_THEME_BOOTSTRAP)
+  for (const font of resolveDocumentationFonts(renderConfig.theme, basePath)) {
+    if (font.bundled) write(`assets/fonts/${font.bundled.fileName}`, readBundledFont(font.bundled))
+  }
+  if (!renderConfig.theme.favicon) write('assets/favicon.svg', renderDocumentationFavicon(renderConfig.theme))
   if (!customRuntime) write('assets/documentation-runtime.js', buildDocumentationRuntime().trimStart())
   write('search.json', stableJson(createSearchEntries(validation.graph.pages)))
   write('assistant-index.json', stableJson(createAssistantChunks(validation.graph.pages)))

@@ -25,6 +25,9 @@ export const DOCUMENTATION_BASE_CSS = String.raw`
   --documentation-shadow-lg: 0 24px 80px rgba(15, 18, 28, .18), 0 6px 24px rgba(15, 18, 28, .08);
   --documentation-header-height: 66px;
   --documentation-sidebar-width: 292px;
+  --documentation-assistant-width: 420px;
+  /* Darkened against the light page; the dark theme lightens it instead. */
+  --documentation-focus-ring: color-mix(in srgb, var(--documentation-accent) 82%, var(--documentation-text));
   color-scheme: light;
   font-family: var(--documentation-font-body);
 }
@@ -47,19 +50,20 @@ export const DOCUMENTATION_BASE_CSS = String.raw`
   --documentation-code-text: #eef0f7;
   --documentation-shadow-sm: 0 1px 2px rgba(0, 0, 0, .24);
   --documentation-shadow-lg: 0 28px 90px rgba(0, 0, 0, .55), 0 8px 24px rgba(0, 0, 0, .35);
+  --documentation-focus-ring: color-mix(in srgb, var(--documentation-accent) 74%, white);
   color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; scroll-padding-top: 92px; }
-body { margin: 0; background: var(--documentation-brand-bg); color: var(--documentation-text); font-family: var(--documentation-font-body); font-size: 15.5px; line-height: 1.7; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+html { scroll-behavior: smooth; scroll-padding-top: 96px; scrollbar-gutter: stable; }
+body { margin: 0; background: var(--documentation-brand-bg); color: var(--documentation-text); font-family: var(--documentation-font-body); font-size: 17px; line-height: 1.65; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
 :root[data-background-decoration="gradient"] body { background-image: radial-gradient(circle at 58% 7%, color-mix(in srgb, var(--documentation-accent) 7%, transparent), transparent 32%); background-attachment: fixed; }
 :root[data-background-decoration="grid"] body { background-image: linear-gradient(color-mix(in srgb, var(--documentation-border) 26%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in srgb, var(--documentation-border) 26%, transparent) 1px, transparent 1px); background-attachment: fixed; background-size: 32px 32px; }
 body:has(.documentation-modal-layer), body:has(.documentation-mobile-nav) { overflow: hidden; }
 button, input, textarea { font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
 a { color: inherit; }
-button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--documentation-accent) 74%, white); outline-offset: 3px; }
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 2px solid var(--documentation-focus-ring); outline-offset: 3px; }
 ::selection { background: color-mix(in srgb, var(--documentation-accent) 24%, transparent); }
 
 .documentation-skip-link { position: fixed; z-index: 200; top: -64px; left: 16px; padding: 9px 13px; border-radius: 8px; background: var(--documentation-text); color: var(--documentation-bg); font-weight: 650; text-decoration: none; }
@@ -67,5 +71,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .documentation-app.is-navigating::before { content: ""; position: fixed; z-index: 240; inset: 0 auto auto 0; width: 42%; height: 2px; background: linear-gradient(90deg, var(--documentation-accent), var(--documentation-accent-2)); box-shadow: 0 0 14px color-mix(in srgb, var(--documentation-accent-2) 48%, transparent); animation: documentation-navigation-progress .8s ease-in-out infinite alternate; }
 ::view-transition-old(documentation-article) { animation: documentation-page-out .11s ease-in both; }
 ::view-transition-new(documentation-article) { animation: documentation-page-in .16s ease-out both; }
+/* Only the article animates. Without these, the browser's default root
+ * cross-fade snapshots the whole viewport and visibly fades over the fixed
+ * assistant launcher/panel on every client navigation. */
+::view-transition-group(root) { animation: none; }
+::view-transition-old(root), ::view-transition-new(root) { animation: none; }
+::view-transition-old(documentation-assistant), ::view-transition-new(documentation-assistant),
+::view-transition-old(documentation-assistant-launcher), ::view-transition-new(documentation-assistant-launcher) { animation: none; }
 
 `

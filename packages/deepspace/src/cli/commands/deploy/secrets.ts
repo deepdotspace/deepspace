@@ -67,7 +67,7 @@ export async function loadDeploySecrets(options: {
         generatedSecretsCache: refreshed.rendered,
         sharedDevVarsCache: true,
       })
-      p.log.info(refreshed.summary)
+      if (refreshed.summary) p.log.info(refreshed.summary)
     }
   } catch (error: unknown) {
     if ((error as { status?: number })?.status === 403) {

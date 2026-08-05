@@ -88,10 +88,12 @@ describe('DeepSpace documentation compiler', () => {
       join(result.outputDir, 'assets', 'documentation.css'),
       'utf8',
     )
-    expect(documentationCss)
-      .toContain('.documentation-app.has-assistant .documentation-pagination { margin-bottom: 76px; transform: translateY(76px); }')
-    expect(documentationCss)
-      .toContain('.documentation-app.has-assistant .documentation-pagination { margin-bottom: 124px; transform: translateY(124px); }')
+    // The launcher sticks inside the reading column instead of being fixed to
+    // the viewport, so the pagination needs no reserved space beneath it.
+    expect(documentationCss).not.toContain('.documentation-app.has-assistant .documentation-pagination')
+    expect(documentationCss).toContain('.documentation-launcher-dock { position: sticky;')
+    expect(documentationCss).toContain('.documentation-launcher-dock + .documentation-pagination { margin-top: 0; }')
+    expect(documentationCss).toContain('.documentation-app.is-assistant-open .documentation-main { margin-right: var(--documentation-assistant-width); }')
     expect(readFileSync(join(result.outputDir, 'old-guide/index.html'), 'utf8')).toContain(
       'url=/docs/guide',
     )
@@ -233,6 +235,34 @@ describe('DeepSpace documentation compiler', () => {
     expect(home).toContain('--documentation-font-mono:Geist Mono')
     expect(home).toContain('rel="preload" href="/docs/media/fonts/geist.woff2" as="font"')
     expect(result.files).toContain('media/fonts/geist-mono.woff2')
+    // Configured slots replace the bundled defaults rather than loading both.
+    expect(result.files).not.toContain('assets/fonts/inter-variable.woff2')
+    expect(result.files).not.toContain('assets/fonts/geist-mono-variable.woff2')
+  })
+
+  it('ships the bundled Inter and Geist Mono faces when the theme configures no fonts', () => {
+    const result = buildDocumentation({ appDir: fixture({}, { 'index.md': '# Typography' }) })
+    const home = readFileSync(join(result.outputDir, 'index.html'), 'utf8')
+
+    expect(result.files).toContain('assets/fonts/inter-variable.woff2')
+    expect(result.files).toContain('assets/fonts/geist-mono-variable.woff2')
+    expect(home).toContain('font-family:"Inter";src:url("/docs/assets/fonts/inter-variable.woff2")')
+    expect(home).toContain('font-family:"Geist Mono";src:url("/docs/assets/fonts/geist-mono-variable.woff2")')
+    expect(home).toContain('font-weight:100 900')
+    expect(home).toContain('rel="preload" href="/docs/assets/fonts/inter-variable.woff2" as="font"')
+    expect(readFileSync(join(result.outputDir, 'assets/fonts/inter-variable.woff2')).subarray(0, 4).toString())
+      .toBe('wOF2')
+  })
+
+  it('emits default tab and share metadata when the theme configures none', () => {
+    const result = buildDocumentation({ appDir: fixture({}, { 'index.md': '# Metadata' }) })
+    const home = readFileSync(join(result.outputDir, 'index.html'), 'utf8')
+
+    expect(result.files).toContain('assets/favicon.svg')
+    expect(home).toContain('<link rel="icon" href="/docs/assets/favicon.svg">')
+    expect(home).toContain('<meta name="twitter:card" content="summary">')
+    expect(home).toContain('<meta name="theme-color" media="(prefers-color-scheme: dark)"')
+    expect(readFileSync(join(result.outputDir, 'assets/favicon.svg'), 'utf8')).toContain('#635bff')
   })
 
   it('renders code groups as accessible synchronized tab panels', () => {
@@ -404,6 +434,7 @@ describe('DeepSpace documentation compiler', () => {
           '',
           'import Counter from "../Counter"',
           'import BareWidget from "tiny-widget"',
+          'import AliasBadge from "@/components/AliasBadge"',
           '',
           '# Custom documentation',
           '',
@@ -413,6 +444,7 @@ describe('DeepSpace documentation compiler', () => {
           'Agent-visible command: `npx deepspace deploy`.',
           '</Counter>',
           '<BareWidget />',
+          '<AliasBadge />',
           '',
           '```ts',
           'import Counter from "./Counter"',
@@ -434,6 +466,15 @@ describe('DeepSpace documentation compiler', () => {
       'import { useState, type ReactNode } from "react"\n' +
         'const implementationSecret = "not-agent-content"\n' +
         'export default function Counter({ children }: { children: ReactNode }) { const [count, setCount] = useState(0); return <div>{children}<button onClick={() => setCount(count + 1)}>Count from MDX: {count}{implementationSecret.slice(0, 0)}</button></div> }\n',
+    )
+    writeFileSync(
+      join(appDir, 'tsconfig.json'),
+      '{\n  // scaffold-style alias\n  "compilerOptions": { "paths": { "@/*": ["./src/*"] } }\n}\n',
+    )
+    mkdirSync(join(appDir, 'src', 'components'), { recursive: true })
+    writeFileSync(
+      join(appDir, 'src', 'components', 'AliasBadge.tsx'),
+      'export default function AliasBadge() { return <span data-alias-badge="true">Alias import</span> }\n',
     )
     mkdirSync(join(appDir, 'node_modules', 'tiny-widget'), { recursive: true })
     writeFileSync(
@@ -460,6 +501,7 @@ describe('DeepSpace documentation compiler', () => {
     expect(home).toContain('data-custom-site="true"')
     expect(home).toContain('Count from MDX:')
     expect(home).toContain('Bare package import')
+    expect(home).toContain('data-alias-badge="true"')
     expect(home).toContain('./Counter')
     expect(home).not.toContain(appDir)
     expect(home).toContain('data-tab-title="npm"')

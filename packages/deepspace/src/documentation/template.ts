@@ -6,6 +6,13 @@ import type {
   DocumentationRuntimeRouteDocument,
   DocumentationThemeConfig,
 } from './types'
+import {
+  DOCUMENTATION_BUNDLED_BODY_FONT,
+  DOCUMENTATION_BUNDLED_MONO_FONT,
+  resolveDocumentationFonts,
+  safeFontFamily,
+  type DocumentationResolvedFont,
+} from './fonts'
 import { renderDefaultDocumentation } from './renderer'
 import { documentationPublicPath, joinSiteUrl, markdownUrlForRoute } from './routing'
 import { escapeHtml } from './text'
@@ -33,17 +40,19 @@ export function renderPage(options: DocumentationPageRenderOptions, assets: {
   const { config, page } = options
   const { data: runtimeData, document: runtimeDocument } = runtime
   const theme = runtimeData.config.theme
-  const accent = validCssColor(theme.accent) ? theme.accent : '#635bff'
+  const accent = documentationAccent(theme)
   const background = validCssColor(theme.background) ? theme.background : '#fbfcfe'
   const backgroundDark = validCssColor(theme.backgroundDark) ? theme.backgroundDark : '#0c0e14'
   const defaultMode = theme.defaultMode ?? 'system'
   const bodyFont = cssFontStack(theme.bodyFont?.family)
   const headingFont = cssFontStack(theme.headingFont?.family ?? theme.bodyFont?.family)
   const monoFont = cssMonoFontStack(theme.monoFont?.family)
-  const fontFaces = renderFontFaces(theme)
-  const fontPreloads = renderFontPreloads(theme)
+  const fonts = resolveDocumentationFonts(theme, options.basePath)
+  const fontFaces = renderFontFaces(fonts)
+  const fontPreloads = renderFontPreloads(fonts)
   const markup = assets.markup ?? renderDefaultDocumentation(runtimeData)
   const assetRoot = documentationPublicPath(options.basePath, '/assets')
+  const favicon = theme.favicon ?? documentationPublicPath(options.basePath, '/assets/favicon.svg')
 
   return `<!doctype html>
 <html lang="en" data-theme-mode="${defaultMode}" data-theme-strict="${theme.strictMode ? 'true' : 'false'}" data-code-mode="${theme.codeBlockMode ?? 'dark'}" data-background-decoration="${theme.backgroundDecoration ?? 'none'}" data-eyebrow-style="${theme.eyebrowStyle ?? 'section'}">
@@ -61,8 +70,11 @@ export function renderPage(options: DocumentationPageRenderOptions, assets: {
   <meta property="og:description" content="${escapeHtml(runtimeDocument.openGraph['og:description'] ?? '')}">
   ${runtimeDocument.openGraph['og:url'] ? `<meta property="og:url" content="${escapeHtml(runtimeDocument.openGraph['og:url'])}">` : ''}
   ${config.seo.ogImage ? `<meta property="og:image" content="${escapeHtml(config.seo.ogImage)}">` : ''}
+  <meta name="twitter:card" content="${config.seo.ogImage ? 'summary_large_image' : 'summary'}">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="${background}">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="${backgroundDark}">
   ${renderCustomMeta(config.seo.metaTags)}
-  ${theme.favicon ? `<link rel="icon" href="${escapeHtml(theme.favicon)}">` : ''}
+  <link rel="icon" href="${escapeHtml(favicon)}">
   ${fontPreloads}
   <link rel="stylesheet" href="${assetRoot}/documentation.css">
   ${(assets.customStylesheets ?? []).map((href) => `<link rel="stylesheet" href="${escapeHtml(href)}">`).join('\n  ')}
@@ -77,33 +89,31 @@ export function renderPage(options: DocumentationPageRenderOptions, assets: {
 </html>`
 }
 
-function renderFontFaces(theme: DocumentationThemeConfig): string {
-  const fonts = [theme.bodyFont, theme.headingFont, theme.monoFont]
-  const seen = new Set<string>()
-  return fonts.flatMap((font) => {
-    if (!font?.source || !validFontSource(font.source)) return []
-    const key = `${font.family}:${font.source}:${font.weight ?? 'normal'}`
-    if (seen.has(key)) return []
-    seen.add(key)
-    const family = safeFontFamily(font.family)
-    const weight = typeof font.weight === 'number' || /^(?:normal|bold|[1-9]00|[1-9]00\s+[1-9]00)$/i.test(String(font.weight))
-      ? String(font.weight ?? 'normal')
-      : 'normal'
-    const format = font.format && /^[a-z0-9-]{2,20}$/i.test(font.format)
-      ? ` format("${font.format}")`
-      : ''
-    return [`@font-face{font-family:"${family}";src:url("${font.source}")${format};font-weight:${weight};font-display:swap}`]
-  }).join('')
+function renderFontFaces(fonts: DocumentationResolvedFont[]): string {
+  return fonts
+    .map((font) => {
+      const format = font.format ? ` format("${font.format}")` : ''
+      return `@font-face{font-family:"${font.family}";src:url("${font.source}")${format};font-weight:${font.weight};font-display:swap}`
+    })
+    .join('')
 }
 
-function renderFontPreloads(theme: DocumentationThemeConfig): string {
-  const sources = new Set(
-    [theme.bodyFont, theme.headingFont, theme.monoFont]
-      .flatMap((font) => font?.source && validFontSource(font.source) ? [font.source] : []),
-  )
-  return [...sources]
-    .map((source) => `<link rel="preload" href="${escapeHtml(source)}" as="font" type="font/woff2" crossorigin>`)
+function renderFontPreloads(fonts: DocumentationResolvedFont[]): string {
+  return fonts
+    .map((font) => `<link rel="preload" href="${escapeHtml(font.source)}" as="font" type="font/woff2" crossorigin>`)
     .join('\n  ')
+}
+
+export function documentationAccent(theme: DocumentationThemeConfig): string {
+  return validCssColor(theme.accent) ? theme.accent : '#635bff'
+}
+
+/**
+ * Default mark, themed from the configured accent so a site that sets no favicon
+ * still gets a tab icon that matches its own palette.
+ */
+export function renderDocumentationFavicon(theme: DocumentationThemeConfig): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><path d="M16 2.5c.5 7.7 5.8 13 13.5 13.5-7.7.5-13 5.8-13.5 13.5C15.5 21.8 10.2 16.5 2.5 16 10.2 15.5 15.5 10.2 16 2.5Z" fill="${escapeHtml(documentationAccent(theme))}"/></svg>\n`
 }
 
 function renderCustomMeta(metaTags: Record<string, string> | undefined): string {
@@ -308,21 +318,13 @@ function validCssColor(value: string | undefined): value is string {
 }
 
 function cssFontStack(value: string | undefined): string {
-  const family = safeFontFamily(value ?? 'Inter')
+  const family = safeFontFamily(value, DOCUMENTATION_BUNDLED_BODY_FONT.family)
   return `${family},ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif`
 }
 
 function cssMonoFontStack(value: string | undefined): string {
-  const family = safeFontFamily(value ?? 'Geist Mono')
+  const family = safeFontFamily(value, DOCUMENTATION_BUNDLED_MONO_FONT.family)
   return `${family},ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace`
-}
-
-function safeFontFamily(value: string): string {
-  return /^[a-z0-9 ,.'-]{1,80}$/i.test(value) ? value : 'Inter'
-}
-
-function validFontSource(value: string): boolean {
-  return /^(?:\/[a-z0-9_./%-]+|https:\/\/[^\s"'()<>]+)$/i.test(value)
 }
 
 function themeBootstrap(): void {

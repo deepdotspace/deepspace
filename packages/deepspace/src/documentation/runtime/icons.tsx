@@ -98,3 +98,11 @@ export function SendIcon(props: IconProps): ReactElement {
 export function StopIcon(props: IconProps): ReactElement {
   return <Icon {...props}><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" /></Icon>
 }
+
+export function HashIcon(props: IconProps): ReactElement {
+  return <Icon {...props}><path d="M9.5 4 7.5 20M16.5 4l-2 16M4.5 9h15M3.5 15h15" stroke="currentColor" strokeLinecap="round" strokeWidth="1.6" /></Icon>
+}
+
+export function ListIcon(props: IconProps): ReactElement {
+  return <Icon {...props}><path d="M4 6h16M4 12h11M4 18h7" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" /></Icon>
+}

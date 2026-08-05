@@ -217,7 +217,7 @@ export default defineDeepspaceCommand({
         const refreshed = await refreshSecretsCache(DEPLOY_URL, token, appIdForSecrets, wranglerEnv)
         if (refreshed) {
           generatedSecretsCache = refreshed.rendered
-          say(refreshed.summary)
+          if (refreshed.summary) say(refreshed.summary)
         }
       } catch (err: unknown) {
         throw new Refusal(

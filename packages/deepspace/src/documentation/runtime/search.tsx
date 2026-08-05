@@ -7,11 +7,11 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react'
-import type { DocumentationSearchEntry } from '../types'
+import type { DocumentationHeading, DocumentationSearchEntry } from '../types'
 import { documentationPublicPath } from '../routing'
 import { documentationSubject } from '../text'
 import { useDialogFocus } from './dialog'
-import { ChevronRightIcon, OrbitMark, SearchIcon, SparkIcon } from './icons'
+import { ChevronRightIcon, FileIcon, HashIcon, OrbitMark, SearchIcon, SparkIcon } from './icons'
 
 export function SearchCommand({
   assistantEnabled,
@@ -31,6 +31,7 @@ export function SearchCommand({
   open: boolean
 }): ReactElement | null {
   const dialogRef = useRef<HTMLDivElement>(null)
+  const resultsRef = useRef<HTMLDivElement>(null)
   const [index, setIndex] = useState<DocumentationSearchEntry[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [query, setQuery] = useState('')
@@ -51,6 +52,12 @@ export function SearchCommand({
       setActiveIndex(0)
     }
   }, [open])
+  // Arrowing past the visible rows must bring the highlighted one into view.
+  useEffect(() => {
+    resultsRef.current
+      ?.querySelector(`#documentation-search-option-${activeIndex}`)
+      ?.scrollIntoView({ block: 'nearest' })
+  }, [activeIndex, query])
   const preparedIndex = useMemo(() => prepareSearchIndex(index ?? []), [index])
   const results = useMemo(() => rankSearch(preparedIndex, query), [preparedIndex, query])
   if (!open) return null
@@ -64,9 +71,10 @@ export function SearchCommand({
       setActiveIndex((current) => (current - 1 + selectableCount) % selectableCount)
     } else if (event.key === 'Enter') {
       event.preventDefault()
-      if (activeIndex < results.length && results[activeIndex]) {
+      const result = activeIndex < results.length ? results[activeIndex] : undefined
+      if (result) {
         onClose()
-        const href = documentationPublicPath(basePath, results[activeIndex].route)
+        const href = documentationPublicPath(basePath, result.href)
         if (onNavigate) onNavigate(href)
         else window.location.assign(href)
       } else if (assistantEnabled && query.trim()) {
@@ -96,7 +104,7 @@ export function SearchCommand({
           />
           <kbd>Esc</kbd>
         </label>
-        <div className="documentation-search-results" id="documentation-search-results" role="listbox" aria-label="Search results">
+        <div className="documentation-search-results" id="documentation-search-results" ref={resultsRef} role="listbox" aria-label="Search results">
           {!query.trim() && (
             <div className="documentation-search-empty"><OrbitMark /><strong>Find an answer in this commit</strong><span>Search pages, headings, APIs, and examples.</span></div>
           )}
@@ -106,14 +114,20 @@ export function SearchCommand({
             <a
               aria-selected={activeIndex === resultIndex}
               className={activeIndex === resultIndex ? 'documentation-search-result is-active' : 'documentation-search-result'}
-              href={documentationPublicPath(basePath, result.route)}
+              href={documentationPublicPath(basePath, result.href)}
               id={`documentation-search-option-${resultIndex}`}
-              key={result.route}
+              key={result.href}
               onClick={onClose}
               onMouseEnter={() => setActiveIndex(resultIndex)}
               role="option"
             >
-              <span><strong>{highlightMatch(result.title, query)}</strong><small>{result.description ?? result.headings[0] ?? result.text.slice(0, 150)}</small></span>
+              <span className="documentation-search-kind">{result.kind === 'section' ? <HashIcon /> : <FileIcon />}</span>
+              <span className="documentation-search-copy">
+                <strong>{highlightMatch(result.title, query)}</strong>
+                {result.kind === 'section'
+                  ? <span className="documentation-search-crumbs">{result.context}<ChevronRightIcon />{result.title}</span>
+                  : <small>{result.context}</small>}
+              </span>
               <ChevronRightIcon />
             </a>
           ))}
@@ -135,10 +149,25 @@ export function SearchCommand({
   )
 }
 
+export interface DocumentationSearchResult {
+  /** Route with the section anchor already applied, and the list key. */
+  href: string
+  kind: 'page' | 'section'
+  title: string
+  /** Second line: the page description, or the owning page for a section. */
+  context: string
+}
+
+interface PreparedSearchHeading {
+  heading: DocumentationHeading
+  normalized: string
+}
+
 interface PreparedSearchEntry {
   entry: DocumentationSearchEntry
   title: string
-  headings: string
+  headings: PreparedSearchHeading[]
+  headingText: string
   haystack: string
 }
 
@@ -146,31 +175,63 @@ function prepareSearchIndex(index: DocumentationSearchEntry[]): PreparedSearchEn
   return index.map((entry) => ({
     entry,
     title: normalizeSearch(entry.title),
-    headings: normalizeSearch(entry.headings.join(' ')),
+    headings: entry.headings.map((heading) => ({ heading, normalized: normalizeSearch(heading.text) })),
+    headingText: normalizeSearch(entry.headings.map((heading) => heading.text).join(' ')),
     haystack: normalizeSearch(`${entry.description ?? ''} ${entry.text}`),
   }))
 }
 
-function rankSearch(index: PreparedSearchEntry[], query: string): DocumentationSearchEntry[] {
+function rankSearch(index: PreparedSearchEntry[], query: string): DocumentationSearchResult[] {
   const normalized = normalizeSearch(query)
   if (!normalized) return []
   const tokens = normalized.split(' ').filter(Boolean)
-  return index
-    .map(({ entry, title, headings, haystack }) => {
-      let score = title === normalized ? 180 : title.startsWith(normalized) ? 110 : title.includes(normalized) ? 75 : 0
-      if (headings.includes(normalized)) score += 55
-      for (const token of tokens) {
-        if (title.includes(token)) score += 24
-        else if (headings.includes(token)) score += 14
-        else if (haystack.includes(token)) score += 5
-        else score -= 18
+  const scored: Array<{ result: DocumentationSearchResult; score: number; route: string }> = []
+  for (const { entry, title, headings, headingText, haystack } of index) {
+    let score = title === normalized ? 180 : title.startsWith(normalized) ? 110 : title.includes(normalized) ? 75 : 0
+    if (headingText.includes(normalized)) score += 55
+    for (const token of tokens) {
+      if (title.includes(token)) score += 24
+      else if (headingText.includes(token)) score += 14
+      else if (haystack.includes(token)) score += 5
+      else score -= 18
+    }
+    if (score > 0) {
+      scored.push({
+        route: entry.route,
+        score,
+        result: {
+          href: entry.route,
+          kind: 'page',
+          title: entry.title,
+          context: entry.description ?? entry.text.slice(0, 150),
+        },
+      })
+    }
+    for (const { heading, normalized: headingNormalized } of headings) {
+      // Deliberately below an exact page-title hit so pages still lead.
+      let sectionScore = headingNormalized === normalized
+        ? 120
+        : headingNormalized.startsWith(normalized) ? 80 : headingNormalized.includes(normalized) ? 60 : 0
+      if (sectionScore === 0) {
+        for (const token of tokens) if (headingNormalized.includes(token)) sectionScore += 18
       }
-      return { entry, score }
-    })
-    .filter((item) => item.score > 0)
-    .sort((left, right) => right.score - left.score || left.entry.route.localeCompare(right.entry.route))
+      if (sectionScore <= 0) continue
+      scored.push({
+        route: `${entry.route}#${heading.id}`,
+        score: sectionScore,
+        result: {
+          href: `${entry.route}#${heading.id}`,
+          kind: 'section',
+          title: heading.text,
+          context: entry.title,
+        },
+      })
+    }
+  }
+  return scored
+    .sort((left, right) => right.score - left.score || left.route.localeCompare(right.route))
     .slice(0, 10)
-    .map((item) => item.entry)
+    .map((item) => item.result)
 }
 
 function highlightMatch(value: string, query: string): ReactNode {

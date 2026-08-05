@@ -7,22 +7,27 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react'
-import type { DocumentationRuntimeData } from '../types'
+import { createPortal } from 'react-dom'
+import type { DocumentationHeading, DocumentationRuntimeData } from '../types'
 import { documentationPublicPath } from '../routing'
 import { errorMessage, safeStorageGet, safeStorageSet, writeClipboardText } from './browser'
-import { ChevronRightIcon } from './icons'
+import { CheckIcon, ChevronRightIcon, CopyIcon, ListIcon, SparkIcon } from './icons'
 import { PageActions } from './page-actions'
 
 export function Article({
   children,
   data,
+  launcher,
   onAssistantOpen,
 }: {
   children?: ReactNode
   data: DocumentationRuntimeData
+  /** Docked assistant entry point, placed above the pagination so it can stick. */
+  launcher?: ReactNode
   onAssistantOpen: (seed?: string) => void
 }): ReactElement {
   const articleRef = useRef<HTMLElement>(null)
+  const codeBlocks = useCodeBlockMounts(articleRef, data.page.route)
   useArticleEnhancements(articleRef, data, onAssistantOpen)
   return (
     <article className="documentation-article" ref={articleRef}>
@@ -43,8 +48,19 @@ export function Article({
         <h1>{data.page.title}</h1>
         {data.page.description && <p className="documentation-lede">{data.page.description}</p>}
       </header>
+      <OutlineDisclosure headings={outlineHeadings(data.page.headings)} />
       {children ?? <div className="documentation-prose" dangerouslySetInnerHTML={{ __html: data.page.html }} />}
+      {codeBlocks.map((mount) => createPortal(
+        <CodeBlockActions
+          assistantEnabled={data.config.assistant.access !== 'disabled'}
+          onAsk={(code) => onAssistantOpen(`Explain this ${data.page.title} example and the important details:\n\n${code}`)}
+          pre={mount.pre}
+        />,
+        mount.host,
+        mount.key,
+      ))}
       {data.page.openapi?.playground && <ApiPlayground operation={data.page.openapi} />}
+      {launcher}
       <nav className="documentation-pagination" aria-label="Page navigation">
         {data.previous ? (
           <a rel="prev" href={documentationPublicPath(data.basePath, data.previous.route)}><small>Previous</small><span><ChevronRightIcon className="is-back" />{data.previous.title}</span></a>
@@ -67,15 +83,54 @@ function Breadcrumbs({ items }: { items: string[] }): ReactElement {
   )
 }
 
+function outlineHeadings(headings: DocumentationHeading[]): DocumentationHeading[] {
+  return headings.filter((heading) => heading.depth === 2 || heading.depth === 3)
+}
+
+function OutlineLinks({
+  active,
+  headings,
+}: {
+  active: string
+  headings: DocumentationHeading[]
+}): ReactElement {
+  return (
+    <>
+      {headings.map((heading) => (
+        <a
+          aria-current={active === heading.id ? 'location' : undefined}
+          className={`${heading.depth === 3 ? 'depth-3 ' : ''}${active === heading.id ? 'is-active' : ''}`}
+          href={`#${heading.id}`}
+          key={heading.id}
+        >{heading.text}</a>
+      ))}
+    </>
+  )
+}
+
+/**
+ * The outline below the rail's breakpoint. It carries no active state: the rail
+ * owns the single scroll observer, and a collapsed disclosure has nothing to
+ * highlight.
+ */
+function OutlineDisclosure({ headings }: { headings: DocumentationHeading[] }): ReactElement | null {
+  if (headings.length === 0) return null
+  return (
+    <details className="documentation-outline-disclosure">
+      <summary><ListIcon />On this page</summary>
+      <nav className="documentation-outline" aria-label="On this page">
+        <OutlineLinks active="" headings={headings} />
+      </nav>
+    </details>
+  )
+}
+
 export function ContextRail({
   data,
 }: {
   data: DocumentationRuntimeData
 }): ReactElement {
-  const headings = useMemo(
-    () => data.page.headings.filter((heading) => heading.depth === 2 || heading.depth === 3),
-    [data.page.headings],
-  )
+  const headings = useMemo(() => outlineHeadings(data.page.headings), [data.page.headings])
   const [active, setActive] = useState(headings[0]?.id ?? '')
   useEffect(() => setActive(headings[0]?.id ?? ''), [headings])
   useEffect(() => {
@@ -93,14 +148,7 @@ export function ContextRail({
       {headings.length > 0 && (
         <nav className="documentation-outline" aria-label="On this page">
           <h2>On this page</h2>
-          {headings.map((heading) => (
-            <a
-              aria-current={active === heading.id ? 'location' : undefined}
-              className={`${heading.depth === 3 ? 'depth-3 ' : ''}${active === heading.id ? 'is-active' : ''}`}
-              href={`#${heading.id}`}
-              key={heading.id}
-            >{heading.text}</a>
-          ))}
+          <OutlineLinks active={active} headings={headings} />
         </nav>
       )}
     </aside>
@@ -147,6 +195,91 @@ function ApiPlayground({ operation }: { operation: NonNullable<DocumentationRunt
   )
 }
 
+interface CodeBlockMount {
+  key: string
+  host: HTMLElement
+  pre: HTMLPreElement
+}
+
+/**
+ * Wraps each compiled `pre` so the copy/ask controls can overlay a non-scrolling
+ * box. Inside `pre` they would scroll away with the code and force horizontal
+ * padding onto every line. The controls themselves are portalled in so their
+ * icons stay the same components the rest of the shell uses.
+ */
+function useCodeBlockMounts(
+  articleRef: RefObject<HTMLElement | null>,
+  route: string,
+): CodeBlockMount[] {
+  const [mounts, setMounts] = useState<CodeBlockMount[]>([])
+  useEffect(() => {
+    const article = articleRef.current
+    if (!article) return
+    const created: Array<{ block: HTMLElement; pre: HTMLPreElement }> = []
+    const next: CodeBlockMount[] = []
+    article.querySelectorAll<HTMLPreElement>('.documentation-prose pre').forEach((pre, index) => {
+      const block = document.createElement('div')
+      block.className = 'documentation-code-block'
+      pre.replaceWith(block)
+      block.appendChild(pre)
+      const language = codeBlockLanguage(pre)
+      if (language) {
+        const label = document.createElement('span')
+        label.className = 'documentation-code-language'
+        label.textContent = language
+        block.appendChild(label)
+      }
+      const host = document.createElement('div')
+      host.className = 'documentation-code-actions'
+      block.appendChild(host)
+      created.push({ block, pre })
+      next.push({ key: `${route}:${index}`, host, pre })
+    })
+    setMounts(next)
+    return () => {
+      setMounts([])
+      for (const { block, pre } of created) block.replaceWith(pre)
+    }
+  }, [articleRef, route])
+  return mounts
+}
+
+function codeBlockLanguage(pre: HTMLPreElement): string {
+  const className = pre.querySelector('code')?.className ?? ''
+  return /(?:^|\s)(?:language|lang)-([a-z0-9+#-]{1,20})/i.exec(className)?.[1] ?? ''
+}
+
+function CodeBlockActions({
+  assistantEnabled,
+  onAsk,
+  pre,
+}: {
+  assistantEnabled: boolean
+  onAsk: (code: string) => void
+  pre: HTMLPreElement
+}): ReactElement {
+  const [copied, setCopied] = useState(false)
+  const copy = async (): Promise<void> => {
+    await writeClipboardText(pre.querySelector('code')?.textContent ?? pre.textContent ?? '')
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1400)
+  }
+  return (
+    <>
+      <button aria-label={copied ? 'Code copied' : 'Copy code'} onClick={() => { void copy() }} type="button">
+        {copied ? <CheckIcon /> : <CopyIcon />}
+      </button>
+      {assistantEnabled && (
+        <button
+          aria-label="Ask the documentation assistant about this code"
+          onClick={() => onAsk(pre.querySelector('code')?.textContent?.trim().slice(0, 1200) ?? '')}
+          type="button"
+        ><SparkIcon /></button>
+      )}
+    </>
+  )
+}
+
 function useArticleEnhancements(
   articleRef: RefObject<HTMLElement | null>,
   data: DocumentationRuntimeData,
@@ -156,38 +289,6 @@ function useArticleEnhancements(
     const article = articleRef.current
     if (!article) return
     const cleanups: Array<() => void> = []
-    article.querySelectorAll<HTMLPreElement>('.documentation-prose pre').forEach((pre) => {
-      if (pre.querySelector('.documentation-code-actions')) return
-      const controls = document.createElement('div')
-      controls.className = 'documentation-code-actions'
-      const copy = document.createElement('button')
-      copy.type = 'button'
-      copy.setAttribute('aria-label', 'Copy code')
-      copy.textContent = 'Copy'
-      const copyHandler = async (): Promise<void> => {
-        await writeClipboardText(pre.querySelector('code')?.textContent ?? pre.textContent ?? '')
-        copy.textContent = 'Copied'
-        window.setTimeout(() => { copy.textContent = 'Copy' }, 1400)
-      }
-      copy.addEventListener('click', copyHandler)
-      controls.appendChild(copy)
-      if (data.config.assistant.access !== 'disabled') {
-        const ask = document.createElement('button')
-        ask.type = 'button'
-        ask.textContent = 'Ask'
-        ask.setAttribute('aria-label', 'Ask the documentation assistant about this code')
-        const askHandler = (): void => {
-          const code = pre.querySelector('code')?.textContent?.trim().slice(0, 1200) ?? ''
-          onAssistantOpen(`Explain this ${data.page.title} example and the important details:\n\n${code}`)
-        }
-        ask.addEventListener('click', askHandler)
-        controls.appendChild(ask)
-        cleanups.push(() => ask.removeEventListener('click', askHandler))
-      }
-      pre.appendChild(controls)
-      cleanups.push(() => { copy.removeEventListener('click', copyHandler); controls.remove() })
-    })
-
     article.querySelectorAll<HTMLElement>('[data-tab-group]').forEach((group, groupIndex) => {
       if (group.querySelector(':scope > .documentation-tab-buttons')) return
       const tabs = Array.from(group.querySelectorAll<HTMLElement>(':scope > [data-tab]'))

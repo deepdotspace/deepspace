@@ -1,5 +1,11 @@
 # create-deepspace
 
+## 0.10.3
+
+### Patch Changes
+
+- Documentation polish: Mintlify-parity UI pass (self-hosted fonts, type scale, sticky launcher, docked assistant, accessible syntax palette, heading-level search), navigation no longer fades over the assistant, MDX imports honor tsconfig path aliases, deploy quota errors name the apps holding slots, scaffolds install with the invoking package manager, and the retired community library publish command is removed.
+
 ## 0.10.2
 
 ### Patch Changes

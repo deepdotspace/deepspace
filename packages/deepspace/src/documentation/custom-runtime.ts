@@ -184,6 +184,7 @@ function resolveCompiledImports(code: string, sourcePath: string, appDir: string
   const tree = parseJavaScript(code, { ecmaVersion: 'latest', sourceType: 'module' }) as unknown as JavaScriptNode
   const replacements: Array<{ start: number; end: number; value: string }> = []
   const appRequire = createRequire(join(appDir, 'package.json'))
+  const resolveAlias = tsconfigAliasResolver(appDir)
   visitJavaScript(tree, (node) => {
     const source = importSource(node)
     if (!source || typeof source.value !== 'string' || source.start === undefined || source.end === undefined) {
@@ -195,7 +196,7 @@ function resolveCompiledImports(code: string, sourcePath: string, appDir: string
       ? resolve(dirname(sourcePath), specifier)
       : specifier === 'deepspace/documentation/react' || specifier === 'react' || specifier.startsWith('react/')
         ? specifier
-        : appRequire.resolve(specifier)
+        : (resolveAlias(specifier) ?? appRequire.resolve(specifier))
     replacements.push({ start: source.start, end: source.end, value: quote(resolved.split(sep).join('/')) })
   })
   return replacements
@@ -205,6 +206,43 @@ function resolveCompiledImports(code: string, sourcePath: string, appDir: string
         `${output.slice(0, replacement.start)}${replacement.value}${output.slice(replacement.end)}`,
       code,
     )
+}
+
+/** Map tsconfig `paths` aliases (e.g. `@/*`) to app-rooted absolute paths,
+ * like relative imports: the emitted path stays extensionless and esbuild
+ * performs extension/tsconfig resolution. First target per pattern only. */
+function tsconfigAliasResolver(appDir: string): (specifier: string) => string | undefined {
+  let base = appDir
+  let aliases: Array<{ prefix: string; exact: boolean; target: string }> = []
+  try {
+    const raw = readFileSync(join(appDir, 'tsconfig.json'), 'utf8')
+    const parsed = JSON.parse(
+      raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, ''),
+    ) as { compilerOptions?: { baseUrl?: string; paths?: Record<string, string[]> } }
+    const options = parsed.compilerOptions
+    if (options?.paths) {
+      base = resolve(appDir, options.baseUrl ?? '.')
+      aliases = Object.entries(options.paths)
+        .filter(([, targets]) => typeof targets?.[0] === 'string')
+        .map(([pattern, targets]) => ({
+          exact: !pattern.includes('*'),
+          prefix: pattern.replace(/\*$/, ''),
+          target: targets[0].replace(/\*$/, ''),
+        }))
+        .sort((left, right) => right.prefix.length - left.prefix.length)
+    }
+  } catch {
+    // An unreadable tsconfig means no aliases; aliased imports then fail
+    // loudly through appRequire.resolve with the original specifier.
+  }
+  return (specifier) => {
+    for (const alias of aliases) {
+      if (alias.exact ? specifier === alias.prefix : specifier.startsWith(alias.prefix)) {
+        return resolve(base, `${alias.target}${alias.exact ? '' : specifier.slice(alias.prefix.length)}`)
+      }
+    }
+    return undefined
+  }
 }
 
 function importSource(node: JavaScriptNode): JavaScriptNode | undefined {

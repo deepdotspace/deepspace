@@ -26,7 +26,7 @@ export function createSearchEntries(pages: DocumentationPage[]): DocumentationSe
       route: page.route,
       title: page.title,
       ...(page.description ? { description: page.description } : {}),
-      headings: page.headings.filter((heading) => heading.depth > 1).map((heading) => heading.text),
+      headings: page.headings.filter((heading) => heading.depth > 1),
       text: page.text.slice(0, 12_000),
     }))
 }
