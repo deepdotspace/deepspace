@@ -1,5 +1,50 @@
 # deepspace
 
+## 0.12.0
+
+### Minor Changes
+
+- Add `deepspace app files`, and make oversized pushes and uploads fail fast with
+  advice that actually works.
+
+  **`deepspace app files put|list|get|rm`** reaches the app's own R2 allocation
+  from the command line, so images and media can be published without a deploy
+  and without living in Git history. Keys are relative to the app; the platform
+  owns the physical prefix and validates every key against it.
+
+  **An oversized push now fails fast and correctly.** A push refused with HTTP
+  413 is classified as `push_too_large` and names both ceilings (20 MiB per file,
+  32 MiB of compressed history per push) plus any local file over the per-file
+  cap. `deploy` renders a rejection with the same text `push` does, instead of a
+  bare "resolve the rejection".
+
+  **The oversize remediation was wrong and is fixed.** It advised `git rm
+--cached` + `.gitignore` + re-commit, which provably does not work: the blob
+  stays reachable from the earlier commit and the push is rejected identically.
+  The advice now says to drop the file from the commits that carry it (or rewrite
+  history if already pushed), states that untracking alone is insufficient, and
+  points at `deepspace app files put` as media's real home. Both facts are
+  covered by tests that run the recipes against a real repository.
+
+  **No git call can hang the CLI any more.** `deepspace deploy` could sit
+  silently for minutes on a push the server had already refused, because
+  `spawnSync` had no timeout. Every git invocation is now bounded, and the
+  deploy push-retry loop has a wall-clock budget rather than only an attempt
+  count.
+
+  **Oversized uploads report their size, not a JSON parse error.** An upload past
+  the edge's request limit returns an HTML error page; the browser hook and the
+  CLI both fed that to `JSON.parse` and surfaced `Unexpected token '<' … is not
+valid JSON`. Both now read failures as text first, and the 25 MiB ceiling is
+  enforced by the shared upload handler — so it binds hand-rolled requests too,
+  not just SDK callers. `uploadBase64` is measured on decoded bytes.
+
+  **The owner files endpoint takes human sessions only.** `APP_OWNER_JWT` (the
+  ten-year token baked into every deployed app) and preview tokens carry the
+  owner as `sub` on the same issuer and audience, so they verify. Accepting them
+  would have let any app read and overwrite files in every other app its owner
+  has; tokens carrying a `scope` claim are now refused there.
+
 ## 0.11.0
 
 ### Minor Changes

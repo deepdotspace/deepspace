@@ -2,6 +2,18 @@ import { sync as spawnSync } from 'cross-spawn'
 
 const MAX_GIT_BUFFER = 512 * 1024 * 1024
 
+/**
+ * Hard ceiling on ONE git invocation.
+ *
+ * `spawnSync` blocks the whole process, so a git call that never returns hangs
+ * the CLI with no output and no way out — a deploy was observed sitting silently
+ * for 5+ minutes on a push the server had already refused. Nothing here is
+ * allowed to wait unbounded. The ceiling is generous enough for a legitimate
+ * 32 MiB push over a slow link (the server's own pack cap) and short enough
+ * that a wedged call surfaces as a fast, named failure instead of a stall.
+ */
+export const GIT_TIMEOUT_MS = 300_000
+
 export class GitError extends Error {
   constructor(
     message: string,
@@ -17,12 +29,23 @@ export class GitError extends Error {
 export function runGit(
   cwd: string,
   args: string[],
-  opts: { input?: string | Buffer; allowFail?: boolean; env?: Record<string, string> } = {},
+  opts: {
+    input?: string | Buffer
+    allowFail?: boolean
+    env?: Record<string, string>
+    timeoutMs?: number
+  } = {},
 ): { stdout: Buffer; stderr: Buffer; status: number } {
+  const timeout = opts.timeoutMs ?? GIT_TIMEOUT_MS
   const result = spawnSync('git', args, {
     cwd,
     input: opts.input,
     maxBuffer: MAX_GIT_BUFFER,
+    timeout,
+    // SIGKILL, not the default SIGTERM: a child that ignores or traps TERM
+    // would otherwise keep running for its full duration and the "timeout"
+    // would bound nothing.
+    killSignal: 'SIGKILL',
     stdio: ['pipe', 'pipe', 'pipe'],
     env: {
       ...process.env,
@@ -31,6 +54,18 @@ export function runGit(
       ...(opts.env ?? {}),
     },
   })
+  // ETIMEDOUT only. Treating any signal as a timeout would relabel an
+  // ENOBUFS kill (output past maxBuffer) and an external SIGKILL — an OOM
+  // killer, a Ctrl-C — as "too large to transfer", which is a different
+  // problem with different advice.
+  if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') {
+    throw new GitError(
+      `git ${args[0]} did not finish within ${Math.round(timeout / 1000)}s and was stopped. ` +
+        `If this was a push, the history is probably too large to transfer — see \`deepspace push\` ` +
+        `for the size limits; otherwise retry, and report it with \`deepspace feedback\` if it persists.`,
+      'git_timeout',
+    )
+  }
   if (result.error) {
     const code = (result.error as NodeJS.ErrnoException).code
     if (code === 'ENOENT') {

@@ -18,6 +18,12 @@
 
 /// <reference types="@cloudflare/workers-types" />
 
+import { MAX_APP_FILE_BYTES, encodeKeyPath, oversizeMessage } from '../../shared/app-files'
+
+// The ceiling this handler enforces, re-exported so workers and their tests
+// cite the constant rather than a copy of the number.
+export { MAX_APP_FILE_BYTES }
+
 const CORS_HEADERS = { 'Access-Control-Allow-Origin': '*' } as const
 
 // ============================================================================
@@ -95,9 +101,22 @@ function sanitizeSubpath(raw: string): string | null {
   return raw
 }
 
-/** Encode an R2 key for use as URL path segments while preserving hierarchy. */
-function encodeKeyPath(key: string): string {
-  return key.split('/').map(encodeURIComponent).join('/')
+/**
+ * Refuse an upload past {@link MAX_APP_FILE_BYTES}.
+ *
+ * This is where the ceiling is real. Clients check it too, but only to fail
+ * early — a hand-rolled request that skips them reaches here, and without this
+ * the worker would buffer the whole body into a ~128 MiB isolate. Callers
+ * check Content-Length BEFORE reading the body, then the decoded size, which
+ * catches a body that lied about (or omitted) its length. The 8 KiB slack
+ * leaves room for multipart headers around a maximum-size file.
+ */
+function oversize(bytes: number, slack = 0): Response | null {
+  if (bytes <= MAX_APP_FILE_BYTES + slack) return null
+  return Response.json(
+    { error: oversizeMessage(bytes), code: 'too_large', maxBytes: MAX_APP_FILE_BYTES },
+    { status: 413, headers: CORS_HEADERS },
+  )
 }
 
 /**
@@ -255,6 +274,10 @@ async function handleUpload(
   scope: string,
 ): Promise<Response> {
   try {
+    // Before anything reads the body.
+    const declared = oversize(Number(request.headers.get('content-length')), 8 * 1024)
+    if (declared) return declared
+
     const contentType = request.headers.get('content-type') || ''
     let fileData: ArrayBuffer
     let fileName: string
@@ -266,6 +289,8 @@ async function handleUpload(
       if (!file) {
         return Response.json({ error: 'No file provided' }, { status: 400, headers: CORS_HEADERS })
       }
+      const tooBig = oversize(file.size)
+      if (tooBig) return tooBig
       fileData = await file.arrayBuffer()
       fileName = formData.get('name')?.toString() || file.name
       mimeType = file.type || 'application/octet-stream'
@@ -278,6 +303,11 @@ async function handleUpload(
         )
       }
       const base64Data = body.data.replace(/^data:[^;]+;base64,/, '')
+      // Check the DECODED size before allocating it: base64 carries 3 bytes
+      // per 4 characters, so a body inside the Content-Length guard can still
+      // decode past the cap.
+      const tooBig = oversize(Math.floor((base64Data.length * 3) / 4))
+      if (tooBig) return tooBig
       fileData = Uint8Array.from(atob(base64Data), (c) => c.charCodeAt(0)).buffer
       fileName = body.name
       mimeType = body.mimeType || 'application/octet-stream'

@@ -40,6 +40,7 @@ import logs from './commands/logs'
 import usage from './commands/usage'
 import add from './commands/add'
 import domain from './commands/domain'
+import appFiles from './commands/app-files'
 import collaborators from './commands/collaborators'
 import transfer from './commands/transfer'
 import integrations from './commands/integrations'
@@ -137,12 +138,13 @@ const app = defineCommand({
   meta: {
     name: 'app',
     description:
-      'The app itself: create, init, list, source, migrate, undeploy, transfer, collaborators, domain, usage',
+      'The app itself: create, init, list, files, source, migrate, undeploy, transfer, collaborators, domain, usage',
   },
   subCommands: {
     create,
     init,
     list: rename(apps, 'list'),
+    files: appFiles,
     undeploy,
     transfer,
     collaborators,

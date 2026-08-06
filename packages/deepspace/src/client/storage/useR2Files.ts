@@ -23,6 +23,12 @@
 
 import { useCallback, useState, useMemo } from 'react'
 import { getAuthToken } from '../auth'
+import {
+  MAX_APP_FILE_BYTES,
+  describeFilesFailure,
+  encodeKeyPath,
+  oversizeMessage,
+} from '../../shared/app-files'
 
 // ============================================================================
 // Types
@@ -34,6 +40,30 @@ export interface R2UploadResult {
   url?: string
   name?: string
   error?: string
+}
+
+/**
+ * Read an upload response without assuming it is JSON.
+ *
+ * An over-limit upload is refused by the edge, not the app, and comes back as
+ * an HTML error page — `response.json()` on that throws `Unexpected token '<'`,
+ * which is what users saw instead of "your file is too big".
+ */
+/** The one client-side size check, for both upload shapes. */
+function oversize(bytes: number): R2UploadResult | null {
+  return bytes > MAX_APP_FILE_BYTES ? { success: false, error: oversizeMessage(bytes) } : null
+}
+
+async function readUploadResult(response: Response): Promise<R2UploadResult> {
+  const text = await response.text()
+  if (response.ok) {
+    try {
+      return JSON.parse(text) as R2UploadResult
+    } catch {
+      return { success: false, error: 'The files service returned a malformed response.' }
+    }
+  }
+  return { success: false, error: describeFilesFailure(response.status, text) }
 }
 
 export interface R2FileInfo {
@@ -134,11 +164,6 @@ function resolveFile(fileOrKey: R2FileInfo | string): { key: string; name: strin
   return { key: fileOrKey.key, name: fileOrKey.originalName }
 }
 
-/** Encode an R2 key as URL path segments without flattening its `/` hierarchy. */
-function encodeKeyPath(key: string): string {
-  return key.split('/').map(encodeURIComponent).join('/')
-}
-
 // ============================================================================
 // Hook
 // ============================================================================
@@ -167,6 +192,8 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
     async (file: File | Blob, name?: string): Promise<R2UploadResult> => {
       setIsUploading(true)
       try {
+        const tooBig = oversize(file.size)
+        if (tooBig) return tooBig
         const headers = await authHeaders()
         const formData = new FormData()
         formData.append('file', file)
@@ -177,7 +204,7 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
           headers,
           body: formData,
         })
-        return (await response.json()) as R2UploadResult
+        return await readUploadResult(response)
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : 'Upload failed' }
       } finally {
@@ -191,13 +218,17 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
     async (base64Data: string, name: string, mimeType?: string): Promise<R2UploadResult> => {
       setIsUploading(true)
       try {
+        // base64 carries 3 bytes per 4 characters; the payload the server
+        // stores is what the limit is about, not the encoded string.
+        const tooBig = oversize(Math.floor((base64Data.length * 3) / 4))
+        if (tooBig) return tooBig
         const headers = await authHeaders()
         const response = await fetch(`/api/files/upload?${scopeParams}`, {
           method: 'POST',
           headers: { ...headers, 'Content-Type': 'application/json' },
           body: JSON.stringify({ data: base64Data, name, mimeType }),
         })
-        return (await response.json()) as R2UploadResult
+        return await readUploadResult(response)
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : 'Upload failed' }
       } finally {

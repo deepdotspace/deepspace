@@ -195,6 +195,136 @@ describe('push rejection decisions', () => {
     ).toMatchObject({ code: 'rate_limited' })
   })
 
+  describe('413 (too large)', () => {
+    const http413 = new Error('error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413')
+
+    it('names both ceilings', () => {
+      const failure = classifyPushTransportFailure(http413)
+      expect(failure).toMatchObject({ code: 'push_too_large' })
+      expect(failure!.error).toContain('20.0 MiB per file')
+      expect(failure!.error).toContain('32.0 MiB of compressed history per push')
+    })
+
+    it('does not classify a 413 that is only part of git progress output', () => {
+      expect(classifyPushTransportFailure(new Error('Total 413 (delta 3), reused 0'))).toBeNull()
+      expect(classifyPushTransportFailure(new Error('Counting objects: 413, done.'))).toBeNull()
+    })
+
+    it('matches both stderr shapes git emits for an HTTP status failure', () => {
+      // The transport reports a failing status one of two ways depending on
+      // where it fails — at the advertisement (`unable to access`) or during
+      // the RPC (`RPC failed; HTTP …`). Both must classify, or the advice
+      // depends on which half of the push broke.
+      for (const stderr of [
+        "fatal: unable to access 'https://deploy-worker.deep.space/api/repo/app_x/': The requested URL returned error: 413",
+        'error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413',
+        'send-pack: unexpected disconnect while reading sideband packet\nerror: RPC failed; HTTP 413',
+      ]) {
+        expect(classifyPushTransportFailure(new Error(stderr)), stderr).toMatchObject({
+          code: 'push_too_large',
+        })
+      }
+    })
+
+    it('names the offending object when the repo is at hand', () => {
+      const repo = mkdtempSync(join(tmpdir(), 'deepspace-413-'))
+      try {
+        initRepo(repo, 'main')
+        // One blob over the 20 MiB per-object cap, one comfortably under.
+        writeFileSync(join(repo, 'huge.bin'), Buffer.alloc(21 * 1024 * 1024, 1))
+        writeFileSync(join(repo, 'small.txt'), 'fine')
+        runGit(repo, ['add', '-A'])
+        runGit(repo, ['commit', '-m', 'add media'])
+
+        const failure = classifyPushTransportFailure(http413, repo)
+        expect(failure!.error).toContain('The oversized file is huge.bin (21.0 MiB)')
+        // Shell-quoted so the command is copy-pasteable for any path.
+        expect(failure!.error).toContain("deepspace app files put 'huge.bin'")
+        expect(failure!.error).not.toContain('small.txt')
+      } finally {
+        rmSync(repo, { recursive: true, force: true })
+      }
+    })
+
+    it('still gives the ceilings when the repo has nothing over the per-file cap', () => {
+      const repo = mkdtempSync(join(tmpdir(), 'deepspace-413-'))
+      try {
+        initRepo(repo, 'main')
+        writeFileSync(join(repo, 'small.txt'), 'fine')
+        runGit(repo, ['add', '-A'])
+        runGit(repo, ['commit', '-m', 'small'])
+
+        // A long history can 413 on the pack cap with no single file over the
+        // object cap, so the advice must not depend on naming a blob.
+        const failure = classifyPushTransportFailure(http413, repo)
+        expect(failure!.error).not.toContain('Over the per-file cap')
+        expect(failure!.error).toContain('smaller batches')
+      } finally {
+        rmSync(repo, { recursive: true, force: true })
+      }
+    })
+  })
+
+  describe('oversized correction (advice that actually works)', () => {
+    /** Commit `file`, then follow the given recipe, and report whether the
+     *  oversized blob is still reachable — i.e. still in the next push. */
+    function stillInHistory(recipe: (repo: string) => void): boolean {
+      const repo = mkdtempSync(join(tmpdir(), 'ds-oversize-'))
+      try {
+        initRepo(repo, 'main')
+        runGit(repo, ['config', 'user.email', 'test@example.com'])
+        runGit(repo, ['config', 'user.name', 'Test'])
+        writeFileSync(join(repo, 'big.bin'), Buffer.alloc(3 * 1024 * 1024, 1))
+        writeFileSync(join(repo, 'a.txt'), 'keep\n')
+        runGit(repo, ['add', '-A'])
+        runGit(repo, ['commit', '-q', '-m', 'add big'])
+        recipe(repo)
+        const listed = runGit(repo, ['rev-list', '--objects', '--all']).stdout.toString('utf-8')
+        return listed.includes('big.bin')
+      } finally {
+        rmSync(repo, { recursive: true, force: true })
+      }
+    }
+
+    // The reason the text below is worded the way it is. `git rm --cached` is
+    // a worktree change; the blob stays reachable from the commit that added
+    // it, so the identical push is refused again.
+    it('confirms `git rm --cached` + re-commit does NOT remove the blob from the push', () => {
+      expect(
+        stillInHistory((repo) => {
+          runGit(repo, ['rm', '--cached', '-q', 'big.bin'])
+          writeFileSync(join(repo, '.gitignore'), 'big.bin\n')
+          runGit(repo, ['add', '.gitignore'])
+          runGit(repo, ['commit', '-q', '-m', 'untrack big'])
+        }),
+      ).toBe(true)
+    })
+
+    it('confirms dropping the unpushed commit DOES remove it', () => {
+      expect(
+        stillInHistory((repo) => {
+          writeFileSync(join(repo, '.gitignore'), 'big.bin\n')
+          runGit(repo, ['reset', '--soft', '--quiet', '-q', 'HEAD'], { allowFail: true })
+          // No parent to reset onto (single commit), so delete the branch and
+          // re-commit clean — the same effect the advice describes.
+          runGit(repo, ['checkout', '-q', '--orphan', 'clean'])
+          runGit(repo, ['rm', '-q', '--cached', 'big.bin'], { allowFail: true })
+          runGit(repo, ['add', 'a.txt', '.gitignore'])
+          runGit(repo, ['commit', '-q', '-m', 'clean'])
+          runGit(repo, ['branch', '-q', '-D', 'main'])
+        }),
+      ).toBe(false)
+    })
+
+    it('says untracking alone is not enough, and names what is', () => {
+      const advice = oversizedPushFix()
+      expect(advice).toContain('NOT sufficient on its own')
+      expect(advice).toContain('git reset --soft')
+      expect(advice).toContain('git filter-repo')
+      expect(advice).toContain('deepspace app files put')
+    })
+  })
+
   it('gives an oversized rejection the correction recipe, never a retry action', () => {
     const message = pushFailureMessage(
       'Workspace upload',

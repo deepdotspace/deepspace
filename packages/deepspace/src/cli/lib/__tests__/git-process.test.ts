@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { gitMeetsFloor, parseGitVersion, runGit } from '../git/process'
+import { GIT_TIMEOUT_MS, GitError, gitMeetsFloor, parseGitVersion, runGit } from '../git/process'
 
 let dir: string
 
@@ -21,6 +21,31 @@ describe('spawn environment hardening', () => {
     const out = runGit(dir, ['-c', 'alias.senv=!env', 'senv']).stdout.toString('utf-8')
     expect(out).toMatch(/^GIT_TERMINAL_PROMPT=0$/m)
     expect(out).toMatch(/^LC_ALL=C$/m)
+  })
+
+  it('stops a git call that would otherwise block forever', () => {
+    // `spawnSync` blocks the whole CLI, so an unbounded git call is a silent
+    // hang with no output and no recovery — a deploy was observed sitting on
+    // one for minutes. A shell alias gives us a genuinely wedged child.
+    const started = Date.now()
+    let error: unknown
+    try {
+      runGit(dir, ['-c', 'alias.hang=!sleep 30', 'hang'], { timeoutMs: 750 })
+    } catch (err) {
+      error = err
+    }
+    expect(error).toBeInstanceOf(GitError)
+    expect((error as GitError).code).toBe('git_timeout')
+    expect((error as GitError).message).toContain('did not finish within 1s')
+    // The point is that it RETURNED, long before the child's own 30s.
+    expect(Date.now() - started).toBeLessThan(10_000)
+  })
+
+  it('caps every invocation by default, not only when a caller asks', () => {
+    // The ceiling has to be the default: the hang was in a call site that
+    // passed no options at all.
+    expect(GIT_TIMEOUT_MS).toBeGreaterThan(0)
+    expect(GIT_TIMEOUT_MS).toBeLessThanOrEqual(300_000)
   })
 
   it('applies caller env overlays on top of the hardening defaults', () => {

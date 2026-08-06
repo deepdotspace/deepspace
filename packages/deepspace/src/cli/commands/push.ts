@@ -36,8 +36,7 @@ import { shQuote } from '../lib/cli-format'
 import {
   classifyPushTransportFailure,
   isRecoverablePushFailure,
-  OVERSIZED_PUSH_RE,
-  oversizedPushFix,
+  pushFailureMessage,
   pushToSpace,
 } from '../lib/vc-push'
 import {
@@ -136,8 +135,9 @@ export default defineDeepspaceCommand({
     const branchArg = args.branch === undefined ? undefined : String(args.branch)
     const appArg = typeof args.app === 'string' ? args.app : undefined
     const force = args.force === true
+    // Outside the try: the catch below needs it to name oversized objects.
+    const appDir = findAppDir()
     try {
-      const appDir = findAppDir()
       if (!appDir)
         throw new Refusal(
           'No wrangler.toml found — run from inside an app directory.',
@@ -366,8 +366,7 @@ export default defineDeepspaceCommand({
             `Run \`deepspace pull --app ${shQuote(appId)} --branch ${shQuote(branch)}\` ` +
             `to integrate, then push again.`
           : result.status === 'rejected'
-            ? `The cloud repo rejected ${branch}: ${rejectReason}.` +
-              (OVERSIZED_PUSH_RE.test(rejectReason) ? ` ${oversizedPushFix(appDir)}` : '')
+            ? pushFailureMessage(`The cloud repo rejected ${branch}`, result, appDir ?? undefined)
             : `The cloud repo's ${branch} has commit(s) your local ${branch} doesn't. ` +
               `Run \`deepspace pull --app ${shQuote(appId)} --branch ${shQuote(branch)}\` ` +
               `and merge (or rebase), then push. Avoid --force here — it's guarded and ` +
@@ -395,7 +394,7 @@ export default defineDeepspaceCommand({
       return { data: { status: result.status, appId, branch, oid: tipOid } }
     } catch (err) {
       if (err instanceof Refusal) throw err
-      const transportFailure = classifyPushTransportFailure(err)
+      const transportFailure = classifyPushTransportFailure(err, appDir ?? undefined)
       if (transportFailure) {
         throw new Refusal(transportFailure.error, transportFailure.code)
       }

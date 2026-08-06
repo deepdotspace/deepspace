@@ -526,6 +526,23 @@ describe('pushWithTransientRetry (deploy auto-push)', () => {
     await rejection
     expect(doPush).toHaveBeenCalledTimes(4) // 1 try + 3 backoffs
   })
+
+  it('stops retrying once the wall-clock budget is spent, however few attempts ran', async () => {
+    vi.useFakeTimers()
+    // Each attempt re-uploads the whole pack. A bounded ATTEMPT count is not a
+    // bounded WAIT: one slow attempt can outlast the budget on its own, and
+    // deploy must still fail fast rather than sit silently.
+    const doPush = vi.fn<() => PushRefResult>().mockImplementation(() => {
+      vi.advanceTimersByTime(90_000)
+      throw new Error('The requested URL returned error: 503')
+    })
+    const promise = pushWithTransientRetry(doPush)
+    const rejection = expect(promise).rejects.toThrow('503')
+    await vi.runAllTimersAsync()
+    await rejection
+    // Two attempts fit inside the 120s budget; the third would start past it.
+    expect(doPush).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('deployRepositoryFailure (auto-push error contract)', () => {

@@ -4,6 +4,7 @@
  * credential-helper, and auth configuration remain in `vc-remote.ts`.
  */
 
+import { formatBytes } from '../../shared/app-files'
 import { shQuote } from './cli-format'
 import { GitError } from './git/process'
 import { findOversizedObjects } from './git/safety'
@@ -77,12 +78,22 @@ export function isRecoverablePushFailure(status: PushRefStatus): boolean {
 }
 
 export interface PushTransportFailure {
-  code: 'app_quota_exceeded' | 'source_managed_by_github' | 'rate_limited'
+  code: 'app_quota_exceeded' | 'source_managed_by_github' | 'rate_limited' | 'push_too_large'
   error: string
 }
 
-/** Classify HTTP failures whose bodies Git's smart-HTTP transport discards. */
-export function classifyPushTransportFailure(error: unknown): PushTransportFailure | null {
+/**
+ * Classify HTTP failures whose bodies Git's smart-HTTP transport discards.
+ *
+ * Only the status survives — git prints `RPC failed; HTTP 413` and drops the
+ * server's sentence — so each branch reconstructs the advice client-side.
+ * `cwd` is optional and only used to name the offending objects on a 413; the
+ * classification never depends on it.
+ */
+export function classifyPushTransportFailure(
+  error: unknown,
+  cwd?: string,
+): PushTransportFailure | null {
   const message = error instanceof Error ? error.message : String(error)
   // Match only HTTP-status contexts: `Total 429 (delta 3)` is valid git output.
   if (/(?:HTTP |error: )409\b/i.test(message)) {
@@ -105,6 +116,9 @@ export function classifyPushTransportFailure(error: unknown): PushTransportFailu
       code: 'rate_limited',
       error: 'The cloud repo rate-limited this push. Wait a few seconds, then retry.',
     }
+  }
+  if (/(?:HTTP |error: )413\b/i.test(message)) {
+    return { code: 'push_too_large', error: pushTooLargeMessage(cwd) }
   }
   return null
 }
@@ -142,28 +156,89 @@ export const OVERSIZED_PUSH_RE = /too large|exceeds|\bLFS\b/i
 /** Mirrors deploy-worker's per-object cap; the server remains the enforcer. */
 const SERVER_OBJECT_CAP_BYTES = 20 * 1024 * 1024
 
+/** Mirrors deploy-worker's MAX_PACK_BYTES — one push's compressed pack. */
+const SERVER_PACK_CAP_BYTES = 32 * 1024 * 1024
+
+/** How to locate the offending object when the repo isn't at hand. */
 export const OVERSIZED_PUSH_FIX =
   `Find the offending object with ` +
-  `\`git rev-list --objects --all | git cat-file --batch-check='%(objecttype) %(objectsize) %(rest)' | sort -k2 -n | tail\`, ` +
-  `then .gitignore it (or move it to Git LFS) and re-commit.`
+  `\`git rev-list --objects --all | git cat-file --batch-check='%(objecttype) %(objectsize) %(rest)' | sort -k2 -n | tail\`.`
 
-function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KiB`
-  return `${bytes} B`
+/**
+ * The correction, in the order it has to happen.
+ *
+ * This used to end at "`git rm --cached`, add to .gitignore, re-commit" —
+ * which does not work, and testing it against the real rejection is how that
+ * was found: the blob stays reachable from the commit that introduced it, so
+ * the very next push sends the identical bytes and is refused identically.
+ * Untracking changes the worktree; only rewriting or dropping the commits
+ * changes what gets pushed. Both facts are stated because following the first
+ * half alone is exactly the loop this text exists to break.
+ */
+function removeFromHistoryAdvice(path: string | null): string {
+  const file = path ? shQuote(path) : '<file>'
+  return (
+    `Media belongs in the app's files rather than Git history — \`deepspace app files put ${file}\` ` +
+    `stores it in the app's own allocation and serves it over HTTP. Then get it out of the push: ` +
+    `add it to .gitignore, and drop it from the commits that carry it — if those commits are still ` +
+    `local, \`git reset --soft <last pushed commit>\` and re-commit without the file. ` +
+    `\`git rm --cached\` plus a new commit is NOT sufficient on its own: the blob stays reachable ` +
+    `from the earlier commit and the push is rejected the same way. If it already reached pushed ` +
+    `history, rewrite it out (\`git filter-repo --path ${file} --invert-paths\`).`
+  )
 }
 
-/** Name over-cap objects when possible so the correction is mechanical. */
-export function oversizedPushFix(cwd?: string, cap: number = SERVER_OBJECT_CAP_BYTES): string {
-  const objects = cwd ? findOversizedObjects(cwd, cap) : []
-  if (objects.length === 0) return OVERSIZED_PUSH_FIX
+type OversizedObject = { path: string; bytes: number }
+
+/** Render the correction for an ALREADY-SCANNED object list. Scanning the
+ *  object database walks every object in the repo, so callers that need both
+ *  the list and this sentence scan once and pass it here. */
+function fixForObjects(objects: OversizedObject[]): string {
+  if (objects.length === 0) return `${OVERSIZED_PUSH_FIX} ${removeFromHistoryAdvice(null)}`
   const one = objects.length === 1
   const named = objects.map((object) => `${object.path} (${formatBytes(object.bytes)})`).join(', ')
   return (
     `The oversized ${one ? 'file is' : 'files are'} ${named}. ` +
-    `Remove ${one ? 'it' : 'them'} from history (\`git rm --cached ${one ? shQuote(objects[0].path) : '<path>'}\`, ` +
-    `add to .gitignore, re-commit) or track ${one ? 'it' : 'them'} with Git LFS.`
+    `${removeFromHistoryAdvice(one ? objects[0].path : null)}`
   )
+}
+
+/** Name over-cap objects when possible so the correction is mechanical. */
+export function oversizedPushFix(cwd?: string, cap: number = SERVER_OBJECT_CAP_BYTES): string {
+  return fixForObjects(cwd ? findOversizedObjects(cwd, cap) : [])
+}
+
+/**
+ * The advice for an HTTP 413 — the transport-level "this push is too big".
+ *
+ * Git discards the server's response body here, so the ceilings are restated
+ * client-side. Both are named because the status alone cannot say which one
+ * was hit: the pack cap bounds ONE push, the object cap bounds ONE file. When
+ * the repo is at hand, the over-cap blobs are named outright, which usually
+ * identifies the cause without the caller running anything.
+ *
+ * The remedy is deliberately not "split the push" for media. Binary files
+ * never delta well, so every clone of the app pays for them forever — that is
+ * exactly what these ceilings exist to prevent. Media belongs in the app's
+ * files allocation, which serves it over HTTP and keeps it out of history.
+ */
+export function pushTooLargeMessage(cwd?: string): string {
+  const ceilings =
+    `The cloud repo refused this push as too large (HTTP 413). The ceilings are ` +
+    `${formatBytes(SERVER_OBJECT_CAP_BYTES)} per file and ` +
+    `${formatBytes(SERVER_PACK_CAP_BYTES)} of compressed history per push. ` +
+    `Large media never compresses, so every clone would pay for it forever.`
+  const objects = cwd ? findOversizedObjects(cwd, SERVER_OBJECT_CAP_BYTES) : []
+  if (objects.length === 0) {
+    // Nothing over the per-file cap, so the pack cap is what was hit: the
+    // history is simply too big for one push, which splitting does fix.
+    return (
+      `${ceilings} No single file is over the per-file cap, so this is the volume of history — ` +
+      `push it in smaller batches (\`git push space <earlier-commit>:refs/heads/<branch>\` first, ` +
+      `then the rest). ${OVERSIZED_PUSH_FIX}`
+    )
+  }
+  return `${ceilings} ${fixForObjects(objects)}`
 }
 
 /**

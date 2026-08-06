@@ -9,7 +9,12 @@ import {
 } from '../../lib/git/repository'
 import { trackedSecretFiles } from '../../lib/git/safety'
 import { mintIdempotencyKey, repoApi, type RemoteWorkspace } from '../../lib/repo-api'
-import { classifyPushTransportFailure, pushToSpace, type PushRefResult } from '../../lib/vc-push'
+import {
+  classifyPushTransportFailure,
+  pushFailureMessage,
+  pushToSpace,
+  type PushRefResult,
+} from '../../lib/vc-push'
 import { ensureSpaceRemote, runGitRemote, spaceRemoteName } from '../../lib/vc-remote'
 import { workspaceIdFromBranch } from '../../lib/workspace-id'
 import { errorCode } from '../../lib/cli-errors'
@@ -130,8 +135,13 @@ export async function syncDeployRepository(options: {
           p.log.info(`Pushed ${branch} → ${tip.slice(0, 10)}.`)
         }
       } else if (pushResult.status === 'rejected') {
+        // The SAME rendering `deepspace push` gives, so an oversized object
+        // carries its correction here too instead of a bare "resolve it".
+        // Divergent copies of this sentence are how deploy ended up telling
+        // users less than push did about the identical rejection.
         output.die(
-          `Cloud repo rejected ${branch}${pushResult.reason ? `: ${pushResult.reason}` : ''}. Resolve the rejection and publish the commit before deploying.`,
+          `${pushFailureMessage('Cloud repo push', pushResult, appDir)} ` +
+            `Publish the commit before deploying.`,
           'vc_push_rejected',
         )
       } else {
@@ -180,7 +190,7 @@ export async function syncDeployRepository(options: {
       sourceRevision = claimed.revision
     }
   } catch (error: unknown) {
-    const failure = deployRepositoryFailure(error)
+    const failure = deployRepositoryFailure(error, appDir)
     output.die(failure.error, failure.code)
   }
 
@@ -218,8 +228,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-export function deployRepositoryFailure(error: unknown): { code: string; error: string } {
-  const transportFailure = classifyPushTransportFailure(error)
+export function deployRepositoryFailure(
+  error: unknown,
+  /** The app checkout, so an oversized push can name the offending files. */
+  cwd?: string,
+): { code: string; error: string } {
+  const transportFailure = classifyPushTransportFailure(error, cwd)
   if (transportFailure) return transportFailure
 
   const code = errorCode(error)
@@ -231,14 +245,25 @@ export function deployRepositoryFailure(error: unknown): { code: string; error: 
   }
 }
 
+/**
+ * Total wall-clock this retry loop may consume. Each attempt re-uploads the
+ * whole pack, so a bounded ATTEMPT count is not a bounded WAIT — three retries
+ * of a slow 32 MiB push can run for many minutes with no output. The deadline
+ * is what actually guarantees deploy fails fast; the per-attempt ceiling in
+ * `runGit` guarantees a single attempt cannot hang inside it.
+ */
+const PUSH_RETRY_BUDGET_MS = 120_000
+
 export async function pushWithTransientRetry(push: () => PushRefResult): Promise<PushRefResult> {
   const backoffMs = [500, 1500, 3500]
+  const deadline = Date.now() + PUSH_RETRY_BUDGET_MS
   for (let attempt = 0; ; attempt++) {
     try {
       return push()
     } catch (error) {
       const message = errorMessage(error)
-      if (/(?:HTTP |error: )(?:429|503)\b/i.test(message) && attempt < backoffMs.length) {
+      const transient = /(?:HTTP |error: )(?:429|503)\b/i.test(message)
+      if (transient && attempt < backoffMs.length && Date.now() + backoffMs[attempt] < deadline) {
         await new Promise((resolve) => setTimeout(resolve, backoffMs[attempt]))
         continue
       }
