@@ -37,9 +37,10 @@ interface PendingInvite {
 
 type AddResponse =
   | { status: 'added'; collaborator: Collaborator }
-  | { status: 'invited'; email: string; token: string; expiresAt: number }
+  // No token: it is the invitee's credential, and it reaches them by email.
+  | { status: 'invited'; email: string; expiresAt: number }
   // A live invite already existed → the server did NOT re-charge or re-send.
-  | { status: 'already_invited'; email: string; token: string; expiresAt: number }
+  | { status: 'already_invited'; email: string; expiresAt: number }
 
 function api<T>(token: string, path: string, init?: RequestInit): Promise<T> {
   return apiFetch<T>(API_URL, token, path, init)
@@ -265,7 +266,10 @@ const accept = defineDeepspaceCommand({
     }
     return {
       data: { ...res },
-      action: cliAction('deepspace', 'pull', '--app', res.appId),
+      // `pull` fast-forwards a checkout this caller does not have yet — the
+      // invite just granted access, so there is nothing local to update.
+      // `clone` is the step that actually works from here.
+      action: cliAction('deepspace', 'clone', res.appId),
     }
   },
 })

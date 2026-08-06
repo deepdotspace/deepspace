@@ -9,6 +9,8 @@ export * from './server/rooms'
 export * from './server/schemas'
 export * from './shared/protocol'
 export * from './shared/ai-models'
+export * from './shared/app-routing'
+export * from './shared/platform-proxy'
 export * from './server/utils'
 export {
   registerDeepSpaceDocumentation,

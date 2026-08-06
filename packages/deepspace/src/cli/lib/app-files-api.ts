@@ -124,8 +124,17 @@ async function request(
   if (res.ok) return res
   const text = await res.text()
   let code: string | undefined
+  let details: Record<string, unknown> | undefined
   try {
-    code = (JSON.parse(text.trim()) as { code?: string }).code
+    const body = JSON.parse(text.trim()) as Record<string, unknown>
+    code = typeof body.code === 'string' ? body.code : undefined
+    // Everything the server quantified travels with the refusal — a storage
+    // refusal's usedBytes/limitBytes reach `--json` as numbers instead of
+    // being left for the caller to parse back out of the sentence.
+    const rest = Object.fromEntries(
+      Object.entries(body).filter(([key]) => key !== 'error' && key !== 'code'),
+    )
+    if (Object.keys(rest).length > 0) details = rest
   } catch {
     // Not the app's JSON; the status carries the meaning.
   }
@@ -137,6 +146,7 @@ async function request(
     // refusing it, and two codes made it look like one.
     code ?? (res.status === 413 ? 'too_large' : res.status >= 500 ? 'server_error' : 'http_error'),
     path,
+    details,
   )
 }
 

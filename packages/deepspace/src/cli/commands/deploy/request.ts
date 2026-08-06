@@ -132,6 +132,15 @@ export async function deployBuiltBundle(options: {
     if (Object.keys(bundle.assetConfig).length) {
       form.append('assetConfig', JSON.stringify(bundle.assetConfig))
     }
+    if (bundle.compatibilityDate) {
+      form.append('compatibilityDate', bundle.compatibilityDate)
+    }
+    if (bundle.compatibilityFlags.length) {
+      form.append('compatibilityFlags', JSON.stringify(bundle.compatibilityFlags))
+    }
+    if (bundle.notFoundHandling) {
+      form.append('notFoundHandling', bundle.notFoundHandling)
+    }
     form.append('name', appName)
     if (confirmRename) form.append('confirmRename', 'true')
     if (shouldSendLineage(repository.commitOid, repository.recoverable)) {

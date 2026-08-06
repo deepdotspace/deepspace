@@ -9,6 +9,7 @@ import * as p from '@clack/prompts'
 import { stopActiveSpinner } from './spinner'
 import { assertExecutableAction, printAction, withSlug, type CliAction } from './output'
 import { errorCode } from './cli-errors'
+import { ApiError } from './api'
 
 export { cliAction } from './output'
 
@@ -49,6 +50,17 @@ export interface CommandResult {
   data?: Record<string, unknown>
   /** One executable follow-up: the `Next:` line and envelope's `action`. */
   action?: CliAction
+}
+
+/**
+ * Structured fields a server refusal carried, for commands that surface an
+ * {@link ApiError} directly rather than translating it into a {@link Refusal}.
+ * Without this the envelope kept only the sentence, so an agent had to read
+ * numbers like remaining storage back out of prose the API had already
+ * quantified.
+ */
+function apiErrorDetails(err: unknown): Record<string, unknown> | undefined {
+  return err instanceof ApiError ? err.details : undefined
 }
 
 /**
@@ -151,7 +163,7 @@ export function defineDeepspaceCommand<A extends ArgsDef>(def: DeepspaceCommandD
               ...(refusal?.actionRequired ? { actionRequired: true } : {}),
               error: message,
               ...(refusal?.action ? { action: refusal.action } : {}),
-              ...withoutReservedKeys(refusal?.extra ?? {}),
+              ...withoutReservedKeys(refusal?.extra ?? apiErrorDetails(err) ?? {}),
             }),
           )
         } else {

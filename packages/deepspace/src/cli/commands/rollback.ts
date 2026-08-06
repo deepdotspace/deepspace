@@ -19,7 +19,7 @@ import { resolveAppTarget, assertAppTargetResolvable, parseWranglerEnvArg } from
 import { apiFetch, ApiError } from '../lib/api'
 import { mintIdempotencyKey, repoApi } from '../lib/repo-api'
 import { createSpinner } from '../lib/spinner'
-import { waitForLiveRelease } from '../lib/edge-propagation'
+import { waitForLiveRelease, type ReleaseWait } from '../lib/edge-propagation'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 
 const REL_ID_RE = /^rel_[0-9A-HJKMNP-TV-Z]{26}$/
@@ -172,15 +172,18 @@ export default defineDeepspaceCommand({
     // Same guard deploy holds: the platform ack means accepted, not serving.
     // Without this, rollback reports success while the edge still answers with
     // the release it was asked to replace.
-    let edgePropagating = false
+    let serving: ReleaseWait = 'unverifiable'
     if (result.url) {
-      spinner?.message('Waiting for edge propagation...')
-      edgePropagating = !(await waitForLiveRelease(result.url, result.releaseStamp, 90_000))
+      spinner?.message('Waiting for the edge to serve this release...')
+      serving = await waitForLiveRelease(result.url, result.releaseStamp, 90_000)
     }
+    const edgePropagating = serving === 'unconfirmed'
     spinner?.stop(
-      edgePropagating
-        ? `Rolled back to ${result.rolledBackTo ?? releaseId} (edge propagation still in progress after 90s).`
-        : `Rolled back to ${result.rolledBackTo ?? releaseId}.`,
+      serving === 'confirmed'
+        ? `Rolled back to ${result.rolledBackTo ?? releaseId}.`
+        : serving === 'unconfirmed'
+          ? `Rolled back to ${result.rolledBackTo ?? releaseId} — the edge is still rolling it out.`
+          : `Rolled back to ${result.rolledBackTo ?? releaseId} — serving could not be verified from here.`,
     )
     // Degraded guard: --allow-do-deletion bypassed the DO-class check, so the
     // platform never verified this rollback against the live Durable Object
@@ -215,6 +218,8 @@ export default defineDeepspaceCommand({
         url: result.url ?? null,
         versionId: result.versionId ?? null,
         wranglerEnv: wranglerEnv ?? null,
+        // Always present, matching `deploy`: one field to branch on.
+        serving,
         ...(edgePropagating ? { edgePropagating: true } : {}),
         ...(doClassGuard ? { doClassGuard } : {}),
       },

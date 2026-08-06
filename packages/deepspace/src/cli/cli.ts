@@ -58,7 +58,7 @@ import workspace from './commands/workspace'
 import activity from './commands/activity'
 import gitCredential from './commands/git-credential'
 import source from './commands/source'
-import migrate from './commands/migrate'
+import update from './commands/update'
 
 // Read own version from package.json so the CLI banner stays in sync with publishes.
 // __dirname of the bundled output is <pkg>/dist; package.json sits one level up.
@@ -139,7 +139,7 @@ const app = defineCommand({
   meta: {
     name: 'app',
     description:
-      'The app itself: create, init, list, files, source, migrate, undeploy, transfer, collaborators, domain, usage',
+      'The app itself: create, init, list, files, source, update, undeploy, transfer, collaborators, domain, usage',
   },
   subCommands: {
     create,
@@ -152,7 +152,7 @@ const app = defineCommand({
     domain,
     usage,
     source,
-    migrate,
+    update,
   },
 })
 
@@ -309,8 +309,8 @@ if (rawArgs.includes('--json') && !wantsHelp) {
   })
 } else {
   // Static path validation is read-only, including for help probes. Without
-  // it, `deepspace migrate --help` silently falls back to root help and exits
-  // 0 even though the only valid path is `deepspace app migrate`.
+  // it, `deepspace update --help` silently falls back to root help and exits
+  // 0 even though the only valid path is `deepspace app update`.
   assertKnownCommandPath(rawArgs)
   // The only entry into citty's colorized rendering — every `--help` page and
   // every usage dump it prints on a parse error goes through showUsage. Keeps

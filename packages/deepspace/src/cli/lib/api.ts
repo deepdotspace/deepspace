@@ -14,6 +14,13 @@ export class ApiError extends Error {
     readonly code?: string,
     /** Internal REST path — kept off the message (DEBUG-only rendering). */
     readonly apiPath?: string,
+    /**
+     * Structured fields the server sent alongside `error`/`code` — e.g. a
+     * storage refusal's `usedBytes`/`limitBytes`. The command runtime spreads
+     * these into the `--json` envelope, so a caller reads the numbers the API
+     * already computed instead of parsing them back out of the sentence.
+     */
+    readonly details?: Record<string, unknown>,
   ) {
     super(message)
   }

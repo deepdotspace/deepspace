@@ -11,7 +11,7 @@ import { ensureInstallReady } from '../lib/install-status'
 import type { CliAction } from '../lib/output'
 import { preflightNodeVersion } from '../lib/preflight'
 import { createSpinner } from '../lib/spinner'
-import { waitForLiveRelease } from '../lib/edge-propagation'
+import { waitForLiveRelease, type ReleaseWait } from '../lib/edge-propagation'
 import { MAX_DEPLOY_ASSET_FILE_BYTES, formatBytes } from '../../shared/app-files'
 import {
   hasWranglerConfig,
@@ -26,7 +26,6 @@ import { deployBuiltBundle } from './deploy/request'
 import { syncDeployRepository } from './deploy/repository'
 import { getAppSource } from '../lib/source-api'
 import { loadDeploySecrets, prepareDeploySecrets } from './deploy/secrets'
-import { legacyDeployRefusal } from './migrate/legacy-app-id'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
@@ -125,10 +124,6 @@ export default defineCommand({
     }
     const appName = nameResult.name
     let appId = readAppId(appDir, envName)
-    if (!appId) {
-      const refusal = legacyDeployRefusal(appDir, envName)
-      if (refusal) output.die(refusal.error, refusal.code)
-    }
     p.log.info(envName ? `App: ${appName}  (env: ${envName})` : `App: ${appName}`)
 
     const { token, ownerId } = await authenticate(appDir, output)
@@ -205,15 +200,24 @@ export default defineCommand({
       spinner,
     })
 
+    let serving: ReleaseWait = 'unverifiable'
     if (body.url) {
-      spinner.message('Waiting for edge propagation...')
-      const ready = await waitForLiveRelease(body.url, body.releaseStamp, 90_000)
-      if (!ready) {
-        spinner.stop('Deployed (edge propagation still in progress after 90s)')
-        p.log.warn(
-          'First requests may briefly hit the assets transitional page; retry in a minute.',
+      spinner.message('Waiting for the edge to serve this release...')
+      serving = await waitForLiveRelease(body.url, body.releaseStamp, 90_000)
+      if (serving !== 'confirmed') {
+        spinner.stop(
+          serving === 'unconfirmed'
+            ? 'Deployed — the edge is still rolling this release out'
+            : 'Deployed — serving could not be verified from here',
         )
-        p.log.info(`URL: ${body.url} (deploy accepted; serving not yet verified from here)`)
+        p.log.warn(
+          serving === 'unconfirmed'
+            ? 'Some requests still get the previous release. Cloudflare rolls a version out per ' +
+                'edge machine; it usually settles within a couple of minutes. Wait before asserting against it.'
+            : 'This release carries no serving stamp (older platform, or a resumed deploy), so the ' +
+                'CLI cannot tell which release the edge answers with.',
+        )
+        p.log.info(`URL: ${body.url}`)
         await syncCommerce(appDir, appId, token, output.nonInteractive)
         if (output.json) {
           return output.emitJson({
@@ -223,7 +227,10 @@ export default defineCommand({
             url: body.url,
             releaseId: body.releaseId ?? null,
             bundleRetained: body.bundleRetained ?? null,
-            edgePropagating: true,
+            // `serving` says what was actually established; `edgePropagating`
+            // stays for callers written against the old shape.
+            serving,
+            edgePropagating: serving === 'unconfirmed',
             recoverable: repository.recoverable,
             ...staleBaseGuardFields(body),
           })
@@ -234,6 +241,8 @@ export default defineCommand({
     }
 
     spinner.stop('Deployed!')
+    // Verified from HERE: ten independent connections agreed. Other regions
+    // may still be rolling over — see lib/edge-propagation.ts.
     p.log.success(`Live at: ${body.url}`)
     await syncCommerce(appDir, appId, token, output.nonInteractive)
     if (output.json) {
@@ -242,6 +251,9 @@ export default defineCommand({
         appId,
         appName,
         url: body.url ?? null,
+        // Always present, so a caller branches on one field instead of
+        // inferring success from the absence of `edgePropagating`.
+        serving,
         releaseId: body.releaseId ?? null,
         bundleRetained: body.bundleRetained ?? null,
         recoverable: repository.recoverable,

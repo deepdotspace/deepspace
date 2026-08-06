@@ -1,80 +1,93 @@
 /**
- * The release-stamp probe: proves the edge serves THE release, not merely a
- * release. The legacy reachability probe stays as the no-stamp fallback.
+ * The release wait, exercised over REAL sockets against a local server.
+ *
+ * Stubbing `fetch` is what hid the defect this module was rewritten to fix:
+ * the old probe agreed with itself because every poll reused one connection,
+ * and a stubbed transport cannot show that. Here each probe is a real request,
+ * and the server answers per CONNECTION — so a test can model an edge that is
+ * half-rolled-over, which is the situation that matters.
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import {
-  RELEASE_STAMP_PATH,
-  waitForLiveRelease,
-  waitForReleaseStamp,
-} from '../edge-propagation'
+import { afterEach, describe, expect, it } from 'vitest'
+import { createServer, type Server } from 'node:http'
+import { RELEASE_STAMP_PATH, waitForLiveRelease } from '../edge-propagation'
 
-afterEach(() => {
-  vi.unstubAllGlobals()
+let server: Server | null = null
+
+afterEach(async () => {
+  if (server) await new Promise<void>((resolve) => server!.close(() => resolve()))
+  server = null
 })
 
-function stampServer(answers: () => string | null): { probes: string[] } {
-  const probes: string[] = []
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (input: string | URL) => {
-      const url = new URL(String(input))
-      probes.push(url.pathname + url.search)
-      const release = answers()
-      if (url.pathname !== RELEASE_STAMP_PATH) return new Response('<html>app</html>')
-      if (release === null) return new Response('not found', { status: 404 })
-      return Response.json({ release })
-    }),
-  )
-  return { probes }
+/**
+ * Start a server that answers each CONNECTION with a release drawn from
+ * `answers`, cycling. One connection per request is what the probe does, so a
+ * `['old', 'new']` cycle models a colo that is exactly half converged.
+ */
+async function startEdge(answers: string[]): Promise<{ url: string; requests: number }> {
+  const state = { requests: 0 }
+  server = createServer((req, res) => {
+    const release = answers[state.requests % answers.length]
+    state.requests++
+    if (!req.url?.startsWith(RELEASE_STAMP_PATH)) {
+      res.writeHead(404).end()
+      return
+    }
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ release }))
+  })
+  await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve))
+  const port = (server!.address() as { port: number }).port
+  return Object.defineProperty({ url: `http://127.0.0.1:${port}` } as { url: string; requests: number }, 'requests', {
+    get: () => state.requests,
+  })
 }
 
-describe('waitForReleaseStamp', () => {
-  it('resolves once the edge answers with this release, three polls in a row', async () => {
-    stampServer(() => 'stamp-new')
-    await expect(waitForReleaseStamp('https://app.example', 'stamp-new', 30_000)).resolves.toBe(
-      true,
-    )
-  })
-
-  it(
-    'keeps polling through the old version and pre-stamp 404s, then converges',
-    async () => {
-      // Rollover: a 404 (a pre-stamp version still serving), then the old
-      // stamp once, then the new one — exactly what mixed colos look like.
-      const answers = ['404', 'stamp-old', 'stamp-new', 'stamp-new', 'stamp-new']
-      const { probes } = stampServer(() => {
-        const next = answers.shift() ?? 'stamp-new'
-        return next === '404' ? null : next
-      })
-      await expect(waitForReleaseStamp('https://app.example', 'stamp-new', 60_000)).resolves.toBe(
-        true,
-      )
-      expect(probes.length).toBeGreaterThanOrEqual(5)
-      // Every probe is cache-busted: the CDN must not answer for a version it
-      // no longer runs.
-      expect(probes.every((p) => p.includes('probe='))).toBe(true)
-    },
-    20_000,
-  )
-
-  it('reports false when the deadline passes without convergence', async () => {
-    stampServer(() => 'stamp-old')
-    await expect(waitForReleaseStamp('https://app.example', 'stamp-new', 1)).resolves.toBe(false)
-  })
-})
-
 describe('waitForLiveRelease', () => {
-  it('uses the stamp when the platform sent one', async () => {
-    const { probes } = stampServer(() => 'stamp-x')
-    await expect(waitForLiveRelease('https://app.example', 'stamp-x', 30_000)).resolves.toBe(true)
-    expect(probes.every((p) => p.startsWith(RELEASE_STAMP_PATH))).toBe(true)
+  it('confirms once independent connections agree on the new release', async () => {
+    const edge = await startEdge(['new'])
+    await expect(waitForLiveRelease(edge.url, 'new', 30_000)).resolves.toBe('confirmed')
+    // Ten agreeing probes, each its own connection — not one probe ten times.
+    expect(edge.requests).toBeGreaterThanOrEqual(10)
   })
 
-  it('falls back to the legacy reachability probe without one', async () => {
-    const { probes } = stampServer(() => 'irrelevant')
-    await expect(waitForLiveRelease('https://app.example', undefined, 30_000)).resolves.toBe(true)
-    expect(probes.some((p) => p.startsWith(RELEASE_STAMP_PATH))).toBe(false)
+  it('does NOT confirm while the edge is still half-serving the old release', async () => {
+    // The exact production failure: alternate old/new per connection. The old
+    // fetch-based probe passed this in three polls because it reused a socket.
+    const edge = await startEdge(['old', 'new'])
+    await expect(waitForLiveRelease(edge.url, 'new', 3_000)).resolves.toBe('unconfirmed')
+  })
+
+  // Backing off through the stale phase, then ten agreeing probes, takes
+  // longer than vitest's default wall — which is the point of the design.
+  it('confirms once a rolling edge finishes converging', { timeout: 20_000 }, async () => {
+    // Old for the first few connections, then new forever.
+    const answers = ['old', 'old', 'old', ...Array.from({ length: 40 }, () => 'new')]
+    let index = 0
+    server = createServer((req, res) => {
+      const release = answers[Math.min(index++, answers.length - 1)]
+      if (!req.url?.startsWith(RELEASE_STAMP_PATH)) return void res.writeHead(404).end()
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ release }))
+    })
+    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve))
+    const port = (server!.address() as { port: number }).port
+    await expect(
+      waitForLiveRelease(`http://127.0.0.1:${port}`, 'new', 30_000),
+    ).resolves.toBe('confirmed')
+  })
+
+  it('reports unverifiable without a stamp instead of pretending to check', async () => {
+    const edge = await startEdge(['new'])
+    await expect(waitForLiveRelease(edge.url, undefined, 30_000)).resolves.toBe('unverifiable')
+    // Nothing was probed: there is nothing to compare against.
+    expect(edge.requests).toBe(0)
+  })
+
+  it('treats an unreachable origin as not-yet-serving, not as success', async () => {
+    // Port 1 is reserved and refuses; the probe must not read that as a match.
+    await expect(waitForLiveRelease('http://127.0.0.1:1', 'new', 1_500)).resolves.toBe(
+      'unconfirmed',
+    )
   })
 })

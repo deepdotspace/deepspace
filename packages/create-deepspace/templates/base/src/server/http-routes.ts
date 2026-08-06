@@ -8,7 +8,14 @@
 
 import type { Hono } from 'hono'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
-import { apiWorkerFetch, authWorkerFetch, platformWorkerFetch, verifyJwt } from 'deepspace/worker'
+import {
+  apiWorkerFetch,
+  authWorkerFetch,
+  BROWSER_PROXY_ROUTES,
+  isPlatformReservedPath,
+  platformWorkerFetch,
+  verifyJwt,
+} from 'deepspace/worker'
 import type { JwtVerifierConfig, VerifyResult } from 'deepspace/worker'
 import { integrations } from '../integrations.js'
 import type { AppContext, Env } from '../../worker.js'
@@ -227,20 +234,6 @@ export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
   })
 }
 
-interface ProxyRoute {
-  method: string
-  path: string
-}
-
-const BROWSER_PROXY_ROUTES: ReadonlyArray<ProxyRoute> = [
-  // useSubscription — read state, subscribe, manage billing.
-  { method: 'GET', path: '/_deepspace/subscriptions/me' },
-  { method: 'POST', path: '/_deepspace/subscriptions/checkout' },
-  { method: 'POST', path: '/_deepspace/subscriptions/portal' },
-  // useCheckout (one-time charges).
-  { method: 'POST', path: '/_deepspace/charges/create' },
-  { method: 'GET', path: '/_deepspace/charges/me' },
-]
 
 /** Register scoped-file and authenticated browser-to-platform proxies. */
 export function registerPlatformProxyRoutes(app: Hono<AppContext>): void {
@@ -333,19 +326,20 @@ const matches = (pathname: string, prefixes: readonly string[]): boolean =>
 const API_PREFIXES = ['/api']
 
 /**
- * Paths an agent probes to ask an origin to describe itself. Serving the SPA
- * shell here returns 200 text/html byte-identical to `/`, which reads as "this
- * app publishes a manifest" — so the agent proceeds on the homepage.
- *
- * Unlike `/api` these DO fall through to the asset layer first: a hand-authored
- * `public/llms.txt` is a real answer and must keep working. Only the SPA
- * fallback is withheld, so an app that publishes nothing here 404s instead of
- * claiming a manifest it does not have. (Mounting `deepspace/documentation`
- * answers them before this fallback ever runs.)
+ * A FILE, not a client route: last segment carries an extension. Wrong in only
+ * the cheap direction — a dotted route 404s visibly, where a missing file
+ * getting the shell is HTML parsed as JavaScript and a blank page.
  */
-const AGENT_PREFIXES = ['/llms.txt', '/llms-full.txt', '/.well-known/mcp', '/.well-known/mcp.json']
+function namesAFile(pathname: string): boolean {
+  const last = pathname.slice(pathname.lastIndexOf('/') + 1)
+  return last.includes('.')
+}
 
-/** Register the SPA fallback last so it cannot shadow worker routes. */
+/**
+ * Register the client-route fallback last so it cannot shadow worker routes.
+ * Deploys set `not_found_handling: "none"`, so a 404 from the binding is a
+ * real miss and this worker makes the call the asset layer cannot.
+ */
 export function registerStaticRoutes(app: Hono<AppContext>): void {
   app.get('*', async (c) => {
     const url = new URL(c.req.url)
@@ -353,13 +347,14 @@ export function registerStaticRoutes(app: Hono<AppContext>): void {
       return c.json({ error: 'not_found' }, 404)
     }
     const response = await c.env.ASSETS.fetch(c.req.raw)
-    if (response.status === 404) {
-      if (matches(url.pathname, AGENT_PREFIXES)) {
-        return c.json({ error: 'not_found' }, 404)
-      }
-      url.pathname = '/index.html'
-      return c.env.ASSETS.fetch(new Request(url.toString(), c.req.raw))
+    if (response.status !== 404) return response
+
+    if (namesAFile(url.pathname) || isPlatformReservedPath(url.pathname)) {
+      return c.json({ error: 'not_found' }, 404)
     }
-    return response
+    // `/`, not `/index.html`: auto-trailing-slash redirects the explicit
+    // filename, and the browser would follow it off the URL it asked for.
+    url.pathname = '/'
+    return c.env.ASSETS.fetch(new Request(url.toString(), c.req.raw))
   })
 }

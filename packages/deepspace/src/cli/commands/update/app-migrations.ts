@@ -11,7 +11,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import {
-  CANONICAL_APP_IDENTITY_MIGRATION_ID,
+  WORKER_OWNED_NOT_FOUND_MIGRATION_ID,
   validateAppMigrationIds,
 } from '../../../shared/protocol/app-migrations'
 import { repoToplevel } from '../../lib/git/repository'
@@ -49,8 +49,19 @@ interface SourceTransformResult {
   replacements: number
 }
 
+/**
+ * A migration is two halves with one rule between them: `transform` must leave
+ * the app CORRECT ON ITS OWN, and `findBlockers` reports only what is left over
+ * — never something the transform's own output depends on. A transform that
+ * cannot finish a file must decline it (zero replacements) rather than half-do
+ * it, because edits are applied even when blockers remain; that is the point of
+ * the command.
+ *
+ * Both run against post-transform content, so `findBlockers` sees what the app
+ * will actually contain.
+ */
 interface SourceMigration extends AppMigrationDefinition {
-  transform(source: string): SourceTransformResult
+  transform(source: string, file: string): SourceTransformResult
   findBlockers(source: string, file: string): AppMigrationBlocker[]
 }
 
@@ -60,10 +71,10 @@ interface SourceMigration extends AppMigrationDefinition {
  */
 const SOURCE_MIGRATIONS: readonly SourceMigration[] = [
   {
-    id: CANONICAL_APP_IDENTITY_MIGRATION_ID,
-    description: 'Use the immutable app id for authenticated platform requests',
-    transform: migrateCanonicalIdentityWire,
-    findBlockers: findLegacyIdentityWireBlockers,
+    id: WORKER_OWNED_NOT_FOUND_MIGRATION_ID,
+    description: 'Let the worker answer misses, so deleted files 404 instead of serving HTML',
+    transform: migrateWorkerOwnedNotFound,
+    findBlockers: findWorkerOwnedNotFoundBlockers,
   },
 ]
 
@@ -115,7 +126,7 @@ export function planAppMigrations(appDir: string): AppMigrationPlan {
     const before = readRegularFile(absolutePath)
     let after = before
     for (const migration of pendingMigrations) {
-      const result = migration.transform(after)
+      const result = migration.transform(after, repoPath)
       after = result.source
       if (result.replacements > 0) {
         const planned = perMigration.get(migration.id) ?? {
@@ -156,11 +167,17 @@ export function planAppMigrations(appDir: string): AppMigrationPlan {
   }
 }
 
-/** Apply exactly the content captured by a clean plan. */
+/**
+ * Apply exactly the content captured by the plan.
+ *
+ * Blockers do NOT hold the edits back: each transform's output stands on its
+ * own (see SourceMigration), so withholding it would leave the app on the old
+ * behavior for the sake of a change the author still has to make by hand. What
+ * a blocker does hold back is the manifest stamp — planAppMigrations only
+ * records a migration as applied once nothing is outstanding, so the next
+ * `update` looks again.
+ */
 export function applyAppMigrationPlan(appDir: string, plan: AppMigrationPlan): void {
-  if (plan.blockers.length > 0) {
-    throw new Error('Cannot apply an app migration plan with unresolved blockers.')
-  }
   const repo = repoToplevel(appDir)
   for (const edit of plan.edits) {
     const absolutePath = join(repo, edit.path)
@@ -226,121 +243,129 @@ function writeRegularFile(path: string, before: string | null, after: string): v
 
 function isSourcePath(repoPath: string, appPrefix: string): boolean {
   if (appPrefix && !repoPath.startsWith(appPrefix)) return false
+  // wrangler.toml carries routing config a migration may have to move in step
+  // with the worker code that depends on it.
+  if (repoPath.endsWith('wrangler.toml')) return true
   return /\.(?:[cm]?[jt]sx?)$/.test(repoPath)
 }
 
-function migrateCanonicalIdentityWire(source: string): SourceTransformResult {
+
+/**
+ * Deploys used to tell Cloudflare's asset layer to answer ANY unmatched path
+ * with index.html at 200 — right for a client route, wrong for a file, and it
+ * meant a deleted build chunk came back as HTML a script tag could not parse.
+ * The asset layer cannot tell those apart; the worker can, so the decision
+ * moved there and the layer now reports a real 404.
+ *
+ * Three edits have to travel together, or the app breaks:
+ *
+ *  1. the config that stops the asset layer inventing answers;
+ *  2. the worker's fallback target, which must ask for `/` — asking for
+ *     `/index.html` gets a redirect to `/`, which the worker hands to the
+ *     browser, dropping it off the URL it asked for;
+ *  3. a guard in front of that fallback, so a path naming a FILE 404s instead
+ *     of receiving the shell. Without it, step 1 changes nothing for the case
+ *     that motivated it: a stale chunk request still gets HTML at 200.
+ */
+function migrateWorkerOwnedNotFound(source: string, file: string): SourceTransformResult {
   let replacements = 0
-  const lines = source.split('\n')
 
-  for (let index = 0; index < lines.length; index++) {
-    let line = lines[index]!
-    line = line.replace(
-      /(\.set\(\s*)(['"])x-app-name\2(\s*,\s*)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.APP_NAME(\s*\))/g,
-      (_match, open: string, quote: string, separator: string, receiver: string, close: string) => {
-        replacements++
-        return `${open}${quote}x-app-id${quote}${separator}${receiver}.DEEPSPACE_APP_ID${close}`
-      },
-    )
-    line = line.replace(
-      /(['"])x-app-name\1(\s*:\s*)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.APP_NAME/g,
-      (_match, quote: string, separator: string, receiver: string) => {
-        replacements++
-        return `${quote}x-app-id${quote}${separator}${receiver}.DEEPSPACE_APP_ID`
-      },
-    )
-    line = line.replace(
-      /(\[\s*)(['"])x-app-name\2(\s*\]\s*=\s*)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.APP_NAME/g,
-      (_match, open: string, quote: string, separator: string, receiver: string) => {
-        replacements++
-        return `${open}${quote}x-app-id${quote}${separator}${receiver}.DEEPSPACE_APP_ID`
-      },
-    )
-    line = line.replace(
-      /(forwardedParams\.set\(\s*)(['"])appName\2(\s*,\s*)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.APP_NAME(\s*\))/g,
-      (_match, open: string, quote: string, separator: string, receiver: string, close: string) => {
-        replacements++
-        return `${open}${quote}appId${quote}${separator}${receiver}.DEEPSPACE_APP_ID${close}`
-      },
-    )
-    lines[index] = line
+  if (file.endsWith('wrangler.toml')) {
+    const next = source.replace(/not_found_handling\s*=\s*"single-page-application"/g, () => {
+      replacements++
+      return 'not_found_handling = "none"'
+    })
+    return { source: next, replacements }
   }
 
-  if (replacements === 0) return { source, replacements }
-  let migrated = lines.join('\n')
-  if (/forwardedParams\.set\(\s*['"]appId['"]/.test(migrated)) {
-    migrated = migrated
-      .replaceAll('injectAppName', 'injectAppId')
-      .replaceAll('`?appName=...`', '`?appId=...`')
-      .replaceAll('Inject appName into the query string', 'Inject appId into the query string')
-      .replaceAll('caller-supplied appName', 'caller-supplied appId')
-      .replaceAll(
-        '/_deepspace/subscriptions/plans?appName=',
-        '/_deepspace/subscriptions/plans?appId=',
-      )
-  }
-  migrated = migrated.replaceAll(
-    'APP_IDENTITY_TOKEN + APP_NAME',
-    'APP_IDENTITY_TOKEN + DEEPSPACE_APP_ID',
+  const retargeted = source.replace(
+    /(url\.pathname\s*=\s*)(['"])\/index\.html\2/g,
+    (_match, assignment: string, quote: string) => {
+      replacements++
+      return `${assignment}${quote}/${quote}`
+    },
   )
-  return {
-    source: ensureCanonicalIdentityProperties(migrated),
-    replacements,
-  }
+  const guarded = insertFileMissGuard(retargeted)
+  return { source: guarded.source, replacements: replacements + guarded.replacements }
 }
 
-function ensureCanonicalIdentityProperties(source: string): string {
+/** Recognizes the fallback line this migration owns: `url.pathname = '/'`. */
+const SHELL_FALLBACK_LINE = /^(\s*)url\.pathname\s*=\s*(['"])\/\2\s*$/
+
+/** How far back to look for an existing guard before adding one. */
+const GUARD_LOOKBACK_LINES = 8
+
+/**
+ * Put a file-vs-route check in front of the shell fallback.
+ *
+ * Anchored on the line the migration itself produces, so the insertion point is
+ * exact rather than inferred, and written inline rather than imported: this is
+ * the app author's file, and the current scaffold spells it out there too.
+ */
+function insertFileMissGuard(source: string): SourceTransformResult {
   const lines = source.split('\n')
+  let replacements = 0
+
   for (let index = lines.length - 1; index >= 0; index--) {
-    const match = /^(\s*)(?:readonly\s+)?APP_NAME\??\s*:\s*string\s*([;,]?)\s*$/.exec(lines[index]!)
-    if (!match || blockAlreadyDeclaresCanonicalId(lines, index, match[1]!.length)) continue
-    const suffix = match[2] ?? ''
-    lines.splice(index + 1, 0, `${match[1]}DEEPSPACE_APP_ID: string${suffix}`)
+    const match = SHELL_FALLBACK_LINE.exec(lines[index]!)
+    if (!match || hasFileMissGuard(lines, index)) continue
+    const indent = match[1]!
+    lines.splice(
+      index,
+      0,
+      `${indent}// A FILE, not a client route: a miss must 404. Returning the shell here`,
+      `${indent}// is HTML parsed as JavaScript, which is a blank page.`,
+      `${indent}if (${FILE_MISS_TEST}) {`,
+      `${indent}  return c.json({ error: 'not_found' }, 404)`,
+      `${indent}}`,
+    )
+    replacements++
   }
-  return lines.join('\n')
+  return { source: lines.join('\n'), replacements }
 }
 
-function blockAlreadyDeclaresCanonicalId(
-  lines: string[],
-  propertyIndex: number,
-  propertyIndent: number,
-): boolean {
-  for (const direction of [-1, 1] as const) {
-    for (
-      let index = propertyIndex + direction;
-      index >= 0 && index < lines.length;
-      index += direction
-    ) {
-      const line = lines[index]!
-      if (/^\s*(?:readonly\s+)?DEEPSPACE_APP_ID\??\s*:/.test(line)) return true
-      const trimmed = line.trimStart()
-      if (!trimmed) continue
-      const indent = line.length - trimmed.length
-      if (indent < propertyIndent && (trimmed.includes('{') || trimmed.startsWith('}'))) break
-    }
-  }
-  return false
+/** Same rule as the scaffold's `namesAFile`: the last segment carries a dot. */
+const FILE_MISS_TEST = "url.pathname.slice(url.pathname.lastIndexOf('/') + 1).includes('.')"
+
+/**
+ * Whether the lines above the fallback already decide file-vs-route — this
+ * migration's own guard on a re-run, or the scaffold's `namesAFile` in an app
+ * that was updated by hand.
+ */
+function hasFileMissGuard(lines: string[], fallbackIndex: number): boolean {
+  const start = Math.max(0, fallbackIndex - GUARD_LOOKBACK_LINES)
+  return lines
+    .slice(start, fallbackIndex)
+    .some((line) => line.includes(FILE_MISS_TEST) || /\bnamesAFile\s*\(/.test(line))
 }
 
-function findLegacyIdentityWireBlockers(source: string, file: string): AppMigrationBlocker[] {
+/**
+ * What the transform could not finish, stated exactly enough to act on.
+ *
+ * Runs on post-transform content: a worker that STILL asks the asset layer for
+ * `/index.html` wrote that path in some form the rewrite above does not match,
+ * and left alone it costs the app every deep link — the browser gets the
+ * redirect and lands on `/`.
+ */
+function findWorkerOwnedNotFoundBlockers(source: string, file: string): AppMigrationBlocker[] {
+  if (file.endsWith('wrangler.toml')) return []
+  if (!source.includes('ASSETS')) return []
+
   const blockers: AppMigrationBlocker[] = []
-  for (const [index, line] of source.split('\n').entries()) {
-    const trimmed = line.trimStart()
-    if (
-      !/['"]x-app-name['"]/.test(line) ||
-      /\.delete\(\s*['"]x-app-name['"]/.test(line) ||
-      trimmed.startsWith('//') ||
-      trimmed.startsWith('/*') ||
-      trimmed.startsWith('*')
-    ) {
-      continue
-    }
+  const lines = source.split('\n')
+  for (const [index, line] of lines.entries()) {
+    // The quote has to sit against the leading slash: a build config naming
+    // './index.html' is not this worker serving a shell.
+    if (!/['"`]\/index\.html/.test(line)) continue
     blockers.push({
-      migrationId: CANONICAL_APP_IDENTITY_MIGRATION_ID,
+      migrationId: WORKER_OWNED_NOT_FOUND_MIGRATION_ID,
       file,
       line: index + 1,
       message:
-        'This app still sends the removed x-app-name identity header in a form the safe migration cannot rewrite.',
+        `This worker still asks the asset layer for "/index.html". Deploys now set ` +
+        `not_found_handling = "none", and "/index.html" redirects to "/" — the browser ` +
+        `follows it and loses the path it asked for. Fetch "/" instead, and 404 first when ` +
+        `the last path segment contains a "." (a file, not a client route).`,
     })
   }
   return blockers

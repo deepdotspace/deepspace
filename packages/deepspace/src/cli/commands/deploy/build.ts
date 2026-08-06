@@ -10,9 +10,10 @@ import {
   validateBindingManifest,
   type CustomBindingManifest,
 } from '../../../server/rooms/binding-manifest'
-import { readAppliedAppMigrations } from '../migrate/app-migrations'
+import { readAppliedAppMigrations } from '../update/app-migrations'
 import { removeMacosJunk } from '../../lib/macos-junk'
 import { MAX_DEPLOY_ASSET_FILE_BYTES, formatBytes } from '../../../shared/app-files'
+import { RESERVED_RUN_WORKER_FIRST as PLATFORM_RESERVED_ROUTES } from '../../../shared/app-routing'
 import { formatSchemaLintFindings, lintProjectSchemas } from '../../lib/schema-lint'
 import type { Spinner } from '../../lib/spinner'
 import {
@@ -22,24 +23,9 @@ import {
 } from '../../lib/wrangler-env'
 import type { DeployOutput } from './output'
 
-const RESERVED_RUN_WORKER_FIRST = new Set([
-  '/api/*',
-  '/ws/*',
-  '/internal/*',
-  '/v1/*',
-  '/_deepspace/*',
-  '/_documentation',
-  '/_documentation/*',
-  '/_documentation-root',
-  '/_documentation-root/*',
-  // Agent-protocol paths: the worker must see them so they cannot fall through
-  // to the SPA shell (templates/base/src/server/http-routes.ts reserves them).
-  '/llms.txt',
-  '/llms-full.txt',
-  '/.well-known/mcp',
-  '/.well-known/mcp.json',
-  '/.well-known/mcp/*',
-])
+/** The platform's own deny-list, imported rather than restated: two copies in
+ *  two packages is how a deny-list silently stops denying. */
+const RESERVED_RUN_WORKER_FIRST = new Set<string>(PLATFORM_RESERVED_ROUTES)
 
 export interface DeployAsset {
   /** Public path the asset serves at, e.g. `/index.html`. */
@@ -65,6 +51,13 @@ export interface DeployBundle {
   doManifest: DurableObjectManifestEntry[] | undefined
   customBindings: CustomBindingManifest
   extraRoutes: true | string[]
+  /** What the app's wrangler config asked for; null when it declares none. */
+  compatibilityDate: string | null
+  /** Flags the app declared; the platform merges its required set on top. */
+  compatibilityFlags: string[]
+  /** The app's declared `[assets] not_found_handling`; null when it declares
+   *  none, and the platform applies Cloudflare's default. */
+  notFoundHandling: string | null
 }
 
 export interface DeployAssetConfig {
@@ -75,9 +68,26 @@ export interface DeployAssetConfig {
 interface OutputWranglerConfig extends Record<string, unknown> {
   name?: string
   main: string
-  assets?: { directory: string; run_worker_first?: unknown }
+  compatibility_date?: string
+  compatibility_flags?: unknown
+  assets?: { directory: string; run_worker_first?: unknown; not_found_handling?: unknown }
   durable_objects?: { bindings: Array<{ name: string; class_name: string }> }
   migrations?: Array<{ new_sqlite_classes?: string[] }>
+}
+
+/**
+ * The compatibility date the app declares, as the Cloudflare plugin resolved
+ * it — which is the same value `deepspace dev` runs against locally.
+ *
+ * Sending it is what stops `wrangler.toml` lying: the field was read by local
+ * dev and IGNORED by the deploy, so an app could develop against one runtime
+ * and serve on another with nothing reporting the divergence. The platform
+ * still decides what it will honor (see `resolveCompatibilityDate` in the
+ * deploy worker); this only reports what the app asked for.
+ */
+function declaredCompatibilityDate(config: OutputWranglerConfig): string | null {
+  const declared = config.compatibility_date
+  return typeof declared === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(declared) ? declared : null
 }
 
 export async function buildDeployBundle(options: {
@@ -227,6 +237,14 @@ export async function buildDeployBundle(options: {
     doManifest,
     customBindings,
     extraRoutes,
+    compatibilityDate: declaredCompatibilityDate(outputConfig),
+    compatibilityFlags: Array.isArray(outputConfig.compatibility_flags)
+      ? outputConfig.compatibility_flags.filter((flag): flag is string => typeof flag === 'string')
+      : [],
+    notFoundHandling:
+      typeof outputConfig.assets?.not_found_handling === 'string'
+        ? outputConfig.assets.not_found_handling
+        : null,
   }
 }
 

@@ -5,6 +5,15 @@ import { Hono } from 'hono'
 import { importPKCS8, SignJWT } from 'jose'
 import { TEMPLATES_DIR } from './template-assembly'
 import { resolveDeployRunWorkerFirst } from '../deploy/build'
+import {
+  isAssetNotFoundHandling,
+  isPlatformReservedPath,
+  REQUIRED_COMPATIBILITY_FLAGS,
+  resolveCompatibilityFlags,
+  SDK_RUN_WORKER_FIRST,
+} from '../../../shared/app-routing'
+import { BROWSER_PROXY_ROUTES } from '../../../shared/platform-proxy'
+import { CLIENT_ERROR_PATH } from '../../../shared/client-errors'
 
 interface TestEnv {
   ASSETS?: Fetcher
@@ -75,6 +84,45 @@ async function signTestJwt(): Promise<string> {
     .setIssuedAt()
     .setExpirationTime('5m')
     .sign(privateKey)
+}
+
+const APP_SHELL = '<!doctype html><div id="root"></div>'
+
+/**
+ * The asset layer AS THE PLATFORM CONFIGURES IT.
+ *
+ * Deploys set `not_found_handling: "none"`, so the binding serves the files it
+ * has and answers a miss with a real 404 — it never invents the shell. The
+ * previous fake here modelled the OPPOSITE of the config we shipped (a 404 on
+ * a miss while production returned the shell at 200), which is how this suite
+ * certified route handling that could not run. Keep this in step with
+ * `cloudflare-deploy.ts`: a double that disagrees with the platform is worse
+ * than no double at all.
+ */
+function spaAssetLayer(present: Record<string, [body: string, contentType: string]> = {}): {
+  assets: Fetcher
+  assetRequests: string[]
+} {
+  const assetRequests: string[] = []
+  const assets = {
+    async fetch(request: Request) {
+      const pathname = new URL(request.url).pathname
+      assetRequests.push(pathname)
+      // `html_handling: "auto-trailing-slash"` serves index files at their
+      // bare path and REDIRECTS the explicit filename there. Modelling that
+      // is what catches a worker handing a browser a 307 off the URL it
+      // asked for.
+      if (pathname === '/index.html') {
+        return new Response(null, { status: 307, headers: { location: '/' } })
+      }
+      const hit = present[pathname] ?? (pathname === '/' ? ([APP_SHELL, 'text/html'] as const) : undefined)
+      if (hit) {
+        return new Response(hit[0], { status: 200, headers: { 'content-type': hit[1] } })
+      }
+      return new Response(null, { status: 404 })
+    },
+  } as Fetcher
+  return { assets, assetRequests }
 }
 
 describe('generated worker route owners', () => {
@@ -223,15 +271,7 @@ describe('generated worker route owners', () => {
     )
     expect(unlisted.status).toBe(404)
 
-    const assetRequests: string[] = []
-    const assets = {
-      async fetch(request: Request) {
-        assetRequests.push(new URL(request.url).pathname)
-        return request.url.endsWith('/index.html')
-          ? new Response('app shell', { status: 200 })
-          : new Response(null, { status: 404 })
-      },
-    } as Fetcher
+    const { assets, assetRequests } = spaAssetLayer()
     const staticApp = new Hono<TestContext>()
     registerStaticRoutes(staticApp)
     const missingApi = await staticApp.request(
@@ -249,8 +289,52 @@ describe('generated worker route owners', () => {
       env({ ASSETS: assets }),
     )
     expect(fallback.status).toBe(200)
-    expect(await fallback.text()).toBe('app shell')
-    expect(assetRequests).toEqual(['/client/route', '/index.html'])
+    expect(await fallback.text()).toBe(APP_SHELL)
+    // The binding reported a real miss; the WORKER chose the shell for it —
+    // asking for `/`, because `/index.html` would come back as a redirect.
+    expect(assetRequests).toEqual(['/client/route', '/'])
+    expect(fallback.status).not.toBe(307)
+  })
+
+  /**
+   * The failure this suite previously certified as passing. A client holding a
+   * stale index.html asks for a hashed chunk the new release deleted; the
+   * asset layer answers with the shell at 200 text/html, and the browser
+   * parses HTML as JavaScript — a white screen with nothing to retry on.
+   */
+  it('404s a missing build asset instead of serving HTML a script tag would parse', async () => {
+    const { assets } = spaAssetLayer({ '/assets/index-NEW.js': ['export {}', 'text/javascript'] })
+    const staticApp = new Hono<TestContext>()
+    registerStaticRoutes(staticApp)
+
+    const gone = await staticApp.request(
+      'https://app.test/assets/index-OLD.js',
+      undefined,
+      env({ ASSETS: assets }),
+    )
+    expect(gone.status).toBe(404)
+    expect(gone.headers.get('content-type')).not.toContain('text/html')
+
+    // The asset that does exist is still served untouched.
+    const live = await staticApp.request(
+      'https://app.test/assets/index-NEW.js',
+      undefined,
+      env({ ASSETS: assets }),
+    )
+    expect(live.status).toBe(200)
+    expect(await live.text()).toBe('export {}')
+
+    // A real .html asset is a match, not the fallback — it must pass through.
+    const { assets: withPage } = spaAssetLayer({
+      '/about.html': ['<h1>About</h1>', 'text/html'],
+    })
+    const page = await staticApp.request(
+      'https://app.test/about.html',
+      undefined,
+      env({ ASSETS: withPage }),
+    )
+    expect(page.status).toBe(200)
+    expect(await page.text()).toBe('<h1>About</h1>')
   })
 
   /**
@@ -285,15 +369,7 @@ describe('generated worker route owners', () => {
    * and they 404 when the app publishes nothing there.
    */
   it('never answers agent-protocol paths with the SPA shell', async () => {
-    const assetRequests: string[] = []
-    const assets = {
-      async fetch(request: Request) {
-        assetRequests.push(new URL(request.url).pathname)
-        return request.url.endsWith('/index.html')
-          ? new Response('app shell', { status: 200 })
-          : new Response(null, { status: 404 })
-      },
-    } as Fetcher
+    const { assets, assetRequests } = spaAssetLayer()
     const staticApp = new Hono<TestContext>()
     registerStaticRoutes(staticApp)
 
@@ -312,8 +388,8 @@ describe('generated worker route owners', () => {
       expect(response.status, path).toBe(404)
       expect(await response.json()).toEqual({ error: 'not_found' })
     }
-    // The asset layer WAS consulted for each — only the SPA retry is withheld,
-    // so nothing asked for /index.html.
+    // The asset layer WAS consulted for each; the shell it returned is what
+    // gets withheld. Nothing asks a second time for /index.html.
     expect(assetRequests).not.toContain('/index.html')
 
     // Unrelated well-known paths keep their normal SPA behavior — the
@@ -329,13 +405,7 @@ describe('generated worker route owners', () => {
   /** A hand-authored public/llms.txt is a real answer; reserving the path must
    *  not take it away, only the SPA shell standing in for it. */
   it('serves a real asset at an agent path when the app ships one', async () => {
-    const assets = {
-      async fetch(request: Request) {
-        return new URL(request.url).pathname === '/llms.txt'
-          ? new Response('# My App\n', { status: 200, headers: { 'content-type': 'text/plain' } })
-          : new Response(null, { status: 404 })
-      },
-    } as Fetcher
+    const { assets } = spaAssetLayer({ '/llms.txt': ['# My App\n', 'text/plain'] })
     const staticApp = new Hono<TestContext>()
     registerStaticRoutes(staticApp)
 
@@ -346,5 +416,118 @@ describe('generated worker route owners', () => {
     )
     expect(response.status).toBe(200)
     expect(await response.text()).toBe('# My App\n')
+  })
+})
+
+/**
+ * The seam this whole file exists to guard.
+ *
+ * The scaffold's wrangler.toml, the deploy worker's upload metadata, and the
+ * app's own route handler all depend on the SAME routing decisions — across
+ * three packages, in three formats, one of them TOML that cannot import
+ * anything. When they disagreed the result was not a build error but months of
+ * unreachable code and an app shell served in place of deleted build chunks.
+ *
+ * TOML can't import the constants, so it gets pinned to them here instead.
+ */
+describe('the app/platform routing contract', () => {
+  it('pins the scaffold wrangler.toml to the shared contract', async () => {
+    const { readFileSync } = await import('node:fs')
+    const toml = readFileSync(join(TEMPLATES_DIR, 'base', 'wrangler.toml'), 'utf8')
+
+    // Both `wrangler dev` and the deploy read this line — the platform honors
+    // what the app declares. It has to be "none" specifically, because this
+    // template's worker owns the fallback: under any other setting the asset
+    // layer answers misses itself and registerStaticRoutes never runs.
+    expect(toml).toContain(`not_found_handling = "none"`)
+    expect(isAssetNotFoundHandling('none')).toBe(true)
+    for (const flag of REQUIRED_COMPATIBILITY_FLAGS) {
+      expect(toml, `wrangler.toml must declare ${flag}`).toContain(flag)
+    }
+    // The deploy re-adds these from the platform's own list, so production is
+    // right either way — but `deepspace dev` reads THIS file, and a missing
+    // entry means a path the worker sees locally and not in production.
+    for (const route of SDK_RUN_WORKER_FIRST) {
+      expect(toml, `wrangler.toml must list ${route} in run_worker_first`).toContain(`"${route}"`)
+    }
+  })
+
+  it('answers reserved platform paths from one predicate, not a per-app copy', () => {
+    // The template used to keep its own list of the extensionless agent paths;
+    // this is the same knowledge, imported.
+    expect(isPlatformReservedPath('/.well-known/mcp')).toBe(true)
+    expect(isPlatformReservedPath('/.well-known/mcp/server-card.json')).toBe(true)
+    expect(isPlatformReservedPath('/llms.txt')).toBe(true)
+    expect(isPlatformReservedPath('/_documentation/anything')).toBe(true)
+    expect(isPlatformReservedPath('/settings')).toBe(false)
+    expect(isPlatformReservedPath('/.well-known/apple-app-site-association')).toBe(false)
+  })
+
+  it('merges an app’s own flags over the required set without letting it undo them', () => {
+    expect(resolveCompatibilityFlags(['nodejs_als'])).toEqual(
+      expect.arrayContaining([...REQUIRED_COMPATIBILITY_FLAGS, 'nodejs_als']),
+    )
+    // A flag that reverses the platform's routing contract is dropped, not honored.
+    const reversed = resolveCompatibilityFlags(['assets_navigation_prefers_asset_serving'])
+    expect(reversed).not.toContain('assets_navigation_prefers_asset_serving')
+    expect(reversed).toContain('assets_navigation_has_no_effect')
+    // Declaring nothing still yields the platform's required set.
+    expect(resolveCompatibilityFlags(undefined)).toEqual([...REQUIRED_COMPATIBILITY_FLAGS])
+  })
+})
+
+/**
+ * The client half and the server half of one contract.
+ *
+ * The SDK's hooks call platform endpoints through the app's proxy, and that
+ * proxy is an ALLOW-LIST — so a call the list does not name is refused by the
+ * app's own worker. Only this package knows which endpoints its hooks call, so
+ * shipping a hook without its route would 404 in a customer's browser, and
+ * only in apps scaffolded before the change. Fresh scaffolds would pass every
+ * test we run.
+ */
+describe('client hooks and the app proxy allow-list', () => {
+  it('proxies every platform endpoint the client hooks actually call', async () => {
+    const { readdirSync, readFileSync, statSync } = await import('node:fs')
+    const { fileURLToPath } = await import('node:url')
+    const clientDir = fileURLToPath(new URL('../../../client', import.meta.url))
+
+    const files: string[] = []
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry)
+        if (statSync(full).isDirectory()) {
+          if (entry !== '__tests__') walk(full)
+        } else if (entry.endsWith('.ts') || entry.endsWith('.tsx')) {
+          files.push(full)
+        }
+      }
+    }
+    walk(clientDir)
+
+    const called = new Set<string>()
+    for (const file of files) {
+      // Comments mention paths they do not call — strip them before scanning.
+      const source = readFileSync(file, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '')
+      for (const match of source.matchAll(/['"`](\/_deepspace\/[A-Za-z0-9/_-]+)/g)) {
+        called.add(match[1])
+      }
+    }
+
+    // Client error reports have their own route, registered ahead of the proxy.
+    called.delete(CLIENT_ERROR_PATH)
+
+    // A scan that finds nothing would pass this test vacuously.
+    expect(called.size).toBeGreaterThan(0)
+    const proxied = new Set(BROWSER_PROXY_ROUTES.map((route) => route.path))
+    for (const path of called) {
+      expect(
+        [...proxied],
+        `${path} is called by a client hook but missing from BROWSER_PROXY_ROUTES — ` +
+          `apps would refuse it at their own proxy`,
+      ).toContain(path)
+    }
   })
 })
