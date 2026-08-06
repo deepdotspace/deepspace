@@ -213,8 +213,16 @@ const list = defineDeepspaceCommand({
         const more = limit < MAX_LIST_LIMIT ? 'raise --limit or narrow with --prefix' : 'narrow with --prefix'
         if (result.truncated) console.log(`(truncated at ${limit} — ${more})`)
       }
+      if (result.storage) {
+        const { usedBytes, limitBytes } = result.storage
+        console.log(
+          limitBytes === undefined
+            ? `Storage: ${formatBytes(usedBytes)} used (limit unavailable right now)`
+            : `Storage: ${formatBytes(usedBytes)} of ${formatBytes(limitBytes)} used`,
+        )
+      }
     }
-    return { data: { appId, files, truncated: result.truncated } }
+    return { data: { appId, files, truncated: result.truncated, storage: result.storage ?? null } }
   },
 })
 

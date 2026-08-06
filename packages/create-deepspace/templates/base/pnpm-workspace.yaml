@@ -1,0 +1,12 @@
+# pnpm settings for this app. pnpm 11 defaults `strictDepBuilds` to true, so an
+# install that silently SKIPS a dependency's build script exits non-zero
+# (ERR_PNPM_IGNORED_BUILDS) instead of warning. Both packages below genuinely
+# need theirs: esbuild compiles its native binary shim for Vite, and workerd is
+# the Workers runtime `deepspace dev` runs on. Without this file, `pnpm install`
+# fails immediately after a scaffold.
+#
+# pnpm reads build allowances only from here or the global config — never from
+# package.json. npm and bun ignore this file entirely.
+allowBuilds:
+  esbuild: true
+  workerd: true

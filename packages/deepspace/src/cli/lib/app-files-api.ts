@@ -340,6 +340,10 @@ async function uploadInParts(
 export interface ListResult {
   files: AppFileEntry[]
   truncated: boolean
+  /** The allocation's whole usage against the owner's limit. Absent from an
+   *  older worker; `limitBytes` absent when the platform's billing lookup was
+   *  down (usage is still real). */
+  storage?: { usedBytes: number; limitBytes?: number }
 }
 
 export async function listAppFiles(

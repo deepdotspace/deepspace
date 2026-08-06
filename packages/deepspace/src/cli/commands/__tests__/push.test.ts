@@ -16,6 +16,12 @@ import * as appTargetModule from '../../lib/app-target'
 import * as vcPushModule from '../../lib/vc-push'
 import * as vcRemoteModule from '../../lib/vc-remote'
 
+// Real-git suite: every test shells out to git in scratch repos (~2s solo)
+// and blows the default 5s wall under parallel vitest workers — the drifting
+// 18-24 failures in docs/audits/2026-08-06-e2e-0.13.0. Headroom, not a
+// license to hang.
+vi.setConfig({ testTimeout: 30_000 })
+
 // A valid ws/<ulid> branch (Crockford base32: no I/L/O/U).
 const WS_BRANCH = 'ws/01hq9j8k7m6n5p4r3s2t1v0w9x'
 const WS_ID = 'ws_01HQ9J8K7M6N5P4R3S2T1V0W9X'

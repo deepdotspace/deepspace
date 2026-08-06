@@ -1,5 +1,11 @@
 # create-deepspace
 
+## 0.14.0
+
+### Patch Changes
+
+- Fix `pnpm install` failing immediately after scaffolding on pnpm 11. That version defaults `strictDepBuilds` to true, so an install that silently skips a dependency's build script exits non-zero (`ERR_PNPM_IGNORED_BUILDS`) instead of warning — and a new app needs two of them: esbuild's native shim for Vite, and workerd, the Workers runtime `deepspace dev` runs on. The scaffold now ships a `pnpm-workspace.yaml` declaring exactly those two under `allowBuilds`, which is the only place pnpm reads build allowances from; npm and bun ignore the file. The template's `allowScripts` field is deleted with it: no package manager has ever read that key, so it described a guarantee nothing enforced.
+
 ## 0.13.0
 
 ### Patch Changes

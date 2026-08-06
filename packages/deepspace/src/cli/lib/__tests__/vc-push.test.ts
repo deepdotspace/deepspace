@@ -3,7 +3,7 @@
 import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { vi, afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { runGit } from '../git/process'
 import { initRepo } from '../git/repository'
 import {
@@ -17,6 +17,12 @@ import {
   type PushRefResult,
 } from '../vc-push'
 import { SPACE_REMOTE } from '../vc-remote'
+
+// Real-git suite: every test shells out to git in scratch repos (~2s solo)
+// and blows the default 5s wall under parallel vitest workers — the drifting
+// 18-24 failures in docs/audits/2026-08-06-e2e-0.13.0. Headroom, not a
+// license to hang.
+vi.setConfig({ testTimeout: 30_000 })
 
 describe('parsePushPorcelain', () => {
   it('maps every flag and preserves rejection reasons', () => {

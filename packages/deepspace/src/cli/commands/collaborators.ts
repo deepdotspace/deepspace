@@ -127,7 +127,8 @@ const add = defineDeepspaceCommand({
       if (!args.json) {
         console.log(
           `✓ Invite sent to ${res.email} (expires ${expires}). ` +
-            `They become a collaborator when they sign in.`,
+            `They accept it from the emailed link, or by signing in and running ` +
+            `\`deepspace app collaborators accept ${app}\`.`,
         )
       }
       return { data: { ...res } }
@@ -203,9 +204,75 @@ const cancel = defineDeepspaceCommand({
   },
 })
 
+interface InviteForMe {
+  appId: string
+  appName: string
+  invitedByName: string
+  /** Epoch milliseconds. */
+  invitedAt: number
+  expiresAt: number
+}
+
+// The invitee's half of the lifecycle: `add` on the owner's side creates the
+// invite; these two are how a SIGNED-IN invitee discovers and accepts it
+// without the emailed link — the path a headless agent can actually take.
+const invites = defineDeepspaceCommand({
+  meta: { name: 'invites', description: 'List invites waiting for you' },
+  async run({ args }) {
+    const token = await ensureToken()
+    const { invites } = await api<{ invites: InviteForMe[] }>(
+      token,
+      '/api/app-collaborators/invites/mine',
+    )
+    if (!args.json) {
+      if (!invites.length) {
+        console.log('No pending invites for your email.')
+      } else {
+        for (const invite of invites) {
+          console.log(
+            `${invite.appId}  invited by ${invite.invitedByName}  ` +
+              `(expires ${new Date(invite.expiresAt).toLocaleDateString()})`,
+          )
+        }
+        console.log('Accept one with `deepspace app collaborators accept <app-id>`.')
+      }
+    }
+    return { data: { invites } }
+  },
+})
+
+const accept = defineDeepspaceCommand({
+  meta: { name: 'accept', description: 'Accept an invite to collaborate on an app' },
+  args: {
+    app: { type: 'positional', description: 'App id (see `collaborators invites`)', required: true },
+  },
+  async run({ args }) {
+    const appId = String(args.app)
+    const token = await ensureToken()
+    // No resolveAppTarget here: the caller has no access to the app yet — the
+    // id comes from `invites` or from the owner. The server owns validation.
+    const res = await api<{ status: 'accepted'; appId: string; alreadyMember: boolean }>(
+      token,
+      `/api/app-collaborators/invites/${encodeURIComponent(appId)}/accept`,
+      { method: 'POST' },
+    )
+    if (!args.json) {
+      console.log(
+        res.alreadyMember
+          ? `• You already have access to ${res.appId}.`
+          : `✓ You can now deploy ${res.appId}.`,
+      )
+    }
+    return {
+      data: { ...res },
+      action: cliAction('deepspace', 'pull', '--app', res.appId),
+    }
+  },
+})
+
 // No `run()` on the parent: citty otherwise cascades it after each subcommand,
 // printing spurious help text.
 export default defineCommand({
   meta: { name: 'collaborators', description: 'Manage who can deploy your app' },
-  subCommands: { list, add, remove, cancel },
+  subCommands: { list, add, remove, cancel, invites, accept },
 })

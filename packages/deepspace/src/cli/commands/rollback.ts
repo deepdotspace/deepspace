@@ -19,7 +19,7 @@ import { resolveAppTarget, assertAppTargetResolvable, parseWranglerEnvArg } from
 import { apiFetch, ApiError } from '../lib/api'
 import { mintIdempotencyKey, repoApi } from '../lib/repo-api'
 import { createSpinner } from '../lib/spinner'
-import { waitForEdgePropagation } from '../lib/edge-propagation'
+import { waitForLiveRelease } from '../lib/edge-propagation'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 
 const REL_ID_RE = /^rel_[0-9A-HJKMNP-TV-Z]{26}$/
@@ -131,6 +131,7 @@ export default defineDeepspaceCommand({
       rolledBackTo?: string
       releaseId?: string
       bundleRetained?: boolean
+      releaseStamp?: string
       // 'unverified' when --allow-do-deletion bypassed the DO-class guard, so
       // the platform did NOT check the rollback against the live DO classes.
       doClassGuard?: string
@@ -174,7 +175,7 @@ export default defineDeepspaceCommand({
     let edgePropagating = false
     if (result.url) {
       spinner?.message('Waiting for edge propagation...')
-      edgePropagating = !(await waitForEdgePropagation(result.url, 90_000))
+      edgePropagating = !(await waitForLiveRelease(result.url, result.releaseStamp, 90_000))
     }
     spinner?.stop(
       edgePropagating

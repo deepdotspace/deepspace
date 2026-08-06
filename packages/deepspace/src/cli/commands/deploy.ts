@@ -11,7 +11,7 @@ import { ensureInstallReady } from '../lib/install-status'
 import type { CliAction } from '../lib/output'
 import { preflightNodeVersion } from '../lib/preflight'
 import { createSpinner } from '../lib/spinner'
-import { waitForEdgePropagation } from '../lib/edge-propagation'
+import { waitForLiveRelease } from '../lib/edge-propagation'
 import { MAX_DEPLOY_ASSET_FILE_BYTES, formatBytes } from '../../shared/app-files'
 import {
   hasWranglerConfig,
@@ -207,7 +207,7 @@ export default defineCommand({
 
     if (body.url) {
       spinner.message('Waiting for edge propagation...')
-      const ready = await waitForEdgePropagation(body.url, 90_000)
+      const ready = await waitForLiveRelease(body.url, body.releaseStamp, 90_000)
       if (!ready) {
         spinner.stop('Deployed (edge propagation still in progress after 90s)')
         p.log.warn(

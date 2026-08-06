@@ -45,6 +45,9 @@ export interface DeployCommitResponse {
   staleBaseGuard?: string
   releaseId?: string
   bundleRetained?: boolean
+  /** This upload's release-stamp nonce; lets the wait prove WHICH release the
+   *  edge serves. Absent from an older platform or a resumed activation. */
+  releaseStamp?: string
 }
 
 export async function deployBuiltBundle(options: {

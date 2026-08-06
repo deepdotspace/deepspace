@@ -38,6 +38,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import {
+  APP_STORAGE_LIMIT_BYTES,
   DANGEROUS_MIME_TYPES,
   MAX_APP_FILE_BYTES,
   MAX_DEPLOY_ASSET_FILE_BYTES,
@@ -50,6 +51,8 @@ import {
   oversizeMessage,
   oversizePartMessage,
   oversizeRequestMessage,
+  storageLimitForTier,
+  storageQuotaMessage,
 } from '../../shared/app-files'
 
 // The limits this handler enforces, re-exported so workers and their tests
@@ -57,12 +60,15 @@ import {
 // limit is how the CLI and the workers drift. `formatBytes` rides along for
 // the same reason.
 export {
+  APP_STORAGE_LIMIT_BYTES,
   MAX_APP_FILE_BYTES,
   MAX_DEPLOY_ASSET_FILE_BYTES,
   MAX_UPLOAD_REQUEST_BYTES,
   UPLOAD_PART_BYTES,
   MAX_UPLOAD_PARTS,
   formatBytes,
+  storageLimitForTier,
+  storageQuotaMessage,
 }
 
 const CORS_HEADERS = { 'Access-Control-Allow-Origin': '*' } as const
@@ -102,8 +108,27 @@ export interface ScopedR2Config {
   requireAuthForMutations?: boolean
 }
 
+/**
+ * The storage-quota contract for one allocation, supplied per request by the
+ * mount. The handler is the enforcer; the mount only knows whose limit
+ * applies.
+ */
+export interface StorageAdmission {
+  /** The WHOLE allocation the quota governs — the app prefix, not the
+   *  (possibly deeper) scope prefix a request resolved to. */
+  prefix: string
+  /**
+   * Resolve the owner's limit in bytes. `null` means the lookup failed;
+   * writes then fail closed (503) rather than admitting unmetered storage,
+   * mirroring the repo store's `StorageBillingUnavailableError`.
+   */
+  limitBytes: () => Promise<number | null>
+}
+
 export interface ScopedR2Auth {
   userId: string | null
+  /** Absent = no quota on this mount (e.g. an app's own bucket). */
+  storage?: StorageAdmission
 }
 
 export type ScopedR2Handler = (
@@ -221,6 +246,94 @@ function declaredLength(request: Request, what: string): number | Response {
  */
 function isKeyWithinPrefix(key: string, prefix: string): boolean {
   return key.startsWith(prefix)
+}
+
+// ============================================================================
+// Storage quota
+// ============================================================================
+
+/** Total stored bytes under a prefix. The bucket itself is the usage ledger —
+ *  no counter to drift, at the cost of one list sweep per admission. */
+async function allocationUsage(bucket: R2Bucket, prefix: string): Promise<number> {
+  let total = 0
+  let cursor: string | undefined
+  do {
+    const page = await bucket.list({ prefix, cursor, limit: 1000 })
+    for (const object of page.objects) total += object.size
+    cursor = page.truncated ? page.cursor : undefined
+  } while (cursor !== undefined)
+  return total
+}
+
+/**
+ * Admit an incoming write against the allocation's storage limit.
+ *
+ * `replacesKey` names the object an upsert overwrites, so its current size is
+ * released before the incoming size is charged — replacing a file in a full
+ * allocation must not be refused for the bytes it frees.
+ *
+ * Two concurrent writes can each pass this check and land together past the
+ * limit: the handler keeps no session state, so admission is a read. That
+ * overshoot is bounded by one in-flight write per racer and self-corrects —
+ * every later write is refused until the allocation is back under its limit.
+ * The repo store pays a Durable Object for exactness; this surface does not.
+ */
+async function admitStorage(
+  bucket: R2Bucket,
+  storage: StorageAdmission | undefined,
+  incomingBytes: number,
+  replacesKey: string | null,
+): Promise<Response | null> {
+  if (!storage) return null
+  const limit = await storage.limitBytes()
+  if (limit === null) {
+    return fail(
+      503,
+      'The storage limit for this app could not be verified; nothing was uploaded. Retry shortly.',
+      'storage_limit_unavailable',
+    )
+  }
+  const stored = await allocationUsage(bucket, storage.prefix)
+  const replaced = replacesKey === null ? 0 : ((await bucket.head(replacesKey))?.size ?? 0)
+  const used = stored - replaced
+  if (used + incomingBytes <= limit) return null
+  return fail(409, storageQuotaMessage(incomingBytes, used, limit), 'storage_quota_exceeded', {
+    usedBytes: used,
+    limitBytes: limit,
+  })
+}
+
+/**
+ * Re-admit a multipart upload against the object R2 actually assembled.
+ *
+ * Init admits the DECLARED total, which is client-supplied; this is where the
+ * real size is knowable, so an object that put the allocation over its limit
+ * is deleted rather than left in it — the same shape as the ceiling re-check.
+ * A limit lookup that fails HERE keeps the object: init already admitted the
+ * declared size against a real limit, and destroying a completed upload over
+ * a billing blip would punish an honest client for the platform's outage.
+ */
+async function admitAssembledObject(
+  bucket: R2Bucket,
+  storage: StorageAdmission | undefined,
+  key: string,
+  objectBytes: number,
+): Promise<Response | null> {
+  if (!storage) return null
+  const limit = await storage.limitBytes()
+  if (limit === null) {
+    console.error('[files:quota] limit unavailable at complete; keeping', key)
+    return null
+  }
+  const stored = await allocationUsage(bucket, storage.prefix)
+  if (stored <= limit) return null
+  await bucket.delete(key).catch(() => undefined)
+  return fail(
+    409,
+    `${storageQuotaMessage(objectBytes, stored - objectBytes, limit)} The assembled upload was not kept.`,
+    'storage_quota_exceeded',
+    { usedBytes: stored - objectBytes, limitBytes: limit },
+  )
 }
 
 /**
@@ -393,13 +506,13 @@ export function createScopedR2Handler(config: ScopedR2Config): ScopedR2Handler {
         return fail(401, 'Authentication required', 'unauthorized')
       }
       return subpath === 'upload'
-        ? handleUpload(request, url, bucket, prefix, auth.userId, scope)
-        : handleMultipart(request, url, bucket, prefix, auth.userId, scope, subpath)
+        ? handleUpload(request, url, bucket, prefix, auth, scope)
+        : handleMultipart(request, url, bucket, prefix, auth, scope, subpath)
     }
 
     // ── List ────────────────────────────────────────────────────────────
     if (!subpath && request.method === 'GET') {
-      return handleList(bucket, prefix, url, scope)
+      return handleList(bucket, prefix, url, scope, auth)
     }
 
     // ── Download ────────────────────────────────────────────────────────
@@ -453,7 +566,7 @@ async function handleUpload(
   url: URL,
   bucket: R2Bucket,
   prefix: string,
-  userId: string | null,
+  auth: ScopedR2Auth,
   scope: string,
 ): Promise<Response> {
   try {
@@ -489,15 +602,20 @@ async function handleUpload(
       rawMimeType = body.mimeType || 'application/octet-stream'
     }
 
-const mime = resolveMimeType(rawMimeType)
+    const mime = resolveMimeType(rawMimeType)
     if (mime instanceof Response) return mime
 
     const located = locateUpload(url, prefix, fileName)
     if (located instanceof Response) return located
 
+    // Only an explicit `?key=` can replace something; generated keys are fresh.
+    const replacesKey = url.searchParams.get('key') === null ? null : located.key
+    const overQuota = await admitStorage(bucket, auth.storage, fileData.byteLength, replacesKey)
+    if (overQuota) return overQuota
+
     await bucket.put(located.key, fileData, {
       httpMetadata: { contentType: mime.mimeType },
-      customMetadata: fileMetadata(fileName, userId),
+      customMetadata: fileMetadata(fileName, auth.userId),
     })
     return storedFileJson(located.key, fileName, url, scope)
   } catch (err) {
@@ -632,16 +750,16 @@ async function handleMultipart(
   url: URL,
   bucket: R2Bucket,
   prefix: string,
-  userId: string | null,
+  auth: ScopedR2Auth,
   scope: string,
   subpath: string,
 ): Promise<Response> {
   if (subpath === 'multipart' && request.method === 'POST') {
-    return multipartInit(request, url, bucket, prefix, userId)
+    return multipartInit(request, url, bucket, prefix, auth)
   }
   if (subpath === 'multipart/part') return multipartPart(request, url, bucket, prefix)
   if (subpath === 'multipart/complete') {
-    return multipartComplete(request, url, bucket, prefix, scope)
+    return multipartComplete(request, url, bucket, prefix, auth, scope)
   }
   return multipartAbort(url, bucket, prefix)
 }
@@ -660,7 +778,7 @@ async function multipartInit(
   url: URL,
   bucket: R2Bucket,
   prefix: string,
-  userId: string | null,
+  auth: ScopedR2Auth,
 ): Promise<Response> {
   const body = await readControlJson(request)
   if (body instanceof Response) return body
@@ -681,11 +799,17 @@ async function multipartInit(
   const located = locateUpload(url, prefix, name)
   if (located instanceof Response) return located
 
+  // Admit the declared total before a byte moves — a client that cannot fit
+  // must learn it now, not 52 parts later. `complete` re-admits the real size.
+  const replacesKey = url.searchParams.get('key') === null ? null : located.key
+  const overQuota = await admitStorage(bucket, auth.storage, size as number, replacesKey)
+  if (overQuota) return overQuota
+
   let upload: R2MultipartUpload
   try {
     upload = await bucket.createMultipartUpload(located.key, {
       httpMetadata: { contentType: mime.mimeType },
-      customMetadata: fileMetadata(name, userId),
+      customMetadata: fileMetadata(name, auth.userId),
     })
   } catch (error) {
     return multipartFailure(error)
@@ -764,6 +888,7 @@ async function multipartComplete(
   url: URL,
   bucket: R2Bucket,
   prefix: string,
+  auth: ScopedR2Auth,
   scope: string,
 ): Promise<Response> {
   const body = await readControlJson(request)
@@ -802,6 +927,8 @@ async function multipartComplete(
     await bucket.delete(session.key).catch(() => undefined)
     return tooBig
   }
+  const overQuota = await admitAssembledObject(bucket, auth.storage, session.key, object.size)
+  if (overQuota) return overQuota
   const name = object.customMetadata?.originalName ?? session.key.split('/').pop() ?? 'file'
   return storedFileJson(session.key, name, url, scope)
 }
@@ -838,6 +965,7 @@ async function handleList(
   prefix: string,
   url: URL,
   scope: string,
+  auth: ScopedR2Auth,
 ): Promise<Response> {
   const userPrefix = url.searchParams.get('prefix') || ''
   const listPrefix = `${prefix}${userPrefix}`
@@ -854,7 +982,19 @@ async function handleList(
       ...obj.customMetadata,
     }
   })
-  return Response.json({ files, truncated: listed.truncated }, { headers: CORS_HEADERS })
+  // A quota nobody can see is a trap: where a limit governs this mount, a
+  // listing carries the allocation's whole usage against it. Usage is always
+  // computable; the limit is omitted when its lookup fails (reads stay up).
+  let storage: { usedBytes: number; limitBytes?: number } | undefined
+  if (auth.storage) {
+    storage = { usedBytes: await allocationUsage(bucket, auth.storage.prefix) }
+    const limitBytes = await auth.storage.limitBytes()
+    if (limitBytes !== null) storage.limitBytes = limitBytes
+  }
+  return Response.json(
+    { files, truncated: listed.truncated, ...(storage ? { storage } : {}) },
+    { headers: CORS_HEADERS },
+  )
 }
 
 async function handleDownload(

@@ -1,6 +1,6 @@
 /** Secret-path redaction, committed-secret refusal, and oversized-object diagnostics. */
 
-import { describe, expect, it, beforeAll, afterAll } from 'vitest'
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest'
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -12,6 +12,12 @@ import {
   SECRET_IN_HISTORY_CODE,
 } from '../git/safety'
 import { runGit } from '../git/process'
+
+// Real-git suite: every test shells out to git in scratch repos (~2s solo)
+// and blows the default 5s wall under parallel vitest workers — the drifting
+// 18-24 failures in docs/audits/2026-08-06-e2e-0.13.0. Headroom, not a
+// license to hang.
+vi.setConfig({ testTimeout: 30_000 })
 import { initRepo, resolveCommit } from '../git/repository'
 
 function git(cwd: string, args: string[], input?: string): string {

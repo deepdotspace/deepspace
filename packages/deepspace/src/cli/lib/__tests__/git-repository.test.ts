@@ -1,6 +1,6 @@
 /** Repository preconditions, refs, ancestry, diffs, and worktree-local excludes. */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { vi, afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,6 +19,12 @@ import {
   resolveCommit,
   updateRef,
 } from '../git/repository'
+
+// Real-git suite: every test shells out to git in scratch repos (~2s solo)
+// and blows the default 5s wall under parallel vitest workers — the drifting
+// 18-24 failures in docs/audits/2026-08-06-e2e-0.13.0. Headroom, not a
+// license to hang.
+vi.setConfig({ testTimeout: 30_000 })
 
 let dir: string
 let first: string

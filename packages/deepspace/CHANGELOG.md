@@ -1,5 +1,14 @@
 # deepspace
 
+## 0.14.0
+
+### Minor Changes
+
+- Enforce the per-tier storage quota on app files. An app's file allocation had per-file, per-part and per-request ceilings but no admission against the owner's plan, so a free-tier app could hold 202 MiB against a 128 MiB limit with every upload reporting success and no surface reporting usage. One per-tier table now serves both storage allocations (the repo store and app files), and the shared files handler admits every write: the single-request upload before the put, a chunked upload against its declared total at init, and again against the object R2 actually assembled at complete — an over-limit assembly is deleted rather than left in the allocation. An upsert is charged only for the bytes it adds. The owner's tier caps the allocation whoever writes, so an app writing at runtime and its owner's CLI meet the same limit; a billing lookup that fails refuses writes rather than admitting unmetered storage, and leaves reads working. Refusals answer `storage_quota_exceeded` with the used and limit byte counts and name the recovery, and `deepspace app files list` now prints storage used against the limit.
+- `deepspace deploy` and `deepspace rollback` now wait for the release they just published, not merely for the app to answer. Every upload carries a synthetic `/.well-known/deepspace/release.json` asset naming its own version, injected by the platform at upload time — so this holds for every app already deployed, including rollbacks of bundles that predate the change, with no app code and no redeploy. Cloudflare serves assets atomically with the version, so the CLI polls that path until the edge returns the release it shipped; without a stamp (an older platform, or a resumed activation) it falls back to the previous reachability probe. "Deployed!" previously landed 30–60 seconds before the edge agreed, which made any deploy-then-assert script flaky by construction.
+
+  Invites can now be accepted without the emailed link. `deepspace app collaborators invites` lists the invites waiting for your signed-in email and `deepspace app collaborators accept <app-id>` accepts one — the same authority the `/join` page enforces (the signed-in email must match the invited address), reachable from a terminal. Previously an invitee who had never signed in could reach a state with no way forward: signing in did not grant access, the CLI said it would, and only the emailed link could complete it. That CLI message now describes what actually happens.
+
 ## 0.13.0
 
 ### Minor Changes

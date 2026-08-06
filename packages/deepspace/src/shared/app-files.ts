@@ -107,6 +107,52 @@ export function planUploadParts(totalBytes: number, partSize: number): UploadPar
 }
 
 /**
+ * Per-tier storage schedule, in bytes. Product semantics, not a deployment
+ * dial — the one table both storage allocations admit against:
+ *
+ *   - the repo store (Git packs + retained bundles + deploy assets), admitted
+ *     by the app's Repo DO (`platform/deploy-worker/src/vc/storage-quota.ts`)
+ *   - the app-files allocation, admitted by the shared files handler
+ *     (`server/utils/scoped-r2-files.ts`)
+ *
+ * Each allocation gets the full amount independently; they are different
+ * buckets with different writers (docs/platform/r2-storage.md). The
+ * customer-visible "storage" number is the app-files allocation — the repo
+ * store is platform bookkeeping that degrades (drops rollback retention)
+ * rather than surfacing here.
+ */
+export const APP_STORAGE_LIMIT_BYTES = {
+  test: 0,
+  free: 128 * 1024 * 1024,
+  starter: 512 * 1024 * 1024,
+  premium: 2 * 1024 * 1024 * 1024,
+  admin: 10 * 1024 * 1024 * 1024,
+} as const
+
+/** The storage limit for a billing tier; unknown or missing tiers get free. */
+export function storageLimitForTier(tier: string | null | undefined): number {
+  if (tier && Object.hasOwn(APP_STORAGE_LIMIT_BYTES, tier)) {
+    return APP_STORAGE_LIMIT_BYTES[tier as keyof typeof APP_STORAGE_LIMIT_BYTES]
+  }
+  return APP_STORAGE_LIMIT_BYTES.free
+}
+
+/** The one storage-quota refusal sentence. `usedBytes` is net of any object
+ *  the upload replaces, so an upsert is charged only for its growth. */
+export function storageQuotaMessage(
+  incomingBytes: number,
+  usedBytes: number,
+  limitBytes: number,
+): string {
+  const free = Math.max(0, limitBytes - usedBytes)
+  return (
+    `This upload needs ${formatBytes(incomingBytes)} but the app's file storage has ` +
+    `${formatBytes(free)} free (${formatBytes(usedBytes)} of ${formatBytes(limitBytes)} used). ` +
+    `Delete files with \`deepspace app files rm <key>\`, or upgrade the owner's plan.`
+  )
+}
+
+/**
  * The largest single file a deploy may ship as a static asset.
  *
  * Cloudflare Static Assets refuses anything larger, so this is a hard edge of
