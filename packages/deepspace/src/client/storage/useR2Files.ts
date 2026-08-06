@@ -3,6 +3,12 @@
  *
  * Provides upload, download, list, and delete for files in R2.
  *
+ * Uploads pick their own transport. A small file goes in one request; a large
+ * one is chunked into parts with `Blob.slice`, so peak memory is bounded by
+ * the PART SIZE rather than by the file — a 1 GiB video costs one part, not a
+ * gibibyte — and the file ceiling becomes a product decision rather than a
+ * request-size accident. Callers do nothing differently either way.
+ *
  * Two scopes are supported via the `scope` option:
  *   - `'self'` (default): per-user storage. Reads require auth.
  *   - `'app'`: app-wide storage. Reads are public — the upload URL works
@@ -25,9 +31,12 @@ import { useCallback, useState, useMemo } from 'react'
 import { getAuthToken } from '../auth'
 import {
   MAX_APP_FILE_BYTES,
+  MAX_BASE64_UPLOAD_BYTES,
+  UPLOAD_PART_BYTES,
   describeFilesFailure,
   encodeKeyPath,
   oversizeMessage,
+  planUploadParts,
 } from '../../shared/app-files'
 
 // ============================================================================
@@ -50,8 +59,8 @@ export interface R2UploadResult {
  * which is what users saw instead of "your file is too big".
  */
 /** The one client-side size check, for both upload shapes. */
-function oversize(bytes: number): R2UploadResult | null {
-  return bytes > MAX_APP_FILE_BYTES ? { success: false, error: oversizeMessage(bytes) } : null
+function oversize(bytes: number, limit = MAX_APP_FILE_BYTES): R2UploadResult | null {
+  return bytes > limit ? { success: false, error: oversizeMessage(bytes, limit) } : null
 }
 
 async function readUploadResult(response: Response): Promise<R2UploadResult> {
@@ -75,10 +84,35 @@ export interface R2FileInfo {
   uploadedBy?: string
 }
 
+/** Told after each part lands, so a long upload can drive a progress bar. */
+export type UploadProgress = (sent: number, total: number) => void
+
+export interface UploadOptions {
+  onProgress?: UploadProgress
+}
+
 export interface UseR2FilesReturn {
-  /** Upload a File or Blob. Optionally provide a display name. */
-  upload: (file: File | Blob, name?: string) => Promise<R2UploadResult>
-  /** Upload raw base64 data. */
+  /**
+   * Upload a File or Blob. Optionally provide a display name.
+   *
+   * A file above the single-request bound is chunked automatically and sent as
+   * parts — nothing to opt into, and nothing held in memory beyond one part.
+   * Pass `onProgress` to follow a large one.
+   */
+  upload: (
+    file: File | Blob,
+    name?: string,
+    options?: UploadOptions,
+  ) => Promise<R2UploadResult>
+  /**
+   * Upload raw base64 data.
+   *
+   * Single-request only: base64 has to be materialized whole to be decoded, so
+   * this path keeps the one-request bound rather than the file ceiling — and
+   * because the request carries the ENCODED string, its real budget is
+   * `MAX_BASE64_UPLOAD_BYTES` (~18.75 MiB decoded), not the full 25 MiB. Send a
+   * Blob through `upload` for anything larger; it chunks.
+   */
   uploadBase64: (base64Data: string, name: string, mimeType?: string) => Promise<R2UploadResult>
   /**
    * Delete a file. Accepts an R2FileInfo from `list()` or a raw key string.
@@ -164,6 +198,99 @@ function resolveFile(fileOrKey: R2FileInfo | string): { key: string; name: strin
   return { key: fileOrKey.key, name: fileOrKey.originalName }
 }
 
+interface MultipartSession {
+  uploadId: string
+  uploadKey: string
+  partSize: number
+}
+
+/**
+ * Upload a file too large for one request, as a sequence of parts.
+ *
+ * `Blob.slice` is a lazy view rather than a copy, so the range is materialized
+ * only while it is being sent: peak memory is one part, not one file, and a
+ * 1 GiB video never becomes 1 GiB of tab memory. Its exact size becomes the
+ * Content-Length the server requires. Parts go one at a time: they must,
+ * because R2 sizes non-final parts uniformly and a half-uploaded object must be
+ * abandonable in one call.
+ *
+ * The server names the key and the part size. Nothing here invents either — a
+ * client that picked its own key could write over a sibling file, and one that
+ * picked its own part size could assemble an upload R2 refuses — but what the
+ * server says is validated before it is looped on.
+ */
+async function uploadInParts(
+  file: File | Blob,
+  name: string,
+  scopeParams: string,
+  authHeaders: () => Promise<Record<string, string>>,
+  onProgress?: UploadProgress,
+): Promise<R2UploadResult> {
+  const headers = await authHeaders()
+  const json = { ...headers, 'Content-Type': 'application/json' }
+  const initResponse = await fetch(`/api/files/multipart?${scopeParams}`, {
+    method: 'POST',
+    headers: json,
+    body: JSON.stringify({ name, mimeType: file.type || 'application/octet-stream', size: file.size }),
+  })
+  if (!initResponse.ok) return await readUploadResult(initResponse)
+  const session = (await initResponse.json()) as MultipartSession
+  if (!Number.isSafeInteger(session.partSize) || session.partSize < 1) {
+    return {
+      success: false,
+      error: `The files service advertised an unusable part size (${session.partSize}).`,
+    }
+  }
+
+  const query =
+    `${scopeParams}&uploadKey=${encodeKeyPath(session.uploadKey)}` +
+    `&uploadId=${encodeURIComponent(session.uploadId)}`
+  const plan = planUploadParts(file.size, session.partSize)
+  const parts: Array<{ partNumber: number; etag: string }> = []
+  let assembled = false
+  try {
+    for (const part of plan) {
+      // The slice is rebuilt per attempt: a body is consumed once, so a retry
+      // needs its own.
+      const send = (): Promise<Response> =>
+        fetch(`/api/files/multipart/part?${query}&partNumber=${part.partNumber}`, {
+          method: 'PUT',
+          headers,
+          body: file.slice(part.start, part.end),
+        })
+      let response = await send().catch(() => null)
+      // ONE retry, only for the answers the platform marks retryable —
+      // otherwise a transient on part 40 of 52 throws away everything already
+      // uploaded. Not a loop: a second failure is the answer.
+      if (!response || response.status === 429 || response.status >= 500) {
+        const retried = await send().catch(() => null)
+        if (retried) response = retried
+      }
+      if (!response) return { success: false, error: 'The files service could not be reached.' }
+      if (!response.ok) return await readUploadResult(response)
+      parts.push((await response.json()) as { partNumber: number; etag: string })
+      onProgress?.(part.end, file.size)
+    }
+    const completed = await fetch(`/api/files/multipart/complete?${query}`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({ parts }),
+    })
+    assembled = completed.ok
+    return await readUploadResult(completed)
+  } finally {
+    // Anything short of an assembled object leaves parts holding space in the
+    // customer's allocation. R2 would reap the session in 7 days; releasing it
+    // now is the difference between a retry loop that costs nothing and one
+    // that fills the app up.
+    if (!assembled) {
+      await fetch(`/api/files/multipart?${query}`, { method: 'DELETE', headers }).catch(
+        () => undefined,
+      )
+    }
+  }
+}
+
 // ============================================================================
 // Hook
 // ============================================================================
@@ -189,11 +316,19 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
   }, [])
 
   const upload = useCallback(
-    async (file: File | Blob, name?: string): Promise<R2UploadResult> => {
+    async (
+      file: File | Blob,
+      name?: string,
+      options?: UploadOptions,
+    ): Promise<R2UploadResult> => {
       setIsUploading(true)
       try {
         const tooBig = oversize(file.size)
         if (tooBig) return tooBig
+        const fileName = name ?? (file instanceof File ? file.name : 'upload')
+        if (file.size > UPLOAD_PART_BYTES) {
+          return await uploadInParts(file, fileName, scopeParams, authHeaders, options?.onProgress)
+        }
         const headers = await authHeaders()
         const formData = new FormData()
         formData.append('file', file)
@@ -204,6 +339,7 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
           headers,
           body: formData,
         })
+        options?.onProgress?.(file.size, file.size)
         return await readUploadResult(response)
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : 'Upload failed' }
@@ -218,9 +354,16 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
     async (base64Data: string, name: string, mimeType?: string): Promise<R2UploadResult> => {
       setIsUploading(true)
       try {
-        // base64 carries 3 bytes per 4 characters; the payload the server
-        // stores is what the limit is about, not the encoded string.
-        const tooBig = oversize(Math.floor((base64Data.length * 3) / 4))
+        // The REQUEST is the encoded string, and that is what has to fit:
+        // base64 spends 4 characters per 3 bytes, so measuring only the
+        // decoded payload against the request bound passes files whose bodies
+        // are a third larger than the server accepts — a check that green-lights
+        // uploads the server then always 413s. Measured decoded, compared
+        // against the decoded budget the request bound actually leaves.
+        const tooBig = oversize(
+          Math.floor((base64Data.length * 3) / 4),
+          MAX_BASE64_UPLOAD_BYTES,
+        )
         if (tooBig) return tooBig
         const headers = await authHeaders()
         const response = await fetch(`/api/files/upload?${scopeParams}`, {

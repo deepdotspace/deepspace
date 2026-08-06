@@ -17,7 +17,7 @@ writeFileSync(
       name: 'Routing Acceptance',
       description: 'Browser-level documentation router acceptance.',
       url: `http://${host}:${port}/docs`,
-      navigation: [{ group: 'Start', pages: ['index', 'guide'] }],
+      navigation: [{ group: 'Start', pages: ['index', 'guide', 'reference'] }],
       assistant: { access: 'public' },
     },
     null,
@@ -25,18 +25,18 @@ writeFileSync(
   )}\n`,
 )
 
+/** Code fences on every page: the copy/ask controls are the article's only
+ * imperative DOM pass, so the default runtime has to carry them through
+ * navigation the same way the executable runtime does. */
 const longBody = Array.from(
-  { length: 32 },
-  (_, index) => `## Section ${index + 1}\n\nRouting acceptance content ${index + 1}.`,
+  { length: 12 },
+  (_, index) => `## Section ${index + 1}\n\nRouting acceptance content ${index + 1}.\n\n\`\`\`ts\nexport const section${index + 1} = ${index + 1}\n\`\`\``,
 ).join('\n\n')
-writeFileSync(
-  join(sourceDir, 'index.md'),
-  `---\ntitle: Home\ndescription: Home metadata.\n---\n\n# Home\n\n[Guide](/guide)\n\n${longBody}\n`,
-)
-writeFileSync(
-  join(sourceDir, 'guide.md'),
-  `---\ntitle: Guide\ndescription: Guide metadata.\n---\n\n# Guide\n\n[Home](/)\n\n${longBody}\n`,
-)
+const body = (title: string, links: string): string =>
+  `---\ntitle: ${title}\ndescription: ${title} metadata.\n---\n\n# ${title}\n\n${links}\n\n${longBody}\n`
+writeFileSync(join(sourceDir, 'index.md'), body('Home', '[Guide](/guide) · [Reference](/reference)'))
+writeFileSync(join(sourceDir, 'guide.md'), body('Guide', '[Home](/) · [Reference](/reference)'))
+writeFileSync(join(sourceDir, 'reference.md'), body('Reference', '[Home](/) · [Guide](/guide)'))
 
 const outputDir = buildDocumentation({ appDir }).outputDir
 const contentTypes: Record<string, string> = {

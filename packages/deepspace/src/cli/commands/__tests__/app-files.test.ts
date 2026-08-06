@@ -10,13 +10,14 @@
 
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { ApiError } from '../../lib/api'
 import {
   MAX_APP_FILE_BYTES,
+  UPLOAD_PART_BYTES,
   contentTypeFor,
   downloadAppFile,
   encodeKeyPath,
@@ -200,14 +201,49 @@ describe('app files transport', () => {
       expect(captured!.url).toBe(`/api/app-files/${APP}/upload?key=img/hero%20shot.png`)
     })
 
-    it('refuses an over-cap file before opening a socket', async () => {
+    it('refuses an over-ceiling file before opening a socket', async () => {
       const local = join(workdir, 'huge.bin')
-      writeFileSync(local, Buffer.alloc(MAX_APP_FILE_BYTES + 1))
+      // Sparse: the check reads `statSync().size`, and writing a real gibibyte
+      // to assert that a size check happens before any read would be silly.
+      writeFileSync(local, '')
+      truncateSync(local, MAX_APP_FILE_BYTES + 1)
       captured = null
       await expect(uploadAppFile(baseUrl, 'tok', APP, local, 'huge.bin')).rejects.toMatchObject({
-        code: 'file_too_large',
+        code: 'too_large',
       })
       expect(captured).toBeNull()
+    })
+
+    /**
+     * `.svg`/`.html`/`.js` were absent from the type map, so they uploaded as
+     * `application/octet-stream` — past the server's type check, stored, and
+     * then served un-renderable behind nosniff, under a `✓`. Naming the real
+     * type is what makes the shared refusal see them.
+     */
+    it.each([
+      ['logo.svg', 'image/svg+xml'],
+      ['page.html', 'text/html'],
+      ['app.js', 'text/javascript'],
+    ])('refuses %s before opening a socket', async (name, mime) => {
+      const local = join(workdir, name)
+      writeFileSync(local, 'x')
+      captured = null
+      const err = await uploadAppFile(baseUrl, 'tok', APP, local, name).catch((e) => e)
+      expect(err).toBeInstanceOf(ApiError)
+      expect(err.code).toBe('active_content')
+      expect(err.message).toContain(mime)
+      // Nothing was sent, so nothing is stored under a misleading type.
+      expect(captured).toBeNull()
+    })
+
+    it('sends a file at exactly the part size in ONE request', async () => {
+      const local = join(workdir, 'exact.bin')
+      writeFileSync(local, '')
+      truncateSync(local, UPLOAD_PART_BYTES)
+      reply = { status: 200, body: JSON.stringify({ key: 'k', name: 'exact.bin' }) }
+      const result = await uploadAppFile(baseUrl, 'tok', APP, local, 'exact.bin')
+      expect(result.parts).toBe(1)
+      expect(captured!.url).toBe(`/api/app-files/${APP}/upload?key=exact.bin`)
     })
 
     it('reports an edge HTML 413 as a size limit, not a JSON parse error', async () => {
@@ -222,7 +258,7 @@ describe('app files transport', () => {
       }
       const err = await uploadAppFile(baseUrl, 'tok', APP, local, 'ok.txt').catch((e) => e)
       expect(err).toBeInstanceOf(ApiError)
-      expect(err.code).toBe('file_too_large')
+      expect(err.code).toBe('too_large')
       expect(err.message).toContain('too large')
       expect(err.message).toContain(formatBytes(MAX_APP_FILE_BYTES))
       expect(err.message).not.toContain('<')
@@ -292,5 +328,262 @@ describe('app files transport', () => {
       expect(err.code).toBe('network_error')
       expect(err.message).toContain('DEEPSPACE_PLATFORM_URL')
     })
+  })
+})
+
+/**
+ * The chunked upload path.
+ *
+ * Against a real HTTP server that plays the whole protocol, because the claims
+ * worth pinning are wire claims: that each part carries an exact
+ * Content-Length rather than going out chunked, that the parts reassemble into
+ * the original file byte-for-byte, and that a failure abandons the session
+ * instead of leaving parts holding the customer's quota.
+ */
+describe('app files chunked upload', () => {
+  interface Seen {
+    method: string
+    url: string
+    contentLength: string | null
+    transferEncoding: string | null
+    body: Buffer
+  }
+
+  let server: Server
+  let baseUrl: string
+  let workdir: string
+  let seen: Seen[] = []
+  /** The fake platform's behaviour, reset per test. */
+  let behaviour: {
+    partSize: number
+    failPart?: number
+    failComplete?: boolean
+    failInit?: boolean
+    /** Fail this part with this status, but only on its FIRST attempt. */
+    flakyPart?: { partNumber: number; status: number }
+  }
+
+  const SERVER_PART_SIZE = 8 * 1024 * 1024
+
+  beforeAll(async () => {
+    workdir = mkdtempSync(join(tmpdir(), 'deepspace-app-files-mpu-'))
+    server = createServer((req: IncomingMessage, res) => {
+      const chunks: Buffer[] = []
+      req.on('data', (chunk: Buffer) => chunks.push(chunk))
+      req.on('end', () => {
+        const url = req.url ?? ''
+        const body = Buffer.concat(chunks)
+        seen.push({
+          method: req.method ?? '',
+          url,
+          contentLength: req.headers['content-length'] ?? null,
+          transferEncoding: req.headers['transfer-encoding'] ?? null,
+          body,
+        })
+        const json = (status: number, payload: unknown): void => {
+          res.writeHead(status, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(payload))
+        }
+        const params = new URL(url, 'http://x').searchParams
+        if (url.includes('/multipart/part')) {
+          const partNumber = Number(params.get('partNumber'))
+          if (behaviour.failPart === partNumber) return json(503, { error: 'part exploded' })
+          const flaky = behaviour.flakyPart
+          if (flaky?.partNumber === partNumber) {
+            const already = seen.filter(
+              (s) => s.url.includes('/multipart/part') && s.url.includes(`partNumber=${partNumber}`),
+            ).length
+            // `seen` already includes this attempt, so 1 means first try.
+            if (already <= 1) return json(flaky.status, { error: 'flaky', code: 'server_error' })
+          }
+          return json(200, { partNumber, etag: `etag-${partNumber}` })
+        }
+        if (url.includes('/multipart/complete')) {
+          return behaviour.failComplete
+            ? json(400, { error: 'assembly failed', code: 'bad_parts' })
+            : json(200, { key: `apps/${APP}/big.mp4`, name: 'big.mp4' })
+        }
+        if (url.includes('/multipart')) {
+          if (req.method === 'DELETE') return json(200, { success: true, aborted: true })
+          return behaviour.failInit
+            ? json(413, { error: 'That file is 1.5 GiB; the limit is 1.0 GiB per file.' })
+            : json(200, {
+                uploadId: 'up-9',
+                uploadKey: params.get('key') ?? 'generated.mp4',
+                partSize: behaviour.partSize,
+              })
+        }
+        return json(200, { key: 'single', name: 'single' })
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  })
+
+  afterAll(() => {
+    server.close()
+    rmSync(workdir, { recursive: true, force: true })
+  })
+
+  beforeEach(() => {
+    seen = []
+    behaviour = { partSize: SERVER_PART_SIZE }
+  })
+
+  /** A file just past the single-request bound, with recognisable content. */
+  function bigFile(name = 'big.mp4'): { path: string; contents: Buffer } {
+    const contents = Buffer.alloc(UPLOAD_PART_BYTES + 1024)
+    for (let i = 0; i < contents.length; i++) contents[i] = i % 251
+    const path = join(workdir, name)
+    writeFileSync(path, contents)
+    return { path, contents }
+  }
+
+  it('runs init → parts → complete and reassembles the file byte-for-byte', async () => {
+    const { path, contents } = bigFile()
+    const result = await uploadAppFile(baseUrl, 'tok', APP, path, 'video/big.mp4')
+
+    const expectedParts = Math.ceil(contents.length / SERVER_PART_SIZE)
+    expect(result).toMatchObject({
+      key: `apps/${APP}/big.mp4`,
+      size: contents.length,
+      parts: expectedParts,
+    })
+    expect(seen.map((s) => `${s.method} ${s.url.split('?')[0]}`)).toEqual([
+      `POST /api/app-files/${APP}/multipart`,
+      ...Array(expectedParts).fill(`PUT /api/app-files/${APP}/multipart/part`),
+      `POST /api/app-files/${APP}/multipart/complete`,
+    ])
+
+    // Init declares the total before a byte moves, and keeps the key nested.
+    expect(seen[0].url).toBe(`/api/app-files/${APP}/multipart?key=video/big.mp4`)
+    expect(JSON.parse(seen[0].body.toString())).toEqual({
+      name: 'big.mp4',
+      mimeType: 'video/mp4',
+      size: contents.length,
+    })
+
+    const parts = seen.slice(1, 1 + expectedParts)
+    parts.forEach((part, index) => {
+      const params = new URL(part.url, 'http://x').searchParams
+      expect(params.get('uploadKey')).toBe('video/big.mp4')
+      expect(params.get('uploadId')).toBe('up-9')
+      expect(Number(params.get('partNumber'))).toBe(index + 1)
+      // Length-delimited, never chunked: the server requires a Content-Length
+      // and a stream body would arrive without one.
+      expect(part.transferEncoding).toBeNull()
+      expect(Number(part.contentLength)).toBe(part.body.length)
+    })
+    // Every part but the last is exactly the advertised size — R2's rule.
+    for (const part of parts.slice(0, -1)) expect(part.body.length).toBe(SERVER_PART_SIZE)
+    expect(Buffer.concat(parts.map((p) => p.body)).equals(contents)).toBe(true)
+
+    expect(JSON.parse(seen.at(-1)!.body.toString())).toEqual({
+      parts: parts.map((_, index) => ({ partNumber: index + 1, etag: `etag-${index + 1}` })),
+    })
+  })
+
+  it('chunks at the size the SERVER advertised, not the local constant', async () => {
+    behaviour.partSize = 5 * 1024 * 1024
+    const { path, contents } = bigFile('server-size.mp4')
+    const result = await uploadAppFile(baseUrl, 'tok', APP, path, 'server-size.mp4')
+    expect(result.parts).toBe(Math.ceil(contents.length / behaviour.partSize))
+    expect(seen[1].body.length).toBe(behaviour.partSize)
+  })
+
+  it('aborts the session when a part fails, and raises the part’s error', async () => {
+    behaviour.failPart = 2
+    const { path } = bigFile('fail-part.mp4')
+    const err = await uploadAppFile(baseUrl, 'tok', APP, path, 'fail-part.mp4').catch((e) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.message).toBe('part exploded')
+    // Three part requests: part 1, then part 2 twice — retried once because
+    // 503 is retryable, then given up on. Part 3 is never attempted, and the
+    // parts that landed are released.
+    expect(seen.filter((s) => s.url.includes('/multipart/part'))).toHaveLength(3)
+    expect(seen.filter((s) => s.url.includes('partNumber=3'))).toHaveLength(0)
+    expect(seen.at(-1)).toMatchObject({ method: 'DELETE' })
+    expect(seen.at(-1)!.url).toContain('uploadId=up-9')
+  })
+
+  it('aborts when assembly fails — parts left behind would hold the quota', async () => {
+    behaviour.failComplete = true
+    const { path } = bigFile('fail-complete.mp4')
+    const err = await uploadAppFile(baseUrl, 'tok', APP, path, 'fail-complete.mp4').catch((e) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.code).toBe('bad_parts')
+    expect(seen.at(-1)).toMatchObject({ method: 'DELETE' })
+  })
+
+  it('does not abort a completed upload', async () => {
+    const { path } = bigFile('clean.mp4')
+    await uploadAppFile(baseUrl, 'tok', APP, path, 'clean.mp4')
+    expect(seen.some((s) => s.method === 'DELETE')).toBe(false)
+  })
+
+  it('stops at init when the server refuses the declared total', async () => {
+    behaviour.failInit = true
+    const { path } = bigFile('refused.mp4')
+    const err = await uploadAppFile(baseUrl, 'tok', APP, path, 'refused.mp4').catch((e) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.message).toContain('the limit is 1.0 GiB per file')
+    // No parts, and nothing to abort — the session was never created.
+    expect(seen).toHaveLength(1)
+  })
+
+  it('reports progress after each part', async () => {
+    const { path, contents } = bigFile('progress.mp4')
+    const ticks: Array<[number, number, number, number]> = []
+    await uploadAppFile(baseUrl, 'tok', APP, path, 'progress.mp4', (sent, total, part, parts) =>
+      ticks.push([sent, total, part, parts]),
+    )
+    const expectedParts = Math.ceil(contents.length / SERVER_PART_SIZE)
+    expect(ticks).toHaveLength(expectedParts)
+    expect(ticks.at(-1)).toEqual([contents.length, contents.length, expectedParts, expectedParts])
+    expect(ticks[0]).toEqual([SERVER_PART_SIZE, contents.length, 1, expectedParts])
+  })
+
+  it('retries a part ONCE on a retryable failure, re-reading the slice', async () => {
+    behaviour.flakyPart = { partNumber: 2, status: 503 }
+    const { path, contents } = bigFile('flaky.mp4')
+    const result = await uploadAppFile(baseUrl, 'tok', APP, path, 'flaky.mp4')
+
+    const expectedParts = Math.ceil(contents.length / SERVER_PART_SIZE)
+    expect(result.parts).toBe(expectedParts)
+    const partCalls = seen.filter((s) => s.url.includes('/multipart/part'))
+    expect(partCalls).toHaveLength(expectedParts + 1)
+
+    // Both attempts at part 2 carried the SAME bytes — a body is consumed
+    // once, so the retry has to re-read the range rather than resend a
+    // drained one. Without that the retry silently uploads nothing.
+    const second = partCalls.filter((s) => s.url.includes('partNumber=2'))
+    expect(second).toHaveLength(2)
+    expect(second[0].body.length).toBe(second[1].body.length)
+    expect(second[0].body.equals(second[1].body)).toBe(true)
+    expect(seen.some((s) => s.method === 'DELETE')).toBe(false)
+  })
+
+  it('does not retry a refusal the server will repeat', async () => {
+    // 4xx is the client's mistake; retrying spends another part upload to
+    // reach the same answer.
+    behaviour.flakyPart = { partNumber: 1, status: 415 }
+    const { path } = bigFile('no-retry.mp4')
+    await uploadAppFile(baseUrl, 'tok', APP, path, 'no-retry.mp4').catch((e) => e)
+    expect(seen.filter((s) => s.url.includes('/multipart/part'))).toHaveLength(1)
+    expect(seen.at(-1)).toMatchObject({ method: 'DELETE' })
+  })
+
+  it('refuses an unusable part size instead of looping forever', async () => {
+    // planUploadParts advances by partSize; a zero would never terminate.
+    for (const partSize of [0, -1]) {
+      seen = []
+      behaviour = { partSize }
+      const { path } = bigFile(`bad-part-size-${partSize}.mp4`)
+      const err = await uploadAppFile(baseUrl, 'tok', APP, path, 'bad.mp4').catch((e) => e)
+      expect(err, String(partSize)).toBeInstanceOf(ApiError)
+      expect(err.code).toBe('invalid_response')
+      expect(err.message).toContain('unusable part size')
+      expect(seen.filter((s) => s.url.includes('/multipart/part'))).toHaveLength(0)
+    }
   })
 })

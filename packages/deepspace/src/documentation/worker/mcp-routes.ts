@@ -243,7 +243,12 @@ function serverCard(
     name: manifest.name,
     description: `Search and read the published ${documentationSubject(manifest.name)}.`,
     version: MCP_SERVER_VERSION,
+    // Preferred version, then everything the handshake will actually accept.
+    // Advertising only the preferred one made the card look like it disagreed
+    // with `initialize`, which per spec MUST echo a supported version the
+    // client asked for rather than force the newest.
     protocolVersion: CURRENT_PROTOCOL_VERSION,
+    protocolVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
     transport: {
       type: 'streamable-http',
       url: new URL(`${publicBasePath}/mcp`, request.url).toString(),

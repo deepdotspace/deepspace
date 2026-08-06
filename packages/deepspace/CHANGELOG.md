@@ -1,5 +1,158 @@
 # deepspace
 
+## 0.13.0
+
+### Minor Changes
+
+- Raise the app-files ceiling to 1 GiB by giving uploads the same streaming
+  discipline the deploy asset transport already has.
+
+  **The 25 MiB per-file limit was never a product decision.** It was the size of
+  one HTTP request leaking out as a rule about files: the handler read the whole
+  body into a ~128 MiB isolate, so the body had to be small. Media above it had
+  nowhere to live — deploy assets refuse it by design and named app files as its
+  home, which app files then also refused.
+
+  **App files now upload the way deploy assets do.** A file above the part size
+  is uploaded through R2's native multipart API: `POST /api/files/multipart` →
+  `PUT /api/files/multipart/part` × N → `POST /api/files/multipart/complete`,
+  with `DELETE /api/files/multipart` abandoning one. Every part is piped into R2
+  through a `FixedLengthStream` with a required `Content-Length`, so the worker
+  holds no more than one chunk of one part and a truncated body fails the write
+  instead of landing a corrupt object. An upload is therefore bounded by the size
+  of one request, never by the size of the file. There is no second upload
+  system: the same shared handler, the same validation, and both mounts — the
+  app's `/api/files` and the owner's `/api/app-files/:appId`.
+
+  **A request that declares no length is refused with 411.** `Number(null)` is
+  `0`, so a chunked body would otherwise clear every size bound as "empty" and
+  then be read unbounded — and R2 cannot size a write it has no length for. One
+  helper asks that question for the control bodies and the part path alike.
+
+  **Small files still take one round trip.** The single-request path is
+  unchanged below the part size, and its behaviour on both mounts is covered by
+  regression tests.
+
+  **Limits now say which question they answer.** `MAX_APP_FILE_BYTES` is 1 GiB
+  (the largest file, checked at init against the declared total and again at
+  complete against what R2 assembled — an over-ceiling object is deleted, not
+  kept). `MAX_UPLOAD_REQUEST_BYTES` is 25 MiB (the most one request body may
+  carry). `UPLOAD_PART_BYTES` is 20 MiB — both the part size init advertises and
+  the hard bound on a part, because `MAX_UPLOAD_PARTS` (52) is computed against
+  it: admitting 25 MiB parts would have made the real in-flight bound 1300 MiB
+  while the advertised ceiling stayed 1 GiB.
+
+  **Both clients chunk automatically, with peak memory bounded by the part size
+  rather than by the file** — roughly 40 MB for a file of any size. `deepspace
+app files put` reports progress per part; `useR2Files().upload` takes an
+  optional `onProgress`. Parts go sequentially, a retryable failure (429, 5xx, a
+  dropped connection) is retried **once** with the range re-read so a transient
+  on part 40 of 52 does not discard a gibibyte, and any other failure abandons
+  the session — so a retry never leaves parts holding the app's quota.
+
+  `uploadBase64` stays single-request, and its client-side budget is now derived
+  from the ENCODED body (`MAX_BASE64_UPLOAD_BYTES`, ~18.75 MiB decoded). Measured
+  against the decoded size it accepted payloads whose bodies were a third larger
+  than the server would ever take — a check that green-lit uploads guaranteed to 413.
+
+  **Failures are classified rather than relayed.** R2's multipart error codes
+  become honest answers: an unknown or expired session is a 404 telling the
+  caller to start a new upload, parts that cannot assemble are a 400 saying why,
+  a missing `Content-Length` is a 411, and only genuine faults are 5xx. A stolen
+  `uploadId` is inert — every call rebuilds the R2 key from the caller's own
+  authenticated prefix, so a session id from another app names an upload that
+  does not exist there.
+
+### Patch Changes
+
+- Fix a set of CLI honesty defects found by two independent agent-experience
+  audits against 0.12.0 — cases where a command reported something the platform
+  was not doing.
+
+  Patch, not minor: every item is a bug fix. `dev start --host` is a new flag on
+  an existing command and `dev start --json` now emits the readiness envelope it
+  already advertised, so neither adds API surface a caller could not already ask
+  for. Under this repo's 0.x policy that stays patch-appropriate.
+  - **`status` no longer reports a live release for an undeployed app.** Liveness
+    came from the append-only release log, which undeploy never touches, so
+    `status` printed `Live release #4 · https://…` while the edge 404'd and
+    `app list` said `undeployed`. Both commands now read one predicate over the
+    registry row, and `app list` reports collaborated apps (with a ROLE column)
+    instead of hiding the apps a collaborator can deploy but never discover.
+  - **The scaffolder persists its git identity.** It committed with `git -c
+user.name=… -c user.email=…` and wrote nothing to `.git/config`, so the next
+    commit — the one `deploy` requires — died `unable to auto-detect email
+address` in any container without global git config.
+  - **`--help` is ANSI-free when stdout is not a terminal.** citty freezes its
+    no-color decision at module load and only honors `NO_COLOR=1`, never
+    consulting stdout; help now renders through one chokepoint that strips SGR
+    escapes off a pipe and leaves a terminal coloured.
+  - **`dev start --json` emits a real readiness envelope** the moment the port
+    answers, instead of nothing until the server exits, and gains `--host` for
+    binding a specific interface. Readiness and the port pre-check both probe by
+    CONNECTING: a bind probe answers "can I bind this address", which on
+    macOS/BSD reports 127.0.0.1 free while vite serves 0.0.0.0. A readiness
+    timeout emits `{"ok":false,"code":"dev_server_not_ready"}` rather than
+    nothing, so a caller blocking on that line cannot hang.
+  - **Generated apps reserve the agent-protocol paths.** `/llms.txt`,
+    `/llms-full.txt`, `/.well-known/mcp`, `/.well-known/mcp.json` and
+    `/.well-known/mcp/*` fell through to the SPA shell, so a probe read the
+    homepage as a published manifest. They are now in the deploy worker's
+    `run_worker_first` baseline (the only list that reaches Cloudflare — the
+    CLI's reserved list is a deny-list that strips them from the app's own
+    config), and the app's static fallback withholds the SPA shell for them. A
+    real `public/llms.txt` still serves; only the shell standing in for one is
+    withheld.
+  - **`rollback` waits for edge propagation** before claiming a URL is live,
+    reusing deploy's wait — now one implementation instead of a private copy.
+  - **Human output no longer prints raw user ids.** `whoami` drops the `UserID:`
+    line, `releases` resolves actors to emails the way `activity` already did,
+    and the on-behalf deploy notice states the attribution instead of an opaque
+    id. All ids stay in `--json`.
+  - **The oversize-push recipe works when executed verbatim.** `git reset --soft`
+    leaves the file STAGED, so the documented re-commit re-added the same blob and
+    the push failed identically; the recipe now includes `git restore --staged`,
+    says to MOVE the file out of `public/` (`.gitignore` does not exclude it from
+    the deploy bundle), and is covered by a test that runs the shipped sentence
+    step by step against a real remote.
+  - **Deploy validates asset sizes before it pushes.** The commit reached the
+    cloud repo first, so the repo advanced onto a release the platform then
+    refused; the refusal now names the file and its size in MiB rather than a
+    SHA-256 and a raw byte count. Only the PER-FILE cap is checked locally, from
+    a constant the deploy worker now imports rather than duplicates — the
+    per-deploy total is env-configurable and the server dedupes by content hash
+    before summing, so any local total would be a guess doing different
+    arithmetic.
+  - **`app files put` refuses active content.** `.svg`, `.html`, `.htm`, `.js`
+    and `.mjs` were missing from the type map, uploaded as
+    `application/octet-stream`, and were stored past the server's own 415 — then
+    served un-renderable under a `✓`. `.xml` is deliberately left unmapped so
+    sitemaps and RSS feeds keep working exactly as before.
+  - **`app files rm` reports a missing key** instead of printing `✓ deleted` for
+    a name that was never there. The HTTP contract is unchanged — DELETE stays
+    idempotent and 200, now carrying `existed`, because deployed apps branch on
+    `res.ok`; the refusal is the CLI's. The oversize code is `too_large` on both
+    sides rather than `too_large` from the worker and `file_too_large` from the
+    client for one condition.
+  - **Ceilings appear in `--help`** for `deploy`, `push` and `app files put`,
+    read from the constants rather than restated.
+  - **The unknown-command suggester withholds the executable action when the
+    guess is destructive** (`rm` → `app files rm`, `delete` → `secrets delete`).
+    The suggestion still appears in prose; only the runnable `action` is dropped.
+    A whole command passed as ONE quoted token (`deepspace "auth whoami"`, which
+    a shell that does not word-split produces) is now recognised and reported as
+    a quoting problem, instead of suggesting a command that printed identically
+    to what was typed.
+  - **The collaborator-invite failure says what actually failed** — email
+    delivery, with the invite not created and the charge voided — instead of a
+    bare "please try again" that loops forever on an undeliverable address.
+  - **MCP discovery advertises every protocol version the handshake accepts.**
+    The handshake itself was already spec-correct (a server MUST echo a supported
+    version the client requested); the card advertising only the newest is what
+    made the two look like they disagreed.
+
+- Fix documentation sites built from MDX crashing on every client-side navigation. The article's imperative code-block pass reparented each compiled `pre`, which is invisible on the default runtime but detaches a React-owned node on the executable runtime, so the next route swap threw `NotFoundError: The node to be removed is not a child of this node` and tore the article out of the page. The prose subtree now names its single writer and the imperative passes cannot reach React-rendered nodes; MDX gets the same code-block and tab-group structure from React components instead. Also fixes the assistant chip clipping the site name, the search trigger rendering at the reading scale instead of the chrome scale, and the theme control buttons sitting edge to edge.
+
 ## 0.12.0
 
 ### Minor Changes

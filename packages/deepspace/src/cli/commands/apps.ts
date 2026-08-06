@@ -15,20 +15,10 @@
 
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
-import { apiFetch } from '../lib/api'
 import { defineDeepspaceCommand } from '../lib/command'
+import { listApps, liveAppUrl } from '../lib/app-target'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
-
-interface AppEntry {
-  appId: string
-  status: string
-  createdAt: string
-  deployedAt: string | null
-  /** Current subdomain lease; null when undeployed. */
-  name: string | null
-  url: string | null
-}
 
 export default defineDeepspaceCommand({
   meta: {
@@ -37,7 +27,7 @@ export default defineDeepspaceCommand({
   },
   async run({ args }) {
     const token = await ensureToken()
-    const { apps } = await apiFetch<{ apps: AppEntry[] }>(DEPLOY_URL, token, '/api/apps')
+    const apps = await listApps(DEPLOY_URL, token)
 
     if (!args.json) {
       if (!apps.length) {
@@ -49,16 +39,20 @@ export default defineDeepspaceCommand({
           (left, right) =>
             Number(right.status !== 'undeployed') - Number(left.status !== 'undeployed'),
         )
+        // A newer CLI against an older deploy worker gets rows with no `role`;
+        // reading `.length` off that crashed the whole listing.
+        const roleOf = (a: (typeof rows)[number]) => a.role ?? 'owner'
+        const roleWidth = Math.max(4, ...rows.map((a) => roleOf(a).length))
         const nameWidth = Math.max(4, ...rows.map((a) => (a.name ?? '—').length))
         const statusWidth = Math.max(6, ...rows.map((a) => a.status.length))
         const idWidth = Math.max(6, ...rows.map((a) => a.appId.length))
         console.log(
-          `${'NAME'.padEnd(nameWidth)}  ${'STATUS'.padEnd(statusWidth)}  ${'APP ID'.padEnd(idWidth)}  URL`,
+          `${'NAME'.padEnd(nameWidth)}  ${'STATUS'.padEnd(statusWidth)}  ${'ROLE'.padEnd(roleWidth)}  ${'APP ID'.padEnd(idWidth)}  URL`,
         )
         for (const a of rows) {
-          const url = a.url ?? '(not deployed)'
+          const url = liveAppUrl(a) ?? '(not deployed)'
           console.log(
-            `${(a.name ?? '—').padEnd(nameWidth)}  ${a.status.padEnd(statusWidth)}  ${a.appId.padEnd(idWidth)}  ${url}`,
+            `${(a.name ?? '—').padEnd(nameWidth)}  ${a.status.padEnd(statusWidth)}  ${roleOf(a).padEnd(roleWidth)}  ${a.appId.padEnd(idWidth)}  ${url}`,
           )
         }
       }

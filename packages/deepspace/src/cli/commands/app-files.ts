@@ -13,6 +13,10 @@
  *   get <key> [--out f]     — download one file
  *   rm <key>                — delete one file
  *
+ * `put` streams: a file past the single-request bound is chunked and sent as
+ * parts, so uploading a 1 GiB video costs one part of memory rather than one
+ * file. Transport details live in lib/app-files-api.ts.
+ *
  * Keys are relative to the app: `logo.png`, `img/hero.jpg`. The server owns
  * the physical prefix and validates every key against it, so a key can never
  * address another app.
@@ -29,12 +33,14 @@ import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { resolveAppTarget } from '../lib/app-target'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
+import { createSpinner } from '../lib/spinner'
 import {
   deleteAppFile,
   downloadAppFile,
   encodeKeyPath,
   formatBytes,
   listAppFiles,
+  MAX_APP_FILE_BYTES,
   uploadAppFile,
 } from '../lib/app-files-api'
 
@@ -102,7 +108,10 @@ export function servedPath(key: string): string {
 // ============================================================================
 
 const put = defineDeepspaceCommand({
-  meta: { name: 'put', description: 'Upload a file to the app’s files' },
+  meta: {
+    name: 'put',
+    description: `Upload a file to the app’s files (${formatBytes(MAX_APP_FILE_BYTES)} per file)`,
+  },
   args: {
     file: { type: 'positional', description: 'Local file to upload', required: true },
     key: { type: 'string', description: 'Key to store it under (default: the file name)' },
@@ -115,13 +124,47 @@ const put = defineDeepspaceCommand({
     }
     const key = requireKey((args.key as string | undefined) ?? basename(localPath))
     const { token, appId } = await target(args.app)
-    const result = await uploadAppFile(PLATFORM_URL, token, appId, localPath, key)
+
+    // A chunked upload can run for minutes. Report each part as it lands —
+    // the spinner already knows to print one static line per phase when
+    // stdout is not a TTY, so an agent log gets progress without repaint noise.
+    const spinner = args.json ? null : createSpinner()
+    let started = false
+    const result = await uploadAppFile(
+      PLATFORM_URL,
+      token,
+      appId,
+      localPath,
+      key,
+      (sent, total, part, parts) => {
+        if (parts === 1 || !spinner) return
+        if (!started) {
+          spinner.start(`Uploading ${key} in ${parts} parts`)
+          started = true
+        }
+        spinner.message(
+          `${key} — part ${part}/${parts} (${formatBytes(sent)} of ${formatBytes(total)})`,
+        )
+      },
+    ).finally(() => {
+      if (started) spinner?.stop()
+    })
 
     if (!args.json) {
-      console.log(`✓ ${key} (${formatBytes(result.size)})`)
+      const how = result.parts > 1 ? ` in ${result.parts} parts` : ''
+      console.log(`✓ ${key} (${formatBytes(result.size)})${how}`)
       console.log(`  Served from your app at ${servedPath(result.key)}`)
     }
-    return { data: { appId, key, storedKey: result.key, size: result.size, path: servedPath(result.key) } }
+    return {
+      data: {
+        appId,
+        key,
+        storedKey: result.key,
+        size: result.size,
+        parts: result.parts,
+        path: servedPath(result.key),
+      },
+    }
   },
 })
 
@@ -210,7 +253,16 @@ const rm = defineDeepspaceCommand({
   async run({ args }) {
     const key = requireKey(String(args.key))
     const { token, appId } = await target(args.app)
-    await deleteAppFile(PLATFORM_URL, token, appId, key)
+    const { existed } = await deleteAppFile(PLATFORM_URL, token, appId, key)
+    // The API is idempotent on purpose (deployed apps depend on that), but a
+    // person typing a key wants to know they hit nothing — a `✓ deleted` for a
+    // typo reads as "the file is gone" when it was never there.
+    if (!existed) {
+      throw new Refusal(
+        `No file at ${key} — nothing was deleted. Check the key with \`deepspace app files list\`.`,
+        'file_not_found',
+      )
+    }
     if (!args.json) console.log(`✓ deleted ${key}`)
     // Terminal: what to upload next is the caller's business.
     return { data: { appId, key, deleted: true } }

@@ -12,6 +12,7 @@ import {
 } from '../../../server/rooms/binding-manifest'
 import { readAppliedAppMigrations } from '../migrate/app-migrations'
 import { removeMacosJunk } from '../../lib/macos-junk'
+import { MAX_DEPLOY_ASSET_FILE_BYTES, formatBytes } from '../../../shared/app-files'
 import { formatSchemaLintFindings, lintProjectSchemas } from '../../lib/schema-lint'
 import type { Spinner } from '../../lib/spinner'
 import {
@@ -31,6 +32,13 @@ const RESERVED_RUN_WORKER_FIRST = new Set([
   '/_documentation/*',
   '/_documentation-root',
   '/_documentation-root/*',
+  // Agent-protocol paths: the worker must see them so they cannot fall through
+  // to the SPA shell (templates/base/src/server/http-routes.ts reserves them).
+  '/llms.txt',
+  '/llms-full.txt',
+  '/.well-known/mcp',
+  '/.well-known/mcp.json',
+  '/.well-known/mcp/*',
 ])
 
 export interface DeployAsset {
@@ -244,6 +252,32 @@ export function resolveDeployRunWorkerFirst(config: WorkerFirstConfig): true | s
   const routes = extractRunWorkerFirst(config)
   return routes
 }
+
+/**
+ * Name what the platform would refuse, from the local build, BEFORE anything
+ * irreversible happens. The server checks this too, but only after the commit
+ * has already been pushed to the cloud repo — which left the repo advanced on
+ * a release that then failed. Checking here also lets the message name the
+ * file, where the server's asset-plan request carries only hashes.
+ *
+ * ONLY the per-file cap. The per-deploy TOTAL is env-configurable
+ * (`MAX_DEPLOY_TOTAL_BYTES`) and the server dedupes by content hash before
+ * summing, so any local total is both a guess at the limit and a different
+ * arithmetic — five copies of one 24 MiB file are 24 MiB to the platform and
+ * would have been 120 MiB here. The server owns that refusal.
+ */
+export function oversizedAssetRefusal(assets: DeployAsset[]): string | null {
+  const tooBig = assets.find((asset) => asset.size > MAX_DEPLOY_ASSET_FILE_BYTES)
+  if (!tooBig) return null
+  return (
+    `${tooBig.path} is ${formatBytes(tooBig.size)}; the per-file limit for deploy assets is ` +
+    `${formatBytes(MAX_DEPLOY_ASSET_FILE_BYTES)}. ${LARGE_MEDIA_HOME}`
+  )
+}
+
+const LARGE_MEDIA_HOME =
+  'Large media belongs in your app files (`deepspace app files put`), not in the deploy bundle — ' +
+  'move it out of `public/` and reference it at runtime.'
 
 /**
  * Walk the built client directory and address every file by content. Hashing

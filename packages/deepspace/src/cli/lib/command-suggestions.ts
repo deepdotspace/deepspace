@@ -6,7 +6,41 @@ export interface UnknownCommand {
   attemptedPath: string[]
   helpPath: string[]
   suggestion: string[]
+  /** Whether the suggestion may be handed back as a runnable `action`. */
+  executable: boolean
+  /** The whole command arrived as ONE quoted argv token, e.g. `"auth whoami"`. */
+  quotedToken?: true
 }
+
+/**
+ * A single argv token holding a whole command path — `deepspace "auth whoami"`.
+ * Almost always over-quoting in a script or a shell that does not word-split,
+ * and the nearest-name search answers it uselessly: the token IS the command,
+ * so the suggestion comes back reading identical to what was typed.
+ */
+function splitTokenPath(
+  token: string,
+  table: Record<string, CommandTreeNode>,
+): string[] | null {
+  const parts = token.trim().split(/\s+/)
+  if (parts.length < 2) return null
+  let node: Record<string, CommandTreeNode> | undefined = table
+  for (const part of parts) {
+    const next: CommandTreeNode | undefined = node?.[part]
+    if (!next) return null
+    node = next.subCommands
+  }
+  return parts
+}
+
+/**
+ * Verbs that destroy something. A guess is a guess: `rm` ranks `app files rm`
+ * first and `delete` ranks `secrets delete` first, so an agent that pastes the
+ * offered action deletes data it never named. These stay in the prose ("did you
+ * mean …?") and are withheld from `action`, which is the executable channel —
+ * a destructive command has to be typed on purpose.
+ */
+const DESTRUCTIVE_VERBS = new Set(['rm', 'delete', 'remove', 'drop', 'clear', 'undeploy', 'kill'])
 
 /** Levenshtein distance for short command names. */
 export function editDistance(a: string, b: string): number {
@@ -74,12 +108,17 @@ export function findUnknownCommand(
     if (!table || token.startsWith('-')) return null
     const command: CommandTreeNode | undefined = table[token]
     if (!command) {
-      const relativeSuggestion = closestCommandPath(token, table)
+      // An exact path that merely arrived as one token is not a guess — say so
+      // precisely instead of ranking names against a string containing spaces.
+      const split = splitTokenPath(token, table)
+      const relativeSuggestion = split ?? closestCommandPath(token, table)
       if (!relativeSuggestion) return null
       return {
         attemptedPath: ['deepspace', ...accepted, token],
         helpPath: ['deepspace', ...accepted],
         suggestion: ['deepspace', ...accepted, ...relativeSuggestion],
+        executable: !DESTRUCTIVE_VERBS.has(relativeSuggestion.at(-1) ?? ''),
+        ...(split ? { quotedToken: true as const } : {}),
       }
     }
     accepted.push(token)

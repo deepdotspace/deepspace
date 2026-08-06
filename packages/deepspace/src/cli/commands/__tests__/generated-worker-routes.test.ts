@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url'
 import { Hono } from 'hono'
 import { importPKCS8, SignJWT } from 'jose'
 import { TEMPLATES_DIR } from './template-assembly'
+import { resolveDeployRunWorkerFirst } from '../deploy/build'
 
 interface TestEnv {
   ASSETS?: Fetcher
@@ -250,5 +251,100 @@ describe('generated worker route owners', () => {
     expect(fallback.status).toBe(200)
     expect(await fallback.text()).toBe('app shell')
     expect(assetRequests).toEqual(['/client/route', '/index.html'])
+  })
+
+  /**
+   * The reserved list is a DENY-list — the CLI strips these from the app's own
+   * array, and the deploy worker re-adds them from its own baseline. So the
+   * CLI sending nothing is CORRECT, and the only thing that proves the paths
+   * reach Cloudflare is the worker's side (cloudflare-deploy.test.ts). This
+   * pins the CLI half of that contract so the two cannot silently disagree.
+   */
+  it('strips the agent paths from the app config, leaving the worker baseline to send them', () => {
+    const routes = resolveDeployRunWorkerFirst({
+      assets: {
+        run_worker_first: [
+          '/api/*',
+          '/llms.txt',
+          '/.well-known/mcp',
+          '/.well-known/mcp.json',
+          '/.well-known/mcp/*',
+          '/custom/*',
+        ],
+      },
+    })
+    // Only the app's OWN addition survives; everything reserved is the
+    // platform's to send.
+    expect(routes).toEqual(['/custom/*'])
+  })
+
+  /**
+   * These paths are how an agent asks an origin to describe itself. Answering
+   * the SPA shell with 200 text/html tells it the app publishes a manifest,
+   * and it then reads the homepage as one — so the SPA fallback is withheld
+   * and they 404 when the app publishes nothing there.
+   */
+  it('never answers agent-protocol paths with the SPA shell', async () => {
+    const assetRequests: string[] = []
+    const assets = {
+      async fetch(request: Request) {
+        assetRequests.push(new URL(request.url).pathname)
+        return request.url.endsWith('/index.html')
+          ? new Response('app shell', { status: 200 })
+          : new Response(null, { status: 404 })
+      },
+    } as Fetcher
+    const staticApp = new Hono<TestContext>()
+    registerStaticRoutes(staticApp)
+
+    for (const path of [
+      '/llms.txt',
+      '/llms-full.txt',
+      '/.well-known/mcp',
+      '/.well-known/mcp.json',
+      '/.well-known/mcp/server-card.json',
+    ]) {
+      const response = await staticApp.request(
+        `https://app.test${path}`,
+        undefined,
+        env({ ASSETS: assets }),
+      )
+      expect(response.status, path).toBe(404)
+      expect(await response.json()).toEqual({ error: 'not_found' })
+    }
+    // The asset layer WAS consulted for each — only the SPA retry is withheld,
+    // so nothing asked for /index.html.
+    expect(assetRequests).not.toContain('/index.html')
+
+    // Unrelated well-known paths keep their normal SPA behavior — the
+    // reservation is the named agent surface, not all of /.well-known.
+    const other = await staticApp.request(
+      'https://app.test/.well-known/apple-app-site-association',
+      undefined,
+      env({ ASSETS: assets }),
+    )
+    expect(other.status).toBe(200)
+  })
+
+  /** A hand-authored public/llms.txt is a real answer; reserving the path must
+   *  not take it away, only the SPA shell standing in for it. */
+  it('serves a real asset at an agent path when the app ships one', async () => {
+    const assets = {
+      async fetch(request: Request) {
+        return new URL(request.url).pathname === '/llms.txt'
+          ? new Response('# My App\n', { status: 200, headers: { 'content-type': 'text/plain' } })
+          : new Response(null, { status: 404 })
+      },
+    } as Fetcher
+    const staticApp = new Hono<TestContext>()
+    registerStaticRoutes(staticApp)
+
+    const response = await staticApp.request(
+      'https://app.test/llms.txt',
+      undefined,
+      env({ ASSETS: assets }),
+    )
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('# My App\n')
   })
 })

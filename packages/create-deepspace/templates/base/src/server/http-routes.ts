@@ -322,15 +322,41 @@ export function registerPlatformProxyRoutes(app: Hono<AppContext>): void {
   })
 }
 
+const matches = (pathname: string, prefixes: readonly string[]): boolean =>
+  prefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`))
+
+/**
+ * An unmatched API call must 404 without consulting the asset layer at all —
+ * answering it with a static file, or with HTML a client then parses as JSON,
+ * is never right.
+ */
+const API_PREFIXES = ['/api']
+
+/**
+ * Paths an agent probes to ask an origin to describe itself. Serving the SPA
+ * shell here returns 200 text/html byte-identical to `/`, which reads as "this
+ * app publishes a manifest" — so the agent proceeds on the homepage.
+ *
+ * Unlike `/api` these DO fall through to the asset layer first: a hand-authored
+ * `public/llms.txt` is a real answer and must keep working. Only the SPA
+ * fallback is withheld, so an app that publishes nothing here 404s instead of
+ * claiming a manifest it does not have. (Mounting `deepspace/documentation`
+ * answers them before this fallback ever runs.)
+ */
+const AGENT_PREFIXES = ['/llms.txt', '/llms-full.txt', '/.well-known/mcp', '/.well-known/mcp.json']
+
 /** Register the SPA fallback last so it cannot shadow worker routes. */
 export function registerStaticRoutes(app: Hono<AppContext>): void {
   app.get('*', async (c) => {
     const url = new URL(c.req.url)
-    if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
+    if (matches(url.pathname, API_PREFIXES)) {
       return c.json({ error: 'not_found' }, 404)
     }
     const response = await c.env.ASSETS.fetch(c.req.raw)
     if (response.status === 404) {
+      if (matches(url.pathname, AGENT_PREFIXES)) {
+        return c.json({ error: 'not_found' }, 404)
+      }
       url.pathname = '/index.html'
       return c.env.ASSETS.fetch(new Request(url.toString(), c.req.raw))
     }

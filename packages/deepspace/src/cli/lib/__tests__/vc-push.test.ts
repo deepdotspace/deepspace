@@ -1,6 +1,6 @@
 /** Push porcelain parsing, real-Git transfer outcomes, and rejection guidance. */
 
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -274,8 +274,12 @@ describe('push rejection decisions', () => {
         initRepo(repo, 'main')
         runGit(repo, ['config', 'user.email', 'test@example.com'])
         runGit(repo, ['config', 'user.name', 'Test'])
-        writeFileSync(join(repo, 'big.bin'), Buffer.alloc(3 * 1024 * 1024, 1))
+        // A base commit to reset onto: the recipes under test all rewind to
+        // "the last pushed commit", which needs a parent to exist.
         writeFileSync(join(repo, 'a.txt'), 'keep\n')
+        runGit(repo, ['add', '-A'])
+        runGit(repo, ['commit', '-q', '-m', 'base'])
+        writeFileSync(join(repo, 'big.bin'), Buffer.alloc(3 * 1024 * 1024, 1))
         runGit(repo, ['add', '-A'])
         runGit(repo, ['commit', '-q', '-m', 'add big'])
         recipe(repo)
@@ -300,26 +304,114 @@ describe('push rejection decisions', () => {
       ).toBe(true)
     })
 
-    it('confirms dropping the unpushed commit DOES remove it', () => {
+    // `reset --soft` moves HEAD and nothing else, so the file is still STAGED.
+    // This is the exact step the shipped recipe used to omit: without the
+    // `git restore --staged`, the follow-up commit re-adds the identical blob.
+    it('confirms `reset --soft` + re-commit alone re-adds the blob', () => {
       expect(
         stillInHistory((repo) => {
           writeFileSync(join(repo, '.gitignore'), 'big.bin\n')
-          runGit(repo, ['reset', '--soft', '--quiet', '-q', 'HEAD'], { allowFail: true })
-          // No parent to reset onto (single commit), so delete the branch and
-          // re-commit clean — the same effect the advice describes.
-          runGit(repo, ['checkout', '-q', '--orphan', 'clean'])
-          runGit(repo, ['rm', '-q', '--cached', 'big.bin'], { allowFail: true })
-          runGit(repo, ['add', 'a.txt', '.gitignore'])
-          runGit(repo, ['commit', '-q', '-m', 'clean'])
-          runGit(repo, ['branch', '-q', '-D', 'main'])
+          runGit(repo, ['reset', '--soft', 'HEAD~1'])
+          runGit(repo, ['add', '.gitignore'])
+          runGit(repo, ['commit', '-q', '-m', 're-commit without the file'])
         }),
-      ).toBe(false)
+      ).toBe(true)
     })
 
-    it('says untracking alone is not enough, and names what is', () => {
+    /**
+     * Runs the shipped sentence itself, step by step, against a real remote,
+     * with NO repair flags: every command is exactly what the text tells a
+     * caller to type, and a non-zero exit is recorded rather than smoothed
+     * over. `--allow-empty` in an earlier version of this test is precisely
+     * what hid the file-only case, where `git commit` legitimately exits 1.
+     *
+     * Both shapes of the offending commit are covered because they end
+     * differently and the text has to describe both:
+     *   - mixed:      other changes remain -> commit succeeds, push advances
+     *   - file-only:  index matches HEAD   -> "nothing to commit", push is
+     *                                         already up to date
+     * Either way the end state is the same and is what the assertions check:
+     * the remote holds no blob, and the worktree is clean.
+     */
+    function runShippedRecipe(fileOnlyCommit: boolean): {
+      commitFailed: boolean
+      remoteHasBlob: boolean
+      worktree: string
+    } {
+      const root = mkdtempSync(join(tmpdir(), 'ds-recipe-'))
+      const remote = join(root, 'server.git')
+      const repo = join(root, 'work')
+      const media = join(root, 'media')
+      try {
+        runGit(root, ['init', '-q', '--bare', 'server.git'])
+        mkdirSync(media)
+        mkdirSync(repo)
+        initRepo(repo, 'main')
+        runGit(repo, ['config', 'user.email', 'test@example.com'])
+        runGit(repo, ['config', 'user.name', 'Test'])
+        mkdirSync(join(repo, 'public'))
+        writeFileSync(join(repo, 'a.txt'), 'keep\n')
+        runGit(repo, ['add', '-A'])
+        runGit(repo, ['commit', '-q', '-m', 'base'])
+        runGit(repo, ['remote', 'add', 'space', remote])
+        runGit(repo, ['push', '-q', 'space', 'HEAD:refs/heads/main'])
+        const lastPushed = runGit(repo, ['rev-parse', 'HEAD']).stdout.toString('utf-8').trim()
+
+        // The offending commit: media under public/, alone or alongside work.
+        writeFileSync(join(repo, 'public', 'big.bin'), Buffer.alloc(3 * 1024 * 1024, 1))
+        if (!fileOnlyCommit) writeFileSync(join(repo, 'a.txt'), 'keep\nand more\n')
+        runGit(repo, ['add', '-A'])
+        runGit(repo, ['commit', '-q', '-m', 'add media'])
+
+        // (1) move it OUT of public/.
+        renameSync(join(repo, 'public', 'big.bin'), join(media, 'big.bin'))
+        // (2) reset --soft to the last pushed commit, then unstage the file.
+        runGit(repo, ['reset', '--soft', lastPushed])
+        expect(
+          runGit(repo, ['diff', '--cached', '--name-only']).stdout.toString('utf-8'),
+        ).toContain('public/big.bin')
+        runGit(repo, ['restore', '--staged', 'public/big.bin'])
+        // (3) commit what remains, then push. Verbatim — no --allow-empty.
+        const commit = runGit(repo, ['commit', '-m', 'drop media'], { allowFail: true })
+        runGit(repo, ['push', '-q', 'space', 'HEAD:refs/heads/main'])
+
+        return {
+          commitFailed: commit.status !== 0,
+          remoteHasBlob: runGit(remote, ['rev-list', '--objects', '--all'])
+            .stdout.toString('utf-8')
+            .includes('big.bin'),
+          worktree: runGit(repo, ['status', '--porcelain']).stdout.toString('utf-8').trim(),
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+
+    it('works verbatim when the commit carried other changes too', () => {
+      const result = runShippedRecipe(false)
+      expect(result.commitFailed).toBe(false)
+      expect(result.remoteHasBlob).toBe(false)
+      expect(result.worktree).toBe('')
+    })
+
+    /** The case `--allow-empty` used to hide: `git commit` exits 1 and the push
+     *  reports "Everything up-to-date", and that is the SUCCESSFUL outcome. */
+    it('works verbatim when the commit carried only the file, despite exit 1', () => {
+      const result = runShippedRecipe(true)
+      expect(result.commitFailed).toBe(true)
+      expect(result.remoteHasBlob).toBe(false)
+      expect(result.worktree).toBe('')
+    })
+
+    it('names every step the recipe depends on, including the empty-commit case', () => {
       const advice = oversizedPushFix()
-      expect(advice).toContain('NOT sufficient on its own')
       expect(advice).toContain('git reset --soft')
+      expect(advice).toContain('git restore --staged')
+      // .gitignore governs Git, not the deploy bundle — the file has to move.
+      expect(advice).toContain('move it OUT of `public/`')
+      // Without this, exit 1 + "Everything up-to-date" reads as two failures.
+      expect(advice).toContain('nothing to commit')
+      expect(advice).toContain('Everything up-to-date')
       expect(advice).toContain('git filter-repo')
       expect(advice).toContain('deepspace app files put')
     })
@@ -371,7 +463,7 @@ describe('push rejection decisions', () => {
       expect(named.indexOf('big.bin')).toBeLessThan(named.indexOf('model.bin'))
       expect(named).toContain('1.5 MiB')
       expect(named).toContain('5 KiB')
-      expect(named).toContain('git rm --cached')
+      expect(named).toContain('git restore --staged')
       expect(named).not.toContain('rev-list')
       expect(pushFailureMessage('Workspace upload', rejected('object too large'), repo)).toContain(
         'retrying cannot succeed',

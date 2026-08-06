@@ -150,40 +150,32 @@ function lstatExists(path: string): boolean {
   }
 }
 
-function commitInitialScaffold(appDir: string, initializedGit: boolean): void {
+/** The scaffold's own committer, written into `.git/config`. */
+export const SCAFFOLD_GIT_IDENTITY = { name: 'DeepSpace', email: 'scaffold@deep.space' }
+
+function git(appDir: string, args: string[], label: string): void {
+  const result = spawn.sync('git', args, { cwd: appDir, stdio: 'pipe' })
+  if (result.error || result.status !== 0) {
+    throw new Error(
+      result.error
+        ? `${label} failed to start: ${result.error.message}`
+        : `${label} exited with code ${result.status}`,
+    )
+  }
+}
+
+export function commitInitialScaffold(appDir: string, initializedGit: boolean): void {
   if (!initializedGit) return
 
-  // Only commit repositories created by this process. The explicit fallback
-  // identity keeps agent sandboxes without global Git config deploy-ready.
-  const added = spawn.sync('git', ['add', '-A'], { cwd: appDir, stdio: 'pipe' })
-  if (added.error || added.status !== 0) {
-    throw new Error(
-      added.error
-        ? `git add failed to start: ${added.error.message}`
-        : `git add exited with code ${added.status}`,
-    )
-  }
-  const committed = spawn.sync(
-    'git',
-    [
-      '-c',
-      'user.name=DeepSpace',
-      '-c',
-      'user.email=scaffold@deep.space',
-      'commit',
-      '-m',
-      'Initial DeepSpace scaffold',
-      '--no-verify',
-    ],
-    { cwd: appDir, stdio: 'pipe' },
-  )
-  if (committed.error || committed.status !== 0) {
-    throw new Error(
-      committed.error
-        ? `git commit failed to start: ${committed.error.message}`
-        : `git commit exited with code ${committed.status}`,
-    )
-  }
+  // Only commit repositories created by this process. The identity is written
+  // into the repo rather than passed with `-c`: `deepspace deploy` requires a
+  // commit, and in a sandbox with no global Git config the caller's very next
+  // commit dies "unable to auto-detect email address" (exit 128) if the only
+  // identity this scaffold ever had lived in one argv.
+  git(appDir, ['config', 'user.name', SCAFFOLD_GIT_IDENTITY.name], 'git config user.name')
+  git(appDir, ['config', 'user.email', SCAFFOLD_GIT_IDENTITY.email], 'git config user.email')
+  git(appDir, ['add', '-A'], 'git add')
+  git(appDir, ['commit', '-m', 'Initial DeepSpace scaffold', '--no-verify'], 'git commit')
 }
 
 function installDependencies(appDir: string): void {

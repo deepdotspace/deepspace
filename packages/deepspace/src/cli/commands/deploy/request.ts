@@ -216,7 +216,10 @@ export async function deployBuiltBundle(options: {
   }
 
   if (body.onBehalfOfOwner) {
-    p.log.warn(`Deployed on behalf of owner ${body.onBehalfOfOwner}`)
+    // The owner's id is the only identity on the wire here, and a collaborator
+    // cannot read the owner roster to resolve it — so say the thing that
+    // matters (attribution, not you) and leave the id to --json.
+    p.log.warn("This release is attributed to the app's owner, not to your account.")
   }
   if (body.staleBaseGuard === 'skipped') {
     p.log.warn(
@@ -341,6 +344,11 @@ export async function uploadDeployAssets(options: {
       `(${Math.ceil(missingBytes / 1024)} KiB); the rest are already stored`,
   )
 
+  // Snapshot the total before the pool starts draining `missing`: `pop()`
+  // removes an asset when a worker CLAIMS it, so `missing.length` counts only
+  // unclaimed work and a denominator derived from it climbs alongside the
+  // numerator (…, 29/29, 30/30).
+  const total = missing.length
   let uploaded = 0
   const next = (): DeployAsset | undefined => missing.pop()
   const worker = async (): Promise<void> => {
@@ -369,7 +377,7 @@ export async function uploadDeployAssets(options: {
         )
       }
       uploaded++
-      spinner.message(`Uploading assets — ${uploaded}/${uploaded + missing.length}...`)
+      spinner.message(`Uploading assets — ${uploaded}/${total}...`)
     }
   }
 

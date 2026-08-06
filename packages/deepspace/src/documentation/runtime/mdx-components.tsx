@@ -1,5 +1,6 @@
 import type { ComponentPropsWithoutRef, ReactElement, ReactNode } from 'react'
 import { Children, createElement, isValidElement } from 'react'
+import { CodeBlock, TabGroup, type TabGroupPanel } from './code-block'
 
 interface TitledProps {
   children?: ReactNode
@@ -56,25 +57,35 @@ export function Tab({ children, label, title }: TitledProps): ReactElement {
 }
 
 export function Tabs({ children }: TitledProps): ReactElement {
-  return <div className="documentation-tabs" data-tab-group>{children}</div>
+  return <TabGroup className="documentation-tabs" panels={tabPanels(children)} />
 }
 
 export function CodeGroup({ children, label, title }: TitledProps): ReactElement {
+  const panels = Children.toArray(children).map((child, index) => ({
+    label: codeBlockTitle(child) ?? `Example ${index + 1}`,
+    content: child,
+  }))
   return (
-    <div className="documentation-code-group" data-tab-group>
-      {title ?? label ? <div className="documentation-code-group-title">{title ?? label}</div> : null}
-      {Children.toArray(children).map((child, index) => (
-        <section
-          className="documentation-tab"
-          data-tab
-          data-tab-title={codeBlockTitle(child) ?? `Example ${index + 1}`}
-          key={index}
-        >
-          {child}
-        </section>
-      ))}
-    </div>
+    <TabGroup
+      className="documentation-code-group"
+      panels={panels}
+      title={title ?? label
+        ? <div className="documentation-code-group-title">{title ?? label}</div>
+        : undefined}
+    />
   )
+}
+
+/** Read `Tab` labels and bodies so the group renders its own tablist. A child
+ * that is not a `Tab` still becomes a panel, keyed by position. */
+function tabPanels(children: ReactNode): TabGroupPanel[] {
+  return Children.toArray(children).map((child, index) => {
+    const props = isValidElement<TitledProps>(child) ? child.props : undefined
+    return {
+      label: props?.title ?? props?.label ?? `Tab ${index + 1}`,
+      content: props && 'children' in props ? props.children : child,
+    }
+  })
 }
 
 function codeBlockTitle(node: ReactNode): string | undefined {
@@ -96,6 +107,9 @@ function Heading({ level, ...props }: ComponentPropsWithoutRef<'h2'> & { level: 
 }
 
 export const documentationMdxComponents = {
+  /** React renders the code-block wrapper so nothing has to move a `pre` that
+   * the reconciler already owns. */
+  pre: CodeBlock,
   Accordion,
   AccordionGroup,
   Card,

@@ -36,9 +36,40 @@ export function requireAppIdArg(explicit: string | undefined): string {
   return id
 }
 
-interface AppListEntry {
+/** One row of `GET /api/apps` — the registry's own view of an app. */
+export interface AppListEntry {
   appId: string
+  status: string
+  createdAt: string
+  deployedAt: string | null
+  /** Current subdomain lease; null when no route is active. */
   name: string | null
+  url: string | null
+  /** Absent when an older deploy worker answers a newer CLI. */
+  role?: 'owner' | 'collaborator'
+}
+
+/**
+ * The one answer to "is this app serving right now", for every command that
+ * asks. Undeploy releases the routes and flips the status but leaves the
+ * release log untouched, so the release row alone cannot tell live from
+ * taken-down — only the registry can, and this is where it is read.
+ */
+export function liveAppUrl(app: AppListEntry): string | null {
+  return app.status === 'active' && app.deployedAt !== null ? app.url : null
+}
+
+/** Fetch the caller's apps — owned and collaborated — from the registry. */
+export async function listApps(deployUrl: string, token: string): Promise<AppListEntry[]> {
+  const { apps } = await apiFetch<{ apps: AppListEntry[] }>(deployUrl, token, '/api/apps')
+  if (!Array.isArray(apps)) {
+    throw new InputError(
+      `The deploy service at ${deployUrl} returned an unexpected response shape for the app list — ` +
+        `check DEEPSPACE_DEPLOY_URL (is this the service the app lives on?).`,
+      'invalid_response',
+    )
+  }
+  return apps
 }
 
 export interface AppTargetOptions {
@@ -47,7 +78,10 @@ export interface AppTargetOptions {
 }
 
 /** Find an app id or subdomain name in the caller's registry list. */
-export function matchAppSelector(apps: AppListEntry[], selector: string): string | null {
+export function matchAppSelector(
+  apps: Array<Pick<AppListEntry, 'appId' | 'name'>>,
+  selector: string,
+): string | null {
   const byId = apps.find((app) => app.appId === selector)
   if (byId) return byId.appId
   const byName = apps.find((app) => app.name === selector)
@@ -62,18 +96,11 @@ export async function resolveAppSelector(
   selector: string,
 ): Promise<string> {
   if (STRICT_APP_ID_RE.test(selector)) return selector
-  const { apps } = await apiFetch<{ apps: AppListEntry[] }>(deployUrl, token, '/api/apps')
-  if (!Array.isArray(apps)) {
-    throw new InputError(
-      `The deploy service at ${deployUrl} returned an unexpected response shape for the app list — ` +
-        `check DEEPSPACE_DEPLOY_URL (is this the service the app lives on?).`,
-      'invalid_response',
-    )
-  }
-  const id = matchAppSelector(apps, selector)
+  const id = matchAppSelector(await listApps(deployUrl, token), selector)
   if (id) return id
 
-  // The owner-scoped app list omits apps on which the caller collaborates.
+  // A name resolves through the repo even when the registry list can't see it
+  // (an admin acting on someone else's app).
   const shared = await resolveAppIdByName(deployUrl, token, selector)
   if (shared) return shared
   throw new InputError(
@@ -189,7 +216,7 @@ export async function warnIfPhantomApp(
 ): Promise<void> {
   if (!explicit || !STRICT_APP_ID_RE.test(explicit.trim())) return
   try {
-    const { apps } = await apiFetch<{ apps: AppListEntry[] }>(deployUrl, token, '/api/apps')
+    const apps = await listApps(deployUrl, token)
     if (!apps.some((app) => app.appId === appId)) {
       process.stderr.write(
         `warning: ${appId} is not among your apps. If it exists and you have access ` +

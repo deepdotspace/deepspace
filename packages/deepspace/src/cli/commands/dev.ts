@@ -8,6 +8,7 @@
  *
  *   deepspace dev start                   # port 5173 (strict)
  *   deepspace dev start --port 5180       # bind to a different port (multi-app dev)
+ *   deepspace dev start --host 0.0.0.0    # bind an explicit interface (containers)
  *
  * Port is `--port` > $DEEPSPACE_PORT > a stable linked-worktree port > 5173,
  * so Codex, Claude, and ordinary Git worktrees do not collide with a primary
@@ -17,11 +18,12 @@
  *
  * Defined with the command runtime (lib/command.ts) so every PREFLIGHT failure
  * (no app dir, logged out, port busy, secrets refresh) carries a slug and a
- * `--json` envelope. The server itself is long-running: the body awaits vite's
- * exit and the envelope lands after it, since there is no earlier moment that
- * means "done". Vite's own output streams through inherited stdio and is never
- * buffered or suppressed — under `--json` the envelope is the LAST line, not
- * the only one.
+ * `--json` envelope. The server itself is long-running, so `--json` emits TWO
+ * envelopes: a readiness line (`{"ok":true,"ready":true,"url":…}`) the moment
+ * the port answers — the only moment a caller waiting to drive the server can
+ * use — and the runtime's own result envelope once vite exits. Vite's output
+ * streams through inherited stdio and is never buffered or suppressed, so the
+ * exit envelope is the LAST line, not the only one.
  */
 
 import { readAppId } from '../lib/app-identity'
@@ -44,7 +46,13 @@ import { preflightNodeVersion, preflightWindowsWorkerd } from '../lib/preflight'
 import { removeMacosJunk } from '../lib/macos-junk'
 import { refreshSecretsCache } from '../lib/secrets'
 import { lintProjectSchemas, formatSchemaLintFindings } from '../lib/schema-lint'
-import { DEFAULT_PORT, resolvePort, checkPortAvailable } from '../lib/port'
+import { DEFAULT_PORT, resolvePort, isPortListening, waitForPortListening } from '../lib/port'
+
+/** What vite's bare `--host` means: every interface. */
+const DEFAULT_DEV_HOST = '0.0.0.0'
+
+/** Long enough for a cold vite + workerd start, short enough to still be news. */
+const READINESS_TIMEOUT_MS = 120_000
 import {
   prepareWranglerEnvConfig,
   wranglerViteEnv,
@@ -98,6 +106,11 @@ export default defineDeepspaceCommand({
       description: `Port to bind (default ${DEFAULT_PORT}, or $DEEPSPACE_PORT)`,
       required: false,
     },
+    host: {
+      type: 'string',
+      description: `Interface to bind (default ${DEFAULT_DEV_HOST} — reachable from outside a container)`,
+      required: false,
+    },
   },
   async run({ args }) {
     const say = (line: string) => {
@@ -106,6 +119,8 @@ export default defineDeepspaceCommand({
     preflightNodeVersion('dev start')
     const wranglerEnv =
       typeof args.env === 'string' && args.env.trim() ? args.env.trim() : undefined
+    const host =
+      typeof args.host === 'string' && args.host.trim() ? args.host.trim() : DEFAULT_DEV_HOST
 
     // Resolve the app root by walking up from the requested dir (default cwd),
     // so running from a subdirectory still works instead of hard-failing.
@@ -206,6 +221,7 @@ export default defineDeepspaceCommand({
     say(`Logged in as ${payload.name ?? payload.email}`)
     if (wranglerEnv) say(`Wrangler env: ${wranglerEnv}`)
     say(`Port: ${port}`)
+    if (host !== DEFAULT_DEV_HOST) say(`Host: ${host}`)
 
     // Refresh the app-store secrets cache (config = wrangler env, or 'prd').
     // A repo without a DEEPSPACE_APP_ID hasn't been initialized — writeDevVars
@@ -242,8 +258,10 @@ export default defineDeepspaceCommand({
     preflightWindowsWorkerd(appDir)
 
     // Pre-probe the port so a collision gets a friendly remedy instead of
-    // vite's raw --strictPort EADDRINUSE stack trace (DEV-5).
-    if (!(await checkPortAvailable(port))) {
+    // vite's raw --strictPort EADDRINUSE stack trace (DEV-5). A connect probe,
+    // because a bind probe on 127.0.0.1 reports "free" while another server
+    // holds 0.0.0.0 — and vite then dies with the stack this exists to avoid.
+    if (await isPortListening(port, host)) {
       const killArgv =
         port === DEFAULT_PORT
           ? ['deepspace', 'dev', 'kill']
@@ -258,13 +276,48 @@ export default defineDeepspaceCommand({
       )
     }
 
+    // 0.0.0.0 is a bind address, not an address to fetch — name the loopback
+    // the caller can actually open.
+    const url = `http://${host === DEFAULT_DEV_HOST ? 'localhost' : host}:${port}`
     say('Starting dev server...\n')
 
-    const vite = spawn('npx', ['vite', '--port', String(port), '--strictPort', '--host'], {
-      cwd: appDir,
-      stdio: 'inherit',
-      env: wranglerViteEnv(process.env, wranglerConfig, { DEEPSPACE_PORT: String(port) }),
-    })
+    const vite = spawn(
+      'npx',
+      ['vite', '--port', String(port), '--strictPort', '--host', host],
+      {
+        cwd: appDir,
+        stdio: 'inherit',
+        env: wranglerViteEnv(process.env, wranglerConfig, { DEEPSPACE_PORT: String(port) }),
+      },
+    )
+    // The readiness envelope. `--json` used to emit nothing until the server
+    // had already exited, which is the one moment a caller waiting to drive it
+    // cannot use. Printed the instant the port answers; the runtime's exit
+    // envelope still lands last, as documented above.
+    //
+    // A timeout emits a REFUSAL rather than nothing: a caller blocking on this
+    // line has no other signal, so silence would hang it for as long as vite
+    // stays up. Not fatal — vite may still come up late, and the exit envelope
+    // remains authoritative.
+    if (args.json) {
+      void waitForPortListening(port, host, READINESS_TIMEOUT_MS).then((ready) => {
+        console.log(
+          JSON.stringify(
+            ready
+              ? { ok: true, ready: true, url, port, host, appDir }
+              : {
+                  ok: false,
+                  code: 'dev_server_not_ready',
+                  error: `The dev server did not answer on ${url} within ${READINESS_TIMEOUT_MS / 1000}s.`,
+                  url,
+                  port,
+                  host,
+                  appDir,
+                },
+          ),
+        )
+      })
+    }
     let stopping = false
     const stop = () => {
       stopping = true
@@ -292,6 +345,6 @@ export default defineDeepspaceCommand({
         extra: { port, appDir, exitCode: code },
       })
     }
-    return { data: { port, appDir, wranglerEnv: wranglerEnv ?? null } }
+    return { data: { port, host, url, appDir, wranglerEnv: wranglerEnv ?? null } }
   },
 })

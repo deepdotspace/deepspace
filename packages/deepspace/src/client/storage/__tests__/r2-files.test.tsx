@@ -4,7 +4,12 @@ import { act, type ReactElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useR2Files, type R2UploadResult, type UseR2FilesReturn } from '../useR2Files'
-import { MAX_APP_FILE_BYTES } from '../../../shared/app-files'
+import {
+  MAX_APP_FILE_BYTES,
+  MAX_BASE64_UPLOAD_BYTES,
+  MAX_UPLOAD_REQUEST_BYTES,
+  UPLOAD_PART_BYTES,
+} from '../../../shared/app-files'
 
 vi.mock('../../auth', () => ({
   getAuthToken: async () => 'test-token',
@@ -72,9 +77,11 @@ describe('useR2Files upload limits', () => {
     return fetchMock
   }
 
-  it('refuses an over-limit File before sending it', async () => {
+  it('refuses an over-ceiling File before sending it', async () => {
     const fetchMock = forbidFetch()
-    const big = new Blob([new Uint8Array(MAX_APP_FILE_BYTES + 1)])
+    // Declared size only: allocating a gibibyte to prove a size check runs
+    // before any allocation would be its own bug.
+    const big = { size: MAX_APP_FILE_BYTES + 1, type: 'video/mp4' } as Blob
     let result: R2UploadResult | null = null
     await act(async () => {
       result = await files!.upload(big, 'big.bin')
@@ -84,11 +91,15 @@ describe('useR2Files upload limits', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('refuses an over-limit base64 upload, measured on DECODED bytes', async () => {
+  it('refuses a base64 upload whose ENCODED body would not fit one request', async () => {
     const fetchMock = forbidFetch()
-    // 4 base64 chars per 3 bytes: this string is under the cap in characters
-    // only if you forget to decode it.
-    const base64 = 'A'.repeat(Math.ceil(((MAX_APP_FILE_BYTES + 1) * 4) / 3))
+    // The budget is the encoded string, because that is what the request body
+    // is. A payload measured only by its decoded size sits under the request
+    // bound while producing a body a third larger — so this decodes to just
+    // over 18.75 MiB, which is comfortably under 25 MiB decoded and was
+    // previously waved through to a guaranteed server 413.
+    const base64 = 'A'.repeat(Math.ceil(((MAX_BASE64_UPLOAD_BYTES + 1) * 4) / 3))
+    expect(Math.floor((base64.length * 3) / 4)).toBeLessThan(MAX_UPLOAD_REQUEST_BYTES)
     let result: R2UploadResult | null = null
     await act(async () => {
       result = await files!.uploadBase64(base64, 'big.bin', 'image/png')
@@ -98,13 +109,20 @@ describe('useR2Files upload limits', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('still sends a file at exactly the limit', async () => {
-    const fetchMock = vi.fn(async () => Response.json({ success: true, key: 'k' }))
-    vi.stubGlobal('fetch', fetchMock)
+  it('sends a file at exactly the part size in one request', async () => {
+    const urls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        urls.push(String(input))
+        return Response.json({ success: true, key: 'k' })
+      }),
+    )
     await act(async () => {
-      await files!.upload(new Blob([new Uint8Array(MAX_APP_FILE_BYTES)]), 'exact.bin')
+      await files!.upload(new Blob([new Uint8Array(UPLOAD_PART_BYTES)]), 'exact.bin')
     })
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(urls).toHaveLength(1)
+    expect(urls[0]).toContain('/api/files/upload')
   })
 
   it('reports an edge HTML 413 as a size limit, not a JSON parse error', async () => {
@@ -125,5 +143,254 @@ describe('useR2Files upload limits', () => {
     expect(result).toMatchObject({ success: false })
     expect(result!.error).not.toMatch(/JSON|Unexpected token|</)
     expect(result!.error).toContain('too large')
+  })
+})
+
+/**
+ * Chunked uploads.
+ *
+ * The file is a stand-in with a real `size` and a `slice` that records the
+ * range asked for: what matters is which bytes the hook asks for and in what
+ * order, and allocating hundreds of megabytes to observe that would defeat the
+ * point of a transport that does not allocate them either.
+ */
+describe('useR2Files chunked upload', () => {
+  interface FakeFile {
+    blob: Blob
+    slices: Array<{ start: number; end: number }>
+  }
+
+  function fakeFile(size: number, type = 'video/mp4'): FakeFile {
+    const slices: Array<{ start: number; end: number }> = []
+    const blob = {
+      size,
+      type,
+      slice(start: number, end: number) {
+        slices.push({ start, end })
+        return { size: end - start, __range: `${start}-${end}` } as unknown as Blob
+      },
+    } as unknown as Blob
+    return { blob, slices }
+  }
+
+  interface Call {
+    url: string
+    method: string
+    body: unknown
+  }
+
+  /** A server that plays the whole protocol, with hooks to make any step fail. */
+  function stubServer(
+    options: {
+      partSize?: number
+      failPart?: number
+      failComplete?: boolean
+      failInit?: boolean
+      /** Fail this part with this status, but only on its FIRST attempt. */
+      flakyPart?: { partNumber: number; status: number }
+    } = {},
+  ): Call[] {
+    const partSize = options.partSize ?? UPLOAD_PART_BYTES
+    const calls: Call[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        calls.push({ url, method: init?.method ?? 'GET', body: init?.body })
+        if (url.includes('/multipart/part')) {
+          const partNumber = Number(new URL(url, 'https://x').searchParams.get('partNumber'))
+          if (options.failPart === partNumber) {
+            return Response.json({ error: 'part exploded' }, { status: 503 })
+          }
+          const flaky = options.flakyPart
+          if (flaky?.partNumber === partNumber) {
+            const already = calls.filter(
+              (c) => c.url.includes('/multipart/part') && c.url.includes(`partNumber=${partNumber}`),
+            ).length
+            // `calls` already includes this attempt, so 1 means first try.
+            if (already <= 1) return Response.json({ error: 'flaky' }, { status: flaky.status })
+          }
+          return Response.json({ partNumber, etag: `etag-${partNumber}` })
+        }
+        if (url.includes('/multipart/complete')) {
+          return options.failComplete
+            ? Response.json({ error: 'assembly failed' }, { status: 400 })
+            : Response.json({ success: true, key: 'apps/a/big.mp4', name: 'big.mp4' })
+        }
+        if (url.includes('/multipart')) {
+          if (init?.method === 'DELETE') return Response.json({ success: true, aborted: true })
+          return options.failInit
+            ? Response.json({ error: 'That file is too big' }, { status: 413 })
+            : Response.json({ uploadId: 'up-1', uploadKey: 'gen/big.mp4', partSize })
+        }
+        return Response.json({ success: true, key: 'single' })
+      }),
+    )
+    return calls
+  }
+
+  it('runs init → parts → complete for a file above the single-request bound', async () => {
+    const calls = stubServer()
+    const file = fakeFile(UPLOAD_PART_BYTES * 2 + 500)
+    let result: R2UploadResult | null = null
+    await act(async () => {
+      result = await files!.upload(file.blob, 'big.mp4')
+    })
+
+    expect(result).toMatchObject({ success: true, key: 'apps/a/big.mp4' })
+    expect(calls.map((c) => `${c.method} ${c.url.split('?')[0]}`)).toEqual([
+      'POST /api/files/multipart',
+      'PUT /api/files/multipart/part',
+      'PUT /api/files/multipart/part',
+      'PUT /api/files/multipart/part',
+      'POST /api/files/multipart/complete',
+    ])
+
+    // Init declares the total up front, so the server can refuse before bytes.
+    expect(JSON.parse(calls[0].body as string)).toEqual({
+      name: 'big.mp4',
+      mimeType: 'video/mp4',
+      size: UPLOAD_PART_BYTES * 2 + 500,
+    })
+
+    // Every part carries the session the server named, never a client guess.
+    for (const call of calls.slice(1, 4)) {
+      const params = new URL(call.url, 'https://x').searchParams
+      expect(params.get('uploadKey')).toBe('gen/big.mp4')
+      expect(params.get('uploadId')).toBe('up-1')
+      expect(params.get('scope')).toBe('self')
+    }
+
+    // The ranges tile the file exactly, uniform except the last — R2's rule.
+    expect(file.slices).toEqual([
+      { start: 0, end: UPLOAD_PART_BYTES },
+      { start: UPLOAD_PART_BYTES, end: UPLOAD_PART_BYTES * 2 },
+      { start: UPLOAD_PART_BYTES * 2, end: UPLOAD_PART_BYTES * 2 + 500 },
+    ])
+
+    expect(JSON.parse(calls[4].body as string)).toEqual({
+      parts: [
+        { partNumber: 1, etag: 'etag-1' },
+        { partNumber: 2, etag: 'etag-2' },
+        { partNumber: 3, etag: 'etag-3' },
+      ],
+    })
+  })
+
+  it('chunks at the size the SERVER advertised, not the local constant', async () => {
+    const serverPartSize = 6 * 1024 * 1024
+    const calls = stubServer({ partSize: serverPartSize })
+    const file = fakeFile(UPLOAD_PART_BYTES + 1)
+    await act(async () => {
+      await files!.upload(file.blob, 'big.mp4')
+    })
+    expect(file.slices[0]).toEqual({ start: 0, end: serverPartSize })
+    expect(calls.filter((c) => c.url.includes('/multipart/part'))).toHaveLength(
+      Math.ceil((UPLOAD_PART_BYTES + 1) / serverPartSize),
+    )
+  })
+
+  it('aborts the session when a part fails, and reports the failure', async () => {
+    const calls = stubServer({ failPart: 2 })
+    let result: R2UploadResult | null = null
+    await act(async () => {
+      result = await files!.upload(fakeFile(UPLOAD_PART_BYTES * 3).blob, 'big.mp4')
+    })
+    expect(result).toMatchObject({ success: false })
+    expect(result!.error).toBe('part exploded')
+    // Three part requests: part 1, then part 2 twice — retried once because
+    // 503 is retryable, and then given up on. Retrying is not a loop.
+    expect(calls.filter((c) => c.url.includes('/multipart/part'))).toHaveLength(3)
+    // Part 3 is never attempted, and the parts that landed are released.
+    expect(calls.filter((c) => c.url.includes('partNumber=3'))).toHaveLength(0)
+    expect(calls.at(-1)).toMatchObject({ method: 'DELETE' })
+  })
+
+  it('aborts when assembly fails — parts left behind would hold the quota', async () => {
+    const calls = stubServer({ failComplete: true })
+    let result: R2UploadResult | null = null
+    await act(async () => {
+      result = await files!.upload(fakeFile(UPLOAD_PART_BYTES * 2).blob, 'big.mp4')
+    })
+    expect(result).toMatchObject({ success: false, error: 'assembly failed' })
+    expect(calls.at(-1)).toMatchObject({ method: 'DELETE' })
+  })
+
+  it('does not abort a completed upload', async () => {
+    const calls = stubServer()
+    await act(async () => {
+      await files!.upload(fakeFile(UPLOAD_PART_BYTES * 2).blob, 'big.mp4')
+    })
+    expect(calls.some((c) => c.method === 'DELETE')).toBe(false)
+  })
+
+  it('stops at init when the server refuses the declared total', async () => {
+    const calls = stubServer({ failInit: true })
+    let result: R2UploadResult | null = null
+    await act(async () => {
+      result = await files!.upload(fakeFile(UPLOAD_PART_BYTES * 2).blob, 'big.mp4')
+    })
+    expect(result).toMatchObject({ success: false, error: 'That file is too big' })
+    expect(calls).toHaveLength(1)
+  })
+
+  it('reports progress after each part', async () => {
+    stubServer()
+    const seen: Array<[number, number]> = []
+    const total = UPLOAD_PART_BYTES * 2 + 7
+    await act(async () => {
+      await files!.upload(fakeFile(total).blob, 'big.mp4', {
+        onProgress: (sent, all) => seen.push([sent, all]),
+      })
+    })
+    expect(seen).toEqual([
+      [UPLOAD_PART_BYTES, total],
+      [UPLOAD_PART_BYTES * 2, total],
+      [total, total],
+    ])
+  })
+
+  it('retries a part ONCE on a retryable failure, then carries on', async () => {
+    const calls = stubServer({ flakyPart: { partNumber: 2, status: 503 } })
+    const file = fakeFile(UPLOAD_PART_BYTES * 3)
+    let result: R2UploadResult | null = null
+    await act(async () => {
+      result = await files!.upload(file.blob, 'big.mp4')
+    })
+    expect(result).toMatchObject({ success: true })
+    // Four part requests for three parts: part 2 was attempted twice. Without
+    // the retry a transient on part 40 of 52 would throw away everything.
+    const partCalls = calls.filter((c) => c.url.includes('/multipart/part'))
+    expect(partCalls).toHaveLength(4)
+    // The retry re-sliced rather than re-sending a consumed body.
+    expect(file.slices.filter((s) => s.start === UPLOAD_PART_BYTES)).toHaveLength(2)
+    expect(calls.some((c) => c.method === 'DELETE')).toBe(false)
+  })
+
+  it('does not retry a refusal the server will repeat', async () => {
+    // 4xx is the client's mistake; retrying spends another part upload to
+    // reach the same answer.
+    const calls = stubServer({ flakyPart: { partNumber: 1, status: 415 } })
+    let result: R2UploadResult | null = null
+    await act(async () => {
+      result = await files!.upload(fakeFile(UPLOAD_PART_BYTES * 2).blob, 'big.mp4')
+    })
+    expect(result).toMatchObject({ success: false })
+    expect(calls.filter((c) => c.url.includes('/multipart/part'))).toHaveLength(1)
+    expect(calls.at(-1)).toMatchObject({ method: 'DELETE' })
+  })
+
+  it('refuses an unusable part size instead of looping forever', async () => {
+    // planUploadParts advances by partSize; a zero would never terminate.
+    for (const partSize of [0, -1]) {
+      const calls = stubServer({ partSize })
+      let result: R2UploadResult | null = null
+      await act(async () => {
+        result = await files!.upload(fakeFile(UPLOAD_PART_BYTES * 2).blob, 'big.mp4')
+      })
+      expect(result, String(partSize)).toMatchObject({ success: false })
+      expect(result!.error).toContain('unusable part size')
+      expect(calls.filter((c) => c.url.includes('/multipart/part'))).toHaveLength(0)
+    }
   })
 })

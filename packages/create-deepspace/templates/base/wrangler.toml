@@ -7,7 +7,14 @@ main = "worker.ts"
 directory = "dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*", "/ws/*", "/internal/*", "/v1/*", "/_deepspace/*"]
+# Without these the asset layer answers first and `not_found_handling` hands
+# back the SPA shell — so an unmatched /api/* call gets HTML, and a probe for
+# /llms.txt reads the homepage as a published manifest.
+#
+# This list governs LOCAL DEV only. `deepspace deploy` strips every
+# platform-reserved route from it and the deploy worker re-adds them from its
+# own baseline, so an app can add routes here but cannot drop these.
+run_worker_first = ["/api/*", "/ws/*", "/internal/*", "/v1/*", "/_deepspace/*", "/llms.txt", "/llms-full.txt", "/.well-known/mcp", "/.well-known/mcp.json", "/.well-known/mcp/*"]
 
 # The app's immutable identity (docs: app-identity). `name` above is just the
 # subdomain label the next deploy claims; this id never changes — data,

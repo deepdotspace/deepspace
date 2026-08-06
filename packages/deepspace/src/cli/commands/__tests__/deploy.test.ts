@@ -7,10 +7,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { blankSelectorRefusal, staleBaseGuardFields } from '../deploy'
+import { MAX_DEPLOY_ASSET_FILE_BYTES } from '../../../shared/app-files'
 import {
   collectAssets,
   extractRunWorkerFirst,
   isDeployAssetControlFile,
+  oversizedAssetRefusal,
   readDeployAssetConfig,
   resolveDeployRunWorkerFirst,
 } from '../deploy/build'
@@ -137,6 +139,47 @@ describe('content-addressed asset collection', () => {
   })
 })
 
+/**
+ * The push is the irreversible half of a deploy. Refusing an over-cap asset
+ * from the local build means the cloud repo never advances onto a commit whose
+ * release the platform was always going to reject.
+ */
+describe('oversizedAssetRefusal', () => {
+  const asset = (path: string, size: number) => ({ path, hash: 'x'.repeat(64), size, sourcePath: path })
+
+  it('passes a bundle whose every file is under the cap', () => {
+    expect(oversizedAssetRefusal([asset('/a.js', 1024), asset('/b.png', 2048)])).toBeNull()
+  })
+
+  it('names the file, not its hash, and uses the same units as every other message', () => {
+    const refusal = oversizedAssetRefusal([asset('/video.mp4', MAX_DEPLOY_ASSET_FILE_BYTES + 1)])
+    expect(refusal).toContain('/video.mp4')
+    expect(refusal).toContain('25.0 MiB')
+    expect(refusal).not.toContain('x'.repeat(64))
+    expect(refusal).toContain('deepspace app files put')
+    // .gitignore does not keep a file out of the bundle; moving it does.
+    expect(refusal).toContain('move it out of `public/`')
+  })
+
+  /**
+   * The per-deploy total is env-configurable AND the server dedupes by content
+   * hash before summing. A local total would be a guess at the limit doing
+   * different arithmetic: these five entries are 120 MiB summed per path and
+   * 24 MiB to the platform, which accepts them.
+   */
+  it('leaves the per-deploy total to the server, which alone knows it', () => {
+    const same = Array.from({ length: 5 }, (_, i) =>
+      asset(`/copy${i}.bin`, MAX_DEPLOY_ASSET_FILE_BYTES - 1),
+    )
+    expect(oversizedAssetRefusal(same)).toBeNull()
+  })
+
+  /** One constant, imported by both sides — not a mirrored number that drifts. */
+  it('checks the same per-file cap the deploy worker enforces', () => {
+    expect(MAX_DEPLOY_ASSET_FILE_BYTES).toBe(25 * 1024 * 1024)
+  })
+})
+
 describe('uploadDeployAssets', () => {
   const SILENT_SPINNER = { start: vi.fn(), stop: vi.fn(), message: vi.fn() }
 
@@ -232,6 +275,44 @@ describe('uploadDeployAssets', () => {
 
       await run(assets)
       expect(uploaded.sort()).toEqual(assets.map((asset) => asset.hash).sort())
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  /** The pool claims work by popping the queue, so a denominator computed from
+   *  what's left climbs with the numerator (…, 10/10, 11/11) and never shows
+   *  how much is actually left. */
+  it('counts progress against the real total, not the shrinking queue', async () => {
+    const files = Object.fromEntries(
+      Array.from({ length: 11 }, (_, index) => [`f${index}.txt`, `body-${index}`]),
+    )
+    const { dir, assets } = buildAssets(files)
+    const spinner = { start: vi.fn(), stop: vi.fn(), message: vi.fn() }
+    try {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string) =>
+          String(url).endsWith('/asset-plan')
+            ? Response.json({ missing: assets.map((asset) => asset.hash) })
+            : Response.json({ ok: true }),
+        ),
+      )
+      await uploadDeployAssets({
+        deployUrl: 'https://deploy.test',
+        appId: 'app_01JQ',
+        token: 'tok',
+        assets,
+        spinner,
+        output: testOutput(),
+      })
+      const progress = spinner.message.mock.calls
+        .map(([line]) => String(line))
+        .filter((line) => line.startsWith('Uploading assets'))
+      expect(progress).toHaveLength(11)
+      expect(progress.every((line) => line.includes('/11'))).toBe(true)
+      expect(progress.at(-1)).toContain('11/11')
+      expect(progress.at(0)).toContain('1/11')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

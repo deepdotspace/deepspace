@@ -75,7 +75,8 @@ export default defineDeepspaceCommand({
     if (!args.json) {
       console.log(`Name:       ${payload.name ?? '(none)'}`)
       console.log(`Email:      ${payload.email ?? '(none)'}`)
-      console.log(`UserID:     ${payload.sub ?? '(none)'}`)
+      // The raw user id identifies nobody a human can act on; it stays in
+      // --json, where it is the stable machine handle.
       console.log(`Type:       ${accountType}`)
       if (payload.iss) console.log(`Issuer:     ${payload.iss}`)
       console.log(`Dashboard:  ${DASHBOARD_URL}`)

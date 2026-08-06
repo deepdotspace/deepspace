@@ -12,7 +12,7 @@ export const DOCUMENTATION_NAVIGATION_CSS = String.raw`
 :root[data-theme="dark"] .documentation-brand-logo-dark { display: block; }
 
 .documentation-header-center { display: flex; align-items: center; justify-content: center; padding: 0 20px; }
-.documentation-search-trigger { display: flex; align-items: center; width: min(380px, 38vw); height: 38px; gap: 9px; padding: 0 10px 0 12px; border: 1px solid var(--documentation-border); border-radius: 10px; background: color-mix(in srgb, var(--documentation-surface) 88%, transparent); color: var(--documentation-muted); box-shadow: var(--documentation-shadow-sm); cursor: pointer; text-align: left; transition: border-color .15s, color .15s, transform .15s; }
+.documentation-search-trigger { display: flex; align-items: center; width: min(380px, 38vw); height: 38px; gap: 9px; padding: 0 10px 0 12px; font-size: 14px; border: 1px solid var(--documentation-border); border-radius: 10px; background: color-mix(in srgb, var(--documentation-surface) 88%, transparent); color: var(--documentation-muted); box-shadow: var(--documentation-shadow-sm); cursor: pointer; text-align: left; transition: border-color .15s, color .15s, transform .15s; }
 .documentation-search-trigger:hover { border-color: var(--documentation-border-strong); color: var(--documentation-text); transform: translateY(-1px); }
 .documentation-search-trigger > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .documentation-search-trigger svg { width: 16px; }
@@ -49,7 +49,7 @@ export const DOCUMENTATION_NAVIGATION_CSS = String.raw`
 .documentation-sidebar-footer > nav { display: flex; flex-wrap: wrap; gap: 8px 13px; }
 .documentation-sidebar-footer a, .documentation-sidebar-footer > span { color: var(--documentation-faint); font-size: 12px; text-decoration: none; }
 .documentation-sidebar-footer a:hover { color: var(--documentation-text); }
-.documentation-theme-controls { display: inline-flex; width: max-content; padding: 2px; border: 1px solid var(--documentation-border); border-radius: 9px; background: var(--documentation-surface); box-shadow: var(--documentation-shadow-sm); }
+.documentation-theme-controls { display: inline-flex; width: max-content; gap: 2px; padding: 2px; border: 1px solid var(--documentation-border); border-radius: 9px; background: var(--documentation-surface); box-shadow: var(--documentation-shadow-sm); }
 .documentation-theme-controls button { display: grid; place-items: center; width: 28px; height: 25px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--documentation-faint); cursor: pointer; }
 .documentation-theme-controls button:hover { color: var(--documentation-text); }
 .documentation-theme-controls button[aria-pressed="true"] { background: var(--documentation-panel-strong); color: var(--documentation-text); }

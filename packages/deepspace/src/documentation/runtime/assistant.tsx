@@ -54,8 +54,11 @@ export function AssistantLauncher({
       id="deepspace-documentation-assistant-launcher"
       onSubmit={submit}
     >
+      {/* A short, fixed label: the site name belongs in the accessible name, not
+          in a chip that has to share one row with the question field. Reading it
+          from `name` clipped every site whose name was longer than "Acme Docs". */}
       <button className="documentation-launcher-agent" type="button" onClick={onOpen} aria-label={`Open the ${subject} agent`}>
-        Ask <span className="documentation-launcher-agent-name">{name}</span>
+        Ask <span className="documentation-launcher-agent-name">AI</span>
       </button>
       <input
         aria-label={`Ask the ${subject} agent`}

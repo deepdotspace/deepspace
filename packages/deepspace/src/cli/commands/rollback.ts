@@ -19,6 +19,7 @@ import { resolveAppTarget, assertAppTargetResolvable, parseWranglerEnvArg } from
 import { apiFetch, ApiError } from '../lib/api'
 import { mintIdempotencyKey, repoApi } from '../lib/repo-api'
 import { createSpinner } from '../lib/spinner'
+import { waitForEdgePropagation } from '../lib/edge-propagation'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 
 const REL_ID_RE = /^rel_[0-9A-HJKMNP-TV-Z]{26}$/
@@ -167,13 +168,28 @@ export default defineDeepspaceCommand({
         'invalid_response',
       )
     }
-    spinner?.stop(`Rolled back to ${result.rolledBackTo ?? releaseId}.`)
+    // Same guard deploy holds: the platform ack means accepted, not serving.
+    // Without this, rollback reports success while the edge still answers with
+    // the release it was asked to replace.
+    let edgePropagating = false
+    if (result.url) {
+      spinner?.message('Waiting for edge propagation...')
+      edgePropagating = !(await waitForEdgePropagation(result.url, 90_000))
+    }
+    spinner?.stop(
+      edgePropagating
+        ? `Rolled back to ${result.rolledBackTo ?? releaseId} (edge propagation still in progress after 90s).`
+        : `Rolled back to ${result.rolledBackTo ?? releaseId}.`,
+    )
     // Degraded guard: --allow-do-deletion bypassed the DO-class check, so the
     // platform never verified this rollback against the live Durable Object
     // classes. Surface it in both modes — an agent branches on the field.
     const doClassGuard = result.doClassGuard === 'unverified' ? ('unverified' as const) : undefined
     if (!args.json) {
-      if (result.url) p.log.success(`Live at: ${result.url}`)
+      if (result.url) {
+        if (edgePropagating) p.log.warn(`URL: ${result.url} (accepted; serving not yet verified)`)
+        else p.log.success(`Live at: ${result.url}`)
+      }
       if (result.bundleRetained === false) {
         p.log.warn(
           'The rollback is live, but its bundle was concurrently retired and is not available for a future rollback.',
@@ -198,6 +214,7 @@ export default defineDeepspaceCommand({
         url: result.url ?? null,
         versionId: result.versionId ?? null,
         wranglerEnv: wranglerEnv ?? null,
+        ...(edgePropagating ? { edgePropagating: true } : {}),
         ...(doClassGuard ? { doClassGuard } : {}),
       },
     }

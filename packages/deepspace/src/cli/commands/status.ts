@@ -34,7 +34,7 @@ import { createSpinner } from '../lib/spinner'
 import { InputError } from '../lib/cli-errors'
 import { readWranglerConfig, resolveAppNameForEnv } from '../lib/wrangler-env'
 import { getAppSource } from '../lib/source-api'
-import { parseWranglerEnvArg } from '../lib/app-target'
+import { parseWranglerEnvArg, listApps, liveAppUrl, type AppListEntry } from '../lib/app-target'
 
 function timeAgo(iso: string): string {
   const ms = Date.now() - Date.parse(iso)
@@ -263,7 +263,7 @@ export default defineCommand({
             lines.push(['Source', 'unclaimed · next normal deploy defaults to DeepSpace'])
             json.source = null
           }
-          const [refsResult, wsResult, releaseResult] = await Promise.all([
+          const [refsResult, wsResult, releaseResult, appsResult] = await Promise.all([
             githubSource
               ? Promise.resolve({ ok: true, value: null } as const)
               : observeRemote(api.getRefs()),
@@ -271,6 +271,7 @@ export default defineCommand({
               ? observeRemote(api.getWorkspace(facts.workspaceId).then((r) => r.view))
               : Promise.resolve({ ok: true, value: null } as const),
             observeRemote(api.latestRelease().then((r) => r.release)),
+            observeRemote(listApps(deployBaseUrl(), token)),
           ] as const)
 
           // workspace position
@@ -344,36 +345,52 @@ export default defineCommand({
             }
           }
 
-          // live release
+          // Live state. The release log is append-only history — undeploy never
+          // touches it — so what is SERVING comes from the registry entry, the
+          // same row `deepspace app list` prints. The release only describes
+          // WHICH build that is.
           if (!releaseResult.ok) reportRemoteFailure('Live', 'live', releaseResult.error)
-          else if (releaseResult.value === null) {
-            lines.push(['Live', 'never deployed'])
-            json.live = null
-          } else {
-            reportRelease(releaseResult.value)
-          }
+          else if (!appsResult.ok) reportRemoteFailure('Live', 'live', appsResult.error)
+          else reportLive(releaseResult.value, appsResult.value.find((a) => a.appId === appId))
           function reportRemoteFailure(label: string, key: string, error: unknown): void {
             const failure = statusRemoteFailure(error)
             lines.push([label, failure.human])
             json[key] = failure.json
           }
-          function reportRelease(rel: RemoteRelease): void {
+          function reportLive(rel: RemoteRelease | null, entry: AppListEntry | undefined): void {
+            if (rel === null) {
+              lines.push(['Live', 'never deployed'])
+              json.live = null
+              return
+            }
             const byYou = userId !== null && rel.actor === userId
-            lines.push([
-              'Live',
-              `release #${rel.seq} (${rel.kind} of ${rel.commitOid?.slice(0, 10) ?? 'unknown source'}, ${timeAgo(rel.createdAt)}${byYou ? ', by you' : ''})` +
-                (rel.url ? ` · ${rel.url}` : ''),
-            ])
-            json.live = {
+            const release =
+              `release #${rel.seq} (${rel.kind} of ${rel.commitOid?.slice(0, 10) ?? 'unknown source'}, ` +
+              `${timeAgo(rel.createdAt)}${byYou ? ', by you' : ''})`
+            const details = {
               seq: rel.seq,
               kind: rel.kind,
               commitOid: rel.commitOid,
               createdAt: rel.createdAt,
-              url: rel.url,
               byYou,
               source: rel.source,
               sourceRevision: rel.sourceRevision,
             }
+            // The listing answered, but not about this app. An admin acting on
+            // someone else's app sees exactly this, and it is NOT evidence the
+            // app is down — so report the release and say liveness is unknown
+            // rather than inventing "unregistered".
+            if (!entry) {
+              lines.push(['Live', `${release} · serving state not visible from your account`])
+              json.live = { ...details, serving: null, url: null }
+              return
+            }
+            const url = liveAppUrl(entry)
+            lines.push([
+              'Live',
+              url ? `${release} · ${url}` : `not serving — ${entry.status}, last ${release}`,
+            ])
+            json.live = { ...details, serving: url !== null, url }
           }
         }
         spinner?.stop('Cloud state checked.')

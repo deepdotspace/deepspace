@@ -7,7 +7,7 @@
  * under `test`.
  */
 
-import { defineCommand, runMain, runCommand } from 'citty'
+import { defineCommand, runMain, runCommand, renderUsage } from 'citty'
 // cross-spawn, not node:child_process: on Windows `npx` is `npx.cmd`, and since
 // Node's CVE-2024-27980 hardening a plain spawn/spawnSync refuses to exec a
 // .cmd (ENOENT / EINVAL) unless shell:true is set — which we won't do (rawArgs
@@ -17,6 +17,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { wrapCommandErrors, errorCode } from './lib/cli-errors'
+import { forTerminal, humanCommand, stripAnsi } from './lib/cli-format'
 import { stopActiveSpinner } from './lib/spinner'
 import { printAction } from './lib/output'
 import {
@@ -233,9 +234,14 @@ function commandTree(): Record<string, CommandTreeNode> {
 }
 
 function unknownCommandMessage(unknown: UnknownCommand): string {
+  // humanCommand, not join(' '): a token containing spaces has to render
+  // quoted, or `deepspace "auth whoami"` reports itself as its own suggestion.
   return (
-    `Unknown command: ${unknown.attemptedPath.join(' ')} — ` +
-    `did you mean \`${unknown.suggestion.join(' ')}\`?`
+    `Unknown command: ${humanCommand(unknown.attemptedPath)} — ` +
+    `did you mean \`${humanCommand(unknown.suggestion)}\`?` +
+    (unknown.quotedToken
+      ? ' The whole command arrived as one quoted argument; pass each word separately.'
+      : '')
   )
 }
 
@@ -246,7 +252,7 @@ function assertKnownCommandPath(argv: string[]): void {
     `${unknownCommandMessage(unknown)}\n` +
       `Run \`${unknown.helpPath.join(' ')} --help\` for the command list.`,
   )
-  printAction({ cwd: process.cwd(), argv: unknown.suggestion })
+  if (unknown.executable) printAction({ cwd: process.cwd(), argv: unknown.suggestion })
   process.exit(1)
 }
 
@@ -271,7 +277,9 @@ if (rawArgs.includes('--json') && !wantsHelp) {
         ok: false,
         code: 'unknown_command',
         error: unknownCommandMessage(unknown),
-        action: { cwd: process.cwd(), argv: unknown.suggestion },
+        ...(unknown.executable
+          ? { action: { cwd: process.cwd(), argv: unknown.suggestion } }
+          : {}),
       }),
     )
     process.exit(1)
@@ -293,13 +301,9 @@ if (rawArgs.includes('--json') && !wantsHelp) {
           : cittyCode === 'E_NO_COMMAND'
             ? 'no_command'
             : errorCode(err)
-    // citty colorizes some messages (cyan) and its no-color check ignores a
-    // non-TTY stdout, so strip ANSI before it lands in the machine-read string.
-    const message = (err instanceof Error ? err.message : String(err)).replace(
-      // eslint-disable-next-line no-control-regex
-      /\u001b\[[0-9;]*m/g,
-      '',
-    )
+    // citty colorizes some messages (cyan), so strip ANSI before it lands
+    // in the machine-read string.
+    const message = stripAnsi(err instanceof Error ? err.message : String(err))
     console.log(JSON.stringify({ ok: false, error: message, ...(code ? { code } : {}) }))
     process.exit(1)
   })
@@ -308,5 +312,17 @@ if (rawArgs.includes('--json') && !wantsHelp) {
   // it, `deepspace migrate --help` silently falls back to root help and exits
   // 0 even though the only valid path is `deepspace app migrate`.
   assertKnownCommandPath(rawArgs)
-  runMain(wrapCommandErrors(main))
+  // The only entry into citty's colorized rendering — every `--help` page and
+  // every usage dump it prints on a parse error goes through showUsage. Keeps
+  // citty's own shape: the trailing blank line, and a render failure reported
+  // rather than thrown out of a help probe.
+  runMain(wrapCommandErrors(main), {
+    showUsage: async (cmd, parent) => {
+      try {
+        console.log(forTerminal(await renderUsage(cmd, parent)) + '\n')
+      } catch (error) {
+        console.error(error)
+      }
+    },
+  })
 }

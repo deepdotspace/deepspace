@@ -15,6 +15,14 @@ export type DocumentationSiteComponent = ComponentType<DocumentationSiteProps>
 /** The polished SDK-owned documentation shell. */
 export const DefaultDocumentation = DocumentationApp
 
+/**
+ * The prose subtree has exactly one writer, and `data-prose` names it. `react`
+ * means the reconciler owns every node inside and only React components may
+ * enhance it; `html` means the compiler's markup owns it and the article's
+ * imperative pass may enhance it. Nothing may write across that line — moving a
+ * React-owned node out from under its fiber makes the next route swap fail with
+ * `removeChild ... not a child of this node`.
+ */
 export function DocumentationContent({
   data,
   Page,
@@ -23,9 +31,19 @@ export function DocumentationContent({
   Page?: DocumentationPageComponent
 }): ReactElement {
   if (!Page) {
-    return <div className="documentation-prose" dangerouslySetInnerHTML={{ __html: data.page.html }} />
+    return (
+      <div
+        className="documentation-prose"
+        data-prose="html"
+        dangerouslySetInnerHTML={{ __html: data.page.html }}
+      />
+    )
   }
-  return <div className="documentation-prose"><Page components={documentationMdxComponents as never} /></div>
+  return (
+    <div className="documentation-prose" data-prose="react">
+      <Page components={documentationMdxComponents as never} />
+    </div>
+  )
 }
 
 export { DocumentationApp }

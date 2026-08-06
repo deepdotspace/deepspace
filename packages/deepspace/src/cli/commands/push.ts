@@ -36,6 +36,7 @@ import { shQuote } from '../lib/cli-format'
 import {
   classifyPushTransportFailure,
   isRecoverablePushFailure,
+  PUSH_CEILINGS,
   pushFailureMessage,
   pushToSpace,
 } from '../lib/vc-push'
@@ -108,7 +109,7 @@ export function workspaceBranchPushRefusal(
 export default defineDeepspaceCommand({
   meta: {
     name: 'push',
-    description: "Push local git commits to the app's cloud repo",
+    description: `Push local git commits to the app's cloud repo (${PUSH_CEILINGS})`,
   },
   args: {
     branch: {

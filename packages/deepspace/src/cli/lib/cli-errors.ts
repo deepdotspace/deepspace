@@ -72,8 +72,16 @@ const API_ERROR_HINTS: Record<string, string> = {
   insufficient_credits:
     'Out of credits. Inviting a new collaborator by email sends them a transactional ' +
     'email billed to your account — top up your credits and try again.',
+  // "Try again" alone sends callers into a loop when the address itself is the
+  // problem — the send is what failed, and an undeliverable address fails the
+  // same way every time.
   invite_email_failed:
-    'The invite email could not be sent. You were not charged — please try again in a moment.',
+    'The invite itself was not created and the charge was voided — nothing to undo. Retrying ' +
+    'helps only if the send was transient; check the address is real and deliverable first. ' +
+    'An email is needed ONLY for someone with no DeepSpace account yet: an existing user is ' +
+    'added instantly, so having them sign in once and re-running this skips email entirely. ' +
+    'If a retry now reports `already_invited` with no email sent, cancel the stuck invite ' +
+    '(`deepspace app collaborators cancel <email>`) and invite again.',
 }
 
 /** Exported for tests. One clean message for an escaped error. */

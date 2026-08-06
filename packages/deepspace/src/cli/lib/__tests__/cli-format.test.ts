@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { humanCommand, shQuote } from '../cli-format'
+import { forTerminal, humanCommand, shQuote, stripAnsi } from '../cli-format'
 
 describe('shQuote', () => {
   it('wraps an ordinary string in single quotes', () => {
@@ -46,5 +46,32 @@ describe('humanCommand', () => {
   it('POSIX-quotes shell metacharacters in an argument', () => {
     const rendered = humanCommand(['deepspace', 'workspace', 'land', '--into', 'evil;$(rm -rf /)'])
     expect(rendered).toBe("deepspace workspace land --into 'evil;$(rm -rf /)'")
+  })
+})
+
+describe('terminal styling', () => {
+  const colored = `\u001b[36mdeepspace status\u001b[39m`
+
+  it('strips SGR escapes', () => {
+    expect(stripAnsi(colored)).toBe('deepspace status')
+    expect(stripAnsi('plain')).toBe('plain')
+  })
+
+  /** citty renders help with color unless NO_COLOR is exactly "1", ignoring a
+   *  piped stdout — so a piped `--help` used to carry escapes into whatever
+   *  parsed it. forTerminal is the one place that decision is made. */
+  it('keeps color for a TTY and drops it for a pipe', () => {
+    const original = process.stdout.isTTY
+    const setTty = (value: boolean | undefined) =>
+      Object.defineProperty(process.stdout, 'isTTY', { value, configurable: true })
+    try {
+      setTty(true)
+      expect(forTerminal(colored)).toBe(colored)
+      setTty(false)
+      expect(forTerminal(colored)).toBe('deepspace status')
+      expect(forTerminal(colored)).not.toContain('\u001b')
+    } finally {
+      setTty(original)
+    }
   })
 })

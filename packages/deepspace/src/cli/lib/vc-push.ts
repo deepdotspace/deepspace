@@ -159,32 +159,50 @@ const SERVER_OBJECT_CAP_BYTES = 20 * 1024 * 1024
 /** Mirrors deploy-worker's MAX_PACK_BYTES — one push's compressed pack. */
 const SERVER_PACK_CAP_BYTES = 32 * 1024 * 1024
 
+/** The ceilings, for `--help` — discoverable before a push hits them. */
+export const PUSH_CEILINGS = `${formatBytes(SERVER_OBJECT_CAP_BYTES)} per file, ${formatBytes(SERVER_PACK_CAP_BYTES)} per push`
+
 /** How to locate the offending object when the repo isn't at hand. */
 export const OVERSIZED_PUSH_FIX =
   `Find the offending object with ` +
   `\`git rev-list --objects --all | git cat-file --batch-check='%(objecttype) %(objectsize) %(rest)' | sort -k2 -n | tail\`.`
 
 /**
- * The correction, in the order it has to happen.
+ * The correction, as an executable sequence. Every clause here has been run
+ * against the real rejection, because each previous version of this text was
+ * wrong in a way that only running it revealed:
  *
- * This used to end at "`git rm --cached`, add to .gitignore, re-commit" —
- * which does not work, and testing it against the real rejection is how that
- * was found: the blob stays reachable from the commit that introduced it, so
- * the very next push sends the identical bytes and is refused identically.
- * Untracking changes the worktree; only rewriting or dropping the commits
- * changes what gets pushed. Both facts are stated because following the first
- * half alone is exactly the loop this text exists to break.
+ *   - "`git rm --cached` + re-commit" leaves the blob reachable from the
+ *     earlier commit, so the next push sends the identical bytes.
+ *   - "`git reset --soft <commit>` and re-commit without the file" leaves the
+ *     file STAGED — reset --soft moves HEAD only — so the re-commit re-adds it
+ *     and the push is refused identically. `git restore --staged` is the step
+ *     that makes the outcome deterministic rather than dependent on whether
+ *     the file happened to be unstaged already.
+ *   - "commit, then push" is wrong when the dropped commit held ONLY the file:
+ *     the index then matches HEAD, `git commit` exits 1 "nothing to commit",
+ *     and `git push` says "Everything up-to-date" — which IS the goal (there
+ *     is nothing left carrying the blob) but reads as two failures in a row.
+ *     Both outcomes are named so neither looks like the recipe went wrong.
+ *   - `.gitignore` governs Git, not the deploy bundle: anything under
+ *     `public/` still ships as a release asset, so the file has to MOVE.
+ *
+ * `deepspace app files put` is named first because it is the destination that
+ * makes the rest a one-way trip instead of a loop.
  */
 function removeFromHistoryAdvice(path: string | null): string {
   const file = path ? shQuote(path) : '<file>'
   return (
     `Media belongs in the app's files rather than Git history — \`deepspace app files put ${file}\` ` +
-    `stores it in the app's own allocation and serves it over HTTP. Then get it out of the push: ` +
-    `add it to .gitignore, and drop it from the commits that carry it — if those commits are still ` +
-    `local, \`git reset --soft <last pushed commit>\` and re-commit without the file. ` +
-    `\`git rm --cached\` plus a new commit is NOT sufficient on its own: the blob stays reachable ` +
-    `from the earlier commit and the push is rejected the same way. If it already reached pushed ` +
-    `history, rewrite it out (\`git filter-repo --path ${file} --invert-paths\`).`
+    `stores it in the app's own allocation and serves it over HTTP. Then get it out of both the ` +
+    `push and the bundle, in this order: (1) move it OUT of \`public/\` — .gitignore keeps it out ` +
+    `of Git but not out of the deploy bundle, which uploads every file under \`public/\`; ` +
+    `(2) if the commits that carry it are still local, \`git reset --soft <last pushed commit>\`, ` +
+    `then \`git restore --staged ${file}\` — reset --soft moves HEAD only and leaves the file ` +
+    `staged, so skipping this step re-commits the same blob; (3) commit what remains, then push — ` +
+    `if git says "nothing to commit", that commit held only the file, so skip straight to the ` +
+    `push and "Everything up-to-date" means you are done. If it already reached pushed history, ` +
+    `rewrite it out instead (\`git filter-repo --path ${file} --invert-paths\`).`
   )
 }
 

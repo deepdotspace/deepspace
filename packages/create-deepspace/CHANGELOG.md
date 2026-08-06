@@ -1,5 +1,95 @@
 # create-deepspace
 
+## 0.13.0
+
+### Patch Changes
+
+- Fix a set of CLI honesty defects found by two independent agent-experience
+  audits against 0.12.0 — cases where a command reported something the platform
+  was not doing.
+
+  Patch, not minor: every item is a bug fix. `dev start --host` is a new flag on
+  an existing command and `dev start --json` now emits the readiness envelope it
+  already advertised, so neither adds API surface a caller could not already ask
+  for. Under this repo's 0.x policy that stays patch-appropriate.
+  - **`status` no longer reports a live release for an undeployed app.** Liveness
+    came from the append-only release log, which undeploy never touches, so
+    `status` printed `Live release #4 · https://…` while the edge 404'd and
+    `app list` said `undeployed`. Both commands now read one predicate over the
+    registry row, and `app list` reports collaborated apps (with a ROLE column)
+    instead of hiding the apps a collaborator can deploy but never discover.
+  - **The scaffolder persists its git identity.** It committed with `git -c
+user.name=… -c user.email=…` and wrote nothing to `.git/config`, so the next
+    commit — the one `deploy` requires — died `unable to auto-detect email
+address` in any container without global git config.
+  - **`--help` is ANSI-free when stdout is not a terminal.** citty freezes its
+    no-color decision at module load and only honors `NO_COLOR=1`, never
+    consulting stdout; help now renders through one chokepoint that strips SGR
+    escapes off a pipe and leaves a terminal coloured.
+  - **`dev start --json` emits a real readiness envelope** the moment the port
+    answers, instead of nothing until the server exits, and gains `--host` for
+    binding a specific interface. Readiness and the port pre-check both probe by
+    CONNECTING: a bind probe answers "can I bind this address", which on
+    macOS/BSD reports 127.0.0.1 free while vite serves 0.0.0.0. A readiness
+    timeout emits `{"ok":false,"code":"dev_server_not_ready"}` rather than
+    nothing, so a caller blocking on that line cannot hang.
+  - **Generated apps reserve the agent-protocol paths.** `/llms.txt`,
+    `/llms-full.txt`, `/.well-known/mcp`, `/.well-known/mcp.json` and
+    `/.well-known/mcp/*` fell through to the SPA shell, so a probe read the
+    homepage as a published manifest. They are now in the deploy worker's
+    `run_worker_first` baseline (the only list that reaches Cloudflare — the
+    CLI's reserved list is a deny-list that strips them from the app's own
+    config), and the app's static fallback withholds the SPA shell for them. A
+    real `public/llms.txt` still serves; only the shell standing in for one is
+    withheld.
+  - **`rollback` waits for edge propagation** before claiming a URL is live,
+    reusing deploy's wait — now one implementation instead of a private copy.
+  - **Human output no longer prints raw user ids.** `whoami` drops the `UserID:`
+    line, `releases` resolves actors to emails the way `activity` already did,
+    and the on-behalf deploy notice states the attribution instead of an opaque
+    id. All ids stay in `--json`.
+  - **The oversize-push recipe works when executed verbatim.** `git reset --soft`
+    leaves the file STAGED, so the documented re-commit re-added the same blob and
+    the push failed identically; the recipe now includes `git restore --staged`,
+    says to MOVE the file out of `public/` (`.gitignore` does not exclude it from
+    the deploy bundle), and is covered by a test that runs the shipped sentence
+    step by step against a real remote.
+  - **Deploy validates asset sizes before it pushes.** The commit reached the
+    cloud repo first, so the repo advanced onto a release the platform then
+    refused; the refusal now names the file and its size in MiB rather than a
+    SHA-256 and a raw byte count. Only the PER-FILE cap is checked locally, from
+    a constant the deploy worker now imports rather than duplicates — the
+    per-deploy total is env-configurable and the server dedupes by content hash
+    before summing, so any local total would be a guess doing different
+    arithmetic.
+  - **`app files put` refuses active content.** `.svg`, `.html`, `.htm`, `.js`
+    and `.mjs` were missing from the type map, uploaded as
+    `application/octet-stream`, and were stored past the server's own 415 — then
+    served un-renderable under a `✓`. `.xml` is deliberately left unmapped so
+    sitemaps and RSS feeds keep working exactly as before.
+  - **`app files rm` reports a missing key** instead of printing `✓ deleted` for
+    a name that was never there. The HTTP contract is unchanged — DELETE stays
+    idempotent and 200, now carrying `existed`, because deployed apps branch on
+    `res.ok`; the refusal is the CLI's. The oversize code is `too_large` on both
+    sides rather than `too_large` from the worker and `file_too_large` from the
+    client for one condition.
+  - **Ceilings appear in `--help`** for `deploy`, `push` and `app files put`,
+    read from the constants rather than restated.
+  - **The unknown-command suggester withholds the executable action when the
+    guess is destructive** (`rm` → `app files rm`, `delete` → `secrets delete`).
+    The suggestion still appears in prose; only the runnable `action` is dropped.
+    A whole command passed as ONE quoted token (`deepspace "auth whoami"`, which
+    a shell that does not word-split produces) is now recognised and reported as
+    a quoting problem, instead of suggesting a command that printed identically
+    to what was typed.
+  - **The collaborator-invite failure says what actually failed** — email
+    delivery, with the invite not created and the charge voided — instead of a
+    bare "please try again" that loops forever on an undeliverable address.
+  - **MCP discovery advertises every protocol version the handshake accepts.**
+    The handshake itself was already spec-correct (a server MUST echo a supported
+    version the client requested); the card advertising only the newest is what
+    made the two look like they disagreed.
+
 ## 0.12.0
 
 ### Minor Changes

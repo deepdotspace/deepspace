@@ -14,6 +14,7 @@ import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { resolveAppTarget, assertAppTargetResolvable, parseWranglerEnvArg } from '../lib/app-target'
 import { repoApi } from '../lib/repo-api'
+import { actorLabels } from '../lib/actor-labels'
 import { parseLimitArg } from '../lib/citty-args'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import { createSpinner } from '../lib/spinner'
@@ -64,11 +65,14 @@ export default defineDeepspaceCommand({
       if (releases.length === 0) {
         p.log.info('No releases yet — the history starts with the next `deepspace deploy`.')
       } else {
+        // Same resolution `activity` uses, for the same reason: a row that
+        // names an email is readable, a row that names Kr7JX… is not.
+        const actors = await actorLabels(token, appId)
         for (const r of releases) {
           const source = r.commitOid ? `commit ${r.commitOid.slice(0, 10)}` : '(no source recorded)'
           const rollback = r.rollbackAvailable ? 'rollback available' : 'rollback unavailable'
           console.log(
-            `#${r.seq}  ${r.id}  ${r.kind.padEnd(8)}  ${r.createdAt}  ${r.actor}  ${source}  ${rollback}`,
+            `#${r.seq}  ${r.id}  ${r.kind.padEnd(8)}  ${r.createdAt}  ${actors.get(r.actor) ?? r.actor}  ${source}  ${rollback}`,
           )
         }
         p.log.info(

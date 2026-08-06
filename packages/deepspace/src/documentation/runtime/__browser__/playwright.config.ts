@@ -1,18 +1,48 @@
 import { defineConfig } from '@playwright/test'
 
+const cwd = new URL('../../../..', import.meta.url).pathname
+const defaultRuntime = 'http://127.0.0.1:4178'
+const customRuntime = 'http://127.0.0.1:4179'
+
+/**
+ * Two fixtures, because the two runtimes own the article subtree differently:
+ * 4178 serves Markdown pages through the default runtime (the compiler's HTML is
+ * injected), 4179 serves MDX pages with an app-owned `documentation.tsx` through
+ * the executable runtime (React renders the prose). Runtime-agnostic specs run
+ * against both, with view transitions on and off.
+ */
 export default defineConfig({
   testDir: '.',
-  testMatch: 'routing.browser.ts',
-  timeout: 30_000,
-  use: {
-    baseURL: 'http://127.0.0.1:4178',
-    browserName: 'chromium',
-    headless: true,
-  },
-  webServer: {
-    command: 'pnpm exec tsx src/documentation/runtime/__browser__/server.ts',
-    cwd: new URL('../../../..', import.meta.url).pathname,
-    url: 'http://127.0.0.1:4178/docs',
-    reuseExistingServer: false,
-  },
+  testMatch: '*.browser.ts',
+  timeout: 60_000,
+  use: { browserName: 'chromium', headless: true },
+  projects: [
+    // `routing.browser.ts` asserts the default fixture's own titles and canonical
+    // URLs, so it stays on the default runtime; everything else is
+    // runtime-agnostic and runs against both. View transitions on and off are
+    // driven per test by `page.emulateMedia`, not by a project, so the two
+    // motion paths stay visible in the spec that depends on them.
+    { name: 'default-runtime', use: { baseURL: defaultRuntime } },
+    {
+      name: 'custom-runtime',
+      testIgnore: 'routing.browser.ts',
+      use: { baseURL: customRuntime },
+    },
+  ],
+  webServer: [
+    {
+      command: 'pnpm exec tsx src/documentation/runtime/__browser__/server.ts',
+      cwd,
+      url: `${defaultRuntime}/docs`,
+      reuseExistingServer: false,
+      timeout: 180_000,
+    },
+    {
+      command: 'pnpm exec tsx src/documentation/runtime/__browser__/custom-server.ts',
+      cwd,
+      url: `${customRuntime}/docs`,
+      reuseExistingServer: false,
+      timeout: 180_000,
+    },
+  ],
 })

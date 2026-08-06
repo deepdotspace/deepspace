@@ -7,7 +7,7 @@ import { Refusal } from './command'
  * so a typo doesn't quietly bind the wrong port.
  */
 
-import { createServer } from 'node:net'
+import { createServer, Socket } from 'node:net'
 
 export const DEFAULT_PORT = 5173
 
@@ -26,6 +26,51 @@ export function checkPortAvailable(port: number, host = '0.0.0.0'): Promise<bool
     srv.once('listening', () => srv.close(() => resolve(true)))
     srv.listen(port, host)
   })
+}
+
+/**
+ * Whether something is already accepting connections on `host:port`.
+ *
+ * A CONNECT probe, not a bind probe, because binding answers the wrong
+ * question. Vite binds `0.0.0.0`; asking "can I bind 127.0.0.1:5173?" on
+ * macOS/BSD answers YES while vite is serving there — so a bind probe reports
+ * a live server as absent, and reports a port as free that vite then fails to
+ * take with EADDRINUSE. Connecting asks the question both callers actually
+ * have: is a server answering here?
+ */
+export function isPortListening(port: number, host: string, timeoutMs = 500): Promise<boolean> {
+  // 0.0.0.0 is a bind address; the reachable name for it is the loopback.
+  const target = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host
+  return new Promise((resolve) => {
+    const socket = new Socket()
+    const done = (listening: boolean) => {
+      socket.destroy()
+      resolve(listening)
+    }
+    socket.setTimeout(timeoutMs)
+    socket.once('connect', () => done(true))
+    socket.once('timeout', () => done(false))
+    socket.once('error', () => done(false))
+    socket.connect(port, target)
+  })
+}
+
+/**
+ * Wait until the dev server answers. This is the only readiness signal
+ * available: vite inherits stdio, so its "Local: http://…" line is never ours
+ * to parse.
+ */
+export async function waitForPortListening(
+  port: number,
+  host: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await isPortListening(port, host)) return true
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  return false
 }
 
 export function resolvePort(arg?: string): number {

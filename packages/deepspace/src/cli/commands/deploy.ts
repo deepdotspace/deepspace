@@ -11,13 +11,15 @@ import { ensureInstallReady } from '../lib/install-status'
 import type { CliAction } from '../lib/output'
 import { preflightNodeVersion } from '../lib/preflight'
 import { createSpinner } from '../lib/spinner'
+import { waitForEdgePropagation } from '../lib/edge-propagation'
+import { MAX_DEPLOY_ASSET_FILE_BYTES, formatBytes } from '../../shared/app-files'
 import {
   hasWranglerConfig,
   readWranglerConfig,
   resolveAppNameForEnv,
   type WranglerConfig,
 } from '../lib/wrangler-env'
-import { buildDeployBundle } from './deploy/build'
+import { buildDeployBundle, oversizedAssetRefusal } from './deploy/build'
 import { syncOneTimeProducts, syncSubscriptionPlans } from './deploy/commerce'
 import { createDeployOutput, type DeployOutput } from './deploy/output'
 import { deployBuiltBundle } from './deploy/request'
@@ -31,7 +33,11 @@ const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 export default defineCommand({
   meta: {
     name: 'deploy',
-    description: 'Build and deploy your DeepSpace app',
+    // The per-file ceiling belongs in --help: it was previously discoverable
+    // only by hitting it, after the build and the push had already run. The
+    // per-deploy total is deliberately absent — it is env-configurable, so any
+    // number stated here would be wrong for some environment.
+    description: `Build and deploy your DeepSpace app (assets: ${formatBytes(MAX_DEPLOY_ASSET_FILE_BYTES)} per file)`,
   },
   args: {
     dir: {
@@ -144,6 +150,26 @@ export default defineCommand({
       output,
     })
     const sourceState = await getAppSource(DEPLOY_URL, token, appId)
+
+    // Build and size-check BEFORE the push. The push is the irreversible step
+    // — it advances the cloud repo — and an asset the platform will refuse is
+    // knowable from the local build, so refusing here leaves the repo exactly
+    // where the caller left it instead of one commit ahead of a failed release.
+    const spinner = createSpinner()
+    const bundle = await buildDeployBundle({
+      appDir,
+      appName,
+      envName,
+      sharedDevVarsCache: secretsCache.linked !== null,
+      output,
+      spinner,
+    })
+    const oversized = oversizedAssetRefusal(bundle.assets)
+    if (oversized) {
+      spinner.stop('Deploy failed')
+      output.die(oversized, 'assets_too_large')
+    }
+
     const repository = await syncDeployRepository({
       deployUrl: DEPLOY_URL,
       appDir,
@@ -155,15 +181,6 @@ export default defineCommand({
       sourceState,
     })
 
-    const spinner = createSpinner()
-    const bundle = await buildDeployBundle({
-      appDir,
-      appName,
-      envName,
-      sharedDevVarsCache: secretsCache.linked !== null,
-      output,
-      spinner,
-    })
     const secrets = prepareDeploySecrets({
       appDir,
       envName,
@@ -190,7 +207,7 @@ export default defineCommand({
 
     if (body.url) {
       spinner.message('Waiting for edge propagation...')
-      const ready = await waitForAssetsReady(body.url, 90_000)
+      const ready = await waitForEdgePropagation(body.url, 90_000)
       if (!ready) {
         spinner.stop('Deployed (edge propagation still in progress after 90s)')
         p.log.warn(
@@ -271,34 +288,6 @@ export function staleBaseGuardFields(body: {
   staleBaseGuard?: unknown
 }): { staleBaseGuard: 'skipped' } | Record<string, never> {
   return body.staleBaseGuard === 'skipped' ? { staleBaseGuard: 'skipped' } : {}
-}
-
-/** Wait until the new deployment is consistently serving across edge isolates. */
-async function waitForAssetsReady(url: string, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs
-  let attempt = 0
-  let streak = 0
-
-  while (Date.now() < deadline) {
-    attempt++
-    try {
-      const response = await fetch(url, { redirect: 'manual' })
-      const body = await response.text()
-      if (!body.includes('Assets have not yet deployed') && !body.includes('No app configured')) {
-        streak++
-        if (streak >= 3) return true
-        await new Promise((resolve) => setTimeout(resolve, 1_500))
-        continue
-      }
-      streak = 0
-    } catch {
-      streak = 0
-    }
-
-    const waitMs = Math.min(8_000, 1_000 * 2 ** (attempt - 1))
-    await new Promise((resolve) => setTimeout(resolve, waitMs))
-  }
-  return false
 }
 
 function errorMessage(error: unknown): string {

@@ -10,9 +10,17 @@ import {
 import { createPortal } from 'react-dom'
 import type { DocumentationHeading, DocumentationRuntimeData } from '../types'
 import { documentationPublicPath } from '../routing'
-import { errorMessage, safeStorageGet, safeStorageSet, writeClipboardText } from './browser'
-import { CheckIcon, ChevronRightIcon, CopyIcon, ListIcon, SparkIcon } from './icons'
+import { errorMessage, safeStorageGet, safeStorageSet } from './browser'
+import { CodeBlockActions, CodeBlockControlsProvider, codeBlockLanguage } from './code-block'
+import { ChevronRightIcon, ListIcon } from './icons'
 import { PageActions } from './page-actions'
+
+/**
+ * Every imperative enhancement is scoped through this selector. React-rendered
+ * prose (`data-prose="react"`) is off limits to DOM surgery: the reconciler is
+ * its only writer.
+ */
+const HTML_PROSE_SCOPE = '.documentation-prose[data-prose="html"]'
 
 export function Article({
   children,
@@ -28,7 +36,12 @@ export function Article({
 }): ReactElement {
   const articleRef = useRef<HTMLElement>(null)
   const codeBlocks = useCodeBlockMounts(articleRef, data.page.route)
-  useArticleEnhancements(articleRef, data, onAssistantOpen)
+  useArticleEnhancements(articleRef, data)
+  const controls = useMemo(() => ({
+    assistantEnabled: data.config.assistant.access !== 'disabled',
+    onAsk: (code: string) =>
+      onAssistantOpen(`Explain this ${data.page.title} example and the important details:\n\n${code}`),
+  }), [data.config.assistant.access, data.page.title, onAssistantOpen])
   return (
     <article className="documentation-article" ref={articleRef}>
       <Breadcrumbs items={data.breadcrumbs} />
@@ -49,16 +62,20 @@ export function Article({
         {data.page.description && <p className="documentation-lede">{data.page.description}</p>}
       </header>
       <OutlineDisclosure headings={outlineHeadings(data.page.headings)} />
-      {children ?? <div className="documentation-prose" dangerouslySetInnerHTML={{ __html: data.page.html }} />}
-      {codeBlocks.map((mount) => createPortal(
-        <CodeBlockActions
-          assistantEnabled={data.config.assistant.access !== 'disabled'}
-          onAsk={(code) => onAssistantOpen(`Explain this ${data.page.title} example and the important details:\n\n${code}`)}
-          pre={mount.pre}
-        />,
-        mount.host,
-        mount.key,
-      ))}
+      <CodeBlockControlsProvider value={controls}>
+        {children ?? (
+          <div
+            className="documentation-prose"
+            data-prose="html"
+            dangerouslySetInnerHTML={{ __html: data.page.html }}
+          />
+        )}
+        {codeBlocks.map((mount) => createPortal(
+          <CodeBlockActions readCode={() => readPreText(mount.pre)} />,
+          mount.host,
+          mount.key,
+        ))}
+      </CodeBlockControlsProvider>
       {data.page.openapi?.playground && <ApiPlayground operation={data.page.openapi} />}
       {launcher}
       <nav className="documentation-pagination" aria-label="Page navigation">
@@ -206,6 +223,10 @@ interface CodeBlockMount {
  * box. Inside `pre` they would scroll away with the code and force horizontal
  * padding onto every line. The controls themselves are portalled in so their
  * icons stay the same components the rest of the shell uses.
+ *
+ * Scoped to `[data-prose="html"]` on purpose: this pass reparents `pre`, which
+ * is only ever safe on compiler-rendered markup the reconciler does not track.
+ * React-rendered prose gets the identical wrapper from `CodeBlock` instead.
  */
 function useCodeBlockMounts(
   articleRef: RefObject<HTMLElement | null>,
@@ -217,12 +238,12 @@ function useCodeBlockMounts(
     if (!article) return
     const created: Array<{ block: HTMLElement; pre: HTMLPreElement }> = []
     const next: CodeBlockMount[] = []
-    article.querySelectorAll<HTMLPreElement>('.documentation-prose pre').forEach((pre, index) => {
+    article.querySelectorAll<HTMLPreElement>(HTML_PROSE_SCOPE + ' pre').forEach((pre, index) => {
       const block = document.createElement('div')
       block.className = 'documentation-code-block'
       pre.replaceWith(block)
       block.appendChild(pre)
-      const language = codeBlockLanguage(pre)
+      const language = codeBlockLanguage(pre.querySelector('code')?.className ?? '')
       if (language) {
         const label = document.createElement('span')
         label.className = 'documentation-code-language'
@@ -244,52 +265,24 @@ function useCodeBlockMounts(
   return mounts
 }
 
-function codeBlockLanguage(pre: HTMLPreElement): string {
-  const className = pre.querySelector('code')?.className ?? ''
-  return /(?:^|\s)(?:language|lang)-([a-z0-9+#-]{1,20})/i.exec(className)?.[1] ?? ''
+function readPreText(pre: HTMLPreElement): string {
+  return pre.querySelector('code')?.textContent ?? pre.textContent ?? ''
 }
 
-function CodeBlockActions({
-  assistantEnabled,
-  onAsk,
-  pre,
-}: {
-  assistantEnabled: boolean
-  onAsk: (code: string) => void
-  pre: HTMLPreElement
-}): ReactElement {
-  const [copied, setCopied] = useState(false)
-  const copy = async (): Promise<void> => {
-    await writeClipboardText(pre.querySelector('code')?.textContent ?? pre.textContent ?? '')
-    setCopied(true)
-    window.setTimeout(() => setCopied(false), 1400)
-  }
-  return (
-    <>
-      <button aria-label={copied ? 'Code copied' : 'Copy code'} onClick={() => { void copy() }} type="button">
-        {copied ? <CheckIcon /> : <CopyIcon />}
-      </button>
-      {assistantEnabled && (
-        <button
-          aria-label="Ask the documentation assistant about this code"
-          onClick={() => onAsk(pre.querySelector('code')?.textContent?.trim().slice(0, 1200) ?? '')}
-          type="button"
-        ><SparkIcon /></button>
-      )}
-    </>
-  )
-}
-
+/**
+ * Enhances compiler-rendered tab groups. Like the code-block pass this is
+ * confined to `[data-prose="html"]`: MDX renders `Tabs` and `CodeGroup` through
+ * `TabGroup`, which owns its own tablist in React.
+ */
 function useArticleEnhancements(
   articleRef: RefObject<HTMLElement | null>,
   data: DocumentationRuntimeData,
-  onAssistantOpen: (seed?: string) => void,
 ): void {
   useEffect(() => {
     const article = articleRef.current
     if (!article) return
     const cleanups: Array<() => void> = []
-    article.querySelectorAll<HTMLElement>('[data-tab-group]').forEach((group, groupIndex) => {
+    article.querySelectorAll<HTMLElement>(`${HTML_PROSE_SCOPE} [data-tab-group]`).forEach((group, groupIndex) => {
       if (group.querySelector(':scope > .documentation-tab-buttons')) return
       const tabs = Array.from(group.querySelectorAll<HTMLElement>(':scope > [data-tab]'))
       if (tabs.length === 0) return
@@ -349,5 +342,5 @@ function useArticleEnhancements(
       cleanups.push(() => { document.removeEventListener('deepspace-documentation-tab-change', sync); controls.remove() })
     })
     return () => cleanups.reverse().forEach((cleanup) => cleanup())
-  }, [articleRef, data.config.assistant.access, data.page.route, data.page.title, onAssistantOpen])
+  }, [articleRef, data.page.route])
 }
