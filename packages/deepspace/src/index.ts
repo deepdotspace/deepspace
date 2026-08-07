@@ -36,3 +36,8 @@ export type { ClientErrorReport, ClientErrorKind } from './shared/client-errors'
 // `deepspace logs` wire DTO + the whitelisted key set — shared with the
 // dashboard, the CLI, and the platform reader so the four never drift.
 export * from './shared/log-events'
+// The per-tier storage schedule the platform ACTUALLY admits against, so a
+// surface that quotes capacity reads it instead of restating it. The billing
+// page advertised 5 GB against an enforced 128 MiB for months precisely
+// because those were two numbers instead of one.
+export { ACCOUNT_STORAGE_LIMIT_BYTES, storageLimitForTier, formatBytes } from './shared/app-files'

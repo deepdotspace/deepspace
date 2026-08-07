@@ -1,5 +1,21 @@
 # deepspace
 
+## 0.16.0
+
+### Minor Changes
+
+- **Storage is now a per-ACCOUNT total, and the schedule is much larger.** free 128 MiB → **1 GiB**, starter 512 MiB → **10 GiB**, premium 2 GiB → **30 GiB**, admin 10 GiB → **100 GiB**.
+
+  The number was per app, which meant an owner at their cap could create another app and keep writing — so the figure on the billing page described nothing enforceable. It is now the total across every app an owner holds: admission sums the owner's apps rather than only the one being written to, and a listing reports that same account total, so the number a caller sees is the number they are held to. Prefixes are swept concurrently, so the cost is the slowest single app rather than the sum, and an owner with one app — the common case — pays exactly what they did before. If the owner's apps cannot be enumerated the write fails closed, for the same reason a failed limit lookup does: an allocation that cannot be measured must not be written against.
+
+  **The repo store no longer rides the customer schedule.** Git packs, retained rollback bundles, and stored deploy assets are admitted against a flat 256 MiB per app, the same for every tier. They are platform bookkeeping, not something a customer buys, so the tier was never the right input — and tying them together meant every raise to the advertised number silently multiplied platform-side storage per app. It also put a **billing lookup on the path of every push, deploy, and rollback**, one that could degrade and refuse the write outright; that failure mode is gone with it. An app that cannot fit its source plus a few rollback bundles in 256 MiB has something in the wrong place: user uploads belong in the app-files allocation, which is what the account schedule sizes.
+
+  The dashboard advertised 5 GB while the platform enforced 128 MiB — a 40× overstatement that survived for months because they were two numbers instead of one. The billing page now reads the enforced schedule directly and cannot claim capacity the platform will not honor. `ACCOUNT_STORAGE_LIMIT_BYTES`, `storageLimitForTier`, and `formatBytes` are exported from the browser entry for that reason; `APP_STORAGE_LIMIT_BYTES` is renamed to `ACCOUNT_STORAGE_LIMIT_BYTES`, since what it means changed.
+
+  **An app still on a legacy name-shaped id can reach its own files again.** `/internal/files/*` shape-checked the caller's `x-app-id` against the public-id pattern — a pre-filter STRICTER than the registry action it feeds, which matches `app_id` OR `resource_id`. Apps registered before canonical ids resolve fine in the registry but never got the chance to ask, so their file storage answered 401 with no way out: they cannot redeploy either. It also caught any app in the window between migrating and its next deploy, whose worker still carries the old id in its `DEEPSPACE_APP_ID` binding. Authority is unchanged — the constant-time HMAC, then a registry lookup that fails closed for anything unregistered.
+
+  **A long AI stream is no longer cut short mid-completion.** The proxy's streaming pump ran inside `ctx.waitUntil` while the client read the other side of a TransformStream, and the runtime cancels that work on its own budget — independent of the client's read loop. Long completions died mid-stream, and the failure was invisible from the app: a cleanly ended SSE with no terminal event and no error. The body now pipes through an identity transform that accumulates the billing transcript as the client pulls, so delivery and invocation lifetime are the same thing and the stream lives exactly as long as its reader. Settlement moves to `flush()`: a completed stream settles actual usage as before, while a client that disconnects mid-stream leaves the bounded worst-case pre-charge standing rather than collecting a refund for bytes it never read — and upstream teardown stops paying the provider for tokens nobody receives.
+
 ## 0.15.0
 
 ### Minor Changes

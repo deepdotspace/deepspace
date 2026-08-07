@@ -29,3 +29,7 @@ export type { ClientErrorReport, ClientErrorKind } from './shared/client-errors'
 // `deepspace logs` wire DTO — the single source of truth shared with the CLI,
 // the dashboard, and the platform telemetry reader (deploy-worker).
 export * from './shared/log-events'
+// Not routed through the files handler's re-export like the app-files limits:
+// this one bounds the REPO store, a different allocation with a different
+// writer (platform/deploy-worker/src/vc/storage-quota.ts).
+export { REPO_STORE_LIMIT_BYTES } from './shared/app-files'

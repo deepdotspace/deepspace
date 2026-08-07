@@ -38,7 +38,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import {
-  APP_STORAGE_LIMIT_BYTES,
+  ACCOUNT_STORAGE_LIMIT_BYTES,
   DANGEROUS_MIME_TYPES,
   MAX_APP_FILE_BYTES,
   MAX_DEPLOY_ASSET_FILE_BYTES,
@@ -60,7 +60,7 @@ import {
 // limit is how the CLI and the workers drift. `formatBytes` rides along for
 // the same reason.
 export {
-  APP_STORAGE_LIMIT_BYTES,
+  ACCOUNT_STORAGE_LIMIT_BYTES,
   MAX_APP_FILE_BYTES,
   MAX_DEPLOY_ASSET_FILE_BYTES,
   MAX_UPLOAD_REQUEST_BYTES,
@@ -114,15 +114,26 @@ export interface ScopedR2Config {
  * applies.
  */
 export interface StorageAdmission {
-  /** The WHOLE allocation the quota governs — the app prefix, not the
-   *  (possibly deeper) scope prefix a request resolved to. */
+  /** This app's own prefix — the one the incoming write lands under. */
   prefix: string
   /**
    * Resolve the owner's limit in bytes. `null` means the lookup failed;
-   * writes then fail closed (503) rather than admitting unmetered storage,
-   * mirroring the repo store's `StorageBillingUnavailableError`.
+   * writes then fail closed (503) rather than admitting unmetered storage.
    */
   limitBytes: () => Promise<number | null>
+  /**
+   * The OTHER app prefixes this owner's storage spans, if any.
+   *
+   * The limit is per ACCOUNT, not per app: an owner's allocation is the total
+   * across everything they own, so admission has to see the siblings too. `[]`
+   * for an owner with one app, which is the common case and costs exactly what
+   * it did when this was a per-app limit.
+   *
+   * Returning `null` means the owner's apps could not be enumerated. Like a
+   * failed limit lookup that fails the write closed rather than admitting a
+   * write against an allocation we cannot measure.
+   */
+  siblingPrefixes?: () => Promise<string[] | null>
 }
 
 export interface ScopedR2Auth {
@@ -254,7 +265,7 @@ function isKeyWithinPrefix(key: string, prefix: string): boolean {
 
 /** Total stored bytes under a prefix. The bucket itself is the usage ledger —
  *  no counter to drift, at the cost of one list sweep per admission. */
-async function allocationUsage(bucket: R2Bucket, prefix: string): Promise<number> {
+async function prefixUsage(bucket: R2Bucket, prefix: string): Promise<number> {
   let total = 0
   let cursor: string | undefined
   do {
@@ -263,6 +274,24 @@ async function allocationUsage(bucket: R2Bucket, prefix: string): Promise<number
     cursor = page.truncated ? page.cursor : undefined
   } while (cursor !== undefined)
   return total
+}
+
+/**
+ * Stored bytes across the WHOLE account — this app plus every sibling.
+ *
+ * Prefixes are swept concurrently, so wall-clock is the slowest single app
+ * rather than the sum. Each app's own pagination is still sequential, which is
+ * what actually bounds this.
+ */
+async function allocationUsage(
+  bucket: R2Bucket,
+  storage: StorageAdmission,
+): Promise<number | null> {
+  const siblings = storage.siblingPrefixes ? await storage.siblingPrefixes() : []
+  if (siblings === null) return null
+  const prefixes = [storage.prefix, ...siblings.filter((p) => p !== storage.prefix)]
+  const totals = await Promise.all(prefixes.map((prefix) => prefixUsage(bucket, prefix)))
+  return totals.reduce((sum, bytes) => sum + bytes, 0)
 }
 
 /**
@@ -293,7 +322,14 @@ async function admitStorage(
       'storage_limit_unavailable',
     )
   }
-  const stored = await allocationUsage(bucket, storage.prefix)
+  const stored = await allocationUsage(bucket, storage)
+  if (stored === null) {
+    return fail(
+      503,
+      'The storage already used by this account could not be measured; nothing was uploaded. Retry shortly.',
+      'storage_limit_unavailable',
+    )
+  }
   const replaced = replacesKey === null ? 0 : ((await bucket.head(replacesKey))?.size ?? 0)
   const used = stored - replaced
   if (used + incomingBytes <= limit) return null
@@ -325,7 +361,11 @@ async function admitAssembledObject(
     console.error('[files:quota] limit unavailable at complete; keeping', key)
     return null
   }
-  const stored = await allocationUsage(bucket, storage.prefix)
+  const stored = await allocationUsage(bucket, storage)
+  if (stored === null) {
+    console.error('[files:quota] account usage unmeasurable at complete; keeping', key)
+    return null
+  }
   if (stored <= limit) return null
   await bucket.delete(key).catch(() => undefined)
   return fail(
@@ -987,9 +1027,10 @@ async function handleList(
   // computable; the limit is omitted when its lookup fails (reads stay up).
   let storage: { usedBytes: number; limitBytes?: number } | undefined
   if (auth.storage) {
-    storage = { usedBytes: await allocationUsage(bucket, auth.storage.prefix) }
+    const usedBytes = await allocationUsage(bucket, auth.storage)
+    if (usedBytes !== null) storage = { usedBytes }
     const limitBytes = await auth.storage.limitBytes()
-    if (limitBytes !== null) storage.limitBytes = limitBytes
+    if (storage && limitBytes !== null) storage.limitBytes = limitBytes
   }
   return Response.json(
     { files, truncated: listed.truncated, ...(storage ? { storage } : {}) },

@@ -106,36 +106,50 @@ export function planUploadParts(totalBytes: number, partSize: number): UploadPar
   return parts
 }
 
+const GIB = 1024 * 1024 * 1024
+
 /**
- * Per-tier storage schedule, in bytes. Product semantics, not a deployment
- * dial — the one table both storage allocations admit against:
+ * The customer-visible storage schedule, in bytes, PER ACCOUNT — the total an
+ * owner's uploaded files may occupy across every app they own, not a budget
+ * each app gets separately. This is the number the billing page advertises.
  *
- *   - the repo store (Git packs + retained bundles + deploy assets), admitted
- *     by the app's Repo DO (`platform/deploy-worker/src/vc/storage-quota.ts`)
- *   - the app-files allocation, admitted by the shared files handler
- *     (`server/utils/scoped-r2-files.ts`)
+ * Admitted by the shared files handler (`server/utils/scoped-r2-files.ts`),
+ * which sums the owner's apps rather than the one being written to.
  *
- * Each allocation gets the full amount independently; they are different
- * buckets with different writers (docs/platform/r2-storage.md). The
- * customer-visible "storage" number is the app-files allocation — the repo
- * store is platform bookkeeping that degrades (drops rollback retention)
- * rather than surfacing here.
+ * It deliberately does NOT govern the repo store — see
+ * `REPO_STORE_LIMIT_BYTES` below, and docs/platform/r2-storage.md.
  */
-export const APP_STORAGE_LIMIT_BYTES = {
+export const ACCOUNT_STORAGE_LIMIT_BYTES = {
   test: 0,
-  free: 128 * 1024 * 1024,
-  starter: 512 * 1024 * 1024,
-  premium: 2 * 1024 * 1024 * 1024,
-  admin: 10 * 1024 * 1024 * 1024,
+  free: 1 * GIB,
+  starter: 10 * GIB,
+  premium: 30 * GIB,
+  admin: 100 * GIB,
 } as const
 
-/** The storage limit for a billing tier; unknown or missing tiers get free. */
+/** The account storage limit for a billing tier; unknown or missing tiers get free. */
 export function storageLimitForTier(tier: string | null | undefined): number {
-  if (tier && Object.hasOwn(APP_STORAGE_LIMIT_BYTES, tier)) {
-    return APP_STORAGE_LIMIT_BYTES[tier as keyof typeof APP_STORAGE_LIMIT_BYTES]
+  if (tier && Object.hasOwn(ACCOUNT_STORAGE_LIMIT_BYTES, tier)) {
+    return ACCOUNT_STORAGE_LIMIT_BYTES[tier as keyof typeof ACCOUNT_STORAGE_LIMIT_BYTES]
   }
-  return APP_STORAGE_LIMIT_BYTES.free
+  return ACCOUNT_STORAGE_LIMIT_BYTES.free
 }
+
+/**
+ * The repo store's budget, per app, flat across every tier.
+ *
+ * Git packs, retained rollback bundles, and stored deploy assets are platform
+ * bookkeeping, not something a customer buys — so this is a working ceiling,
+ * not an entitlement, and it is deliberately small. An app that cannot fit its
+ * SOURCE plus a few rollback bundles in this has something in the wrong place:
+ * user uploads belong in the app-files allocation above, which is what the
+ * account schedule sizes.
+ *
+ * Being flat is the point. Tying it to the tier table meant every raise to the
+ * customer-facing number silently multiplied platform-side storage per app,
+ * and made a push depend on a billing lookup that could refuse it.
+ */
+export const REPO_STORE_LIMIT_BYTES = 256 * 1024 * 1024
 
 /** The one storage-quota refusal sentence. `usedBytes` is net of any object
  *  the upload replaces, so an upsert is charged only for its growth. */
