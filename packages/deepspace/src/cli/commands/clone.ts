@@ -22,6 +22,7 @@ import { resolveAppSelector, assertAppTargetResolvable } from '../lib/app-target
 import { currentBranch, resolveCommit } from '../lib/git/repository'
 import {
   deployBaseUrl,
+  ensureGitIdentity,
   ensureSpaceRemote,
   repoUrl,
   runGitRemote,
@@ -153,8 +154,11 @@ export default defineDeepspaceCommand({
       throw err
     }
     // The remote URL is already right — this installs the credential
-    // helper so bare git works in this clone from now on.
+    // helper so bare git works in this clone from now on, and gives the fresh
+    // checkout an identity so its first commit or merge isn't blocked on
+    // global git config the machine may not have.
     ensureSpaceRemote(dir, appId)
+    ensureGitIdentity(dir, token)
 
     const head = resolveCommit(dir, 'HEAD')
     const branch = currentBranch(dir)

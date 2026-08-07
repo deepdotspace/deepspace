@@ -1,4 +1,5 @@
 import * as p from '@clack/prompts'
+import { errorCode } from '../../lib/cli-errors'
 import { defineDeepspaceCommand, Refusal } from '../../lib/command'
 import type { CliAction } from '../../lib/output'
 import { runGit } from '../../lib/git/process'
@@ -6,6 +7,7 @@ import { isPlausibleBranchName, isWorkTreeClean, resolveCommit } from '../../lib
 import { committedSecretRefusal } from '../../lib/git/safety'
 import { pushToSpace } from '../../lib/vc-push'
 import {
+  ensureGitIdentity,
   ensureSpaceRemote,
   runGitRemote,
   SPACE_REMOTE,
@@ -29,10 +31,21 @@ import {
   inferWorkspaceId,
   pushWorkspaceRef,
   resolveTarget,
+  workspaceNotActiveRefusal,
 } from './runtime'
 
 export function hasLeftoverConflictMarkers(diffCheckOutput: string): boolean {
   return /leftover conflict marker/.test(diffCheckOutput)
+}
+
+/** The files `git diff --check` flagged, so the refusal can name them. */
+export function conflictMarkerFiles(diffCheckOutput: string): string[] {
+  const files = new Set<string>()
+  for (const line of diffCheckOutput.split('\n')) {
+    const match = /^(.+?):\d+: leftover conflict marker/.exec(line)
+    if (match) files.add(match[1])
+  }
+  return [...files]
 }
 
 export interface LandArgs {
@@ -110,7 +123,27 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
     })
     const recoveryAction: CliAction = { cwd: appDir, argv: resumeArgv }
     const resumeNext = humanCommand(resumeArgv)
-    assertSelectedWorkspaceCheckout(appDir, id, resumeArgv)
+    const dropAction: CliAction = {
+      cwd: appDir,
+      argv: ['deepspace', 'workspace', 'drop', id, '--app', appId],
+    }
+    // A FINISHED workspace outranks a checkout mismatch: sending someone to
+    // attach a landed workspace prescribes a command that cannot succeed.
+    // Guarded read — the mismatch is a purely LOCAL determination, and a
+    // network blip must surface it, not replace it with a lookup error.
+    try {
+      assertSelectedWorkspaceCheckout(appDir, id, resumeArgv)
+    } catch (mismatch) {
+      const current = await api
+        .getWorkspace(id)
+        .then((r) => r.view)
+        .catch(() => null)
+      if (current && current.workspace.status !== 'active') {
+        spinner?.stop('Workspace finished.')
+        throw workspaceNotActiveRefusal(id, current.workspace.status, dropAction)
+      }
+      throw mismatch
+    }
     const headBefore = resolveCommit(appDir, 'HEAD')
     if (!headBefore) {
       throw new Refusal('The workspace has no commits — nothing to land.', 'no_commits')
@@ -128,13 +161,10 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
     const [{ view }, refs] = await Promise.all([api.getWorkspace(id), api.getRefs()])
     if (view.workspace.status !== 'active') {
       spinner?.stop('Workspace finished.')
-      throw new Refusal(
-        `Workspace ${id} is already ${view.workspace.status}.`,
-        'workspace_not_active',
-        { extra: { status: view.workspace.status } },
-      )
+      throw workspaceNotActiveRefusal(id, view.workspace.status, dropAction)
     }
     ensureSpaceRemote(appDir, appId)
+    ensureGitIdentity(appDir, token)
 
     // A conflict retry keeps the pure workspace line immutable: HEAD's first parent is its tip.
     const isResumedMerge =
@@ -199,6 +229,7 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
           'merge_conflict',
           {
             actionRequired: true,
+            action: recoveryAction,
             extra: { workspaceId: id, conflict: true },
           },
         )
@@ -209,14 +240,17 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
       const markerCheck = runGit(appDir, ['diff', '--check', 'HEAD^', 'HEAD'], {
         allowFail: true,
       })
-      if (hasLeftoverConflictMarkers(markerCheck.stdout.toString('utf-8'))) {
+      const markerOutput = markerCheck.stdout.toString('utf-8')
+      if (hasLeftoverConflictMarkers(markerOutput)) {
+        const files = conflictMarkerFiles(markerOutput)
         spinner?.stop('Conflict markers in merge.')
         throw new Refusal(
-          `The merge commit still contains unresolved conflict markers (<<<<<<< / ======= / >>>>>>>). Fix the marked files, commit the correction, then re-run \`${resumeNext}\`. Nothing was pushed to ${intoBranch}.`,
+          `The merge commit still contains unresolved conflict markers (<<<<<<< / ======= / >>>>>>>)${files.length ? ` in ${files.join(', ')}` : ''}. Fix the marked files, commit the correction, then re-run \`${resumeNext}\`. Nothing was pushed to ${intoBranch}.`,
           'conflict_markers',
           {
             actionRequired: true,
-            extra: { workspaceId: id, conflict: true },
+            action: recoveryAction,
+            extra: { workspaceId: id, conflict: true, ...(files.length ? { files } : {}) },
           },
         )
       }
@@ -256,6 +290,7 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
           'validation_failed',
           {
             actionRequired: true,
+            action: recoveryAction,
             extra: { workspaceId: id, passed: false, outputTail },
           },
         )
@@ -269,6 +304,7 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
           'validation_mutated_tree',
           {
             actionRequired: true,
+            action: recoveryAction,
             extra: { workspaceId: id },
           },
         )
@@ -306,7 +342,51 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
       )
     }
 
-    await api.landWorkspace(id, { landedOid, intoRef })
+    // The push already moved `intoBranch`. If recording it fails — a network
+    // blip, a racing land — the CLI must say so: reporting a bare failure
+    // here would claim nothing happened while trunk carries the work.
+    try {
+      await api.landWorkspace(id, { landedOid, intoRef })
+    } catch (err) {
+      // A finished workspace is a terminal answer, not a recording hiccup: a
+      // concurrent land or drop won the race while we merged. Re-running
+      // could never record it, so no resume action. The status re-read below
+      // keeps this from swallowing an unrelated failure.
+      const code = errorCode(err)
+      if (code === 'workspace_not_active') {
+        const status = await api
+          .getWorkspace(id)
+          .then((r) => r.view.workspace.status)
+          .catch(() => null)
+        if (status && status !== 'active') {
+          spinner?.stop('Workspace finished.')
+          // Exit 2 with the drop action: trunk DID move (the contract keeps
+          // partial-success claims out of exit 1), and cleaning up the
+          // leftover checkout is the one deterministic step that remains —
+          // drop's trunk-tip proof accepts a branch the merge contains.
+          throw new Refusal(
+            `${intoBranch} took the land push (${landedOid.slice(0, 10)}), and the workspace is already ${status} — a concurrent land or drop finished first, so there is nothing left to record. This checkout is a leftover; \`deepspace workspace drop ${id}\` cleans it up.`,
+            'workspace_not_active',
+            {
+              actionRequired: true,
+              action: dropAction,
+              extra: { workspaceId: id, into: intoBranch, landedOid, pushed: true, status },
+            },
+          )
+        }
+      }
+      spinner?.stop('Landed; not recorded.')
+      const detail = err instanceof Error ? err.message : String(err)
+      throw new Refusal(
+        `The land push succeeded (${intoBranch} was at ${landedOid.slice(0, 10)}), but recording the land failed (${detail}). Resolve that, then re-run \`${resumeNext}\` — it re-checks the merge (a no-op when already pushed) and records it.`,
+        'land_unrecorded',
+        {
+          actionRequired: true,
+          action: recoveryAction,
+          extra: { workspaceId: id, into: intoBranch, landedOid, pushed: true },
+        },
+      )
+    }
     spinner?.stop(`Landed ${id} into ${intoBranch} at ${landedOid.slice(0, 10)}.`)
     const cleanup = keepWorktree
       ? null

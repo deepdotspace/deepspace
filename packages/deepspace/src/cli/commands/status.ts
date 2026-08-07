@@ -301,14 +301,27 @@ export default defineCommand({
             }
           }
 
-          // trunk position (only meaningful off a workspace branch)
+          // current-branch sync position (only meaningful off a workspace
+          // branch). Labeled "Trunk" ONLY when the branch IS the default
+          // branch — calling a feature branch's sync state "Trunk in_sync"
+          // misreads as "local trunk matches cloud trunk".
           const refs = refsResult.ok ? refsResult.value : undefined
           const trunkRef = refs?.refs.find((r) => `refs/heads/${branch}` === r.name)
+          const defaultBranch =
+            refs?.head && refs.head.startsWith('refs/heads/')
+              ? refs.head.slice('refs/heads/'.length)
+              : null
           if (!facts.workspaceId && branch) {
+            // With the default branch unknown (GitHub-owned source, refs
+            // unfetched, or a repo with no HEAD yet) `isTrunk` is null and
+            // the label stays 'Trunk' — asserted true/false only where it is
+            // actually derivable, so a machine caller can't read a guess.
+            const isTrunk = defaultBranch === null ? null : branch === defaultBranch
+            const label = isTrunk === false ? 'Branch sync' : 'Trunk'
             if (githubSource) {
-              lines.push(['Trunk', `${branch} is owned through normal Git/GitHub`])
-              json.trunk = { state: 'external', provider: 'github', branch }
-            } else if (!refsResult.ok) reportRemoteFailure('Trunk', 'trunk', refsResult.error)
+              lines.push([label, `${branch} is owned through normal Git/GitHub`])
+              json.trunk = { state: 'external', provider: 'github', branch, isTrunk }
+            } else if (!refsResult.ok) reportRemoteFailure(label, 'trunk', refsResult.error)
             else {
               const remoteOid = trunkRef?.oid ?? null
               const localOid = resolveCommit(appDir, `refs/heads/${branch}`)
@@ -334,14 +347,14 @@ export default defineCommand({
                           ? 'diverged'
                           : 'differs'
               lines.push([
-                'Trunk',
+                label,
                 remoteOid === null
                   ? `cloud repo has no ${branch} yet`
                   : facts.trunkState === 'in_sync'
                     ? `${branch} in sync with the cloud repo (${remoteOid.slice(0, 10)})`
                     : `${branch} ${facts.trunkState.replace('_', ' ')} relative to the cloud repo (local ${localOid?.slice(0, 10) ?? 'none'}, cloud ${remoteOid.slice(0, 10)})`,
               ])
-              json.trunk = { state: facts.trunkState, localOid, remoteOid }
+              json.trunk = { state: facts.trunkState, localOid, remoteOid, branch, isTrunk }
             }
           }
 

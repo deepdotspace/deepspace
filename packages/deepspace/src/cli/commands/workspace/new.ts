@@ -5,7 +5,7 @@ import { mintUlid } from '../../lib/app-identity'
 import { defineDeepspaceCommand, Refusal } from '../../lib/command'
 import { resolveCommit } from '../../lib/git/repository'
 import { workspaceBranchName } from '../../lib/workspace-id'
-import { ensureSpaceRemote } from '../../lib/vc-remote'
+import { ensureGitIdentity, ensureSpaceRemote } from '../../lib/vc-remote'
 import { mintIdempotencyKey } from '../../lib/repo-api'
 import { createSpinner } from '../../lib/spinner'
 import { detectPackageManager } from '../../lib/package-manager'
@@ -63,6 +63,9 @@ export const newWorkspaceCommand = defineDeepspaceCommand({
     )
     spinner?.message('Creating workspace…')
     ensureSpaceRemote(appDir, appId)
+    // The new worktree exists to be committed in ("Then: commit as usual") —
+    // make sure it can, on a machine with no git identity configured.
+    ensureGitIdentity(appDir, token)
 
     // Prefer the requested revision, then cloud trunk, then local HEAD for an empty cloud repo.
     let baseOid: string | null = null

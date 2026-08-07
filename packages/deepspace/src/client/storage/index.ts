@@ -25,7 +25,6 @@ export { usePresence } from './hooks/usePresence'
 export { useYjsRoom, type UseYjsRoomResult } from './hooks/useYjsRoom'
 
 // Room-specific hooks
-export { useGameRoom, type UseGameRoomResult, type GamePlayer } from './hooks/useGameRoom'
 export { useCanvas, type UseCanvasResult, type CanvasShapeClient, type ViewportClient } from './hooks/useCanvas'
 export { useCronMonitor, type UseCronMonitorResult, type CronTaskState, type CronHistoryEntry } from './hooks/useCronMonitor'
 export { useJobs, type UseJobsResult, type JobView, type JobStatusView } from './hooks/useJobs'

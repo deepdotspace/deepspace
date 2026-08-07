@@ -1,15 +1,16 @@
 import * as p from '@clack/prompts'
-import { existsSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import { ensureToken } from '../../auth'
 import { findAppDir } from '../../lib/app-context'
 import { parseAppArg, resolveAppTarget } from '../../lib/app-target'
 import { defineDeepspaceCommand, Refusal } from '../../lib/command'
 import { runGit } from '../../lib/git/process'
-import { resolveCommit, switchToNewBranch } from '../../lib/git/repository'
-import { isWorkspaceId, workspaceBranchName } from '../../lib/workspace-id'
+import { listWorktrees, resolveCommit, switchToNewBranch } from '../../lib/git/repository'
+import { isWorkspaceId, resolveWorkspaceWorktree, workspaceBranchName } from '../../lib/workspace-id'
 import {
   deployBaseUrl,
+  ensureGitIdentity,
   ensureSpaceRemote,
   runGitRemote,
   SPACE_REMOTE,
@@ -20,8 +21,29 @@ import { createSpinner } from '../../lib/spinner'
 import { errorCode } from '../../lib/cli-errors'
 import type { CliAction } from '../../lib/output'
 import { detectPackageManager } from '../../lib/package-manager'
-import { appDirInWorktree, defaultWorkspaceRoot, materializeWorkspaceWorktree } from './local'
+import {
+  appDirInWorktree,
+  defaultWorkspaceRoot,
+  materializeWorkspaceWorktree,
+  rematerializeWorkspaceWorktree,
+} from './local'
+import { workspaceSyncRelation } from './analysis'
 import { APP_ARG, resolveTarget } from './runtime'
+
+/** Same directory, symlinks resolved — git canonicalizes worktree paths on
+ *  every platform (macOS `/tmp/x` lists as `/private/tmp/x`; a Linux
+ *  container's bind-mounted `/workspace` likewise resolves), so a literal
+ *  compare would refuse an attach that names the worktree it already has. */
+function samePath(a: string, b: string): boolean {
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p)
+    } catch {
+      return resolve(p)
+    }
+  }
+  return real(a) === real(b)
+}
 
 /** Explain why a finished workspace cannot be attached. */
 export function finishedWorkspaceMessage(id: string, view: RemoteWorkspaceView): string {
@@ -108,6 +130,9 @@ export const attachWorkspaceCommand = defineDeepspaceCommand({
         })
       }
       ensureSpaceRemote(appDir, appId)
+      // The checkout (and every worktree sharing its .git) is about to
+      // commit on this line — make sure it can.
+      ensureGitIdentity(appDir, token)
       const localWorkspaceRef = spacePrivateRef(`workspaces/${id}`)
       runGitRemote(appDir, token, [
         'fetch',
@@ -130,9 +155,107 @@ export const attachWorkspaceCommand = defineDeepspaceCommand({
           : resolve(appDir, requestedDir)
         : defaultWorkspaceRoot(appDir, id)
       const dir = appDirInWorktree(appDir, worktreeRoot)
-      if (resolveCommit(appDir, `refs/heads/${branch}`)) {
+      const localTip = resolveCommit(appDir, `refs/heads/${branch}`)
+      if (localTip) {
+        // Attach is a "get me this workspace's checkout" verb — when the
+        // checkout already exists, pointing at it IS success. Refusing here
+        // dead-ended every stale `workspace attach` action another verb had
+        // emitted before the worktree existed. `git worktree list` keeps
+        // listing an rm -rf'd worktree (prunable) — verify the directory is
+        // real before claiming it, and prune so re-materializing can work.
+        let existing = resolveWorkspaceWorktree(listWorktrees(appDir), id)
+        if (existing && !existsSync(existing)) {
+          runGit(appDir, ['worktree', 'prune'], { allowFail: true })
+          existing = null
+        }
+        // The checkout can trail or diverge from the published tip, and the
+        // relation decides the one recovery that actually works from there:
+        // `sync` publishes when ahead, but deterministically refuses a
+        // behind/diverged line — that one needs the pull first.
+        const relation = workspaceSyncRelation(appDir, localTip, tip)
+        const inSync = relation === 'in_sync'
+        const behindOrDiverged = relation === 'behind' || relation === 'diverged'
+        const syncAdvice = behindOrDiverged
+          ? `integrate the published tip first (\`git pull --no-rebase ${SPACE_REMOTE} ${view.workspace.ref}\`)`
+          : `run \`deepspace workspace sync\` from it`
+        const syncAction = (cwd: string): CliAction =>
+          behindOrDiverged
+            ? { cwd, argv: ['git', 'pull', '--no-rebase', SPACE_REMOTE, view.workspace.ref] }
+            : { cwd, argv: ['deepspace', 'workspace', 'sync'] }
+        if (existing && (!requestedDir || samePath(existing, worktreeRoot))) {
+          const existingDir = appDirInWorktree(appDir, existing)
+          // The truthful tip is the WORKTREE's, not the server's: this verb
+          // moved nothing, and reporting a remote tip that is not checked
+          // out anywhere here would send an agent to judge the wrong tree.
+          spinner?.stop(`Already attached: ${id}.`)
+          if (!args.json) {
+            p.log.info(`Task: ${view.workspace.task}`)
+            p.log.info(`Work in: cd ${existingDir}`)
+            if (!inSync) {
+              p.log.warn(
+                `The checkout is at ${localTip.slice(0, 10)} but the workspace's published tip is ${tip.slice(0, 10)} — ${syncAdvice}.`,
+              )
+            }
+          }
+          return {
+            data: {
+              workspaceId: id,
+              mode: 'worktree',
+              dir: existingDir,
+              worktreeRoot: existing,
+              branch,
+              tipOid: localTip,
+              remoteTip: tip,
+              syncRelation: relation,
+              task: view.workspace.task,
+              alreadyAttached: true,
+            },
+            ...(inSync ? {} : { action: syncAction(existingDir) }),
+          }
+        }
+        if (!existing) {
+          // Branch present, checkout gone — what `git worktree remove` (or a
+          // failed cleanup) leaves behind. The branch is this workspace's own
+          // line, so re-materialize it; the fast-forward publish rule already
+          // protects any unpublished commits it carries.
+          const failure = rematerializeWorkspaceWorktree(appDir, worktreeRoot, branch, id)
+          if (failure) {
+            spinner?.stop('Branch exists.')
+            throw new Refusal(
+              `Branch ${branch} exists locally with no worktree, and re-materializing it failed: ${failure}. Inspect it (\`git log ${branch}\`) and check it out yourself.`,
+              'branch_exists',
+            )
+          }
+          spinner?.stop(`Re-attached ${id}.`)
+          if (!args.json) {
+            p.log.info(`Task: ${view.workspace.task}`)
+            p.log.info(`Work in: cd ${dir}`)
+            if (!inSync) {
+              p.log.warn(
+                `The re-materialized checkout is at ${localTip.slice(0, 10)} but the workspace's published tip is ${tip.slice(0, 10)} — after installing, ${syncAdvice}.`,
+              )
+            }
+          }
+          const action: CliAction = { cwd: dir, argv: [detectPackageManager(dir), 'install'] }
+          return {
+            data: {
+              workspaceId: id,
+              mode: 'worktree',
+              dir,
+              worktreeRoot,
+              branch,
+              tipOid: localTip,
+              remoteTip: tip,
+              syncRelation: relation,
+              task: view.workspace.task,
+              rematerialized: true,
+            },
+            action,
+          }
+        }
+        spinner?.stop('Branch exists.')
         throw new Refusal(
-          `Branch ${branch} already exists locally (this workspace has a worktree here). Find it with \`git worktree list\` and continue there.`,
+          `Workspace ${id} is already checked out at ${existing} — continue there (or drop that worktree before attaching it elsewhere).`,
           'branch_exists',
         )
       }
@@ -151,6 +274,10 @@ export const attachWorkspaceCommand = defineDeepspaceCommand({
           worktreeRoot,
           branch,
           tipOid: tip,
+          remoteTip: tip,
+          // Freshly materialized at the published tip — trivially in sync;
+          // every attach outcome carries the same shape.
+          syncRelation: 'in_sync',
           task: view.workspace.task,
         },
         action,
@@ -191,6 +318,9 @@ export const attachWorkspaceCommand = defineDeepspaceCommand({
     try {
       runGit(process.cwd(), ['init', '--quiet', dir])
       ensureSpaceRemote(dir, appId)
+      // A brand-new repo the agent is about to commit in: give it an identity
+      // when the machine has none configured.
+      ensureGitIdentity(dir, token)
       const localWorkspaceRef = spacePrivateRef(`workspaces/${id}`)
       runGitRemote(dir, token, [
         'fetch',
@@ -227,6 +357,8 @@ export const attachWorkspaceCommand = defineDeepspaceCommand({
         dir,
         branch,
         tipOid: tip,
+        remoteTip: tip,
+        syncRelation: 'in_sync',
         task: view.workspace.task,
       },
       action,

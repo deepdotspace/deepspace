@@ -1,6 +1,6 @@
 import * as p from '@clack/prompts'
 import { readFileSync } from 'node:fs'
-import { printAction, withSlug, type CliAction } from '../../lib/output'
+import { executableAction, printAction, withSlug, type CliAction } from '../../lib/output'
 import type { Spinner } from '../../lib/spinner'
 import type { DeployAsset, DeployBundle } from './build'
 import type { DeployOutput } from './output'
@@ -57,6 +57,7 @@ export async function deployBuiltBundle(options: {
   appName: string
   token: string
   rename: boolean
+  claimReleased: boolean
   ignoreStale: boolean
   bundle: DeployBundle
   secrets: DeploySecretsPayload
@@ -70,6 +71,7 @@ export async function deployBuiltBundle(options: {
     appId,
     appName,
     token,
+    claimReleased,
     ignoreStale,
     bundle,
     secrets,
@@ -95,8 +97,11 @@ export async function deployBuiltBundle(options: {
     stopLabel: string | null = 'Deploy failed',
     code?: string,
     actionRequired = false,
-    action?: CliAction,
+    rawAction?: CliAction,
   ): Promise<never> => {
+    // Deploy's post-upload exit door pins like die() does — a bare
+    // `deepspace` argv must never leave here.
+    const action = rawAction ? executableAction(rawAction) : undefined
     if (stopLabel !== null) spinner.stop(stopLabel)
     p.cancel(code ? withSlug(message, code) : message)
     if (action) printAction(action)
@@ -143,6 +148,7 @@ export async function deployBuiltBundle(options: {
     }
     form.append('name', appName)
     if (confirmRename) form.append('confirmRename', 'true')
+    if (claimReleased) form.append('claimReleased', 'true')
     if (shouldSendLineage(repository.commitOid, repository.recoverable)) {
       form.append('commitOid', repository.commitOid as string)
     }

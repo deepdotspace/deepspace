@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url'
 import { wrapCommandErrors, errorCode } from './lib/cli-errors'
 import { forTerminal, humanCommand, stripAnsi } from './lib/cli-format'
 import { stopActiveSpinner } from './lib/spinner'
-import { printAction } from './lib/output'
+import { executableAction, printAction } from './lib/output'
 import {
   findUnknownCommand,
   type CommandTreeNode,
@@ -252,7 +252,9 @@ function assertKnownCommandPath(argv: string[]): void {
     `${unknownCommandMessage(unknown)}\n` +
       `Run \`${unknown.helpPath.join(' ')} --help\` for the command list.`,
   )
-  if (unknown.executable) printAction({ cwd: process.cwd(), argv: unknown.suggestion })
+  if (unknown.executable) {
+    printAction(executableAction({ cwd: process.cwd(), argv: unknown.suggestion }))
+  }
   process.exit(1)
 }
 
@@ -278,7 +280,7 @@ if (rawArgs.includes('--json') && !wantsHelp) {
         code: 'unknown_command',
         error: unknownCommandMessage(unknown),
         ...(unknown.executable
-          ? { action: { cwd: process.cwd(), argv: unknown.suggestion } }
+          ? { action: executableAction({ cwd: process.cwd(), argv: unknown.suggestion }) }
           : {}),
       }),
     )

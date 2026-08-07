@@ -2,7 +2,7 @@ import * as p from '@clack/prompts'
 import { defineDeepspaceCommand } from '../../lib/command'
 import { listWorktrees, resolveCommit, revListCount } from '../../lib/git/repository'
 import { statusFiles } from '../../lib/git/safety'
-import { ensureSpaceRemote } from '../../lib/vc-remote'
+import { ensureSpaceRemote, SPACE_REMOTE } from '../../lib/vc-remote'
 import { createSpinner } from '../../lib/spinner'
 import { resolveWorkspaceWorktree } from '../../lib/workspace-id'
 import {
@@ -13,6 +13,7 @@ import {
   peerWorkspaceRef,
   printOverlaps,
   trunkOverlapPaths,
+  workspaceSyncRelation,
 } from './analysis'
 import { APP_ARG, assertExplicitWorkspaceId, inferWorkspaceId, resolveTarget } from './runtime'
 
@@ -56,6 +57,16 @@ export const workspaceStatusCommand = defineDeepspaceCommand({
     const unsynced = headOid !== null && view.tipOid !== headOid
     const dirty = workspaceDir ? statusFiles(workspaceDir) : []
 
+    // One relation drives the human line AND `--json syncRelation` — deriving
+    // them separately is how the two surfaces drift apart. A finished
+    // workspace answers `unknown`: its checkout is a leftover, not a line to
+    // reconcile.
+    const relation = !unsynced
+      ? ('in_sync' as const)
+      : workspace.status !== 'active' || !workspaceDir
+        ? ('unknown' as const)
+        : workspaceSyncRelation(workspaceDir, headOid, view.tipOid)
+
     const lines = await loadWorkspaceLines(appDir, token, api, trunkOid)
     const myTip = headOid ?? resolveCommit(appDir, peerWorkspaceRef(id)) ?? view.tipOid
     const line = myTip ? lineChangedPaths(appDir, workspace.baseOid, myTip, trunkOid) : null
@@ -78,6 +89,10 @@ export const workspaceStatusCommand = defineDeepspaceCommand({
         ? {
             headOid,
             unsynced,
+            // The human line distinguishes behind/diverged/ahead; the machine
+            // mirror must too, or a JSON caller can't tell a fast-forward from
+            // a real divergence.
+            syncRelation: relation,
             uncommitted: dirty,
             trunkOverlap,
           }
@@ -94,10 +109,33 @@ export const workspaceStatusCommand = defineDeepspaceCommand({
           `Not checked out in this clone — showing the published state (local HEAD/uncommitted unavailable). Attach it with \`deepspace workspace attach ${id} <dir>\`.`,
         )
       }
-      if (unsynced)
-        p.log.warn(
-          `Local HEAD ${headOid?.slice(0, 10)} is not synced (server has ${view.tipOid?.slice(0, 10) ?? 'nothing'}) — run \`deepspace workspace sync\`.`,
-        )
+      if (unsynced) {
+        // State the RIGHT fact per state: `sync` deterministically refuses on
+        // a finished workspace and on a diverged line, so prescribing it
+        // unconditionally sends agents into a refusal loop.
+        if (workspace.status === 'landed') {
+          p.log.info(
+            `Already landed${workspace.landedOid ? ` at ${workspace.landedOid.slice(0, 10)}` : ''} — this checkout is a leftover; \`deepspace workspace drop ${id}\` cleans it up.`,
+          )
+        } else if (workspace.status === 'dropped') {
+          p.log.info(
+            `Already dropped — this checkout is a leftover; \`deepspace workspace drop ${id}\` cleans it up.`,
+          )
+        } else if (relation === 'behind') {
+          p.log.warn(
+            `Local HEAD ${headOid?.slice(0, 10)} is BEHIND the published tip ${view.tipOid?.slice(0, 10)} (another checkout synced ahead) — fast-forward first (\`git pull --no-rebase ${SPACE_REMOTE} ${workspace.ref}\`).`,
+          )
+        } else if (relation === 'diverged') {
+          p.log.warn(
+            `Local HEAD ${headOid?.slice(0, 10)} has DIVERGED from the published tip ${view.tipOid?.slice(0, 10)} — integrate it first (\`git pull --no-rebase ${SPACE_REMOTE} ${workspace.ref}\`), then \`deepspace workspace sync\`.`,
+          )
+        } else {
+          // 'ahead' and 'unknown': sync is the right (or only honest) advice.
+          p.log.warn(
+            `Local HEAD ${headOid?.slice(0, 10)} is not synced (server has ${view.tipOid?.slice(0, 10) ?? 'nothing'}) — run \`deepspace workspace sync\`.`,
+          )
+        }
+      }
       if (dirty.length > 0) p.log.warn(`${dirty.length} uncommitted file(s) in the worktree.`)
       if (trunkOverlap.length > 0) {
         p.log.warn(

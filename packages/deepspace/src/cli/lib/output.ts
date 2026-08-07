@@ -14,7 +14,8 @@
  */
 
 import * as p from '@clack/prompts'
-import { isAbsolute } from 'node:path'
+import { readFileSync, realpathSync } from 'node:fs'
+import { dirname, isAbsolute, resolve } from 'node:path'
 import { shQuote } from './cli-format'
 
 /** One executable recovery step. Commands decide which action is appropriate;
@@ -24,11 +25,65 @@ export interface CliAction {
   argv: string[]
 }
 
+/**
+ * An action naming `deepspace` is only runnable where a `deepspace` binary is
+ * on PATH — which a linked worktree (a checkout with no `node_modules` of its
+ * own), a bare clone directory, or any agent that invokes us through
+ * `npx deepspace` is not. When we can identify the CLI entry we are running
+ * from, pin it together with its interpreter — the same reasoning as the git
+ * credential helper in vc-remote.ts, though that one deliberately pins the
+ * RAW argv[1] (its literal path feeds the transient-entry heuristic) while
+ * actions resolve symlinks and verify package ownership. Anywhere the entry
+ * is unidentifiable (embedded, tests), the plain name is left alone.
+ */
+export function resolveActionArgv(argv: string[]): string[] {
+  if (argv[0] !== 'deepspace') return argv
+  const entry = cliEntryPath()
+  return entry ? [process.execPath, entry, ...argv.slice(1)] : argv
+}
+
+/**
+ * The real path of the CLI entry we are executing, or null when it cannot be
+ * identified (embedded use, tests, a Windows `.cmd` shim as argv[1] — all
+ * fall back to the bare name, which is the pre-pinning behavior, not an
+ * error). `npx deepspace` and `node_modules/.bin` on POSIX hand us a symlink
+ * to the package's `dist/cli.js` — resolve it, or a pinned action would name
+ * a link that only exists in one checkout.
+ */
+function cliEntryPath(): string | null {
+  const entry = process.argv[1]
+  if (!entry || !isAbsolute(entry)) return null
+  let real: string
+  try {
+    real = realpathSync(entry)
+  } catch {
+    return null
+  }
+  if (!/(^|[\\/])cli\.[cm]?js$/.test(real)) return null
+  // `cli.js` is a common entry basename — pin only when it is OUR package's,
+  // or an embedding host would be handed deepspace's arguments.
+  try {
+    const pkg = JSON.parse(readFileSync(resolve(dirname(real), '..', 'package.json'), 'utf-8')) as {
+      name?: string
+    }
+    return pkg.name === 'deepspace' ? real : null
+  } catch {
+    return null
+  }
+}
+
+/** The single door every emitted action goes through: pinned, then validated.
+ *  Idempotent — a pinned argv starts with the interpreter, not `deepspace`,
+ *  so re-applying it is a no-op. */
+export function executableAction(action: CliAction): CliAction {
+  const pinned = { ...action, argv: resolveActionArgv(action.argv) }
+  assertExecutableAction(pinned)
+  return pinned
+}
+
 /** Construct an action without turning argv back into a shell program. */
 export function cliAction(...argv: string[]): CliAction {
-  const action = { cwd: process.cwd(), argv }
-  assertExecutableAction(action)
-  return action
+  return executableAction({ cwd: process.cwd(), argv })
 }
 
 /** Reject action-shaped hints that an agent cannot execute verbatim. */
@@ -51,13 +106,22 @@ export function withSlug(msg: string, code: string): string {
 }
 
 function displayArg(arg: string): string {
-  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(arg) ? arg : shQuote(arg)
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(arg)) return arg
+  // cmd.exe and PowerShell treat single quotes as literal characters, so the
+  // POSIX quoting would render Windows paths un-pasteable; double quotes work
+  // in both shells.
+  if (process.platform === 'win32') return `"${arg.replaceAll('"', '""')}"`
+  return shQuote(arg)
 }
 
 /** Render the same structured action exposed to agents as a copy-pasteable
  *  human command. The shell string is presentation only, never machine data. */
 export function printAction(action: CliAction): void {
   assertExecutableAction(action)
+  // Rule 2: this line renders the SAME value `argv` carries. A pinned
+  // self-invocation therefore prints as the interpreter + entry it will
+  // actually run — `npx deepspace …` would read nicer but is a different
+  // command (a registry lookup that can resolve another version).
   const command = action.argv.map(displayArg).join(' ')
   const prefix = action.cwd === process.cwd() ? '' : `cd ${displayArg(action.cwd)} && `
   p.log.message(`Next: ${prefix}${command}`)

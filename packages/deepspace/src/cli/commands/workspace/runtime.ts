@@ -14,6 +14,7 @@ import {
 import { pushFailureMessage, pushToSpace } from '../../lib/vc-push'
 import { deployBaseUrl, SPACE_REMOTE } from '../../lib/vc-remote'
 import { repoApi, type RepoApi } from '../../lib/repo-api'
+import { appDirInWorktree } from './local'
 
 export const APP_ARG = {
   type: 'string' as const,
@@ -61,7 +62,7 @@ export function inferWorkspaceId(appDir: string, explicit: string | undefined): 
   const id = explicit?.trim() || workspaceIdFromBranch(currentBranch(appDir))
   if (!id) {
     throw new Refusal(
-      'Not inside a workspace worktree (the branch is not ws/<id>). Pass the workspace id, or create one with `deepspace workspace new -t "…"`.',
+      'Not inside a workspace worktree (the branch is not ws/<id>). Select one with `-w ws_…` (for `workspace drop`, pass the id as the argument), or create one with `deepspace workspace new -t "…"`.',
       'not_in_workspace',
     )
   }
@@ -69,6 +70,26 @@ export function inferWorkspaceId(appDir: string, explicit: string | undefined): 
     throw new Refusal(`Invalid workspace id: ${id} (expected ws_<ULID>).`, 'invalid_workspace')
   }
   return id
+}
+
+/** A finished workspace refuses a mutating verb the same way everywhere.
+ *  When the caller stands in (or near) the leftover checkout, `dropAction`
+ *  points at the one verb that resolves this state — `workspace drop` cleans
+ *  the leftover up. Exit stays 1: nothing was mutated, the action is advice. */
+export function workspaceNotActiveRefusal(
+  id: string,
+  status: string,
+  dropAction?: CliAction,
+): Refusal {
+  return new Refusal(
+    `Workspace ${id} is already ${status}.` +
+      (dropAction ? ' This checkout is a leftover — `deepspace workspace drop` cleans it up.' : ''),
+    'workspace_not_active',
+    {
+      ...(dropAction ? { action: dropAction } : {}),
+      extra: { workspaceId: id, status },
+    },
+  )
 }
 
 /** Mutating verbs must run from the selected workspace's own checkout. */
@@ -80,18 +101,22 @@ export function assertSelectedWorkspaceCheckout(
   const branch = currentBranch(appDir)
   if (isSelectedWorkspaceCheckout(branch, id)) return
   const worktree = resolveWorkspaceWorktree(listWorktrees(appDir), id)
-  const action: CliAction = worktree
-    ? { cwd: worktree, argv: resumeArgv }
+  // The app dir INSIDE the worktree, not its root: commands resolve the app
+  // by walking UP from cwd, so an app in a subdirectory is invisible from
+  // the worktree root.
+  const worktreeAppDir = worktree ? appDirInWorktree(appDir, worktree) : null
+  const action: CliAction = worktreeAppDir
+    ? { cwd: worktreeAppDir, argv: resumeArgv }
     : { cwd: appDir, argv: ['deepspace', 'workspace', 'attach', id] }
   throw new Refusal(
     `Workspace ${id} is not checked out here (current branch: ${branch ?? 'detached'}). ` +
-      (worktree
-        ? `Run this command from its checkout at ${worktree}.`
+      (worktreeAppDir
+        ? `Run this command from its checkout at ${worktreeAppDir}.`
         : 'Attach it in this clone before mutating its published line.'),
     'workspace_checkout_mismatch',
     {
       action,
-      extra: worktree ? { workspaceDir: worktree } : undefined,
+      extra: worktreeAppDir ? { workspaceDir: worktreeAppDir } : undefined,
     },
   )
 }
@@ -124,15 +149,19 @@ export function pushWorkspaceRef(
   const push = pushToSpace(appDir, token, `${headOid}:${ref}`)
   if (push.status === 'committed' || push.status === 'up_to_date') return
   if (push.status === 'ref_conflict' || push.status === 'non_fast_forward') {
+    // `--no-rebase` matters: a fresh clone has no pull.rebase/pull.ff config,
+    // and a divergent pull without it dies asking how to reconcile — the one
+    // executable action must run as-is.
     throw new Refusal(
       `Another checkout advanced this workspace's line, so publishing yours is not a ` +
         `fast-forward — the push was refused rather than drop that work. Integrate its tip ` +
-        `(\`git pull ${SPACE_REMOTE} ${ref}\`, or re-attach the workspace in a fresh dir), ` +
-        `resolve any conflicts, then re-run the command. (Amended or rebased your own ` +
-        `commits? Same refusal — merge your old tip back in.)`,
+        `(\`git pull --no-rebase ${SPACE_REMOTE} ${ref}\`, or re-attach the workspace in a ` +
+        `fresh dir), resolve any conflicts, then re-run the command. (Amended or rebased ` +
+        `your own commits? Same refusal — merge your old tip back in.)`,
       push.status,
       {
-        action: { cwd: appDir, argv: ['git', 'pull', SPACE_REMOTE, ref] },
+        actionRequired: true,
+        action: { cwd: appDir, argv: ['git', 'pull', '--no-rebase', SPACE_REMOTE, ref] },
       },
     )
   }

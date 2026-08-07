@@ -1,5 +1,6 @@
 /**
- * Remote URL, bearer auth, and credential-helper setup for the `space` remote.
+ * Remote URL, bearer auth, credential-helper setup, and session-derived Git
+ * identity for the platform source remotes — the auth ↔ git-config bridge.
  * The transfer itself is real Git; push protocol parsing lives in `vc-push.ts`.
  */
 
@@ -7,6 +8,7 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { DEEPSPACE_ENV, PLATFORM_URLS, type DeepSpaceEnvironment } from '../env'
+import { decodeJwtPayload } from '../jwt'
 import { shQuote } from './cli-format'
 import { runGit } from './git/process'
 
@@ -202,6 +204,43 @@ export function ensureSpaceRemote(cwd: string, appId: string, remote = SPACE_REM
   }
   installCredentialHelper(cwd, url)
   return url
+}
+
+/**
+ * Fill in whichever half of the checkout's Git identity is missing, from the
+ * caller's session token. A checkout on a machine with no global identity —
+ * or a half-configured one (a global user.name and no email dies on the same
+ * "unable to auto-detect email address") — cannot commit or merge, including
+ * the `git pull` a divergence refusal hands back as its recovery.
+ *
+ * Deliberately NOT called from `ensureSpaceRemote`: read-only verbs must not
+ * write to a user's `.git/config`. Call it from the verbs that go on to
+ * commit or hand back a committing recovery (clone, attach, sync, land).
+ * `--local` scope — shared by every linked worktree of the checkout, which is
+ * what land-from-a-worktree needs — and per key, so anything the user set is
+ * never overwritten.
+ */
+export function ensureGitIdentity(cwd: string, token: string): void {
+  try {
+    const configured = (key: string): boolean =>
+      runGit(cwd, ['config', '--get', key], { allowFail: true }).stdout.toString('utf-8').trim() !==
+      ''
+    const missingName = !configured('user.name')
+    const missingEmail = !configured('user.email')
+    if (!missingName && !missingEmail) return
+    const payload = decodeJwtPayload<{ email?: string; name?: string }>(token)
+    if (!payload.email) return
+    if (missingName) {
+      runGit(cwd, ['config', '--local', 'user.name', payload.name || payload.email], {
+        allowFail: true,
+      })
+    }
+    if (missingEmail) {
+      runGit(cwd, ['config', '--local', 'user.email', payload.email], { allowFail: true })
+    }
+  } catch {
+    // Undecodable token, unreadable config, or a non-repo cwd — leave Git as it is.
+  }
 }
 
 /** Extract the app id from a DeepSpace repository URL. */

@@ -376,10 +376,8 @@ export async function deleteAppFile(
 ): Promise<{ existed: boolean }> {
   const path = filesPath(appId, `/${encodeKeyPath(key)}`)
   const res = await request(baseUrl, token, path, { method: 'DELETE' })
-  // An older worker answers without the field; it deleted whatever was there
-  // and cannot tell us which, so don't invent a refusal.
-  const body = await readJson<{ existed?: boolean }>(res, path)
-  return { existed: body.existed !== false }
+  const body = await readJson<{ existed: boolean }>(res, path)
+  return { existed: body.existed }
 }
 
 export interface DownloadResult {

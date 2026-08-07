@@ -24,6 +24,25 @@ export function peerWorkspaceRef(workspaceId: string): string {
   return `${PEER_REF_PREFIX}${workspaceId}`
 }
 
+/** How a checkout's tip stands against the workspace's published tip — one
+ *  word, shared by `workspace status` (human + `--json syncRelation`) and
+ *  `attach`, so every surface prescribes the recovery this relation actually
+ *  admits (`sync` when ahead; `git pull` first when behind or diverged).
+ *  `unknown` when either side is missing or the published tip is not a local
+ *  object — fail toward the generic advice, never a wrong specific one. */
+export function workspaceSyncRelation(
+  dir: string,
+  localOid: string | null,
+  publishedOid: string | null,
+): 'in_sync' | 'ahead' | 'behind' | 'diverged' | 'unknown' {
+  if (localOid !== null && localOid === publishedOid) return 'in_sync'
+  if (localOid === null || publishedOid === null) return 'unknown'
+  if (resolveCommit(dir, publishedOid) === null) return 'unknown'
+  if (isAncestor(dir, localOid, publishedOid)) return 'behind'
+  if (isAncestor(dir, publishedOid, localOid)) return 'ahead'
+  return 'diverged'
+}
+
 export interface WorkspaceOverlap {
   workspaceId: string
   task: string

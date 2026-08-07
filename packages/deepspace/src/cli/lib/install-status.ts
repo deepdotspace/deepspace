@@ -3,15 +3,20 @@ import { Refusal } from './command'
  * Verifies the app's dependencies are installed before running a command that
  * needs them (dev, test, deploy, add).
  *
- * Current `create-deepspace` completes installation before returning and
- * before its initial commit. Sentinels under `<appDir>/.deepspace/` retain
- * compatibility with scaffolds created by the older detached installer:
+ * `create-deepspace` completes installation before returning and before its
+ * initial commit. Sentinels under `<appDir>/.deepspace/` are how a run that
+ * did NOT complete is told apart from one still in progress:
  *
  *   install.started — created before the worker is spawned
- *   install.pid     — legacy worker pid (liveness check for an older scaffold)
+ *   install.pid     — the worker's pid; the liveness check that separates
+ *                     "still installing" from "died without finishing"
  *   install.done    — written on successful completion
  *   install.err     — written on failure (contains the error message)
- *   install.log     — legacy combined stdout/stderr
+ *   install.log     — combined stdout/stderr, quoted in the refusal
+ *
+ * `install.pid` and `install.log` were once described here as legacy, left for
+ * an older detached installer. They are not: the current installer writes both
+ * and this module reads both on every refusal path.
  *
  * The presence of `node_modules/deepspace/package.json` is the ground truth
  * for "ready"; the sentinels only shape the error message.

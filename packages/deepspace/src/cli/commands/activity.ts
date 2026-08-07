@@ -72,7 +72,9 @@ export function formatEvent(
       detail = `"${String(s.task ?? '')}" from ${short(s.baseOid)}`
       break
     case 'workspace.synced':
-      detail = `→ ${short(s.headOid)} (${Number(s.files ?? 0)} files vs base)`
+      // The event records only the tip: changed-file counts are client-side
+      // diffs by design (do/workspaces.ts), so there is no count to print.
+      detail = `→ ${short(s.headOid)}`
       break
     case 'workspace.landed':
       detail = `"${String(s.task ?? '')}" → ${short(s.landedOid)} on ${String(s.into ?? 'trunk')}`

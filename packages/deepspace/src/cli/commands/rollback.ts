@@ -177,7 +177,6 @@ export default defineDeepspaceCommand({
       spinner?.message('Waiting for the edge to serve this release...')
       serving = await waitForLiveRelease(result.url, result.releaseStamp, 90_000)
     }
-    const edgePropagating = serving === 'unconfirmed'
     spinner?.stop(
       serving === 'confirmed'
         ? `Rolled back to ${result.rolledBackTo ?? releaseId}.`
@@ -191,7 +190,7 @@ export default defineDeepspaceCommand({
     const doClassGuard = result.doClassGuard === 'unverified' ? ('unverified' as const) : undefined
     if (!args.json) {
       if (result.url) {
-        if (edgePropagating) p.log.warn(`URL: ${result.url} (accepted; serving not yet verified)`)
+        if (serving === 'unconfirmed') p.log.warn(`URL: ${result.url} (accepted; serving not yet verified)`)
         else p.log.success(`Live at: ${result.url}`)
       }
       if (result.bundleRetained === false) {
@@ -220,7 +219,6 @@ export default defineDeepspaceCommand({
         wranglerEnv: wranglerEnv ?? null,
         // Always present, matching `deploy`: one field to branch on.
         serving,
-        ...(edgePropagating ? { edgePropagating: true } : {}),
         ...(doClassGuard ? { doClassGuard } : {}),
       },
     }

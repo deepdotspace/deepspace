@@ -40,7 +40,7 @@
  * ---------------
  *
  * Some message types carry different payloads depending on who's sending.
- * `MSG.GAME_START`, for example, is `{}` when the client requests a start
+ * `MSG.RECORDS_RESUBSCRIBE`, for example, is `{}` when the client asks to
  * but `{ state, tick }` when the server broadcasts the start event.
  * `MSG.CANVAS_ADD` is a flat shape dict on the way in and a `{ shape }`
  * wrapper on the way out. Modelling these with one union would force
@@ -131,10 +131,6 @@ export type ClientMessage =
   // `MSG_YJS_AWARENESS` envelope ids from `./constants.ts` and ride the
   // binary WebSocket channel. They bypass this typed layer entirely.
   // ---- Game -------------------------------------------------------------
-  | BaseMessage<typeof MSG.GAME_INPUT, { action: string; data: Record<string, unknown> }>
-  | BaseMessage<typeof MSG.GAME_PLAYER_READY, EmptyPayload>
-  | BaseMessage<typeof MSG.GAME_START, EmptyPayload>
-  | BaseMessage<typeof MSG.GAME_END, EmptyPayload>
   // ---- Canvas -----------------------------------------------------------
   // `CANVAS_ADD` sends a flat shape dict as the payload (not `{ shape }`);
   // the server wraps it in `{ shape }` on its rebroadcast. Keep the types
@@ -228,7 +224,7 @@ export type ServerMessage =
   // ---- Auth -------------------------------------------------------------
   // Emitted once per connection by rooms that enforce role-based writes
   // (Canvas, Game, Cron). Client hooks store `canWrite` in state and
-  // disable write APIs when false. See useCanvas / useGameRoom /
+  // disable write APIs when false. See useCanvas /
   // useCronMonitor for the consumer side.
   | BaseMessage<typeof MSG.AUTH, { canWrite: boolean }>
   // ---- Users ------------------------------------------------------------
@@ -242,16 +238,6 @@ export type ServerMessage =
       { collection: string; recordId: string; fieldName: string; canWrite: boolean }
     >
   // ---- Game -------------------------------------------------------------
-  | BaseMessage<
-      typeof MSG.GAME_STATE,
-      { state: unknown; tick: number; players: unknown[]; running: boolean }
-    >
-  | BaseMessage<typeof MSG.GAME_TICK, { state: unknown; tick: number }>
-  | BaseMessage<typeof MSG.GAME_START, { state: unknown; tick: number }>
-  | BaseMessage<typeof MSG.GAME_END, { state: unknown; tick: number }>
-  | BaseMessage<typeof MSG.GAME_PLAYER_JOIN, { player: unknown }>
-  | BaseMessage<typeof MSG.GAME_PLAYER_LEAVE, { userId: string }>
-  | BaseMessage<typeof MSG.GAME_PLAYER_READY, { userId: string }>
   // ---- Canvas -----------------------------------------------------------
   // `CANVAS_SHAPES` carries both the shape list and the viewports snapshot
   // so new connections can restore a multi-user view in one message. See
@@ -361,12 +347,6 @@ export const clientBuild = {
     ({ type: MSG.YJS_JOIN, payload: { collection, recordId, fieldName } }) as const,
   yjsLeave: (collection: string, recordId: string, fieldName: string) =>
     ({ type: MSG.YJS_LEAVE, payload: { collection, recordId, fieldName } }) as const,
-  // Game
-  gameInput: (action: string, data: Record<string, unknown> = {}) =>
-    ({ type: MSG.GAME_INPUT, payload: { action, data } }) as const,
-  gamePlayerReady: () => ({ type: MSG.GAME_PLAYER_READY, payload: EMPTY }) as const,
-  gameStart: () => ({ type: MSG.GAME_START, payload: EMPTY }) as const,
-  gameEnd: () => ({ type: MSG.GAME_END, payload: EMPTY }) as const,
   // Canvas — `CANVAS_ADD` / `CANVAS_VIEWPORT` payloads are flat (the shape
   // or viewport object is the whole payload).
   canvasAdd: (shape: Record<string, unknown>) =>
@@ -464,21 +444,6 @@ export const serverBuild = {
       type: MSG.YJS_JOIN,
       payload: { collection, recordId, fieldName, canWrite },
     }) as const,
-  // Game
-  gameState: (state: unknown, tick: number, players: unknown[], running: boolean) =>
-    ({ type: MSG.GAME_STATE, payload: { state, tick, players, running } }) as const,
-  gameTick: (state: unknown, tick: number) =>
-    ({ type: MSG.GAME_TICK, payload: { state, tick } }) as const,
-  gameStart: (state: unknown, tick: number) =>
-    ({ type: MSG.GAME_START, payload: { state, tick } }) as const,
-  gameEnd: (state: unknown, tick: number) =>
-    ({ type: MSG.GAME_END, payload: { state, tick } }) as const,
-  gamePlayerJoin: (player: unknown) =>
-    ({ type: MSG.GAME_PLAYER_JOIN, payload: { player } }) as const,
-  gamePlayerLeave: (userId: string) =>
-    ({ type: MSG.GAME_PLAYER_LEAVE, payload: { userId } }) as const,
-  gamePlayerReady: (userId: string) =>
-    ({ type: MSG.GAME_PLAYER_READY, payload: { userId } }) as const,
   // Canvas
   canvasShapes: (shapes: unknown[], viewports: unknown[]) =>
     ({ type: MSG.CANVAS_SHAPES, payload: { shapes, viewports } }) as const,
@@ -564,8 +529,6 @@ export const serverBuild = {
 // union:
 //
 //     dispatch<ServerMessage>(raw, {
-//       [MSG.GAME_STATE]: (p) => { /* p is narrowed */ },
-//       [MSG.GAME_TICK]:  (p) => { /* p is narrowed */ },
 //     })
 //
 //     // With an app-defined message (use a STRING LITERAL for the type

@@ -2,7 +2,7 @@ import * as p from '@clack/prompts'
 import { defineDeepspaceCommand, Refusal } from '../../lib/command'
 import { resolveCommit } from '../../lib/git/repository'
 import { statusFiles } from '../../lib/git/safety'
-import { ensureSpaceRemote } from '../../lib/vc-remote'
+import { ensureGitIdentity, ensureSpaceRemote } from '../../lib/vc-remote'
 import { createSpinner } from '../../lib/spinner'
 import {
   fetchTrunk,
@@ -20,6 +20,7 @@ import {
   inferWorkspaceId,
   pushWorkspaceRef,
   resolveTarget,
+  workspaceNotActiveRefusal,
 } from './runtime'
 
 export const syncWorkspaceCommand = defineDeepspaceCommand({
@@ -45,7 +46,26 @@ export const syncWorkspaceCommand = defineDeepspaceCommand({
       typeof args.app === 'string' ? args.app : undefined,
     )
     const id = inferWorkspaceId(appDir, workspaceArg)
-    assertSelectedWorkspaceCheckout(appDir, id, ['deepspace', 'workspace', 'sync'])
+    // A FINISHED workspace outranks a checkout mismatch — the mismatch's
+    // attach action refuses on a finished workspace, so it would be a dead
+    // end (same precedence land applies). Guarded read: the mismatch is a
+    // purely local determination, and a network blip must surface it.
+    try {
+      assertSelectedWorkspaceCheckout(appDir, id, ['deepspace', 'workspace', 'sync'])
+    } catch (mismatch) {
+      const current = await api
+        .getWorkspace(id)
+        .then((r) => r.view)
+        .catch(() => null)
+      if (current && current.workspace.status !== 'active') {
+        spinner?.stop('Workspace finished.')
+        throw workspaceNotActiveRefusal(id, current.workspace.status, {
+          cwd: appDir,
+          argv: ['deepspace', 'workspace', 'drop', id, '--app', appId],
+        })
+      }
+      throw mismatch
+    }
     const headOid = resolveCommit(appDir, 'HEAD')
     if (!headOid) {
       throw new Refusal('The workspace has no commits yet — commit first, then sync.', 'no_commits')
@@ -65,6 +85,9 @@ export const syncWorkspaceCommand = defineDeepspaceCommand({
       )
     }
     ensureSpaceRemote(appDir, appId)
+    // The divergence refusal below hands back a `git pull` that MERGES — it
+    // needs an identity, same as the verbs that commit directly.
+    ensureGitIdentity(appDir, token)
     pushWorkspaceRef(appDir, token, before.workspace.ref, headOid)
 
     // Keep advisory overlap math current without turning a transient fetch into a sync failure.

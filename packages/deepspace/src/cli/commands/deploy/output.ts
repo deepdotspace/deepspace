@@ -1,5 +1,5 @@
 import * as p from '@clack/prompts'
-import { printAction, withSlug, type CliAction } from '../../lib/output'
+import { executableAction, printAction, withSlug, type CliAction } from '../../lib/output'
 
 export interface DeployOutput {
   readonly json: boolean
@@ -52,19 +52,22 @@ export function createDeployOutput(json: boolean): DeployOutput {
       introShown = true
     },
     die(message, code, opts = {}) {
+      // Deploy's own exit door, so it owns the pinning the command runtime
+      // applies elsewhere — a bare `deepspace` argv must never leave here.
+      const action = opts.action ? executableAction(opts.action) : undefined
       if (json) {
         emitJson({
           ok: false,
           code,
           error: message,
           ...(opts.actionRequired ? { actionRequired: true } : {}),
-          ...(opts.action ? { action: opts.action } : {}),
+          ...(action ? { action } : {}),
         })
       } else {
         if (introShown && opts.actionRequired) p.log.warn(withSlug(message, code))
         else if (introShown) p.cancel(withSlug(message, code))
         else console.error(withSlug(message, code))
-        if (opts.action) printAction(opts.action)
+        if (action) printAction(action)
       }
       process.exit(opts.actionRequired ? 2 : 1)
     },

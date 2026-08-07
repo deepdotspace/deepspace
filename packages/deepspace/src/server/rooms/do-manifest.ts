@@ -25,11 +25,10 @@ export type DOManifest = DOManifestEntry[]
  * @example
  * const manifest = [
  *   { binding: 'RECORD_ROOMS', className: 'AppRecordRoom', sqlite: true },
- *   { binding: 'GAME_ROOMS', className: 'AppGameRoom', sqlite: true },
  * ] as const satisfies DOManifest
  *
  * type Env = BaseEnv & DOBindings<typeof manifest>
- * // => { RECORD_ROOMS: DurableObjectNamespace; GAME_ROOMS: DurableObjectNamespace }
+ * // => { RECORD_ROOMS: DurableObjectNamespace }
  */
 export type DOBindings<T extends readonly DOManifestEntry[]> = {
   [K in T[number]['binding']]: DurableObjectNamespace

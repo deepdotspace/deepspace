@@ -2,14 +2,12 @@
  * Wire protocol constants.
  *
  * The JSON WebSocket protocol uses dotted string identifiers (e.g.
- * `"game.input"`) as the `type` discriminator. All message types are
+ * `"records.query"`) as the `type` discriminator. All message types are
  * grouped under a single `MSG` object so imports stay tidy:
  *
  *     import { MSG, dispatch, clientBuild } from 'deepspace'
  *
  *     dispatch<ServerMessage>(raw, {
- *       [MSG.GAME_STATE]: (p) => { ... },
- *       [MSG.GAME_TICK]:  (p) => { ... },
  *     })
  *
  * Each key's value is the on-wire string — grep-friendly, self-
@@ -54,15 +52,6 @@ export const MSG = {
   LIST_SCHEMAS: 'records.list_schemas',
   RESUBSCRIBE: 'records.resubscribe',
 
-  // ---- GameRoom --------------------------------------------------------
-  GAME_STATE: 'game.state',
-  GAME_INPUT: 'game.input',
-  GAME_PLAYER_JOIN: 'game.player_join',
-  GAME_PLAYER_LEAVE: 'game.player_leave',
-  GAME_PLAYER_READY: 'game.player_ready',
-  GAME_START: 'game.start',
-  GAME_END: 'game.end',
-  GAME_TICK: 'game.tick',
 
   // ---- CanvasRoom ------------------------------------------------------
   CANVAS_SHAPES: 'canvas.shapes',

@@ -7,7 +7,7 @@
 import { defineCommand, type ArgsDef, type CommandDef } from 'citty'
 import * as p from '@clack/prompts'
 import { stopActiveSpinner } from './spinner'
-import { assertExecutableAction, printAction, withSlug, type CliAction } from './output'
+import { executableAction, printAction, withSlug, type CliAction } from './output'
 import { errorCode } from './cli-errors'
 import { ApiError } from './api'
 
@@ -37,8 +37,10 @@ export class Refusal extends Error {
     super(message)
     this.name = 'Refusal'
     this.code = code
-    if (opts.action) assertExecutableAction(opts.action)
-    this.action = opts.action
+    // Actions built as object literals get the same executable-argv treatment
+    // `cliAction` applies, so no refusal can hand out a bare `deepspace` that
+    // its own `cwd` cannot run.
+    this.action = opts.action ? executableAction(opts.action) : undefined
     this.actionRequired = opts.actionRequired ?? false
     this.extra = opts.extra ?? {}
   }
@@ -137,7 +139,11 @@ export function defineDeepspaceCommand<A extends ArgsDef>(def: DeepspaceCommandD
       try {
         const out =
           (await def.run({ args: args as Record<string, unknown> & { json: boolean } })) ?? {}
-        if (out.action) assertExecutableAction(out.action)
+        // Success-path actions honor the same contract refusal actions do:
+        // executable exactly as given, in the stated cwd — which means the
+        // interpreter must be pinned (a linked worktree has no `deepspace`
+        // on PATH and no node_modules of its own).
+        if (out.action) out.action = executableAction(out.action)
         if (json) {
           console.log(
             JSON.stringify({

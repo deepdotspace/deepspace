@@ -1,9 +1,6 @@
 const APP_MIGRATION_ID_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/
 const MAX_APP_MIGRATION_IDS = 256
 
-/** First source migration required by the canonical app identity cutover. */
-export const CANONICAL_APP_IDENTITY_MIGRATION_ID = '2026-08-canonical-app-identity-wire'
-
 /** Asset-layer misses became real 404s, and the worker owns the fallback. The
  *  config and the worker's fallback path have to move together. */
 export const WORKER_OWNED_NOT_FOUND_MIGRATION_ID = '2026-08-worker-owned-not-found'

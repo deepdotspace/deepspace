@@ -1,5 +1,107 @@
 # deepspace
 
+## 0.17.0
+
+### Minor Changes
+
+- **`deepspace deploy --claim-released` lets a platform admin take a name still inside its 30-day cooldown.** Undeploying releases a hostname into a hold reserved for its previous owner, and `released_by` records the app's **owner** — not whoever ran the undeploy. So an admin taking down an abandoned or abusive app could not then put anything on that name for a month: the reservation belongs to the absent owner, and the admin's own app matches neither the releasing-owner nor the releasing-app leg that normally allows a reclaim. The name was stranded by the mechanism meant to protect it.
+
+  The flag is explicit rather than an implicit admin bypass. The override is absolute — it beats a release made seconds ago and permanently discards the reservation rather than pausing it — so a routine admin deploy must not be able to seize a held name by accident. This is the same reasoning that makes a rename require `--rename`. Non-admin accounts are refused with `admin_required`, and because the tier lookup fails closed, a billing outage refuses rather than grants.
+
+  Two records are written, because neither side knows the whole story: the deploy worker logs the acting admin (it cannot name the displaced owner, since only released rows carry `released_by` and no by-host lookup returns them), and the registry logs the displaced owner and the app that lost the name at the moment the row is replaced.
+
+- **Removed: GameRoom, document mode, and the identity-migration wire.** These
+  landed in #240 and #241 without a changeset, so this declares them rather than
+  letting a release drop public exports silently.
+
+  Gone from the public surface:
+  - `useGameRoom`, and the `GameRoom` durable object with `GameRoomConfig`,
+    `GamePlayer`, `UseGameRoomResult`, `Player`, and `GameInput`. No in-repo app
+    used it, and it failed the authorization, hibernation, and scheduling
+    invariants every other room holds. Use `RecordRoom` for shared state.
+  - `CANONICAL_APP_IDENTITY_MIGRATION_ID` and the `MSG.GAME_*` protocol
+    constants, which had no producer or consumer once the room went.
+  - The RecordRoom document-mode migrations, verified unused across every repo
+    in the org before deletion.
+
+  An app that imported any of these will fail to build. Nothing in the templates
+  or the feature catalog referenced them.
+
+### Patch Changes
+
+- Fix a set of version-control lifecycle and honesty defects found by
+  black-box agent live-testing of multi-checkout collaboration — cases where
+  a verb prescribed recovery that deterministically failed, reported work it
+  did not do, or handed out a command that could not run where it pointed.
+  - **Recovery actions execute verbatim.** Every `action.argv` that re-invokes
+    this CLI is pinned to the running interpreter and entry (resolved through
+    the `node_modules/.bin` symlink) instead of the bare word `deepspace`,
+    which is not on PATH in a linked worktree, a bare clone, or an `npx`
+    invocation. One door (`executableAction`) applies it to refusal actions,
+    success-path actions, the unknown-command suggestion, and `deploy`'s own
+    exit envelope; consumers must not assume `argv[0] === 'deepspace'`.
+  - **A checkout can follow its own advice.** `deepspace clone`, `workspace
+new`, `workspace attach`, `workspace sync`, and `workspace land` fill
+    whichever half of the checkout's repo-local git identity is missing from
+    the session token — previously the `git pull` a divergence refusal handed
+    back (and any first commit) died on `unable to auto-detect email address`
+    in a container with no global git config, or with a half-configured one.
+    The divergence recovery also pins `git pull --no-rebase` (a fresh clone
+    has no reconcile config) and exits 2 from workspace publishes exactly as
+    it does from `push`.
+  - **A second checkout of a landed workspace is no longer a dead end.**
+    `workspace drop` cleans up the stale local worktree and branch of a
+    workspace another clone landed or dropped — proving publication against a
+    freshly fetched trunk tip when the landed ref is gone — and reports
+    whether the remote drop actually happened (`json.remoteDropped`) instead
+    of claiming a fresh drop on a replay. `workspace status` states the right
+    fact per state (landed/dropped → drop cleans up; behind → fast-forward;
+    diverged → integrate first) instead of prescribing a `workspace sync` that
+    would refuse, and `--json` gains `syncRelation` so machine callers see the
+    same distinction. `workspace land` and `workspace sync` on a finished
+    workspace report `workspace_not_active` (with the `workspace drop` cleanup
+    action) ahead of a checkout mismatch whose attach advice could not
+    succeed; drop's own unsynced refusal stops prescribing the publish path
+    once the workspace is finished — nothing can publish those commits, and
+    the message says so. The server returns `workspace_not_active` (over the
+    generic `conflict`) for sync/land/drop against a finished workspace — a
+    worker-side change that reaches existing CLIs on deploy; no released CLI
+    branches on the old slug, and this CLI tolerates both.
+  - **`workspace attach` is idempotent.** Attaching an already-attached
+    workspace points at the existing worktree instead of refusing
+    `branch_exists` — reporting the LOCAL tip and, when it differs from the
+    published tip, the recovery that relation actually admits (`workspace
+sync` when ahead; `git pull --no-rebase` first when behind or diverged,
+    since sync would refuse) — and re-materializes a worktree that `git
+worktree remove` or a failed cleanup deleted.
+  - **Land refusals carry their resume action, and a recorded merge is never
+    reported as a bare failure.** `merge_conflict`, `conflict_markers` (now
+    naming the offending files), `validation_failed`, and
+    `validation_mutated_tree` carry the exact re-run action; when the trunk
+    push succeeded and only recording the land failed, `land_unrecorded`
+    states that the merge IS on trunk and resumes by re-running instead of
+    implying nothing happened. When a concurrent land or drop finished the
+    workspace mid-merge, land answers `workspace_not_active` at exit 2 with
+    `pushed: true` and the `workspace drop` cleanup action — the merge is on
+    trunk, and re-running could never record it.
+  - **`status` stops labeling a feature branch's sync line "Trunk".** A
+    non-default branch renders as `Branch sync`, and `json.trunk` gains
+    `branch`/`isTrunk` (`isTrunk: null` when the default branch is unknown —
+    GitHub-owned source or an unborn cloud repo — never a guess), so
+    `trunk.state: "in_sync"` on a feature branch can no longer read as "local
+    trunk matches cloud trunk". `activity` (CLI and dashboard) stops printing
+    a fabricated "(0 files vs base)" changed-file count on workspace syncs —
+    the event never carried one.
+
+- `deepspace workspace drop` and `land` no longer treat the generic `conflict`
+  error as "already finished".
+
+  The server refuses a finished workspace with `workspace_not_active`; `conflict`
+  was the pre-rename slug, and the CLI accepted both. Platform workers deploy
+  ahead of the CLI release, so nothing still answers with the old slug — and
+  `conflict` remains live for workspace-id clashes, which were being re-read as
+  "already finished" instead of surfacing. An id clash now raises immediately.
+
 ## 0.16.0
 
 ### Minor Changes

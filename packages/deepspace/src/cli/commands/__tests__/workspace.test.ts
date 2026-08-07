@@ -28,12 +28,14 @@ import {
   inspectWorkspaceCleanup,
   isManagedWorkspaceWorktree,
   materializeWorkspaceWorktree,
+  rematerializeWorkspaceWorktree,
 } from '../workspace/local'
-import { hasLeftoverConflictMarkers, landResumeArgv } from '../workspace/land'
+import { conflictMarkerFiles, hasLeftoverConflictMarkers, landResumeArgv } from '../workspace/land'
 import { cleanFailedFreshAttachDir, finishedWorkspaceMessage } from '../workspace/attach'
-import { overlapsWith } from '../workspace/analysis'
+import { overlapsWith, workspaceSyncRelation } from '../workspace/analysis'
 import { withWorkspaceOverlaps } from '../workspace/list'
-import { isWorkspaceTipPublished, workspaceUnsyncedRefusal } from '../workspace/drop'
+import { dropRemoteTolerant, isWorkspaceTipPublished, workspaceUnsyncedRefusal } from '../workspace/drop'
+import { ApiError } from '../../lib/api'
 
 // Real-git suite: every test shells out to git in scratch repos (~2s solo)
 // and blows the default 5s wall under parallel vitest workers — the drifting
@@ -234,6 +236,14 @@ describe('hasLeftoverConflictMarkers (land pre-push guard)', () => {
   it('does NOT flag on empty output (a clean merge)', () => {
     expect(hasLeftoverConflictMarkers('')).toBe(false)
   })
+
+  it('names each offending file once, tolerating colons in the path', () => {
+    expect(conflictMarkerFiles(withMarkers)).toEqual(['f.txt'])
+    expect(
+      conflictMarkerFiles('weird:1.txt:3: leftover conflict marker\nf.txt:5: trailing whitespace.'),
+    ).toEqual(['weird:1.txt'])
+    expect(conflictMarkerFiles('')).toEqual([])
+  })
 })
 
 describe('landResumeArgv (exit-2 resume preserves the caller’s flags)', () => {
@@ -420,6 +430,35 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
     expect(git(main, ['log', '-1', '--format=%s', BRANCH]).trim()).toBe('advanced')
   })
 
+  it('re-materializes a deleted worktree with the ownership invariants intact', () => {
+    const main = initRepoWithCommit()
+    const dir = join(main, '.deepspace', 'ws', ID.slice(3).toLowerCase())
+    materializeWorkspaceWorktree(main, dir, BRANCH, 'HEAD', ID)
+    git(main, ['worktree', 'remove', '--force', dir])
+
+    expect(rematerializeWorkspaceWorktree(main, dir, BRANCH, ID)).toBeNull()
+    expect(existsSync(dir)).toBe(true)
+    // The marker is what lets land/drop clean this checkout up later — an
+    // unmarked re-attach recreates the stranded-worktree dead end.
+    expect(isManagedWorkspaceWorktree(dir, ID)).toBe(true)
+  })
+
+  it('rolls the re-materialized checkout back — never the branch — when the marker cannot be written', () => {
+    const main = initRepoWithCommit()
+    const dir = join(main, '.deepspace', 'ws', ID.slice(3).toLowerCase())
+    materializeWorkspaceWorktree(main, dir, BRANCH, 'HEAD', ID)
+    git(main, ['worktree', 'remove', '--force', dir])
+    const tip = git(main, ['rev-parse', BRANCH]).trim()
+
+    const failure = rematerializeWorkspaceWorktree(main, dir, BRANCH, ID, {
+      markManaged: () => false,
+    })
+
+    expect(failure).toMatch(/ownership/i)
+    expect(existsSync(dir)).toBe(false)
+    expect(git(main, ['rev-parse', BRANCH]).trim()).toBe(tip)
+  })
+
   it('retains an unmarked worktree owned by Codex, Claude, or plain Git', () => {
     const main = initRepoWithCommit()
     const dir = join(main, '.claude', 'worktrees', 'external')
@@ -518,6 +557,7 @@ describe('workspace drop safety', () => {
       id: ID,
       branch: BRANCH,
       workspaceDir,
+      status: 'active',
     })
 
     expect(refusal.actionRequired).toBe(false)
@@ -526,6 +566,125 @@ describe('workspace drop safety', () => {
       argv: ['deepspace', 'workspace', 'sync', '--app', APP_ID, '--workspace', ID],
     })
     expect(refusal.message).toMatch(/then re-run.*workspace drop/i)
+  })
+
+  it('never prescribes sync for a FINISHED workspace — that sync deterministically refuses', () => {
+    const refusal = workspaceUnsyncedRefusal({
+      appId: APP_ID,
+      id: ID,
+      branch: BRANCH,
+      workspaceDir: '/worktrees/safe',
+      status: 'landed',
+    })
+
+    expect(refusal.action).toBeUndefined()
+    expect(refusal.message).not.toMatch(/workspace sync/)
+    expect(refusal.message).toMatch(/already landed/)
+    expect(refusal.message).toMatch(/--keep-worktree/)
+    expect(refusal.extra).toMatchObject({ workspaceId: ID, status: 'landed' })
+  })
+})
+
+describe('dropRemoteTolerant (post-call truth, legacy-slug tolerance)', () => {
+  const ID = 'ws_01ABCDEFGHJKMNPQRSTVWXYZ00'
+  const view = (status: string) => ({ workspace: { status } }) as never
+  const api = (impl: {
+    drop?: () => Promise<{ view: never }>
+    get?: () => Promise<{ view: never }>
+  }) =>
+    ({
+      dropWorkspace: impl.drop ?? (() => Promise.reject(new Error('unexpected drop'))),
+      getWorkspace: impl.get ?? (() => Promise.reject(new Error('unexpected get'))),
+    }) as never
+
+  it('reports a real drop only when THIS call transitioned an active workspace', async () => {
+    const fresh = await dropRemoteTolerant(
+      api({ drop: async () => ({ view: view('dropped') }) }),
+      ID,
+      'active',
+    )
+    expect(fresh.remoteDropped).toBe(true)
+
+    const replay = await dropRemoteTolerant(
+      api({ drop: async () => ({ view: view('dropped') }) }),
+      ID,
+      'dropped',
+    )
+    expect(replay.remoteDropped).toBe(false)
+  })
+
+  it('tolerates workspace_not_active when the re-read proves it finished', async () => {
+    const out = await dropRemoteTolerant(
+      api({
+        drop: async () => {
+          throw new ApiError('already landed', 409, 'workspace_not_active')
+        },
+        get: async () => ({ view: view('landed') }),
+      }),
+      ID,
+      'active',
+    )
+    expect(out.remoteDropped).toBe(false)
+    expect((out.view as { workspace: { status: string } }).workspace.status).toBe('landed')
+  })
+
+  it('rethrows the original refusal on other codes, an active re-read, or a failed re-read', async () => {
+    const boom = new ApiError('nope', 403, 'forbidden')
+    await expect(
+      dropRemoteTolerant(api({ drop: async () => Promise.reject(boom) }), ID, 'active'),
+    ).rejects.toBe(boom)
+
+    const raced = new ApiError('conflict', 409, 'conflict')
+    await expect(
+      dropRemoteTolerant(
+        api({
+          drop: async () => Promise.reject(raced),
+          get: async () => ({ view: view('active') }),
+        }),
+        ID,
+        'active',
+      ),
+    ).rejects.toBe(raced)
+
+    await expect(
+      dropRemoteTolerant(
+        api({
+          drop: async () => Promise.reject(raced),
+          get: async () => Promise.reject(new Error('offline')),
+        }),
+        ID,
+        'active',
+      ),
+    ).rejects.toBe(raced)
+  })
+})
+
+describe('workspaceSyncRelation (one relation drives status, attach, and their advice)', () => {
+  it('classifies in_sync/ahead/behind/diverged and fails to unknown on missing objects', () => {
+    const main = initRepo()
+    git(main, ['config', 'user.email', 't@t'])
+    git(main, ['config', 'user.name', 't'])
+    writeFileSync(join(main, 'f.txt'), 'x\n')
+    git(main, ['add', '-A'])
+    git(main, ['commit', '-q', '-m', 'init'])
+    const c1 = git(main, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(join(main, 'a.txt'), 'a\n')
+    git(main, ['add', 'a.txt'])
+    git(main, ['commit', '-q', '-m', 'c2'])
+    const c2 = git(main, ['rev-parse', 'HEAD']).trim()
+    git(main, ['checkout', '-q', '-b', 'side', c1])
+    writeFileSync(join(main, 'b.txt'), 'b\n')
+    git(main, ['add', 'b.txt'])
+    git(main, ['commit', '-q', '-m', 'c2b'])
+    const c2b = git(main, ['rev-parse', 'HEAD']).trim()
+
+    expect(workspaceSyncRelation(main, c2, c2)).toBe('in_sync')
+    expect(workspaceSyncRelation(main, c2, c1)).toBe('ahead')
+    expect(workspaceSyncRelation(main, c1, c2)).toBe('behind')
+    expect(workspaceSyncRelation(main, c2b, c2)).toBe('diverged')
+    expect(workspaceSyncRelation(main, c2, '0'.repeat(40))).toBe('unknown')
+    expect(workspaceSyncRelation(main, null, c2)).toBe('unknown')
+    expect(workspaceSyncRelation(main, c2, null)).toBe('unknown')
   })
 })
 

@@ -135,6 +135,31 @@ export function materializeWorkspaceWorktree(
   excludeWorktreeDir(appDir, worktreeRoot)
 }
 
+/** Re-create the checkout for a workspace branch that lost its worktree
+ *  (`git worktree remove`, a failed cleanup). Same post-add setup as
+ *  `materializeWorkspaceWorktree` — the ownership marker is what lets
+ *  land/drop clean the checkout up later, so a failed write rolls the
+ *  worktree back (the pre-existing branch stays). Returns an error message,
+ *  or null on success. */
+export function rematerializeWorkspaceWorktree(
+  appDir: string,
+  worktreeRoot: string,
+  branch: string,
+  workspaceId: string,
+  options: { markManaged?: (worktreeRoot: string, workspaceId: string) => boolean } = {},
+): string | null {
+  const added = runGit(appDir, ['worktree', 'add', worktreeRoot, branch], { allowFail: true })
+  if (added.status !== 0) {
+    return added.stderr.toString('utf-8').trim() || 'unknown git error'
+  }
+  if (!(options.markManaged ?? markManagedWorkspace)(worktreeRoot, workspaceId)) {
+    runGit(appDir, ['worktree', 'remove', worktreeRoot], { allowFail: true })
+    return `could not record DeepSpace ownership for ${worktreeRoot}`
+  }
+  excludeWorktreeDir(appDir, worktreeRoot)
+  return null
+}
+
 export function inOwnLinkedWorktree(appDir: string, id: string): boolean {
   if (workspaceIdFromBranch(currentBranch(appDir)) !== id) return false
   try {

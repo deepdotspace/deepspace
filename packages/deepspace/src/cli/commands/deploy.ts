@@ -58,6 +58,14 @@ export default defineCommand({
         'Confirm that a changed wrangler `name` renames this app (its URL moves; data, secrets, and collaborators travel). Without this flag an interactive prompt asks.',
       default: false,
     },
+    'claim-released': {
+      type: 'boolean',
+      description:
+        'Platform admins only: claim an app name still inside its 30-day release cooldown. ' +
+        'The previous owner permanently loses their reserved reclaim. ' +
+        'Non-admin accounts are refused.',
+      default: false,
+    },
     'allow-missing-secrets': {
       type: 'boolean',
       description:
@@ -192,6 +200,7 @@ export default defineCommand({
       appName,
       token,
       rename: args.rename === true,
+      claimReleased: args['claim-released'] === true,
       ignoreStale: Boolean(args['ignore-stale']),
       bundle,
       secrets,
@@ -227,10 +236,7 @@ export default defineCommand({
             url: body.url,
             releaseId: body.releaseId ?? null,
             bundleRetained: body.bundleRetained ?? null,
-            // `serving` says what was actually established; `edgePropagating`
-            // stays for callers written against the old shape.
             serving,
-            edgePropagating: serving === 'unconfirmed',
             recoverable: repository.recoverable,
             ...staleBaseGuardFields(body),
           })
@@ -252,7 +258,7 @@ export default defineCommand({
         appName,
         url: body.url ?? null,
         // Always present, so a caller branches on one field instead of
-        // inferring success from the absence of `edgePropagating`.
+        // inferring success from an absent one.
         serving,
         releaseId: body.releaseId ?? null,
         bundleRetained: body.bundleRetained ?? null,
