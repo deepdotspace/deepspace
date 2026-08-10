@@ -40,8 +40,7 @@ import {
   listConfigs,
   listSecrets,
   parseSecretsUpload,
-  pullAppSecretsCache,
-  renderSecretsCache,
+  refreshSecretsCache,
   setSecret,
   uploadSecrets,
   validateConfigName,
@@ -408,25 +407,24 @@ const pull = defineCommand({
         )
       const t = await resolveTarget(args)
       const ownerId = decodeJwtPayload<{ sub: string }>(t.token).sub
-      const pulled = await pullAppSecretsCache(DEPLOY_URL, t.token, t.appId, t.configName)
-      if (!pulled) {
-        // A collaborator's first pull on a fresh clone often lands here —
-        // point at how secrets get INTO the store, not just that it's empty.
-        ok(args.json === true, { appId: t.appId, config: t.configName, pulled: 0 }, () =>
-          console.log(
-            `No secrets in ${t.configName} yet — nothing to pull. Whoever has them adds them with \`deepspace secrets set KEY=value\` (or \`secrets upload <file>\`); if the app truly needs none, you're ready as-is.`,
-          ),
-        )
-        return
-      }
+      const refreshed = await refreshSecretsCache(
+        DEPLOY_URL,
+        t.token,
+        t.appId,
+        wranglerEnv,
+        t.configName,
+      )
       await writeDevVars(appDir, ownerId, t.token, wranglerEnv, {
         appId: t.appId,
-        generatedSecretsCache: renderSecretsCache(pulled.values, pulled),
-        sharedDevVarsCache: true,
+        generatedSecretsCache: refreshed.rendered,
       })
-      const count = Object.keys(pulled.values).length
+      const count = Object.keys(refreshed.pulled?.values ?? {}).length
       ok(args.json === true, { appId: t.appId, config: t.configName, pulled: count }, () =>
-        console.log(`Pulled ${count} secrets (${t.configName}) into .dev.vars.`),
+        console.log(
+          refreshed.pulled
+            ? `Pulled ${count} secrets (${t.configName}) into .dev.vars.`
+            : `Config ${t.configName} does not exist yet; regenerated .dev.vars without app secrets.`,
+        ),
       )
     } catch (err) {
       fail(err)

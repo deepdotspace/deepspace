@@ -7,7 +7,14 @@
  * under `test`.
  */
 
-import { defineCommand, runMain, runCommand, renderUsage } from 'citty'
+import {
+  defineCommand,
+  runMain,
+  runCommand,
+  renderUsage,
+  type ArgsDef,
+  type CommandDef,
+} from 'citty'
 // cross-spawn, not node:child_process: on Windows `npx` is `npx.cmd`, and since
 // Node's CVE-2024-27980 hardening a plain spawn/spawnSync refuses to exec a
 // .cmd (ENOENT / EINVAL) unless shell:true is set — which we won't do (rawArgs
@@ -19,7 +26,8 @@ import { fileURLToPath } from 'node:url'
 import { wrapCommandErrors, errorCode } from './lib/cli-errors'
 import { forTerminal, humanCommand, stripAnsi } from './lib/cli-format'
 import { stopActiveSpinner } from './lib/spinner'
-import { executableAction, printAction } from './lib/output'
+import { executableAction, printAction, withSlug } from './lib/output'
+import { unknownOptionMessage, unknownOptionNamesFromRaw } from './lib/command'
 import {
   findUnknownCommand,
   type CommandTreeNode,
@@ -258,6 +266,58 @@ function assertKnownCommandPath(argv: string[]): void {
   process.exit(1)
 }
 
+/** Resolve the selected executable leaf using the same static tree shape citty
+ * dispatches. All current command/argument definitions are synchronous. */
+function selectedLeaf(argv: string[]): {
+  command: CommandDef
+  rawArgs: string[]
+  path: string[]
+} | null {
+  let command: CommandDef = main
+  let remaining = argv
+  const path: string[] = []
+  const commandPrefixArgs: string[] = []
+  for (;;) {
+    const subCommands = command.subCommands as Record<string, CommandDef> | undefined
+    if (!subCommands || Object.keys(subCommands).length === 0) {
+      return { command, rawArgs: [...commandPrefixArgs, ...remaining], path }
+    }
+    const index = remaining.findIndex((argument) => !argument.startsWith('-'))
+    if (index < 0) return { command, rawArgs: [...commandPrefixArgs, ...remaining], path }
+    const name = remaining[index]
+    const entry = Object.entries(subCommands).find(([key, child]) => {
+      if (key === name) return true
+      const alias = (child.meta as { alias?: string | string[] } | undefined)?.alias
+      return (Array.isArray(alias) ? alias : alias ? [alias] : []).includes(name)
+    })
+    if (!entry) return null
+    // Citty accepts leaf options such as `--json` before the subcommand. Keep
+    // those tokens and validate them against the eventual executable leaf;
+    // slicing them away here would recreate the silent-unknown bug at the
+    // root/group boundary.
+    commandPrefixArgs.push(...remaining.slice(0, index))
+    path.push(entry[0])
+    command = entry[1]
+    remaining = remaining.slice(index + 1)
+  }
+}
+
+function assertKnownOptions(argv: string[]): void {
+  const selected = selectedLeaf(argv)
+  if (!selected || selected.path.join(' ') === 'app create') return
+  const args = (selected.command.args ?? {}) as ArgsDef
+  const unknown = unknownOptionNamesFromRaw(selected.rawArgs, args)
+  if (unknown.length === 0) return
+  const commandName = selected.path.join(' ') || 'deepspace'
+  const message = unknownOptionMessage(commandName, unknown, args)
+  if (argv.includes('--json')) {
+    console.log(JSON.stringify({ ok: false, code: 'unknown_option', error: message }))
+  } else {
+    console.error(withSlug(message, 'unknown_option'))
+  }
+  process.exit(1)
+}
+
 const rawArgs = process.argv.slice(2)
 const wantsHelp = rawArgs.some((arg) => arg === '--help' || arg === '-h')
 if (DEEPSPACE_ENV === 'invalid') {
@@ -270,6 +330,9 @@ if (DEEPSPACE_ENV === 'invalid') {
     console.error(error)
   }
   process.exit(1)
+}
+if (!wantsHelp && !(rawArgs.length === 1 && ['--version', '-v'].includes(rawArgs[0]))) {
+  assertKnownOptions(rawArgs)
 }
 if (rawArgs.includes('--json') && !wantsHelp) {
   const unknown = findUnknownCommand(rawArgs, commandTree())

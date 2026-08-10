@@ -59,7 +59,7 @@
     "framer-motion": "^12.38.0"
   },
   "instructions": [
-    "Configure APP_NAME, HERO_HEADLINE, HERO_SUBHEADLINE, FAQ_ITEMS etc. in LandingPage.tsx"
+    "Configure APP_NAME, HERO_HEADLINE, HERO_SUBHEADLINE, FAQ_ITEMS, etc. in src/pages/(app)/landing.tsx"
   ],
   "patterns": []
 }

@@ -36,9 +36,7 @@ export function useChatChannel(channelName: string = DEFAULT_CHANNEL_NAME) {
   const defaultChannel = channels
     .filter(
       (c: RecordData<Channel>) =>
-        c.data.name === channelName &&
-        c.data.type === 'public' &&
-        !c.data.archived,
+        c.data.name === channelName && c.data.type === 'public' && !c.data.archived,
     )
     .sort(
       (a: RecordData<Channel>, b: RecordData<Channel>) =>
@@ -59,11 +57,7 @@ export function useChatChannel(channelName: string = DEFAULT_CHANNEL_NAME) {
         description: 'Default chat channel',
       })
     }
-    // Deps intentionally limited to [user, status]: this is a one-shot init
-    // guarded by hasInitialized. Including defaultChannel/create/channelName
-    // would re-run and defeat the create-once semantics.
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot init guarded by hasInitialized; adding defaultChannel/create/channelName would defeat create-once
-  }, [user, status])
+  }, [user, status, defaultChannel, create, channelName])
 
   // Wait for the members query to be ready before auto-joining.
   useEffect(() => {

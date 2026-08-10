@@ -216,15 +216,13 @@ export function LibrarySidebar({
   const onCommitFolderRenameRef = useRef(onCommitRenameFolder)
   onCommitFolderRenameRef.current = onCommitRenameFolder
 
-  useEffect(() => {
-    return () => {
-      // Intentionally read the ref's LATEST value at unmount to clear whatever
-      // blur timer is pending; capturing it at effect-setup time (null) would be
-      // wrong here since this is a timer ref, not a DOM node.
-      // eslint-disable-next-line react-hooks/exhaustive-deps -- must clear the latest pending timer at unmount, not the setup-time value
-      if (folderRenameBlurTimerRef.current) clearTimeout(folderRenameBlurTimerRef.current)
-    }
+  const clearPendingFolderRename = useCallback(() => {
+    if (folderRenameBlurTimerRef.current) clearTimeout(folderRenameBlurTimerRef.current)
   }, [])
+
+  useEffect(() => {
+    return clearPendingFolderRename
+  }, [clearPendingFolderRename])
 
   const submitNewFolder = useCallback(async () => {
     const name = newFolderName.trim()

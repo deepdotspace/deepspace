@@ -11,8 +11,17 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SCAFFOLD_GIT_IDENTITY, commitInitialScaffold } from '../setup-runtime'
+
+/**
+ * This is the only suite here that shells out, and each case spawns several
+ * `git` processes. Vitest's 5s default is comfortable alone but not under
+ * `turbo run test`, which runs 18 tasks at once — the suite then times out on a
+ * loaded machine and fails a release over a test that is not broken. Generous
+ * enough to absorb that contention, far short of masking a hang.
+ */
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 })
 
 /**
  * Run git with NO ambient identity, the way a fresh container has none:
@@ -48,11 +57,25 @@ describe('commitInitialScaffold', () => {
     priorEnv = {
       GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
       GIT_CONFIG_SYSTEM: process.env.GIT_CONFIG_SYSTEM,
+      GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME,
+      GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL,
+      GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME,
+      GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL,
+      EMAIL: process.env.EMAIL,
     }
     // The scaffolder shells out itself, so the "no identity anywhere" condition
     // has to be in this process's environment.
     process.env.GIT_CONFIG_GLOBAL = '/dev/null'
     process.env.GIT_CONFIG_SYSTEM = '/dev/null'
+    for (const key of [
+      'GIT_AUTHOR_NAME',
+      'GIT_AUTHOR_EMAIL',
+      'GIT_COMMITTER_NAME',
+      'GIT_COMMITTER_EMAIL',
+      'EMAIL',
+    ]) {
+      delete process.env[key]
+    }
     git(appDir, ['init', '-q'])
     writeFileSync(join(appDir, 'README.md'), '# app\n')
   })
@@ -80,6 +103,58 @@ describe('commitInitialScaffold', () => {
     git(appDir, ['add', '-A'])
     expect(() => git(appDir, ['commit', '-m', 'second'])).not.toThrow()
     expect(git(appDir, ['rev-list', '--count', 'HEAD'])).toBe('2')
+  })
+
+  it('uses an existing effective identity without shadowing it locally', () => {
+    const globalConfig = join(appDir, '.git', 'test-global-config')
+    execFileSync('git', ['config', '--file', globalConfig, 'user.name', 'Actual Developer'])
+    execFileSync('git', ['config', '--file', globalConfig, 'user.email', 'actual@example.com'])
+    process.env.GIT_CONFIG_GLOBAL = globalConfig
+
+    commitInitialScaffold(appDir, true)
+
+    expect(() => git(appDir, ['config', '--local', 'user.name'])).toThrow()
+    expect(() => git(appDir, ['config', '--local', 'user.email'])).toThrow()
+    expect(git(appDir, ['log', '-1', '--pretty=%an <%ae>'])).toBe(
+      'Actual Developer <actual@example.com>',
+    )
+
+    writeFileSync(join(appDir, 'src.ts'), 'export const x = 1\n')
+    git(appDir, ['add', '-A'])
+    expect(() =>
+      execFileSync('git', ['commit', '-m', 'second'], {
+        cwd: appDir,
+        env: process.env,
+        stdio: 'ignore',
+      }),
+    ).not.toThrow()
+  })
+
+  it('preserves a configured name combined with the standard EMAIL fallback', () => {
+    git(appDir, ['config', 'user.name', 'Actual Developer'])
+    process.env.EMAIL = 'actual@example.com'
+
+    commitInitialScaffold(appDir, true)
+
+    expect(git(appDir, ['config', '--local', 'user.name'])).toBe('Actual Developer')
+    expect(git(appDir, ['config', '--local', 'user.email'])).toBe('actual@example.com')
+    expect(git(appDir, ['log', '-1', '--pretty=%an <%ae>'])).toBe(
+      'Actual Developer <actual@example.com>',
+    )
+  })
+
+  it('preserves an environment name combined with a configured email', () => {
+    git(appDir, ['config', 'user.email', 'actual@example.com'])
+    process.env.GIT_AUTHOR_NAME = 'Actual Developer'
+    process.env.GIT_COMMITTER_NAME = 'Actual Developer'
+
+    commitInitialScaffold(appDir, true)
+
+    expect(git(appDir, ['config', '--local', 'user.name'])).toBe('Actual Developer')
+    expect(git(appDir, ['config', '--local', 'user.email'])).toBe('actual@example.com')
+    expect(git(appDir, ['log', '-1', '--pretty=%an <%ae>'])).toBe(
+      'Actual Developer <actual@example.com>',
+    )
   })
 
   it('leaves a repository it did not create alone', () => {

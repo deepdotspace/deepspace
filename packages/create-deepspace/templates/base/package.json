@@ -2,7 +2,7 @@
   "name": "@deepspace/base",
   "version": "0.1.0",
   "engines": {
-    "node": ">=22.15.0"
+    "node": ">=22.15.0 <23 || >=24 <25 || >=26 <27"
   },
   "type": "module",
   "files": [

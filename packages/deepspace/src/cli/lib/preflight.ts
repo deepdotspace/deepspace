@@ -7,29 +7,33 @@ import * as nodeModule from 'node:module'
 import { resolve } from 'node:path'
 
 /**
- * The Cloudflare Vite plugin uses `module.registerHooks` (Node 22.15+ /
- * 23.5+). On older Nodes, `vite build` and the dev server die with a cryptic
- * ESM error from deep inside the plugin:
+ * The Cloudflare Vite plugin uses `module.registerHooks`. On older Nodes,
+ * `vite build` and the dev server die with a cryptic ESM error from deep
+ * inside the plugin:
  *
  *   SyntaxError: The requested module 'node:module' does not provide an
  *   export named 'registerHooks'
  *
- * Catch it before spawning Vite and print the actual fix instead. Feature-
- * detected rather than version-pinned so the check can't go stale; the
- * `hasRegisterHooks` parameter exists only for tests.
+ * Catch it before spawning Vite and print the actual fix instead. DeepSpace
+ * supports maintained even-numbered Node lines only; odd-numbered lines are
+ * short-lived and can become incompatible through their frozen npm version.
+ * The injectable parameters exist only for tests.
  */
 export function preflightNodeVersion(
   command: string,
   hasRegisterHooks: boolean = typeof (nodeModule as { registerHooks?: unknown }).registerHooks ===
     'function',
+  version: string = process.versions.node,
 ): void {
-  if (hasRegisterHooks) return
+  const [major, minor] = version.split('.').map(Number)
+  const supportedLine = (major === 22 && minor >= 15) || major === 24 || major === 26
+  if (hasRegisterHooks && supportedLine) return
   // Throw, never process.exit — see resolvePort: an exit inside a runtime
   // command body skips the --json envelope entirely.
   throw new Refusal(
-    `deepspace ${command} requires Node 22.15 or newer (found v${process.versions.node}). ` +
-      'Install the current LTS from https://nodejs.org and re-run.',
-    'node_too_old',
+    `deepspace ${command} requires a supported Node release: 22.15+, 24, or 26 ` +
+      `(found v${version}). Install the current LTS from https://nodejs.org and re-run.`,
+    supportedLine ? 'node_capability_missing' : 'node_unsupported',
   )
 }
 

@@ -1,167 +1,37 @@
-/** Local `.dev.vars` parsing, preservation, and SDK-managed writes. */
+/**
+ * `.dev.vars` — the local runtime env for `wrangler dev`, generated whole.
+ *
+ * The file is a materialization, never a source: platform-derived values
+ * (JWTs, worker URLs) plus a cached copy of the app's secret store, rewritten
+ * on every dev, test, deploy, and `secrets pull` run. Nothing reads it back,
+ * and hand edits do not survive the next write — a value the app needs lives
+ * in the store (`npx deepspace secrets set`), which is also the only thing a
+ * deploy ships.
+ *
+ * It used to be three zones: an SDK section, a hand-edited section preserved
+ * across writes, and the store cache — which required a divider grammar, a
+ * dotenv parser to read the file back, and a deploy guard reconciling the two
+ * sources (docs/proposals/secrets-source-of-truth.md). One source of truth
+ * deleted all of it.
+ */
 
-import { existsSync, readFileSync } from 'node:fs'
 import { PLATFORM_URLS } from '../env'
 import { readAppId } from './app-identity'
 import { fetchAppIdentityToken, fetchPublicKey, mintAppOwnerJwt } from './app-tokens'
-import { stripGeneratedSecretsCache } from './secrets'
 import { writeSecretFileSync } from './secure-file'
 import { devVarsPathFor } from './wrangler-env'
 
-/** Keys rewritten from platform truth on every dev, test, and deploy run. */
-const SDK_MANAGED_KEYS = new Set([
-  'AUTH_JWT_PUBLIC_KEY',
-  'AUTH_JWT_ISSUER',
-  'AUTH_WORKER_URL',
-  'API_WORKER_URL',
-  'PLATFORM_WORKER_URL',
-  'OWNER_USER_ID',
-  'APP_OWNER_JWT',
-  'APP_IDENTITY_TOKEN',
-  'ALLOW_DEBUG_ROUTES',
-])
-
-export const DEV_VARS_DIVIDER = '# --- not managed by the SDK; preserved across dev/test runs ---'
-
 interface WriteDevVarsOptions {
   appId?: string
-  /** Rendered remote secrets cache, which replaces legacy preserved values. */
+  /** Rendered store-secrets block (`renderSecretsCache`). */
   generatedSecretsCache?: string
-  /** Linked configs share `.dev.vars`; unlinked apps use `.dev.vars.<env>`. */
-  sharedDevVarsCache?: boolean
 }
 
-/**
- * Strip SDK-managed lines above the divider while preserving all other content
- * verbatim, including comments and multi-line quoted values.
- */
-export function extractCustomDevVars(content: string): string {
-  const lines = content.split('\n')
-  const out: string[] = []
-  let belowDivider = false
-  let i = 0
-  while (i < lines.length) {
-    const line = lines[i]
-    if (line.trim() === DEV_VARS_DIVIDER.trim()) {
-      belowDivider = true
-      i++
-      continue
-    }
-    const eq = line.indexOf('=')
-    const keyMatch = eq >= 0 ? line.slice(0, eq).match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*$/) : null
-    if (!keyMatch) {
-      out.push(line)
-      i++
-      continue
-    }
-    const key = keyMatch[1]
-    const valueStart = line.slice(eq + 1)
-    const block: string[] = [line]
-    if (valueStart.startsWith('"') && !hasUnescapedQuote(valueStart.slice(1))) {
-      i++
-      while (i < lines.length) {
-        block.push(lines[i])
-        const closed = hasUnescapedQuote(lines[i])
-        i++
-        if (closed) break
-      }
-    } else {
-      i++
-    }
-    if (belowDivider || !SDK_MANAGED_KEYS.has(key)) out.push(...block)
-  }
-  while (out.length && out[out.length - 1].trim() === '') out.pop()
-  return out.join('\n')
-}
-
-function hasUnescapedQuote(value: string): boolean {
-  let escaped = false
-  for (const char of value) {
-    if (escaped) {
-      escaped = false
-      continue
-    }
-    if (char === '\\') {
-      escaped = true
-      continue
-    }
-    if (char === '"') return true
-  }
-  return false
-}
-
-/** Parse values used by deploy safety checks from a dotenv-formatted string. */
-export function parseDevVars(content: string): Record<string, string> {
-  const result: Record<string, string> = {}
-  const lines = content.split('\n')
-  let i = 0
-  while (i < lines.length) {
-    const line = lines[i]
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith('#')) {
-      i++
-      continue
-    }
-    const eq = line.indexOf('=')
-    if (eq < 0) {
-      i++
-      continue
-    }
-    const keyMatch = line.slice(0, eq).match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*$/)
-    if (!keyMatch) {
-      i++
-      continue
-    }
-    const key = keyMatch[1]
-    let value = line.slice(eq + 1)
-
-    let closed = !value.startsWith('"') || hasUnescapedQuote(value.slice(1))
-    if (!closed) {
-      i++
-      while (i < lines.length) {
-        value += '\n' + lines[i]
-        if (hasUnescapedQuote(lines[i])) {
-          closed = true
-          i++
-          break
-        }
-        i++
-      }
-    } else {
-      i++
-    }
-
-    if (value.startsWith('"') && !closed) {
-      throw new Error(
-        `parseDevVars: unterminated quoted value for key "${key}" — check your .dev.vars file for a missing closing quote.`,
-      )
-    }
-    if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
-      value = unescapeQuotedDevVar(value.slice(1, -1))
-    }
-    result[key] = value
-  }
-  return result
-}
-
-function unescapeQuotedDevVar(value: string): string {
-  let out = ''
-  for (let i = 0; i < value.length; i++) {
-    const char = value[i]
-    if (char !== '\\' || i === value.length - 1) {
-      out += char
-      continue
-    }
-    const next = value[i + 1]
-    if (next === '\\' || next === '"') {
-      out += next
-      i++
-      continue
-    }
-    out += char
-  }
-  return out
-}
+const HEADER = [
+  '# Generated by deepspace — do not edit; this file is rewritten on every',
+  '# dev, test, deploy, and secrets pull run. App values live in the secret store:',
+  '#   npx deepspace secrets set KEY=value',
+].join('\n')
 
 function requireAppIdFor(appDir: string, wranglerEnv?: string): string {
   const id = readAppId(appDir, wranglerEnv)
@@ -173,7 +43,7 @@ function requireAppIdFor(appDir: string, wranglerEnv?: string): string {
   )
 }
 
-/** Rewrite the SDK section and preserve user-owned values below it. */
+/** Write the whole file from platform truth + the store cache. */
 export async function writeDevVars(
   appDir: string,
   ownerId: string,
@@ -187,7 +57,10 @@ export async function writeDevVars(
   const appOwnerJwt = await mintAppOwnerJwt(urls.auth, callerJwt, appId)
   const appIdentityToken = await fetchAppIdentityToken(urls.deploy, callerJwt, appId)
 
-  // Wrangler requires quotes around multi-line PEM values.
+  // Wrangler requires quotes around multi-line PEM values. ALLOW_DEBUG_ROUTES
+  // is dev-only here: deploys ship the store, so this value never reaches
+  // production — a store entry for the same key lands later in the file and
+  // wins locally too (dotenv last-write).
   const sdkVars = [
     `AUTH_JWT_PUBLIC_KEY="${publicKey}"`,
     `AUTH_JWT_ISSUER=${urls.auth}/api/auth`,
@@ -200,22 +73,10 @@ export async function writeDevVars(
     `ALLOW_DEBUG_ROUTES=true`,
   ].join('\n')
 
-  const useSharedDevVarsCache = opts.sharedDevVarsCache ?? opts.generatedSecretsCache !== undefined
-  const devVarsPath = devVarsPathFor(appDir, wranglerEnv, {
-    sharedDevVarsCache: useSharedDevVarsCache,
-  })
-  const existing = existsSync(devVarsPath) ? readFileSync(devVarsPath, 'utf-8') : ''
-  const custom =
-    opts.generatedSecretsCache ??
-    extractCustomDevVars(stripGeneratedSecretsCache(existing).trimEnd())
-  let body: string
-  if (!custom) {
-    body = `${sdkVars}\n`
-  } else if (opts.generatedSecretsCache) {
-    body = `${sdkVars}\n\n${custom}\n`
-  } else {
-    body = `${sdkVars}\n\n${DEV_VARS_DIVIDER}\n${custom}\n`
-  }
-
-  writeSecretFileSync(devVarsPath, body)
+  const devVarsPath = devVarsPathFor(appDir)
+  const cache = opts.generatedSecretsCache
+  writeSecretFileSync(
+    devVarsPath,
+    [HEADER, '', sdkVars, ...(cache ? ['', cache] : []), ''].join('\n'),
+  )
 }

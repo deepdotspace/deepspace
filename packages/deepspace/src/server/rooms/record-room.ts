@@ -39,9 +39,6 @@ import {
   type PermissionContext,
   SchemaRegistry,
   BASE_USERS_SCHEMA,
-  resolveColumn,
-  collectionTableName,
-  dataToColumnValues,
 } from '../schemas/registry'
 import { ensureCollectionTable as ensureCollectionTableImpl } from './collection-table-migration'
 import {
@@ -218,7 +215,6 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
 
     this.ensureAllCollectionTables()
   }
-
 
   // ============================================================================
   // Table-Mode Schema Management

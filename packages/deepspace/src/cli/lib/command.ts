@@ -4,7 +4,7 @@
  * actions, plus the 0/1/2 exit convention.
  */
 
-import { defineCommand, type ArgsDef, type CommandDef } from 'citty'
+import { defineCommand, parseArgs, type ArgsDef, type CommandDef } from 'citty'
 import * as p from '@clack/prompts'
 import { stopActiveSpinner } from './spinner'
 import { executableAction, printAction, withSlug, type CliAction } from './output'
@@ -118,27 +118,108 @@ export interface DeepspaceCommandDef<A extends ArgsDef> {
  * Wrap a command body in the contract. Injects `--json`, renders both output
  * paths, and owns the exit codes — a body never calls process.exit itself.
  */
+/** Both spellings citty's parser can produce for one declared name. */
+function nameVariants(name: string): string[] {
+  return [
+    name,
+    name.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase()),
+    name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`),
+  ]
+}
+
+/**
+ * Option names the command never declared.
+ *
+ * citty 0.2.2 hardcodes its parser to `strict: false` and exposes no way to
+ * change it, so an unknown flag is not rejected — it is silently dropped into
+ * the parsed object. `--limitt 1` therefore swallowed both the flag and its
+ * value and returned every release, exit 0; `--jsonn` printed human prose to
+ * stdout while the caller waited for JSON. Unknown SUBCOMMANDS and bad flag
+ * VALUES are both already rejected — only flag names went unchecked.
+ *
+ * Reading the leftovers back out is what makes one central check possible: no
+ * per-command tables, no second parser. Pure + exported for tests.
+ */
+export function unknownOptionNames(parsed: Record<string, unknown>, args: ArgsDef): string[] {
+  const known = new Set<string>(['_'])
+  for (const [name, def] of Object.entries(args)) {
+    for (const variant of nameVariants(name)) known.add(variant)
+    const alias = (def as { alias?: string | string[] }).alias
+    for (const a of Array.isArray(alias) ? alias : alias ? [alias] : []) {
+      for (const variant of nameVariants(a)) known.add(variant)
+    }
+  }
+  return Object.keys(parsed).filter((key) => !known.has(key))
+}
+
+/** Parse only option names, without letting required positionals or enum
+ * validation hide an unknown option before the executable-wide preflight can
+ * report it. */
+export function unknownOptionNamesFromRaw(rawArgs: string[], args: ArgsDef): string[] {
+  const relaxedArgs = Object.fromEntries(
+    Object.entries(args).map(([name, definition]) => [
+      name,
+      definition.type === 'enum'
+        ? { ...definition, type: 'string' as const, required: false, options: undefined }
+        : { ...definition, required: false },
+    ]),
+  ) as ArgsDef
+  return unknownOptionNames(parseArgs(rawArgs, relaxedArgs), args)
+}
+
+export function unknownOptionMessage(
+  commandName: string,
+  unknown: string[],
+  args: ArgsDef,
+): string {
+  const valid = Object.entries(args)
+    .filter(([, definition]) => definition.type !== 'positional')
+    .map(([name]) => name)
+    .sort()
+    .join(', ')
+  return (
+    `Unknown ${unknown.length === 1 ? 'option' : 'options'}: ` +
+    `${unknown.map((name) => `--${name}`).join(', ')}. ` +
+    `\`${commandName}\` accepts: ${valid || '(none)'}.`
+  )
+}
+
 export function defineDeepspaceCommand<A extends ArgsDef>(def: DeepspaceCommandDef<A>): CommandDef {
   // The injected `json` arg widens citty's inferred ArgsDef generic, which no
   // longer matches the bare `CommandDef` the registry holds. The runtime reads
   // args dynamically, so the erasure is safe and keeps every command in the
   // tree one uniform type.
+  const declaredArgs: ArgsDef = {
+    ...(def.args ?? ({} as A)),
+    json: {
+      type: 'boolean',
+      description: 'Emit a single-line JSON result for scripts/agents',
+      default: false,
+    },
+  }
   return defineCommand({
     meta: def.meta,
-    args: {
-      ...(def.args ?? ({} as A)),
-      json: {
-        type: 'boolean',
-        description: 'Emit a single-line JSON result for scripts/agents',
-        default: false,
-      },
-    },
+    args: declaredArgs,
     async run({ args }) {
       const json = Boolean((args as { json?: boolean }).json)
       let succeeded = false
       try {
+        // Before any side effect: a typo'd flag must not run the command with
+        // the caller's intent silently dropped.
+        const unknown = unknownOptionNames(args as Record<string, unknown>, declaredArgs)
+        if (unknown.length > 0) {
+          throw new Refusal(
+            unknownOptionMessage(def.meta.name, unknown, declaredArgs),
+            'unknown_option',
+          )
+        }
+        // Hoisting `args` to a named ArgsDef (so the unknown-option check can
+        // read the same declaration citty parsed against) widens what citty
+        // infers here, so the erasure needs the explicit unknown hop.
         const out =
-          (await def.run({ args: args as Record<string, unknown> & { json: boolean } })) ?? {}
+          (await def.run({
+            args: args as unknown as Record<string, unknown> & { json: boolean },
+          })) ?? {}
         // Success-path actions honor the same contract refusal actions do:
         // executable exactly as given, in the stated cwd — which means the
         // interpreter must be pinned (a linked worktree has no `deepspace`

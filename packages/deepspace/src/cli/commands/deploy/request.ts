@@ -130,7 +130,7 @@ export async function deployBuiltBundle(options: {
     if (bundle.customBindings.length) {
       form.append('bindingManifest', JSON.stringify(bundle.customBindings))
     }
-    if (secrets.names.length) form.append('userSecrets', JSON.stringify(secrets.values))
+    if (secrets.authoritative) form.append('userSecrets', JSON.stringify(secrets.values))
     if (bundle.extraRoutes === true || bundle.extraRoutes.length) {
       form.append('extraRunWorkerFirst', JSON.stringify(bundle.extraRoutes))
     }
@@ -400,9 +400,7 @@ export async function uploadDeployAssets(options: {
   }
 
   try {
-    await Promise.all(
-      Array.from({ length: Math.min(UPLOAD_CONCURRENCY, missing.length) }, worker),
-    )
+    await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, missing.length) }, worker))
   } catch (error: unknown) {
     spinner.stop('Deploy failed')
     if (error instanceof AssetUploadError) {

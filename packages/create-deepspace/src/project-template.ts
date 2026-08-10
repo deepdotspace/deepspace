@@ -117,14 +117,13 @@ export function prepareProject(
       : `Copying ${input.template} template`,
   )
   mkdirSync(target.appDir, { recursive: true })
-  const preserved = copyTemplate(input.template, target.appDir)
+  const appId = mintAppId()
+  const preserved = copyTemplate(input.template, target.appDir, target.appName, appId)
   writeGitignoreIfMissing(target.appDir)
   progress.stop('Template ready')
   for (const message of preserved) p.log.info(message)
 
   progress.start('Configuring project')
-  replaceInDir(target.appDir, '__APP_NAME__', target.appName)
-  replaceInDir(target.appDir, '__APP_ID__', mintAppId())
   configurePackageJson(
     target.appDir,
     target.appName,
@@ -221,12 +220,17 @@ function resolveTarget(requestedAppName: string): Omit<PreparedProject, 'initial
   return { appName, appDir, isInPlace }
 }
 
-function copyTemplate(template: string, appDir: string): string[] {
+function copyTemplate(template: string, appDir: string, appName: string, appId: string): string[] {
   const stagingDirectory = mkdtempSync(join(tmpdir(), 'deepspace-template-'))
   const preserved: string[] = []
 
   try {
     assembleTemplate(template, stagingDirectory)
+    // Substitute only template-owned bytes. In-place targets may contain
+    // README/docs/agent files whose literal placeholder text belongs to the
+    // user and must survive the merge unchanged.
+    replaceInDir(stagingDirectory, '__APP_NAME__', appName)
+    replaceInDir(stagingDirectory, '__APP_ID__', appId)
     for (const entry of readdirSync(stagingDirectory)) {
       const source = join(stagingDirectory, entry)
       const destination = join(appDir, entry)

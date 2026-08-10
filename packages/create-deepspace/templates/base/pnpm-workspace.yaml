@@ -7,6 +7,9 @@
 #
 # pnpm reads build allowances only from here or the global config — never from
 # package.json. npm and bun ignore this file entirely.
+packages:
+  - .
+
 allowBuilds:
   esbuild: true
   workerd: true

@@ -129,10 +129,8 @@ export default defineDeepspaceCommand({
     if (appIdForSecrets) {
       try {
         const refreshed = await refreshSecretsCache(DEPLOY_URL, token, appIdForSecrets, wranglerEnv)
-        if (refreshed) {
-          generatedSecretsCache = refreshed.rendered
-          if (refreshed.summary) say(refreshed.summary)
-        }
+        generatedSecretsCache = refreshed.rendered
+        if (refreshed.summary) say(refreshed.summary)
       } catch (err: unknown) {
         throw new Refusal(
           `Failed to refresh app secrets: ${err instanceof Error ? err.message : String(err)}`,
@@ -141,10 +139,8 @@ export default defineDeepspaceCommand({
       }
     }
 
-    const sharedDevVarsCache = generatedSecretsCache !== undefined
     await writeDevVars(appDir, ownerId, token, wranglerEnv, {
       generatedSecretsCache,
-      sharedDevVarsCache,
     })
 
     if (suite !== 'unit') {
@@ -152,7 +148,9 @@ export default defineDeepspaceCommand({
         const { removed } = await syncTestAccountStore()
         if (removed > 0) say(`Removed ${removed} stale test account credential(s).`)
       } catch (error) {
-        say(`Warning: could not reconcile test accounts: ${error instanceof Error ? error.message : String(error)}`)
+        say(
+          `Warning: could not reconcile test accounts: ${error instanceof Error ? error.message : String(error)}`,
+        )
       }
     }
 
@@ -165,33 +163,20 @@ export default defineDeepspaceCommand({
 
     switch (suite) {
       case 'smoke':
-        exitCode = runPlaywright(
-          appDir,
-          ['tests/smoke.spec.ts'],
-          port,
-          wranglerEnv,
-          sharedDevVarsCache,
-        )
+        exitCode = runPlaywright(appDir, ['tests/smoke.spec.ts'], port, wranglerEnv)
         break
       case 'api':
-        exitCode = runPlaywright(
-          appDir,
-          ['tests/api.spec.ts'],
-          port,
-          wranglerEnv,
-          sharedDevVarsCache,
-        )
+        exitCode = runPlaywright(appDir, ['tests/api.spec.ts'], port, wranglerEnv)
         break
       case 'e2e':
-        exitCode = runPlaywright(appDir, [], port, wranglerEnv, sharedDevVarsCache)
+        exitCode = runPlaywright(appDir, [], port, wranglerEnv)
         break
       case 'unit':
         exitCode = runVitest(appDir)
         break
       case 'all':
         exitCode = runVitest(appDir)
-        if (exitCode === 0)
-          exitCode = runPlaywright(appDir, [], port, wranglerEnv, sharedDevVarsCache)
+        if (exitCode === 0) exitCode = runPlaywright(appDir, [], port, wranglerEnv)
         break
       case 'default':
         exitCode = runPlaywright(
@@ -199,12 +184,11 @@ export default defineDeepspaceCommand({
           ['tests/smoke.spec.ts', 'tests/api.spec.ts'],
           port,
           wranglerEnv,
-          sharedDevVarsCache,
         )
         break
       default:
         if (suite.endsWith('.spec.ts')) {
-          exitCode = runPlaywright(appDir, [suite], port, wranglerEnv, sharedDevVarsCache)
+          exitCode = runPlaywright(appDir, [suite], port, wranglerEnv)
         } else {
           throw new Refusal(
             `Unknown test suite: ${suite}\nAvailable: smoke, api, e2e, unit, all`,
@@ -230,11 +214,10 @@ function runPlaywright(
   testFiles: string[],
   port: number,
   wranglerEnv?: string,
-  sharedDevVarsCache = false,
 ): number {
   let wranglerConfig: PreparedWranglerEnvConfig
   try {
-    wranglerConfig = prepareWranglerEnvConfig(appDir, wranglerEnv, { sharedDevVarsCache })
+    wranglerConfig = prepareWranglerEnvConfig(appDir, wranglerEnv)
   } catch (err: unknown) {
     console.error(err instanceof Error ? err.message : String(err))
     return 1

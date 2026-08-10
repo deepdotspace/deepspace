@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseArgs, validateAppName } from '../cli-input'
+import { nodeRuntimeRefusal, parseArgs, validateAppName } from '../cli-input'
 
 const argv = (...args: string[]) => ['node', 'create-deepspace', ...args]
 
@@ -46,5 +46,17 @@ describe('validateAppName', () => {
     (name) => {
       expect(validateAppName(name)).not.toBeNull()
     },
+  )
+})
+
+describe('nodeRuntimeRefusal', () => {
+  it.each(['22.15.0', '22.99.0', '24.0.0', '24.19.0', '26.0.0'])(
+    'accepts supported runtime %s',
+    (version) => expect(nodeRuntimeRefusal(version)).toBeNull(),
+  )
+
+  it.each(['20.20.0', '22.14.0', '23.11.1', '25.9.0', '27.0.0'])(
+    'refuses unsupported runtime %s before scaffolding',
+    (version) => expect(nodeRuntimeRefusal(version)).toContain(`current: ${version}`),
   )
 })

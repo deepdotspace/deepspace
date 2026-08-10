@@ -48,6 +48,7 @@ trap cleanup EXIT
 # Distinct sentinel so we can prove .gitattributes was preserved across an
 # in-place scaffold (instead of clobbered by cpSync of the template).
 SENTINEL='# preserved-by-test-in-place'
+PLACEHOLDER_SENTINEL='User literals: __APP_NAME__ and __APP_ID__'
 
 PASS=0
 FAIL=0
@@ -79,10 +80,10 @@ run_scenario() {
     printf '%s\ncustom-cache/\n' "$SENTINEL" > "$target/.gitignore"
   elif [[ "$seed" == "docs-and-md" ]]; then
     (cd "$target" && git init -q)
-    printf '%s\n# my project readme\n' "$SENTINEL" > "$target/README.md"
+    printf '%s\n%s\n# my project readme\n' "$SENTINEL" "$PLACEHOLDER_SENTINEL" > "$target/README.md"
     printf '%s\n# my project agent notes\n' "$SENTINEL" > "$target/CLAUDE.md"
     mkdir -p "$target/docs"
-    printf '%s\n# design notes\n' "$SENTINEL" > "$target/docs/notes.md"
+    printf '%s\n%s\n# design notes\n' "$SENTINEL" "$PLACEHOLDER_SENTINEL" > "$target/docs/notes.md"
     mkdir -p "$target/.claude"
     printf '%s\n' '{"version":"0.0.1","configurations":[{"name":"custom-preview","port":7777}]}' \
       > "$target/.claude/launch.json"
@@ -214,7 +215,7 @@ run_scenario() {
     if [[ -n "$(git -C "$target" status --porcelain)" ]]; then
       errors+=("fresh scaffold repository is dirty after setup")
     fi
-    if ! git -C "$target" ls-files -- bun.lock package-lock.json | grep -q .; then
+    if ! git -C "$target" ls-files -- bun.lock bun.lockb package-lock.json pnpm-lock.yaml | grep -q .; then
       errors+=("fresh scaffold initial commit does not contain a package-manager lockfile")
     fi
   fi
@@ -227,6 +228,11 @@ run_scenario() {
         errors+=("$f was deleted by scaffold")
       elif ! grep -qF "$SENTINEL" "$target/$f"; then
         errors+=("$f sentinel missing (file was overwritten)")
+      fi
+    done
+    for f in README.md docs/notes.md; do
+      if ! grep -qF "$PLACEHOLDER_SENTINEL" "$target/$f"; then
+        errors+=("$f user placeholder literals were rewritten")
       fi
     done
     if [[ ! -d "$target/.git" ]]; then

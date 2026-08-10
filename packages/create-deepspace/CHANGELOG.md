@@ -1,5 +1,24 @@
 # create-deepspace
 
+## 0.18.0
+
+### Patch Changes
+
+- Support the maintained Node 22 (22.15+), 24, and 26 release lines. Reject
+  end-of-life odd-numbered releases explicitly instead of allowing installs that
+  can fail inside their frozen npm dependency resolver.
+
+  Because npm treats `engines` as a warning by default, `create-deepspace` also
+  checks the runtime before prompts, file copies, identity minting, or Git
+  initialization. Help and version remain available for diagnosis.
+
+- Declare the scaffold root as the pnpm workspace package so pnpm 11 accepts the
+  generated `pnpm-workspace.yaml` while applying its required build allowances.
+- Preserve user-owned content during in-place scaffolding. Placeholder
+  substitution now happens in the staged template before it is merged, existing
+  Claude skill directories are refused rather than recursively replaced, and
+  mixed-source effective Git identities retain their real name and email.
+
 ## 0.17.0
 
 ## 0.16.0
@@ -8,7 +27,7 @@
 
 ### Minor Changes
 
-- **`deepspace app migrate` is removed**, replaced by `deepspace app update` (below). It existed for one historical cutover — moving an app from a name-shaped id to a canonical one — and the platform endpoints behind it are unchanged, so an app still on a legacy id migrates with `npx deepspace@0.13.0 app migrate` and then upgrades normally.
+- **`deepspace app migrate` is removed**, replaced by `deepspace app update` (below). It existed for one historical cutover — moving an app from a name-shaped id to a canonical one. The platform migration endpoints were subsequently removed too; an unexpected legacy-id app now requires operator-owned recovery. Do not downgrade to run the old command.
 
   A file that no longer exists now answers `404`, not the app's HTML. Deploys configured the asset layer with `not_found_handling: "single-page-application"`, so it answered EVERY unmatched path with `index.html` at 200 — correct for a client route, wrong for a file. A deploy replaces the hashed build chunks, so a tab still holding the previous `index.html` requested one and got HTML where JavaScript belonged: the script tag parsed it, failed, and the page went white with no error in any log, monitor, or network panel. The same answer went to agents probing `/llms.txt` and `/.well-known/mcp`, telling them the app publishes a manifest it does not have.
 

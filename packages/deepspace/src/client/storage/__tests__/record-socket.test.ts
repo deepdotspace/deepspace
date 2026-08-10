@@ -255,6 +255,112 @@ describe('open', () => {
 // ── close: settlement + backoff ──────────────────────────────────────────────
 
 describe('close', () => {
+  it('closes a connection whose peer stopped answering, and leaves a quiet healthy one alone', async () => {
+    // A peer that stops answering without closing leaves the socket
+    // ESTABLISHED: nothing is lost, so nothing retransmits, so no close event
+    // is ever coming. Measured against a frozen peer, an unprobed socket
+    // stayed open indefinitely — so every mechanism below (stale queries,
+    // 'disconnected', backoff reconnect) simply never ran.
+    const h = makeSocket()
+    h.socket.registerSubscription('sub-1', QUERY_KEY)
+    await h.socket.connect()
+    h.ws().serverOpen()
+
+    // Quiet but healthy: the runtime answers each probe. Nothing should fire.
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(15_000)
+      h.ws().onmessage?.({ data: 'pong' })
+    }
+    expect(h.ws().sent.filter((s) => s === 'ping').length).toBeGreaterThan(0)
+    expect(h.ws().readyState).toBe(1)
+    expect(h.store.resetToLoading).not.toHaveBeenCalled()
+
+    // The peer goes silent. The connection is still perfectly fine.
+    const silentWs = h.ws()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(silentWs.readyState).toBe(3)
+    expect(h.listeners.onStatus).toHaveBeenCalledWith('disconnected')
+    expect(h.store.resetToLoading).toHaveBeenCalledWith(QUERY_KEY)
+  })
+
+  it('does not probe a connection that is already carrying traffic', async () => {
+    // Live updates already prove the peer is answering; a probe on top of
+    // them would be pure noise.
+    const h = makeSocket()
+    await h.socket.connect()
+    h.ws().serverOpen()
+
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(14_000)
+      h.ws().serverMessage('CHANGE', { collection: 'todos' })
+    }
+    expect(h.ws().sent.filter((s) => s === 'ping')).toEqual([])
+    expect(h.ws().readyState).toBe(1)
+  })
+
+  it('probes before closing when the first heartbeat callback resumes late', async () => {
+    let monotonicNow = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => monotonicNow)
+    const h = makeSocket()
+    await h.socket.connect()
+    h.ws().serverOpen()
+
+    // Model a throttled/backgrounded event loop: wall/monotonic time advances,
+    // but only the first queued interval callback is allowed to run.
+    monotonicNow = 60_000
+    await vi.advanceTimersToNextTimerAsync()
+    expect(h.ws().sent.filter((message) => message === 'ping')).toHaveLength(1)
+    expect(h.ws().readyState).toBe(1)
+
+    monotonicNow = 75_000
+    await vi.advanceTimersToNextTimerAsync()
+    expect(h.ws().readyState).toBe(1)
+
+    monotonicNow = 90_000
+    await vi.advanceTimersToNextTimerAsync()
+    expect(h.ws().readyState).toBe(3)
+  })
+
+  it('reprobes when the scheduler resumes with a pre-suspension ping outstanding', async () => {
+    let monotonicNow = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => monotonicNow)
+    const h = makeSocket()
+    await h.socket.connect()
+    h.ws().serverOpen()
+
+    monotonicNow = 15_000
+    await vi.advanceTimersToNextTimerAsync()
+    expect(h.ws().sent.filter((message) => message === 'ping')).toHaveLength(1)
+
+    // The runtime may already have queued a pong, but its message task cannot
+    // run while the event loop is suspended. The first resumed timer must not
+    // win that task-source race by closing the socket.
+    monotonicNow = 90_000
+    await vi.advanceTimersToNextTimerAsync()
+    expect(h.ws().sent.filter((message) => message === 'ping')).toHaveLength(2)
+    expect(h.ws().readyState).toBe(1)
+
+    monotonicNow = 105_000
+    await vi.advanceTimersToNextTimerAsync()
+    expect(h.ws().readyState).toBe(1)
+
+    monotonicNow = 120_000
+    await vi.advanceTimersToNextTimerAsync()
+    expect(h.ws().readyState).toBe(3)
+  })
+
+  it('clears an outstanding probe on any inbound frame', async () => {
+    const h = makeSocket()
+    await h.socket.connect()
+    h.ws().serverOpen()
+
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(h.ws().sent.at(-1)).toBe('ping')
+    h.ws().serverMessage('CHANGE', { collection: 'todos' })
+    await vi.advanceTimersByTimeAsync(29_999)
+    expect(h.ws().readyState).toBe(1)
+  })
+
   it('rejects pending confirmations, resets queries to loading, schedules backoff', async () => {
     const h = makeSocket()
     h.socket.registerSubscription('sub-1', QUERY_KEY)
@@ -377,7 +483,11 @@ describe('sendConfirmed', () => {
 
     const promise = h.socket.sendConfirmed({ type: 'mutate', payload: { a: 1 } })
     const sent = JSON.parse(h.ws().sent.at(-1)!) as { payload: { requestId: string } }
-    h.ws().serverMessage(MSG.ACK, { requestId: sent.payload.requestId, success: true, recordId: 'r1' })
+    h.ws().serverMessage(MSG.ACK, {
+      requestId: sent.payload.requestId,
+      success: true,
+      recordId: 'r1',
+    })
     await expect(promise).resolves.toEqual({ recordId: 'r1' })
   })
 
@@ -388,7 +498,11 @@ describe('sendConfirmed', () => {
 
     const promise = h.socket.sendConfirmed({ type: 'mutate', payload: {} })
     const sent = JSON.parse(h.ws().sent.at(-1)!) as { payload: { requestId: string } }
-    h.ws().serverMessage(MSG.ACK, { requestId: sent.payload.requestId, success: false, error: 'denied' })
+    h.ws().serverMessage(MSG.ACK, {
+      requestId: sent.payload.requestId,
+      success: false,
+      error: 'denied',
+    })
     await expect(promise).rejects.toThrow('denied')
   })
 
@@ -424,7 +538,10 @@ describe('dispatch', () => {
 
   it('QUERY_RESULT lands in the store under the subscription queryKey', async () => {
     const h = await openSocket()
-    h.ws().serverMessage(MSG.QUERY_RESULT, { subscriptionId: 'sub-1', records: [{ recordId: 'r1' }] })
+    h.ws().serverMessage(MSG.QUERY_RESULT, {
+      subscriptionId: 'sub-1',
+      records: [{ recordId: 'r1' }],
+    })
     expect(h.store.setQueryResult).toHaveBeenCalledWith(QUERY_KEY, [{ recordId: 'r1' }])
   })
 

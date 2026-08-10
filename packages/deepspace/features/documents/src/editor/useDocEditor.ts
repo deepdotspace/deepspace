@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useMemo, useRef } from 'react'
-import { useEditor, type Editor } from '@tiptap/react'
+import { useEditor, type AnyExtension, type Editor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import Collaboration from '@tiptap/extension-collaboration'
 import { CollaborationCaret } from '@tiptap/extension-collaboration-caret'
@@ -127,7 +127,7 @@ export function useDocEditor({
   const provider = useMemo(() => (awareness ? { awareness } : null), [awareness])
 
   const extensions = useMemo(() => {
-    const exts: unknown[] = [
+    const exts: AnyExtension[] = [
       StarterKit.configure({
         // Yjs has its own undo/redo history via the Collaboration extension; keeping
         // both enabled corrupts the shared document on undo.
@@ -175,12 +175,7 @@ export function useDocEditor({
       // in dev (the editor view is destroyed and re-created, and any subscriber
       // that runs in between throws on `editor.view`). Defer to a useEffect.
       immediatelyRender: false,
-      // Bare directive on purpose: naming @typescript-eslint/no-explicit-any
-      // here is a hard "unknown rule" error under the scaffolded app's
-      // minimal eslint config (which never registers that plugin), while the
-      // SDK monorepo's config does enable the rule and needs the suppression.
-      // eslint-disable-next-line
-      extensions: extensions as any,
+      extensions,
       editorProps: {
         transformPastedHTML: stripCollaborationArtifactsFromHTML,
         attributes: {

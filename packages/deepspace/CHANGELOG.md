@@ -1,5 +1,149 @@
 # deepspace
 
+## 0.18.0
+
+### Minor Changes
+
+- **Deploy no longer reads `.dev.vars`. The secret store is the only source.**
+
+  Deploy used to compare hand-edited `.dev.vars` keys against the store and
+  refuse (`secrets_not_uploaded`) or warn when they differed — a guard that
+  inferred intent from a local file. It also broke its own escape hatch: the
+  refusal pointed at `secrets upload .dev.vars` while that same deploy had
+  already written the SDK-managed block into that file, whose keys the upload
+  then rejected, with no code and no action to recover from. An agent that hit
+  it had no way forward.
+
+  `.dev.vars` keeps its real job — deploy WRITES it so `deepspace dev` sees the
+  same values — and is never read back to decide anything.
+
+  **Removed:** the `--allow-missing-secrets` flag and the `secrets_not_uploaded`
+  refusal code, which only existed to escape that guard.
+
+  Deploy now distinguishes a missing config from an explicitly created empty
+  config. A missing config regenerates the local cache without app secrets and
+  refuses before build, Git push, or upload, with an executable
+  `secrets configs create` action. An existing empty config is explicit
+  delete-all intent. The deploy server independently preserves live bindings
+  when an older client omits secret authority, making the rollout safe in both
+  directions.
+
+  Authoritative deletion is part of release finalization, not a best-effort log.
+  The server retries Cloudflare reconciliation three times and retains the
+  per-app release fence on failure. Replaying the exact deploy retries deletion
+  without issuing a second Worker activation; a release is recorded only after
+  stale bindings, including `ALLOW_DEBUG_ROUTES`, are gone.
+
+  If the original CLI process exits after that partial result, a fresh deploy key
+  can resume only when the complete Worker, secret, attribution, and source
+  lineage hash matches the live operation. The server first proves that exact
+  operation is live at Cloudflare; different input stays fenced. Malformed
+  successful Cloudflare secret-list envelopes also fail closed.
+
+  The per-app release transaction is now reserved before route registration,
+  binding auto-provisioning, or rate-limit allocation. Losing concurrent deploys
+  therefore return without renaming the production app or creating provider
+  resources. An incomplete reservation cannot activate; an exact retry may
+  atomically take ownership and finish its resolved rollback metadata. Durable
+  key aliases keep displaced processes from reclaiming the operation and replay
+  the successor after finalization; a safe pre-activation abort removes the
+  aliases with the fence. A compare-and-set transition grants exactly one request
+  permission to issue the Worker PUT. That winner is bound to a request-scoped
+  claim nonce: it can clear its own committed-but-lost claim response before the
+  PUT begins, while an uncertain concurrent request cannot clear the winner's
+  activation fence.
+
+- **`.dev.vars` is now fully generated. Hand edits do not survive.**
+
+  The file used to be three zones — an SDK section, a hand-edited section
+  preserved across runs, and a store cache — which required a divider grammar, a
+  dotenv parser to read the file back, and reconciliation between the two
+  sources. That made `.dev.vars` a second source of truth, and historically a
+  de-facto deploy input (docs/proposals/secrets-source-of-truth.md).
+
+  Now it is a materialization: rewritten whole on every `dev`, `test`, `deploy`,
+  and `secrets pull` run from platform values plus the app's secret store, with
+  a header saying so. Nothing reads it back.
+
+  **If you hand-edited `.dev.vars`, put required values in the store before
+  updating** (`deepspace secrets set KEY=value`). The next dev/test/pull run
+  overwrites the file. There is no legacy import or compatibility path; beta
+  consumers must update their configuration.
+
+  All Wrangler environments now share the one generated `.dev.vars`. Missing
+  configs materialize as empty, so a successful refresh cannot leave stale local
+  values behind.
+
+  Also removed: `secrets upload` no longer strips a generated block (there is no
+  block to strip — uploading the generated file is not a flow; use
+  `secrets download` for backups).
+
+### Patch Changes
+
+- Remove stale lint suppressions from the Messaging and Documents feature
+  sources so an app containing every public feature builds without unused-rule
+  warnings.
+- Support the maintained Node 22 (22.15+), 24, and 26 release lines. Reject
+  end-of-life odd-numbered releases explicitly instead of allowing installs that
+  can fail inside their frozen npm dependency resolver.
+
+  Because npm treats `engines` as a warning by default, `create-deepspace` also
+  checks the runtime before prompts, file copies, identity minting, or Git
+  initialization. Help and version remain available for diagnosis.
+
+- `deepspace pull` no longer traps an agent when local work is simply unpushed.
+
+  Local-ahead — the ordinary state after `commit` — was classified as divergence.
+  `pull` exited 2 with `actionRequired: true` and handed back
+  `git merge refs/remotes/space/<branch>`, which answers "Already up to date" and
+  changes nothing. An agent honouring the exit-2 contract re-ran `pull` forever;
+  only `push` clears the state, and `push` was not the pinned action.
+
+  It is now `status: "local_ahead"` on a successful (exit 0) pull. Human output
+  names `deepspace push`, and JSON carries that same targeted push as its
+  executable success action. `deepspace status` has always classified this
+  correctly — the two now agree.
+
+- Typo'd flags are now refused instead of silently ignored.
+
+  citty hardcodes its parser to `strict: false`, so an unknown flag was never
+  rejected — it was dropped and the command ran with the caller's intent
+  discarded. `deepspace releases --limitt 1` swallowed the flag _and_ its value
+  and returned every release with exit 0; `--jsonn` printed human prose to stdout
+  while the caller waited for JSON. Unknown subcommands and bad flag _values_
+  were already rejected; only flag names went unchecked.
+
+  One check at the shared command boundary now rejects them with
+  `code: "unknown_option"` before any side effect, naming the options that verb
+  accepts. Aliases, hyphenated names, and `--no-<flag>` are unaffected.
+
+- Collaborative apps no longer show stale data as live when the connection dies
+  quietly.
+
+  A peer that stops answering without closing leaves the socket ESTABLISHED — no
+  packets are lost, so nothing retransmits, so no close event ever arrives.
+  Measured against a peer frozen mid-conversation, an unprobed connection stayed
+  open indefinitely. That is a hung Durable Object, a broken relay, or a
+  blackholed path; the browser's `offline` event fires for none of them, because
+  the machine's own network is fine.
+
+  Everything downstream already handled this correctly and was simply never
+  called: `useRecordContext().status` flips to `'disconnected'`, every live query
+  resets to loading while keeping its records on screen, and the socket
+  reconnects with backoff. The client now probes a connection once it has gone
+  quiet and closes it after 45s of silence, so those run when they should.
+
+  The probe costs nothing on the server: `BaseRoom` already registers a
+  `WebSocketRequestResponsePair('ping','pong')`, so the Cloudflare runtime
+  answers it while the Durable Object stays hibernated. An app already receiving
+  updates is never probed. Liveness is probe-based: a quiet socket sends a ping
+  after 15 seconds and closes only when that outstanding probe receives no
+  inbound answer for a further 30 seconds. A backgrounded timer's first resumed
+  callback therefore probes instead of falsely disconnecting a healthy socket.
+  If suspension occurs after a ping was sent, the first delayed callback also
+  discards that pre-suspension judgment and sends a fresh probe before applying
+  the normal deadline.
+
 ## 0.17.0
 
 ### Minor Changes
@@ -122,7 +266,7 @@ worktree remove` or a failed cleanup deleted.
 
 ### Minor Changes
 
-- **`deepspace app migrate` is removed**, replaced by `deepspace app update` (below). It existed for one historical cutover — moving an app from a name-shaped id to a canonical one — and the platform endpoints behind it are unchanged, so an app still on a legacy id migrates with `npx deepspace@0.13.0 app migrate` and then upgrades normally.
+- **`deepspace app migrate` is removed**, replaced by `deepspace app update` (below). It existed for one historical cutover — moving an app from a name-shaped id to a canonical one. The platform migration endpoints were subsequently removed too; an unexpected legacy-id app now requires operator-owned recovery. Do not downgrade to run the old command.
 
   A file that no longer exists now answers `404`, not the app's HTML. Deploys configured the asset layer with `not_found_handling: "single-page-application"`, so it answered EVERY unmatched path with `index.html` at 200 — correct for a client route, wrong for a file. A deploy replaces the hashed build chunks, so a tab still holding the previous `index.html` requested one and got HTML where JavaScript belonged: the script tag parsed it, failed, and the page went white with no error in any log, monitor, or network panel. The same answer went to agents probing `/llms.txt` and `/.well-known/mcp`, telling them the app publishes a manifest it does not have.
 

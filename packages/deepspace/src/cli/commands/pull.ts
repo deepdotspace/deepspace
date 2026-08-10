@@ -42,6 +42,7 @@ import type { CliAction } from '../lib/output'
 
 type Integration =
   | 'up_to_date'
+  | 'local_ahead'
   | 'fast_forwarded'
   | 'branch_created'
   | 'fetched_only_diverged'
@@ -289,12 +290,7 @@ export default defineDeepspaceCommand({
     // remote-tracking ref always mirrors the remote, rewrites included).
     spinner?.message(`Fetching ${branch} from the cloud repo…`)
     const trackingRef = spaceTrackingRef(branch)
-    runGitRemote(appDir, token, [
-      'fetch',
-      '--quiet',
-      SPACE_REMOTE,
-      `+${refName}:${trackingRef}`,
-    ])
+    runGitRemote(appDir, token, ['fetch', '--quiet', SPACE_REMOTE, `+${refName}:${trackingRef}`])
     const remoteOid = resolveCommit(appDir, trackingRef)
     if (!remoteOid) {
       spinner?.stop('Fetch failed.')
@@ -343,6 +339,15 @@ export default defineDeepspaceCommand({
           integration = 'fast_forwarded'
         }
       }
+    } else if (isAncestor(appDir, remoteOid, localOid)) {
+      // Local already CONTAINS the cloud tip — ordinary unpushed work, not a
+      // divergence. There is nothing to integrate, so the fetch succeeded and
+      // the next step is `push`. Lumping this in with divergence below issued
+      // exit 2 plus `git merge <tracking-ref>`, which answers "Already up to
+      // date" and leaves the state untouched — an agent honouring the exit-2
+      // contract re-ran pull forever. `status` has always classified this
+      // correctly; the two now agree.
+      integration = 'local_ahead'
     } else {
       integration = 'fetched_only_diverged'
     }
@@ -359,9 +364,19 @@ export default defineDeepspaceCommand({
     let line: string
     let codeForState: string | undefined
     let recoveryAction: CliAction | undefined
+    let successAction: CliAction | undefined
     switch (integration) {
       case 'up_to_date':
         line = `${branch} is already up to date.`
+        break
+      case 'local_ahead':
+        // Success, not a refusal: nothing to receive. Exit 0 may still carry
+        // the one deterministic continuation, just like other successful
+        // command results in the shared output contract.
+        line =
+          `${branch} already contains ${SPACE_REMOTE}/${branch} at ${remoteOid.slice(0, 10)} — ` +
+          `nothing to pull. Local work is not on the cloud repo yet: run \`${pushCommand}\`.`
+        successAction = targetedVcAction('push', appDir, appId, branch)
         break
       case 'fast_forwarded':
         line = `Fast-forwarded ${branch} to ${remoteOid.slice(0, 10)}.`
@@ -438,7 +453,8 @@ export default defineDeepspaceCommand({
     spinner?.stop(codeForState ? `Fetched ${SPACE_REMOTE}/${branch}.` : line)
     // Completeness: appId and the fetched remote oid are --json facts the
     // summary line doesn't always carry — say them in the text too.
-    if (!args.json) p.log.info(`App: ${appId} · ${SPACE_REMOTE}/${branch} at ${remoteOid.slice(0, 10)}`)
+    if (!args.json)
+      p.log.info(`App: ${appId} · ${SPACE_REMOTE}/${branch} at ${remoteOid.slice(0, 10)}`)
     if (codeForState) {
       // Every blocked integration is ok:false. Only one with an executable
       // continuation adds actionRequired and exits 2; judgment states exit 1.
@@ -454,6 +470,6 @@ export default defineDeepspaceCommand({
         },
       })
     }
-    return { data: { status: integration, appId, branch, remoteOid } }
+    return { data: { status: integration, appId, branch, remoteOid }, action: successAction }
   },
 })

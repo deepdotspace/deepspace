@@ -101,6 +101,11 @@ export async function readCliInput(
     printMissingAppNameUsage()
     process.exit(1)
   }
+  const runtimeRefusal = nodeRuntimeRefusal()
+  if (runtimeRefusal) {
+    console.error(runtimeRefusal)
+    process.exit(1)
+  }
 
   p.intro('Create a new DeepSpace app')
   const templates = loadTemplates()
@@ -149,6 +154,15 @@ export async function readCliInput(
   }
 
   return { appName, local: args.local, template }
+}
+
+/** Runtime guard for npm's default non-strict handling of `engines`. */
+export function nodeRuntimeRefusal(version = process.versions.node): string | null {
+  const [major, minor] = version.split('.').map(Number)
+  const supported = (major === 22 && minor >= 15) || major === 24 || major === 26
+  return supported
+    ? null
+    : `create-deepspace requires Node 22.15+, 24, or 26 (current: ${version}). Update Node before scaffolding; no project files were changed.`
 }
 
 export function validateAppName(name: string): string | null {

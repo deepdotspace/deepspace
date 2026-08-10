@@ -140,9 +140,11 @@ describe('pushToSpace against real repositories', () => {
 
   it('can push through an isolated staging remote', () => {
     runGit(repo, ['remote', 'add', 'space-staging', bare])
-    expect(pushToSpace(repo, 'tok', 'refs/heads/main:refs/heads/main', {
-      remote: 'space-staging',
-    }).status).toBe('committed')
+    expect(
+      pushToSpace(repo, 'tok', 'refs/heads/main:refs/heads/main', {
+        remote: 'space-staging',
+      }).status,
+    ).toBe('committed')
   })
 })
 
@@ -202,7 +204,9 @@ describe('push rejection decisions', () => {
   })
 
   describe('413 (too large)', () => {
-    const http413 = new Error('error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413')
+    const http413 = new Error(
+      'error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413',
+    )
 
     it('names both ceilings', () => {
       const failure = classifyPushTransportFailure(http413)
@@ -236,6 +240,8 @@ describe('push rejection decisions', () => {
       const repo = mkdtempSync(join(tmpdir(), 'deepspace-413-'))
       try {
         initRepo(repo, 'main')
+        runGit(repo, ['config', 'user.email', 'test@example.com'])
+        runGit(repo, ['config', 'user.name', 'Test'])
         // One blob over the 20 MiB per-object cap, one comfortably under.
         writeFileSync(join(repo, 'huge.bin'), Buffer.alloc(21 * 1024 * 1024, 1))
         writeFileSync(join(repo, 'small.txt'), 'fine')
@@ -256,6 +262,8 @@ describe('push rejection decisions', () => {
       const repo = mkdtempSync(join(tmpdir(), 'deepspace-413-'))
       try {
         initRepo(repo, 'main')
+        runGit(repo, ['config', 'user.email', 'test@example.com'])
+        runGit(repo, ['config', 'user.name', 'Test'])
         writeFileSync(join(repo, 'small.txt'), 'fine')
         runGit(repo, ['add', '-A'])
         runGit(repo, ['commit', '-m', 'small'])

@@ -231,10 +231,8 @@ export default defineDeepspaceCommand({
     if (appIdForSecrets) {
       try {
         const refreshed = await refreshSecretsCache(DEPLOY_URL, token, appIdForSecrets, wranglerEnv)
-        if (refreshed) {
-          generatedSecretsCache = refreshed.rendered
-          if (refreshed.summary) say(refreshed.summary)
-        }
+        generatedSecretsCache = refreshed.rendered
+        if (refreshed.summary) say(refreshed.summary)
       } catch (err: unknown) {
         throw new Refusal(
           `Failed to refresh app secrets: ${err instanceof Error ? err.message : String(err)}`,
@@ -243,18 +241,12 @@ export default defineDeepspaceCommand({
       }
     }
 
-    const sharedDevVarsCache = generatedSecretsCache !== undefined
     await writeDevVars(appDir, payload.sub, token, wranglerEnv, {
       generatedSecretsCache,
-      sharedDevVarsCache,
     })
     // prepareWranglerEnvConfig throws typed errors that already carry slugs;
     // let them through untouched rather than flattening them to a message.
-    const wranglerConfig: PreparedWranglerEnvConfig = prepareWranglerEnvConfig(
-      appDir,
-      wranglerEnv,
-      { sharedDevVarsCache },
-    )
+    const wranglerConfig: PreparedWranglerEnvConfig = prepareWranglerEnvConfig(appDir, wranglerEnv)
     preflightWindowsWorkerd(appDir)
 
     // Pre-probe the port so a collision gets a friendly remedy instead of
@@ -281,15 +273,11 @@ export default defineDeepspaceCommand({
     const url = `http://${host === DEFAULT_DEV_HOST ? 'localhost' : host}:${port}`
     say('Starting dev server...\n')
 
-    const vite = spawn(
-      'npx',
-      ['vite', '--port', String(port), '--strictPort', '--host', host],
-      {
-        cwd: appDir,
-        stdio: 'inherit',
-        env: wranglerViteEnv(process.env, wranglerConfig, { DEEPSPACE_PORT: String(port) }),
-      },
-    )
+    const vite = spawn('npx', ['vite', '--port', String(port), '--strictPort', '--host', host], {
+      cwd: appDir,
+      stdio: 'inherit',
+      env: wranglerViteEnv(process.env, wranglerConfig, { DEEPSPACE_PORT: String(port) }),
+    })
     // The readiness envelope. `--json` used to emit nothing until the server
     // had already exited, which is the one moment a caller waiting to drive it
     // cannot use. Printed the instant the port answers; the runtime's exit

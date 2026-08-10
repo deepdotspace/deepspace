@@ -1,30 +1,29 @@
 /**
  * App-secrets CLI lib: validation, upload parsing, download formatting, the
- * generated-cache render/strip round-trip, and pullAppSecretsCache's
- * missing-store tolerance. (The store's server behavior is covered in the
- * deploy-worker's suites; command wiring is exercised by e2e.)
+ * rendered `.dev.vars` secrets block, and pullAppSecretsCache's missing-store
+ * tolerance. (The store's server behavior is covered in the deploy-worker's
+ * suites; command wiring is exercised by e2e.)
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  GENERATED_SECRETS_DIVIDER,
   defaultConfigNameForEnv,
   formatSecretsDownload,
   parseSecretsUpload,
   pullAppSecretsCache,
   quoteDotenvValue,
+  refreshSecretsCache,
   renderSecretsCache,
   shellSingleQuote,
-  stripGeneratedSecretsCache,
   validateConfigName,
   validateSecretName,
 } from '../lib/secrets'
-import { DEV_VARS_DIVIDER, extractCustomDevVars, parseDevVars } from '../lib/dev-vars'
 
 const APP_ID = 'app_01HZXYABCDEFGHJKMNPQRSTVWX'
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 describe('validation', () => {
@@ -58,16 +57,13 @@ describe('validation', () => {
 describe('upload parsing', () => {
   it('parses dotenv with quoting and comments', () => {
     const parsed = parseSecretsUpload(
-      ['# comment', 'PLAIN=abc', 'QUOTED="with \\"quotes\\" and spaces"', '', 'not a line'].join(
-        '\n',
-      ),
+      ['# comment', 'PLAIN=abc', 'QUOTED="with \\"quotes\\" and spaces"', ''].join('\n'),
     )
     expect(parsed).toEqual({ PLAIN: 'abc', QUOTED: 'with "quotes" and spaces' })
   })
 
   it('parses multiline quoted values (a real PEM survives byte-exact)', () => {
-    const pem =
-      '-----BEGIN PRIVATE KEY-----\nBJAXHUsmUQ1j3ZqVWawiNQ==\n-----END PRIVATE KEY-----'
+    const pem = '-----BEGIN PRIVATE KEY-----\nBJAXHUsmUQ1j3ZqVWawiNQ==\n-----END PRIVATE KEY-----'
     const parsed = parseSecretsUpload(`BEFORE=1\nMULTI="\n${pem}\n"\nAFTER=2`)
     // The value round-trips with real newlines, and NO phantom key is minted
     // from the base64 continuation line (`BJAXHUsmUQ1j3ZqVWawiNQ==`).
@@ -100,10 +96,24 @@ describe('upload parsing', () => {
   it('rejects reserved names in both JSON and dotenv uploads', () => {
     // The dotenv branch must fail as loudly as `set`/JSON, not silently ship a
     // reserved name and let the server reject it with a raw (400).
-    expect(() => parseSecretsUpload('{"APP_OWNER_JWT":"x"}')).toThrow(/managed by the DeepSpace SDK/)
+    expect(() => parseSecretsUpload('{"APP_OWNER_JWT":"x"}')).toThrow(
+      /managed by the DeepSpace SDK/,
+    )
     expect(() => parseSecretsUpload('APP_OWNER_JWT=x')).toThrow(/managed by the DeepSpace SDK/)
-    // A non-name line is still skipped silently (comments, blanks, junk).
-    expect(parseSecretsUpload('# note\nOK=1\nnot a line')).toEqual({ OK: '1' })
+  })
+
+  it('fails closed on malformed dotenv lines without echoing their value', () => {
+    expect(() => parseSecretsUpload('# note\nOK=1\nnot a line')).toThrow(
+      /line 3: expected KEY=value/,
+    )
+    let invalidNameError: Error | undefined
+    try {
+      parseSecretsUpload('1BAD=do-not-print-this')
+    } catch (error) {
+      invalidNameError = error as Error
+    }
+    expect(invalidNameError?.message).toMatch(/line 1/)
+    expect(invalidNameError?.message).not.toContain('do-not-print-this')
   })
 })
 
@@ -149,36 +159,16 @@ describe('download formatting', () => {
   })
 })
 
-describe('generated cache', () => {
-  it('render → strip round-trips a .dev.vars body', () => {
-    const cache = renderSecretsCache({ API_KEY: 'v1' }, { appId: APP_ID, configName: 'prd' })
-    expect(cache).toContain(GENERATED_SECRETS_DIVIDER)
-    expect(cache).toContain(`# app ${APP_ID} · config prd`)
-    expect(cache).toContain('API_KEY=v1')
-
-    const body = `SDK_VAR=1\n\n${cache}\n`
-    expect(stripGeneratedSecretsCache(body)).toBe('SDK_VAR=1\n')
-    expect(stripGeneratedSecretsCache('SDK_VAR=1\n')).toBe('SDK_VAR=1\n')
-  })
-
-  it('deploy only sees hand-edited vars, never generated-cache entries', () => {
-    // Guards the local-only-vars warning against false positives: the deploy reads
-    // `extractCustomDevVars(stripGeneratedSecretsCache(body))`. A stale cache entry
-    // (a just-deleted secret, or another config's secrets in the shared .dev.vars)
-    // must NOT surface as a "local-only" var — only genuinely hand-edited lines do.
+describe('renderSecretsCache', () => {
+  it('renders a sorted, quoted block naming its source store', () => {
+    // The block is one zone of a fully generated file (see lib/dev-vars.ts) —
+    // there is no divider grammar and nothing parses it back. The header line
+    // exists only so a reader knows which store the values came from.
     const cache = renderSecretsCache(
-      { FROM_STORE: '1', DELETED_BUT_STALE: '2' },
+      { B_KEY: 'two words', A_KEY: 'v1' },
       { appId: APP_ID, configName: 'prd' },
     )
-    const body = [
-      'AUTH_JWT_ISSUER=managed', // SDK-managed, above the divider → stripped
-      DEV_VARS_DIVIDER,
-      'MY_LOCAL=hand', // genuinely hand-edited → the only thing that should surface
-      cache,
-    ].join('\n')
-    expect(parseDevVars(extractCustomDevVars(stripGeneratedSecretsCache(body)))).toEqual({
-      MY_LOCAL: 'hand',
-    })
+    expect(cache).toBe(`# App secrets · config prd · app ${APP_ID}\nA_KEY=v1\nB_KEY="two words"`)
   })
 })
 
@@ -193,6 +183,16 @@ describe('pullAppSecretsCache', () => {
     expect(vi.mocked(fetch).mock.calls[0][0]).toBe(
       `https://deploy.test/api/secrets/${APP_ID}/configs/prd/values`,
     )
+  })
+
+  it('renders an absent selected config as an empty local materialization', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ error: 'config_not_found' }, { status: 404 })),
+    )
+    const refreshed = await refreshSecretsCache('https://deploy.test', 't', APP_ID, 'staging', 'qa')
+    expect(refreshed.pulled).toBeNull()
+    expect(refreshed.rendered).toBe(`# App secrets · config qa · app ${APP_ID}`)
   })
 
   it('treats a missing store/config (404) as "nothing to ship"', async () => {

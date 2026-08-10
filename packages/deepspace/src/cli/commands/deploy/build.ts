@@ -94,11 +94,10 @@ export async function buildDeployBundle(options: {
   appDir: string
   appName: string
   envName: string | undefined
-  sharedDevVarsCache: boolean
   output: DeployOutput
   spinner: Spinner
 }): Promise<DeployBundle> {
-  const { appDir, appName, envName, sharedDevVarsCache, output, spinner } = options
+  const { appDir, appName, envName, output, spinner } = options
   const junk = removeMacosJunk(appDir)
   if (junk > 0) p.log.info(`Removed ${junk} macOS metadata file(s) (._*, .DS_Store)`)
 
@@ -110,9 +109,7 @@ export async function buildDeployBundle(options: {
   spinner.start('Building...')
   let preparedWranglerConfig: PreparedWranglerEnvConfig | undefined
   try {
-    preparedWranglerConfig = prepareWranglerEnvConfig(appDir, envName, {
-      sharedDevVarsCache,
-    })
+    preparedWranglerConfig = prepareWranglerEnvConfig(appDir, envName)
     const appDomain = DEEPSPACE_ENV === 'staging' ? 'spacestest.com' : 'app.space'
     execSync('npx vite build', {
       cwd: appDir,
@@ -328,7 +325,10 @@ export function collectAssets(dir: string): DeployAsset[] {
 
 export function readDeployAssetConfig(clientDir: string): DeployAssetConfig {
   const config: DeployAssetConfig = {}
-  for (const [file, key] of [['_headers', '_headers'], ['_redirects', '_redirects']] as const) {
+  for (const [file, key] of [
+    ['_headers', '_headers'],
+    ['_redirects', '_redirects'],
+  ] as const) {
     const filePath = join(clientDir, file)
     if (!existsSync(filePath)) continue
     const content = readFileSync(filePath, 'utf8')

@@ -75,16 +75,8 @@ describe('resolveAppNameForEnv', () => {
 })
 
 describe('devVarsPathFor', () => {
-  it('returns .dev.vars when no env is given', () => {
-    expect(devVarsPathFor('/app', undefined)).toBe('/app/.dev.vars')
-  })
-
-  it('returns .dev.vars.<env> when env is given in legacy mode', () => {
-    expect(devVarsPathFor('/app', 'staging')).toBe('/app/.dev.vars.staging')
-  })
-
-  it('returns shared .dev.vars when env is given in linked-secrets mode', () => {
-    expect(devVarsPathFor('/app', 'staging', { sharedDevVarsCache: true })).toBe('/app/.dev.vars')
+  it('returns the one generated .dev.vars path', () => {
+    expect(devVarsPathFor('/app')).toBe('/app/.dev.vars')
   })
 })
 
@@ -98,31 +90,7 @@ describe('prepareWranglerEnvConfig', () => {
     }
   }
 
-  it('keeps legacy CLOUDFLARE_ENV behavior unless linked secrets need the shared cache', () => {
-    withTempDir((dir) => {
-      writeFileSync(join(dir, '.dev.vars.staging'), 'OLD_SECRET=keep-for-user\n')
-      writeFileSync(
-        join(dir, 'wrangler.toml'),
-        ['name = "hopkins"', '[env.staging]', 'name = "hopkins-staging"'].join('\n'),
-      )
-
-      const warnings: string[] = []
-      const prepared = prepareWranglerEnvConfig(dir, 'staging', {
-        warn: (message) => warnings.push(message),
-      })
-      expect(prepared.configPath).toBeUndefined()
-      expect(warnings).toHaveLength(0)
-
-      const childEnv = wranglerViteEnv({ CLOUDFLARE_ENV: 'ambient' }, prepared)
-      expect(childEnv.CLOUDFLARE_ENV).toBe('staging')
-      expect(childEnv.CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH).toBeUndefined()
-      expect(readFileSync(join(dir, '.dev.vars.staging'), 'utf-8')).toBe(
-        'OLD_SECRET=keep-for-user\n',
-      )
-    })
-  })
-
-  it('flattens the selected env and makes .dev.vars win in linked-secrets mode', () => {
+  it('flattens the selected env so Wrangler reads the one generated cache', () => {
     withTempDir((dir) => {
       writeFileSync(join(dir, '.dev.vars.staging'), 'OLD_SECRET=keep-for-user\n')
       writeFileSync(
@@ -144,16 +112,9 @@ describe('prepareWranglerEnvConfig', () => {
         ].join('\n'),
       )
 
-      const warnings: string[] = []
-      const prepared = prepareWranglerEnvConfig(dir, 'staging', {
-        sharedDevVarsCache: true,
-        warn: (message) => warnings.push(message),
-      })
+      const prepared = prepareWranglerEnvConfig(dir, 'staging')
       expect(prepared.configPath).toBeDefined()
       expect(existsSync(prepared.configPath!)).toBe(true)
-      expect(warnings).toHaveLength(1)
-      expect(warnings[0]).toContain('.dev.vars.staging')
-      expect(warnings[0]).toContain('.dev.vars')
 
       const generated = readFileSync(prepared.configPath!, 'utf-8')
       expect(generated).toContain('name = "hopkins-staging"')
@@ -197,7 +158,7 @@ describe('prepareWranglerEnvConfig', () => {
         ].join('\n'),
       )
 
-      const prepared = prepareWranglerEnvConfig(dir, 'staging', { sharedDevVarsCache: true })
+      const prepared = prepareWranglerEnvConfig(dir, 'staging')
       const generated = readFileSync(prepared.configPath!, 'utf-8')
       expect(generated).toContain('name = "STAGING_ROOMS"')
       expect(generated).not.toContain('name = "ROOMS"')
@@ -225,7 +186,7 @@ describe('prepareWranglerEnvConfig', () => {
         ].join('\n'),
       )
 
-      const prepared = prepareWranglerEnvConfig(dir, 'staging', { sharedDevVarsCache: true })
+      const prepared = prepareWranglerEnvConfig(dir, 'staging')
       const generated = readFileSync(prepared.configPath!, 'utf-8')
       expect(generated).toContain('name = "STAGING_LIMITER"')
       expect(generated).not.toContain('name = "PRODUCTION_LIMITER"')
@@ -236,9 +197,7 @@ describe('prepareWranglerEnvConfig', () => {
   it('does nothing when no env is selected', () => {
     withTempDir((dir) => {
       writeFileSync(join(dir, 'wrangler.toml'), 'name = "hopkins"\n')
-      const prepared = prepareWranglerEnvConfig(dir, undefined, {
-        warn: () => expect.fail('unexpected warning'),
-      })
+      const prepared = prepareWranglerEnvConfig(dir, undefined)
       expect(prepared.configPath).toBeUndefined()
       const childEnv = wranglerViteEnv({ CLOUDFLARE_ENV: 'ambient' }, prepared)
       expect(childEnv.CLOUDFLARE_ENV).toBe('ambient')

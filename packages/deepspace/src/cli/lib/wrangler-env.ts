@@ -19,13 +19,10 @@
  * No platform-side change needed beyond letting the CLI register a second
  * app under the same owner.
  *
- * When an app links a remote secrets project, DeepSpace keeps generated
- * dev/test/deploy credentials in a single `.dev.vars` cache so named
- * environments do not leave extra local files. In that linked-secrets mode,
- * `--env` flattens the selected Wrangler env into a generated config for the
- * Cloudflare Vite plugin instead of passing `CLOUDFLARE_ENV`; otherwise
- * Wrangler would prefer legacy `.dev.vars.<env>` files over the shared cache.
- * Unlinked apps keep Wrangler's legacy env-file behavior.
+ * DeepSpace keeps generated dev/test/deploy credentials in one `.dev.vars`
+ * file. For `--env`, it flattens the selected Wrangler env into a generated
+ * config for the Cloudflare Vite plugin instead of passing `CLOUDFLARE_ENV`;
+ * otherwise Wrangler would look for a separate `.dev.vars.<env>` file.
  */
 
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -59,12 +56,7 @@ export interface WranglerConfig {
 
 export interface PreparedWranglerEnvConfig {
   configPath?: string
-  wranglerEnv?: string
   cleanup(): void
-}
-
-export interface WranglerEnvModeOptions {
-  sharedDevVarsCache?: boolean
 }
 
 type TomlRecord = Record<string, unknown>
@@ -136,46 +128,16 @@ export function resolveAppNameForEnv(
   return resolveAppName(envBlock.name)
 }
 
-/** The .dev.vars path for the selected mode. Linked secrets use a shared cache. */
-export function devVarsPathFor(
-  appDir: string,
-  envName: string | undefined,
-  opts: WranglerEnvModeOptions = {},
-): string {
-  if (opts.sharedDevVarsCache || !envName) return join(appDir, '.dev.vars')
-  return join(appDir, `.dev.vars.${envName}`)
-}
-
-export function legacyEnvDevVarsPathFor(
-  appDir: string,
-  envName: string | undefined,
-): string | undefined {
-  return envName ? join(appDir, `.dev.vars.${envName}`) : undefined
-}
-
-export function warnIfLegacyEnvDevVarsExists(
-  appDir: string,
-  envName: string | undefined,
-  warn: (message: string) => void = console.warn,
-): void {
-  const legacyPath = legacyEnvDevVarsPathFor(appDir, envName)
-  if (!legacyPath || !existsSync(legacyPath)) return
-  warn(
-    `Warning: ${legacyPath} exists, but DeepSpace now uses ${devVarsPathFor(appDir, envName, { sharedDevVarsCache: true })} ` +
-      `for every environment. This run will ignore ${legacyPath}; move any secrets you still ` +
-      `need into .dev.vars, then remove the env-specific file when you're ready.`,
-  )
+/** DeepSpace owns one generated local env file for every Wrangler environment. */
+export function devVarsPathFor(appDir: string): string {
+  return join(appDir, '.dev.vars')
 }
 
 export function prepareWranglerEnvConfig(
   appDir: string,
   envName: string | undefined,
-  opts: { warn?: (message: string) => void } & WranglerEnvModeOptions = {},
 ): PreparedWranglerEnvConfig {
   if (!envName) return { cleanup() {} }
-  if (!opts.sharedDevVarsCache) return { wranglerEnv: envName, cleanup() {} }
-
-  warnIfLegacyEnvDevVarsExists(appDir, envName, opts.warn)
 
   const config = readWranglerConfig(appDir)
   const resolved = resolveAppNameForEnv(config, envName)
@@ -212,8 +174,6 @@ export function wranglerViteEnv(
   if (prepared.configPath) {
     delete env.CLOUDFLARE_ENV
     env.CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH = prepared.configPath
-  } else if (prepared.wranglerEnv) {
-    env.CLOUDFLARE_ENV = prepared.wranglerEnv
   }
   return env
 }

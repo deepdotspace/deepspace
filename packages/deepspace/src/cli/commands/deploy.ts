@@ -66,12 +66,6 @@ export default defineCommand({
         'Non-admin accounts are refused.',
       default: false,
     },
-    'allow-missing-secrets': {
-      type: 'boolean',
-      description:
-        'Deploy even though hand-edited .dev.vars secrets are absent from the store (they will NOT be deployed, and any a previous deploy set are dropped).',
-      default: false,
-    },
     // Citty maps --no-push to the negation of an argument named `push`.
     push: {
       type: 'boolean',
@@ -163,7 +157,6 @@ export default defineCommand({
       appDir,
       appName,
       envName,
-      sharedDevVarsCache: secretsCache.linked !== null,
       output,
       spinner,
     })
@@ -185,10 +178,7 @@ export default defineCommand({
     })
 
     const secrets = prepareDeploySecrets({
-      appDir,
-      envName,
       cache: secretsCache,
-      allowMissing: Boolean(args['allow-missing-secrets']),
       customBindings: bundle.customBindings,
       doManifest: bundle.doManifest,
       output,

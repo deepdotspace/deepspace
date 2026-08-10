@@ -59,9 +59,11 @@ describe('isPortListening', () => {
     try {
       expect(await isPortListening(port, '0.0.0.0')).toBe(true)
       expect(await isPortListening(port, '127.0.0.1')).toBe(true)
-      // The old probe's answer, pinned so the regression cannot come back
-      // silently: it reports the port FREE while the server is serving.
-      expect(await checkPortAvailable(port, '127.0.0.1')).toBe(true)
+      // The historical bind-probe bug is a macOS/BSD socket behavior. Linux
+      // correctly reports the wildcard bind as occupied; the connect-probe
+      // assertions above are the cross-platform contract.
+      const bsdBindSemantics = ['darwin', 'freebsd', 'openbsd'].includes(process.platform)
+      expect(await checkPortAvailable(port, '127.0.0.1')).toBe(bsdBindSemantics)
     } finally {
       server.close()
     }

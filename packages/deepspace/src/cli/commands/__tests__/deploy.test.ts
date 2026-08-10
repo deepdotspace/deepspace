@@ -23,7 +23,6 @@ import {
   postWithRetry,
   uploadDeployAssets,
 } from '../deploy/request'
-import { classifyDevVarsSecrets } from '../deploy/secrets'
 import {
   deployRepositoryFailure,
   dirtyWorktreeRefusal,
@@ -36,6 +35,10 @@ import {
 import type { DeployOutput } from '../deploy/output'
 import type { PushRefResult } from '../../lib/vc-push'
 import { GitError } from '../../lib/git/process'
+import { loadDeploySecrets, prepareDeploySecrets } from '../deploy/secrets'
+import { writeDevVars } from '../../lib/dev-vars'
+
+vi.mock('../../lib/dev-vars', () => ({ writeDevVars: vi.fn(async () => undefined) }))
 
 describe('extractRunWorkerFirst', () => {
   it('forwards documentation routes only when the app declares them', () => {
@@ -101,6 +104,88 @@ describe('blankSelectorRefusal (pre-auth blank deploy selector)', () => {
   })
 })
 
+describe('deploy secret authority', () => {
+  const appId = 'app_01HZXYABCDEFGHJKMNPQRSTVWX'
+
+  function output(): DeployOutput {
+    return {
+      json: true,
+      nonInteractive: true,
+      emitJson: vi.fn(),
+      showIntro: vi.fn(),
+      die(message, code, options): never {
+        const error = new Error(message) as Error & {
+          code?: string
+          options?: unknown
+        }
+        error.code = code
+        error.options = options
+        throw error
+      },
+    }
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.mocked(writeDevVars).mockClear()
+  })
+
+  it('materializes empty locally but refuses deploy when the config is absent', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ error: 'config_not_found' }, { status: 404 })),
+    )
+
+    const result = loadDeploySecrets({
+      deployUrl: 'https://deploy.test',
+      appDir: '/tmp/app',
+      appId,
+      envName: undefined,
+      ownerId: 'owner',
+      token: 'token',
+      output: output(),
+    })
+
+    await expect(result).rejects.toMatchObject({
+      code: 'secrets_config_missing',
+      options: {
+        action: {
+          cwd: '/tmp/app',
+          argv: ['deepspace', 'secrets', 'configs', 'create', 'prd'],
+        },
+      },
+    })
+    expect(writeDevVars).toHaveBeenCalledWith(
+      '/tmp/app',
+      'owner',
+      'token',
+      undefined,
+      expect.objectContaining({
+        generatedSecretsCache: `# App secrets · config prd · app ${appId}`,
+      }),
+    )
+  })
+
+  it('treats an explicitly existing empty config as authoritative', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ secrets: {} })),
+    )
+    const cache = await loadDeploySecrets({
+      deployUrl: 'https://deploy.test',
+      appDir: '/tmp/app',
+      appId,
+      envName: undefined,
+      ownerId: 'owner',
+      token: 'token',
+      output: output(),
+    })
+    expect(
+      prepareDeploySecrets({ cache, customBindings: [], doManifest: undefined, output: output() }),
+    ).toEqual({ values: {}, names: [], authoritative: true })
+  })
+})
+
 describe('content-addressed asset collection', () => {
   it('addresses every built file by the SHA-256 of its bytes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'deepspace-assets-'))
@@ -145,7 +230,12 @@ describe('content-addressed asset collection', () => {
  * release the platform was always going to reject.
  */
 describe('oversizedAssetRefusal', () => {
-  const asset = (path: string, size: number) => ({ path, hash: 'x'.repeat(64), size, sourcePath: path })
+  const asset = (path: string, size: number) => ({
+    path,
+    hash: 'x'.repeat(64),
+    size,
+    sourcePath: path,
+  })
 
   it('passes a bundle whose every file is under the cap', () => {
     expect(oversizedAssetRefusal([asset('/a.js', 1024), asset('/b.png', 2048)])).toBeNull()
@@ -491,56 +581,6 @@ describe('postWithRetry', () => {
     await vi.runAllTimersAsync()
     await rejection
     expect(fetchMock).toHaveBeenCalledTimes(3)
-  })
-})
-
-describe('classifyDevVarsSecrets (#145 secret-drop guard)', () => {
-  it('BLOCKS when the store is empty but .dev.vars has hand-edited secrets', () => {
-    // The dangerous case: deploying would ship no secrets and drop any live ones.
-    const r = classifyDevVarsSecrets({
-      storeSecretNames: [],
-      handEditedDevVarKeys: ['API_KEY', 'DB_URL'],
-      allowMissing: false,
-    })
-    expect(r.kind).toBe('block')
-    expect(r.kind === 'block' && r.strayKeys).toEqual(['API_KEY', 'DB_URL'])
-  })
-
-  it('does NOT block when --allow-missing-secrets is set (warns instead)', () => {
-    const r = classifyDevVarsSecrets({
-      storeSecretNames: [],
-      handEditedDevVarKeys: ['API_KEY'],
-      allowMissing: true,
-    })
-    expect(r.kind).toBe('warn')
-  })
-
-  it('only WARNS when the store already ships secrets and .dev.vars has extras', () => {
-    const r = classifyDevVarsSecrets({
-      storeSecretNames: ['API_KEY'],
-      handEditedDevVarKeys: ['API_KEY', 'LOCAL_ONLY'],
-      allowMissing: false,
-    })
-    expect(r.kind).toBe('warn')
-    expect(r.kind === 'warn' && r.strayKeys).toEqual(['LOCAL_ONLY'])
-  })
-
-  it('is ok when every hand-edited .dev.vars key is already in the store', () => {
-    const r = classifyDevVarsSecrets({
-      storeSecretNames: ['API_KEY', 'DB_URL'],
-      handEditedDevVarKeys: ['API_KEY'],
-      allowMissing: false,
-    })
-    expect(r.kind).toBe('ok')
-  })
-
-  it('is ok when there are no hand-edited .dev.vars secrets (empty store, empty file)', () => {
-    const r = classifyDevVarsSecrets({
-      storeSecretNames: [],
-      handEditedDevVarKeys: [],
-      allowMissing: false,
-    })
-    expect(r.kind).toBe('ok')
   })
 })
 

@@ -14,7 +14,14 @@ import type { GroupedReaction } from 'deepspace'
 import { UserProfilePopover } from './UserProfilePopover'
 import { useLongPress } from '../hooks/useLongPress'
 
-const QUICK_EMOJIS = ['\u{1F44D}', '\u2764\uFE0F', '\u{1F602}', '\u{1F389}', '\u{1F525}', '\u{1F440}']
+const QUICK_EMOJIS = [
+  '\u{1F44D}',
+  '\u2764\uFE0F',
+  '\u{1F602}',
+  '\u{1F389}',
+  '\u{1F525}',
+  '\u{1F440}',
+]
 
 export interface MessageRect {
   top: number
@@ -61,6 +68,8 @@ export function MessageItem({
   const [editContent, setEditContent] = useState(message.data.content)
   const editContainerRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
+  const latestMessageContentRef = useRef(message.data.content)
+  latestMessageContentRef.current = message.data.content
 
   const authorId = message.data.authorId || message.createdBy
   const author = getUser(authorId)
@@ -78,27 +87,25 @@ export function MessageItem({
         height: rect.height,
       })
     },
-    { delay: 500, threshold: 10 }
+    { delay: 500, threshold: 10 },
   )
 
   useEffect(() => {
-    if (forceEdit && !isEditing) {
-      setIsEditing(true)
-      setEditContent(message.data.content)
-    }
-    // Deps intentionally limited to [forceEdit]: this reacts only to the
-    // forceEdit trigger. Including isEditing/message.data.content would re-fire
-    // on every keystroke and clobber the in-progress edit buffer.
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot on forceEdit; adding isEditing/message.data.content would re-fire on keystrokes and clobber the edit buffer
-  }, [forceEdit])
+    if (!forceEdit || isEditing) return
+    setEditContent(latestMessageContentRef.current)
+    setIsEditing(true)
+  }, [forceEdit, isEditing])
 
   const timestamp = new Date(message.createdAt)
   const timeStr = timestamp.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-  const dateTimeStr = timestamp.toLocaleDateString(undefined, {
-    month: '2-digit',
-    day: '2-digit',
-    year: '2-digit',
-  }) + ', ' + timeStr
+  const dateTimeStr =
+    timestamp.toLocaleDateString(undefined, {
+      month: '2-digit',
+      day: '2-digit',
+      year: '2-digit',
+    }) +
+    ', ' +
+    timeStr
 
   const exitEdit = useCallback(() => {
     setIsEditing(false)
@@ -173,10 +180,7 @@ export function MessageItem({
         }`}
       >
         <div className="shrink-0 w-10" />
-        <p
-          data-testid="deleted-tombstone"
-          className="text-sm italic text-muted-foreground/70"
-        >
+        <p data-testid="deleted-tombstone" className="text-sm italic text-muted-foreground/70">
           This message was deleted.
         </p>
       </div>
@@ -205,10 +209,7 @@ export function MessageItem({
       </div>
 
       {/* Content column */}
-      <div
-        ref={contentRef}
-        className={`flex-1 min-w-0 ${isHighlighted ? 'invisible' : ''}`}
-      >
+      <div ref={contentRef} className={`flex-1 min-w-0 ${isHighlighted ? 'invisible' : ''}`}>
         {isFirstInGroup && (
           <div className="flex items-baseline gap-2 mb-0.5">
             <UserProfilePopover userId={authorId} onStartDM={onStartDM}>
@@ -239,7 +240,13 @@ export function MessageItem({
                   className="p-1.5 rounded-md bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
                   title="Save"
                 >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <svg
+                    className="w-4 h-4"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
                     <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                   </svg>
                 </button>
@@ -249,7 +256,13 @@ export function MessageItem({
                   className="p-1.5 rounded-md bg-muted text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
                   title="Cancel"
                 >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <svg
+                    className="w-4 h-4"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
                     <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                   </svg>
                 </button>
@@ -257,7 +270,10 @@ export function MessageItem({
             </div>
           </div>
         ) : (
-          <p className="text-sm text-foreground/90 whitespace-pre-wrap break-words leading-relaxed" data-testid="message-content">
+          <p
+            className="text-sm text-foreground/90 whitespace-pre-wrap break-words leading-relaxed"
+            data-testid="message-content"
+          >
             {message.data.content}
             {message.data.edited ? (
               <span className="text-[10px] ml-1.5 text-muted-foreground italic">(edited)</span>
@@ -300,7 +316,10 @@ export function MessageItem({
 
       {/* Desktop hover toolbar */}
       {!isEditing && (
-        <div data-testid={`hover-toolbar-${message.recordId}`} className="absolute -top-3 right-5 flex items-center gap-0.5 bg-card border border-border/60 rounded-lg shadow-sm p-0.5 transition-all duration-100 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto">
+        <div
+          data-testid={`hover-toolbar-${message.recordId}`}
+          className="absolute -top-3 right-5 flex items-center gap-0.5 bg-card border border-border/60 rounded-lg shadow-sm p-0.5 transition-all duration-100 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto"
+        >
           {QUICK_EMOJIS.map((emoji) => (
             <button
               key={emoji}
@@ -318,8 +337,18 @@ export function MessageItem({
             className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
             title="Reply in thread"
           >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
+            <svg
+              className="w-3.5 h-3.5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={1.5}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"
+              />
             </svg>
           </button>
           {isOwn && (
@@ -333,8 +362,18 @@ export function MessageItem({
                 className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
                 title="Edit message"
               >
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                <svg
+                  className="w-3.5 h-3.5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={1.5}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                  />
                 </svg>
               </button>
               <button
@@ -343,8 +382,18 @@ export function MessageItem({
                 className="p-1.5 rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
                 title="Delete message"
               >
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                <svg
+                  className="w-3.5 h-3.5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={1.5}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                  />
                 </svg>
               </button>
             </>

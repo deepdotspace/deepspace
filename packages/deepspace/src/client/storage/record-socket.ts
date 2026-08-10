@@ -24,10 +24,33 @@ import { MSG } from '../../shared/protocol/constants'
 const WS_CONNECTING = 0
 const WS_OPEN = 1
 
+/**
+ * Liveness probe interval and response deadline. Ordinary quiet sockets send
+ * a probe after 15 seconds and close only if that probe is unanswered for a
+ * further 30 seconds.
+ *
+ * A peer that stops answering without closing leaves the connection
+ * ESTABLISHED: no packets are lost, so nothing retransmits, so nothing ever
+ * times out. Measured against a peer frozen mid-conversation, an unprobed
+ * socket stayed open indefinitely — this is unbounded, not slow. That is a hung
+ * Durable Object, a broken relay, or a blackholed path; `offline` does not fire
+ * for any of them, because the machine's own network is fine.
+ *
+ * The probe costs nothing on the server: BaseRoom registers a
+ * `WebSocketRequestResponsePair('ping','pong')`, so the Cloudflare runtime
+ * answers it while the DO stays hibernated.
+ */
+const PING_EVERY_MS = 15_000
+const PONG_TIMEOUT_MS = 30_000
+
 /** The slice of RecordStore the engine writes to (structural, for tests). */
 export interface RecordStoreLike {
   setQueryResult(queryKey: string, records: RecordData[]): void
-  applyChange(queryKey: string, record: RecordData, changeType: 'create' | 'update' | 'delete'): void
+  applyChange(
+    queryKey: string,
+    record: RecordData,
+    changeType: 'create' | 'update' | 'delete',
+  ): void
   hasRecord(queryKey: string, recordId: string): boolean
   setError(queryKey: string, error: string): void
   resetToLoading(queryKey: string): void
@@ -85,6 +108,14 @@ export class RecordSocket {
   private readonly pendingRequests = new Map<string, PendingRequest>()
   private reconnectAttempt = 0
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null
+  private heartbeat: ReturnType<typeof setInterval> | null = null
+  /** Any inbound frame proves the peer is answering. */
+  private lastInboundAt = 0
+  /** Monotonic time of the one probe awaiting an inbound answer. */
+  private outstandingPingAt: number | null = null
+  /** Monotonic time of the prior heartbeat callback. A long gap means the
+   *  scheduler was suspended, so a pre-suspension probe cannot be judged. */
+  private lastHeartbeatCheckAt = 0
   // Bumped by connect() (on entry) and disconnect()/destroy(). connect()
   // captures it before awaiting the auth token and re-checks after; a
   // mismatch means a teardown (or a newer connect) raced in during the
@@ -164,6 +195,7 @@ export class RecordSocket {
     ws.onopen = () => {
       config.log?.('connected', config.roomId)
       config.listeners.onStatus('connected')
+      this.startHeartbeat(ws)
       // Re-subscribe every active query. After a plain socket drop the
       // server has no memory of our subscriptions and sends no RESUBSCRIBE
       // (that only fires on membership changes) — without this, a
@@ -181,6 +213,7 @@ export class RecordSocket {
     // The reconnect's onopen re-subscribes every active query, so fresh
     // QUERY_RESULTs replace the stale store contents (full resync).
     ws.onclose = () => {
+      this.stopHeartbeat()
       config.log?.('disconnected', config.roomId)
       config.listeners.onStatus('disconnected')
       config.listeners.onReady(false)
@@ -243,8 +276,60 @@ export class RecordSocket {
     }
   }
 
+  /**
+   * Turn a peer that stopped answering into a `close` event. That is the whole
+   * job — `onclose` already reports 'disconnected', marks every query stale,
+   * and reconnects with backoff. Without this it is never called, because
+   * nothing about the connection is actually broken.
+   */
+  private startHeartbeat(ws: WebSocket): void {
+    this.stopHeartbeat()
+    this.lastInboundAt = performance.now()
+    this.lastHeartbeatCheckAt = this.lastInboundAt
+    this.outstandingPingAt = null
+    this.heartbeat = setInterval(() => {
+      if (ws.readyState !== WS_OPEN) return
+      const now = performance.now()
+      const callbackGap = now - this.lastHeartbeatCheckAt
+      this.lastHeartbeatCheckAt = now
+      if (this.outstandingPingAt !== null) {
+        if (now - this.outstandingPingAt >= PONG_TIMEOUT_MS) {
+          // The event loop can freeze after the runtime queued a pong but
+          // before our message task runs. A heartbeat callback delayed by a
+          // full response window cannot safely judge that old probe: send a
+          // fresh one and give it the ordinary deadline after the scheduler
+          // resumes. Normal 15-second callbacks still close a silent peer at
+          // the original deadline.
+          if (callbackGap >= PONG_TIMEOUT_MS) {
+            ws.send('ping')
+            this.outstandingPingAt = now
+          } else {
+            ws.close()
+          }
+        }
+        return
+      }
+      // Only probe once the connection has actually gone quiet: an app
+      // receiving live updates has already proved the peer is answering.
+      if (now - this.lastInboundAt >= PING_EVERY_MS) {
+        ws.send('ping')
+        this.outstandingPingAt = now
+      }
+    }, PING_EVERY_MS)
+    // A suspended timer's first resumed callback has no outstanding probe, so
+    // it sends one instead of closing a healthy backgrounded connection.
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeat) clearInterval(this.heartbeat)
+    this.heartbeat = null
+    this.outstandingPingAt = null
+    this.lastHeartbeatCheckAt = 0
+  }
+
   /** Close without firing onclose — prevents the zombie-reconnect. */
   private teardownSocket(): void {
+    this.stopHeartbeat()
     const ws = this.ws
     if (!ws) return
     this.config.log?.('closing', this.config.roomId)
@@ -329,6 +414,13 @@ export class RecordSocket {
   }
 
   private handleMessage(event: MessageEvent): void {
+    this.lastInboundAt = performance.now()
+    this.outstandingPingAt = null
+    // The runtime's auto-response to our probe. It carries no payload — its
+    // only meaning is the timestamp above — and it is not JSON, so it must
+    // return before the parse below.
+    if (event.data === 'pong') return
+
     if (event.data instanceof ArrayBuffer) {
       this.binaryHandlers.forEach((h) => h(event.data as ArrayBuffer))
       return

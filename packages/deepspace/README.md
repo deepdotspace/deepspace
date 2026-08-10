@@ -6,7 +6,8 @@
 
 The DeepSpace SDK — build real-time collaborative apps on Cloudflare Workers.
 Bundles auth, real-time data subscriptions, RBAC, messaging, file storage,
-collaborative editing (Yjs), and zero-config deployment behind four imports.
+collaborative editing (Yjs), and zero-config deployment through focused public
+entry points.
 
 The fastest way to start is to scaffold a full app rather than wire the SDK up
 by hand:
@@ -27,15 +28,18 @@ npm install deepspace
 
 ## Entry points
 
-The package has four supported import paths:
+The package has seven supported import paths:
 
 - **`deepspace`** — the React client SDK (hooks, providers, auth, storage,
   messaging, theme). Runs in the browser.
+- **`deepspace/schema`** — schema builders and shared schema types.
 - **`deepspace/worker`** — the Cloudflare Worker runtime (`RecordRoom`, schemas,
   JWT verification, HMAC auth). Runs in your app's Worker.
 - **`deepspace/server`** — app-server helpers for actions, billing, and room
   handlers.
 - **`deepspace/testing`** — Playwright fixtures for multi-user tests.
+- **`deepspace/documentation`** — documentation compiler and runtime helpers.
+- **`deepspace/documentation/react`** — documentation React components.
 
 ## Minimal usage
 
@@ -89,11 +93,10 @@ npx deepspace dev start  # run locally
 npx deepspace deploy     # deploy to *.app.space
 ```
 
-The [normative CLI hierarchy](../../docs/platform/cli-contract.md#public-command-hierarchy)
-keeps durable app lifecycle and version migrations under `deepspace app`,
-while checkout-oriented Git, workspace, release, and deploy operations stay
-top-level. In particular, app migration is
-`deepspace app migrate`; there is no top-level `deepspace migrate` alias.
+The hierarchy shown by `deepspace --help` keeps durable app lifecycle under
+`deepspace app`, while checkout-oriented Git, workspace, release, and deploy
+operations stay top-level. The historical `deepspace app migrate` command was
+removed in 0.15.0; it is not an upgrade or recovery path.
 
 Every app has one authoritative Git repository. DeepSpace source is the packaged
 default: the first normal deploy claims it and publishes automatically.
@@ -114,40 +117,14 @@ DeepSpace verifies GitHub but never writes it. Inspect or transfer authority wit
 `deepspace app source`, `deepspace app source github`, or
 `deepspace app source deepspace`. Transfers mirror branches and tags before one
 atomic authority change; switching back uses the same commands. Commands support
-`--json` for agents. See the
-[repository guide](https://github.com/deepdotspace/deepspace/blob/main/docs/platform/repo-store-git.md)
-for workspaces, releases, and rollback.
+`--json` for agents. Use `deepspace --help`, command-specific `--help`, and the
+[public manual](https://documentation.deep.space) for workspaces, releases, and
+rollback.
 
-`deepspace app migrate` is the permanent upgrade runner for breaking app
-changes. It contains an ordered set of structural, idempotent migrations, so
-agents and developers keep using the same command across releases:
-
-```bash
-npx deepspace app migrate --dry-run
-npx deepspace app migrate
-```
-
-The dry-run lists pending source migrations without changing files. For a
-legacy GitHub app whose `DEEPSPACE_APP_ID` is still name-shaped, it also lists
-the exact registry rows that will be re-keyed and the physical stores that
-remain at the existing resource id. The command applies only transformations
-it recognizes safely, pauses for normal commit/push, and finishes with one
-deploy. Applied steps live in the checked-in `deepspace.migrations.json`
-manifest. Normal deploy bundles record that manifest in the release, so the
-next run can determine whether the migration is live without depending on Git
-commit lineage. Rerun after each returned action; when nothing is pending it
-reports `up_to_date`. This is the same workflow for GitHub and DeepSpace
-source; only their normal push behavior differs. `APP_NAME`-based
-legacy room and storage addresses are retained; canonical `DEEPSPACE_APP_ID`
-is used only for logical identity and platform authentication.
-
-Keep deploy, release rollback, and undeploy idle from the mutating command until
-that returned deploy begins; normal app traffic continues throughout.
-Before the registry cutover commits, `--cancel` reverses a prepared migration
-after the restored legacy configuration is committed and pushed. After the
-cutover, recovery is deliberately forward-only: deploy the canonical app and
-rerun `deepspace app migrate` to verify the live release. DeepSpace never
-writes the GitHub repository.
+Use the current command-specific release notes for supported upgrade steps. If
+an app or checkout still carries a name-shaped legacy id, stop and contact the
+DeepSpace operator; do not downgrade the SDK or run migration commands copied
+from historical changelogs and proposals.
 
 ## Debugging
 

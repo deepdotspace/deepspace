@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import * as p from '@clack/prompts'
 import spawn from 'cross-spawn'
@@ -66,6 +66,7 @@ export async function completeProjectSetup(
 async function installAgentSkill(appDir: string, progress: Progress): Promise<void> {
   progress.start('Installing DeepSpace agent skill')
   try {
+    assertClaudeSkillLinkAvailable(appDir)
     // Upstream currently needs .claude/ to exist before a project-local install
     // or it can silently skip Claude Code's symlink.
     mkdirSync(join(appDir, '.claude'), { recursive: true })
@@ -124,15 +125,28 @@ async function installAgentSkill(appDir: string, progress: Progress): Promise<vo
   }
 }
 
+/** Refuse before the external installer can touch a user-owned Claude skill. */
+export function assertClaudeSkillLinkAvailable(appDir: string): void {
+  const link = join(appDir, '.claude', 'skills', 'deepspace')
+  if (!lstatExists(link) || lstatSync(link).isSymbolicLink()) return
+  throw new Error(
+    '.claude/skills/deepspace already exists and is not a symlink; it was preserved. ' +
+      'Move or merge that directory, then rerun the skills installer.',
+  )
+}
+
 /** Keep every supported agent pointed at the one portable project skill. */
 export function ensureClaudeSkillLink(appDir: string): void {
   const source = join(appDir, '.agents', 'skills', 'deepspace')
-  if (!existsSync(source)) throw new Error('skills installer did not create .agents/skills/deepspace')
+  if (!existsSync(source))
+    throw new Error('skills installer did not create .agents/skills/deepspace')
   const link = join(appDir, '.claude', 'skills', 'deepspace')
   mkdirSync(join(link, '..'), { recursive: true })
   if (existsSync(link) || lstatExists(link)) {
     if (lstatSync(link).isSymbolicLink()) return
-    rmSync(link, { recursive: true, force: true })
+    throw new Error(
+      '.claude/skills/deepspace already exists and is not a symlink; refusing to replace it.',
+    )
   }
   symlinkSync(
     process.platform === 'win32' ? source : '../../.agents/skills/deepspace',
@@ -150,7 +164,7 @@ function lstatExists(path: string): boolean {
   }
 }
 
-/** The scaffold's own committer, written into `.git/config`. */
+/** Fallback identity for a machine with no effective Git author/committer. */
 export const SCAFFOLD_GIT_IDENTITY = { name: 'DeepSpace', email: 'scaffold@deep.space' }
 
 function git(appDir: string, args: string[], label: string): void {
@@ -164,16 +178,64 @@ function git(appDir: string, args: string[], label: string): void {
   }
 }
 
+function gitSucceeds(appDir: string, args: string[]): boolean {
+  const result = spawn.sync('git', args, { cwd: appDir, stdio: 'ignore' })
+  return !result.error && result.status === 0
+}
+
+function gitOutput(appDir: string, args: string[]): string | null {
+  const result = spawn.sync('git', args, { cwd: appDir, encoding: 'utf-8' })
+  if (result.error || result.status !== 0) return null
+  return String(result.stdout).trim()
+}
+
+function effectiveGitIdentity(appDir: string, kind: 'AUTHOR' | 'COMMITTER') {
+  const value = gitOutput(appDir, ['var', `GIT_${kind}_IDENT`])
+  const match = value?.match(/^(.*) <([^<>]+)> \d+ [+-]\d+$/)
+  return match ? { name: match[1], email: match[2] } : null
+}
+
 export function commitInitialScaffold(appDir: string, initializedGit: boolean): void {
   if (!initializedGit) return
 
-  // Only commit repositories created by this process. The identity is written
-  // into the repo rather than passed with `-c`: `deepspace deploy` requires a
-  // commit, and in a sandbox with no global Git config the caller's very next
-  // commit dies "unable to auto-detect email address" (exit 128) if the only
-  // identity this scaffold ever had lived in one argv.
-  git(appDir, ['config', 'user.name', SCAFFOLD_GIT_IDENTITY.name], 'git config user.name')
-  git(appDir, ['config', 'user.email', SCAFFOLD_GIT_IDENTITY.email], 'git config user.email')
+  // Preserve the developer's effective identity. A fresh container still gets
+  // a repository-local fallback so its next required deploy commit works.
+  const hasConfiguredName = gitSucceeds(appDir, ['config', '--get', 'user.name'])
+  const hasConfiguredEmail = gitSucceeds(appDir, ['config', '--get', 'user.email'])
+  const author = effectiveGitIdentity(appDir, 'AUTHOR')
+  const committer = effectiveGitIdentity(appDir, 'COMMITTER')
+  const hasExplicitIdentityInput = Boolean(
+    hasConfiguredName ||
+    hasConfiguredEmail ||
+    process.env.GIT_AUTHOR_NAME ||
+    process.env.GIT_AUTHOR_EMAIL ||
+    process.env.GIT_COMMITTER_NAME ||
+    process.env.GIT_COMMITTER_EMAIL ||
+    process.env.EMAIL,
+  )
+  const stableEffectiveIdentity =
+    hasExplicitIdentityInput &&
+    author &&
+    committer &&
+    author.name === committer.name &&
+    author.email === committer.email
+      ? author
+      : null
+
+  if (!hasConfiguredName) {
+    git(
+      appDir,
+      ['config', 'user.name', stableEffectiveIdentity?.name ?? SCAFFOLD_GIT_IDENTITY.name],
+      'git config user.name',
+    )
+  }
+  if (!hasConfiguredEmail) {
+    git(
+      appDir,
+      ['config', 'user.email', stableEffectiveIdentity?.email ?? SCAFFOLD_GIT_IDENTITY.email],
+      'git config user.email',
+    )
+  }
   git(appDir, ['add', '-A'], 'git add')
   git(appDir, ['commit', '-m', 'Initial DeepSpace scaffold', '--no-verify'], 'git commit')
 }

@@ -238,6 +238,40 @@ describe('pull recovery target and checkout', () => {
     expect(exits).toEqual([2])
   })
 
+  it('treats unpushed local work as success, not divergence (no exit-2 loop)', async () => {
+    // The commit -> pull -> push loop is the default shape of an agentic edit,
+    // and its middle step used to be a trap: local-ahead fell into the
+    // divergence bucket, so pull exited 2 with `actionRequired` and handed back
+    // `git merge <tracking-ref>` — which answers "Already up to date" and
+    // changes nothing. An agent honouring the exit-2 contract re-ran pull
+    // forever. Nothing is fetched to integrate here, so this is exit 0.
+    repo = makeRepo()
+    const baseOid = git(repo, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(join(repo, 'local.txt'), 'local\n')
+    git(repo, ['add', '-A'])
+    git(repo, ['commit', '-q', '-m', 'unpushed local work'])
+    const trackingRef = 'refs/remotes/space/main'
+    // The cloud tip is the ancestor the local branch already contains.
+    mockPullService(remoteRefs('main', baseOid), { [trackingRef]: baseOid })
+
+    const { output, exits } = await runPullJson({ app: 'ahead-app', branch: 'main' }, repo)
+
+    expect(output).toMatchObject({
+      ok: true,
+      status: 'local_ahead',
+      appId: APP_ID,
+      branch: 'main',
+      action: {
+        cwd: repo,
+        argv: ['deepspace', 'push', '--app', APP_ID, '--branch', 'main'],
+      },
+    })
+    expect(exits).toEqual([0])
+    // The failure mode this replaced was a refusal/action that could not
+    // change state. The successful action is the actual next operation.
+    expect(output).not.toHaveProperty('code')
+  })
+
   it('merges a divergent selected branch in the worktree that owns it', async () => {
     const branch = 'feature/selected'
     repo = makeRepo()
