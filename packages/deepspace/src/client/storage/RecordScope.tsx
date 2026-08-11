@@ -27,6 +27,7 @@ import { RecordContext, type RecordContextValue } from './context'
 import { useRecordAuth } from './context'
 import { RecordStore } from './store'
 import { RecordSocket } from './record-socket'
+import { RecordRoomNotReadyError } from './errors'
 import { useScopeRegistry, type ScopeEntry } from './ScopeRegistry'
 import { getAuthToken } from '../auth'
 import { wsLog } from './ws-log'
@@ -234,7 +235,7 @@ function ScopeConnection({
       timeoutMs = 10000,
     ): Promise<unknown> => {
       const socket = socketRef.current
-      if (!socket) return Promise.reject(new Error('WebSocket not connected'))
+      if (!socket) return Promise.reject(new RecordRoomNotReadyError())
       return socket.sendConfirmed(message, timeoutMs)
     },
     [],

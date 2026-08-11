@@ -70,29 +70,47 @@ async function signInAndSaveState(
     // Hit the app first so the origin is established (some auth plugins
     // require a same-origin Origin header on sign-in).
     await page.goto('/')
-    const ok = await page.evaluate(
+    const result = await page.evaluate(
       async ({ email, password }: { email: string; password: string }) => {
         const res = await fetch('/api/auth/sign-in/email', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password }),
         })
-        return res.ok
+        const body: unknown = await res.json().catch(() => null)
+        const error = body && typeof body === 'object' ? (body as Record<string, unknown>) : null
+        return {
+          ok: res.ok,
+          status: res.status,
+          code: typeof error?.code === 'string' ? error.code : null,
+          message: typeof error?.message === 'string' ? error.message : null,
+        }
       },
       account,
     )
-    if (!ok) {
-      throw new Error(
-        `Sign-in failed for ${account.email}. Check the password is current; ` +
-          `if the account was deleted on the server, re-create with ` +
-          `\`deepspace test accounts create\`.`,
-      )
-    }
+    if (!result.ok) throw new Error(formatSignInFailure(account.email, result))
     await ctx.storageState({ path: outPath })
     return outPath
   } finally {
     await ctx.close()
   }
+}
+
+interface SignInFailure {
+  status: number
+  code: string | null
+  message: string | null
+}
+
+/** Keep the server's safe status/code so auth failures remain actionable. */
+export function formatSignInFailure(email: string, failure: SignInFailure): string {
+  const code = failure.code ? ` ${failure.code}` : ''
+  const detail = failure.message ? `: ${failure.message}` : ''
+  const nextStep =
+    failure.code === 'INVALID_ORIGIN'
+      ? 'Add this app origin to the auth allowlist, then retry.'
+      : 'Check the stored credential or recreate the account with `deepspace test accounts create`.'
+  return `Sign-in failed for ${email} (HTTP ${failure.status}${code})${detail}. ${nextStep}`
 }
 
 export interface EnsureStorageStateOptions {

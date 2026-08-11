@@ -81,6 +81,12 @@ describe('the command runtime supplies --json', () => {
   ])('%s accepts --json', (_name, cmd) => {
     expect((cmd.args as Record<string, { type?: string }>).json?.type).toBe('boolean')
   })
+
+  it('describes test output as a stream with a final JSON line', () => {
+    const description = (test.args as Record<string, { description?: string }>).json.description
+    expect(description).toContain('Stream test output')
+    expect(description).toContain('last line')
+  })
 })
 
 describe('--env has the -e alias everywhere init does (ONB-7)', () => {

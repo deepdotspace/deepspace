@@ -45,6 +45,8 @@ import {
 } from '../../schemas/registry'
 import { ensureCollectionTable } from '../../rooms/collection-table-migration'
 import { capToolResultSize, DEFAULT_CONTEXT_CONFIG } from '../../utils/chat-context'
+import { MSG_YJS_AWARENESS } from '../../../shared/protocol/constants'
+import { createDecoder, readVarUint, readVarUint8Array } from '../../../shared/protocol/yjs'
 
 const CAP = DEFAULT_CONTEXT_CONFIG.toolResultCap
 
@@ -68,7 +70,9 @@ function makeSql(db: Database.Database): SqlStorage {
       stmt.run(...bindings)
       return { toArray: () => [] }
     },
-    get databaseSize(): number { return 0 },
+    get databaseSize(): number {
+      return 0
+    },
     Cursor: undefined as unknown as SqlStorage['Cursor'],
     Statement: undefined as unknown as SqlStorage['Statement'],
   } as unknown as SqlStorage
@@ -141,7 +145,7 @@ function insert(
   const ts = '2026-05-06T00:00:00.000Z'
   const cols = row.cols ?? {}
   const names = Object.keys(cols)
-  const colCols = names.map(c => `"${columnId(c)}"`).join(',')
+  const colCols = names.map((c) => `"${columnId(c)}"`).join(',')
   const colVals = names.map(() => '?').join(',')
   const sql =
     `INSERT INTO ${tableName} ` +
@@ -155,7 +159,11 @@ async function execTool(
   ctx: ToolsApiContext,
   tool: string,
   params: Record<string, unknown>,
-): Promise<{ success: boolean; data: { records: unknown[]; count?: number; [k: string]: unknown }; [k: string]: unknown }> {
+): Promise<{
+  success: boolean
+  data: { records: unknown[]; count?: number; [k: string]: unknown }
+  [k: string]: unknown
+}> {
   const request = new Request('https://internal/api/tools/execute', {
     method: 'POST',
     headers: {
@@ -256,8 +264,8 @@ describe('records.query oversized result degrades to a usable page', () => {
     expect(out.data.truncated).toBe(true)
     expect(out.data.total).toBe(120)
     expect((out.data.records as unknown[]).length).toBe(out.data.returned)
-    expect((out.data.returned as number)).toBeGreaterThan(0)
-    expect((out.data.returned as number)).toBeLessThan(120)
+    expect(out.data.returned as number).toBeGreaterThan(0)
+    expect(out.data.returned as number).toBeLessThan(120)
     expect(JSON.stringify(out).length).toBeLessThanOrEqual(CAP)
   })
 
@@ -269,13 +277,16 @@ describe('records.query oversized result degrades to a usable page', () => {
 
     // chat-routes wraps every tool result in capToolResultSize before handing
     // it to the model — replicate that step here.
-    const capped = capToolResultSize(result, CAP) as { success: boolean; data: Record<string, unknown> }
+    const capped = capToolResultSize(result, CAP) as {
+      success: boolean
+      data: Record<string, unknown>
+    }
     expect(capped.success).toBe(true)
     expect(capped.data.truncated).toBe(true)
     expect(capped.data.total).toBe(120)
     expect((capped.data.records as unknown[]).length).toBe(capped.data.returned)
-    expect((capped.data.returned as number)).toBeGreaterThan(0)
-    expect((capped.data.returned as number)).toBeLessThan(120)
+    expect(capped.data.returned as number).toBeGreaterThan(0)
+    expect(capped.data.returned as number).toBeLessThan(120)
     expect(JSON.stringify(capped).length).toBeLessThanOrEqual(CAP)
   })
 })
@@ -306,11 +317,11 @@ describe('built-in tool catalog', () => {
       new Request('https://internal/api/tools/list'),
       'tools/list',
     )
-    const { tools } = await listResponse.json() as { tools: Array<{ name: string }> }
-    const toolNames = tools.map(tool => tool.name)
+    const { tools } = (await listResponse.json()) as { tools: Array<{ name: string }> }
+    const toolNames = tools.map((tool) => tool.name)
 
     expect(new Set(toolNames).size).toBe(toolNames.length)
-    expect(toolNames.filter(name => name.startsWith('yjs.'))).toEqual([
+    expect(toolNames.filter((name) => name.startsWith('yjs.'))).toEqual([
       'yjs.list',
       'yjs.getText',
       'yjs.setText',
@@ -326,7 +337,7 @@ describe('built-in tool catalog', () => {
         }),
         'tools/execute',
       )
-      const result = await executeResponse.json() as { success: boolean; error?: string }
+      const result = (await executeResponse.json()) as { success: boolean; error?: string }
       const unknownError = toolName.startsWith('yjs.')
         ? `Unknown Yjs tool: ${toolName}`
         : `Unknown tool: ${toolName}`
@@ -339,6 +350,52 @@ describe('built-in tool catalog', () => {
 })
 
 describe('Yjs document cache lifetime', () => {
+  it('removes the correct awareness client from each subscribed document on disconnect', () => {
+    const db = new Database(':memory:')
+    createYjsTable(db)
+    const sql = makeSql(db)
+    const body = { collection: 'docs', recordId: 'doc-1', fieldName: 'body' }
+    const title = { collection: 'docs', recordId: 'doc-1', fieldName: 'title' }
+    const bodyKey = getYjsDocKey(body.collection, body.recordId, body.fieldName)
+    const titleKey = getYjsDocKey(title.collection, title.recordId, title.fieldName)
+    const attachment: ConnectionAttachment = {
+      ...yjsAttachment(body),
+      yjsSubscriptions: [body, title],
+      awarenessClientIds: { [bodyKey]: 11, [titleKey]: 22 },
+    }
+    const peer = makeSocket({
+      ...yjsAttachment(body),
+      yjsSubscriptions: [body, title],
+    })
+    const sent: Uint8Array[] = []
+    const ctx: YjsContext = {
+      ...makeYjsContext(sql, {
+        getWebSockets: () => [peer],
+      } as unknown as DurableObjectState),
+      sendBinary: (_ws, data) => sent.push(data),
+    }
+
+    handleYjsDisconnect(ctx, makeSocket(attachment), attachment)
+
+    const removals = sent.map((frame) => {
+      const decoder = createDecoder(frame)
+      expect(readVarUint(decoder)).toBe(MSG_YJS_AWARENESS)
+      const docKey = new TextDecoder().decode(readVarUint8Array(decoder))
+      const payload = createDecoder(readVarUint8Array(decoder))
+      expect(readVarUint(payload)).toBe(1)
+      const clientId = readVarUint(payload)
+      readVarUint(payload) // clock
+      const state = new TextDecoder().decode(readVarUint8Array(payload))
+      return { docKey, clientId, state }
+    })
+
+    expect(removals).toEqual([
+      { docKey: bodyKey, clientId: 11, state: 'null' },
+      { docKey: titleKey, clientId: 22, state: 'null' },
+    ])
+    db.close()
+  })
+
   it('keeps a subscribed document and evicts it when the final subscriber leaves', () => {
     const db = new Database(':memory:')
     createYjsTable(db)

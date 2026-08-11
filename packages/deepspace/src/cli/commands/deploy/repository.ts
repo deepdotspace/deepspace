@@ -31,6 +31,37 @@ export interface DeployRepositoryState {
   baseReleaseId: string | null
 }
 
+/**
+ * Read-only local checks that should fail before an expensive build. The
+ * actual sync repeats these checks immediately before its remote mutation so
+ * a working tree changed during the build still fails safely.
+ */
+export function preflightDeployRepository(options: {
+  appDir: string
+  push: boolean
+  source: AppSource | null
+}): { code: string; error: string } | null {
+  const { appDir, push, source } = options
+  if (!push || source?.provider === 'github') return null
+
+  try {
+    assertSyncableRepo(appDir)
+    if (!source && listGitHubRemotes(appDir).length > 0) {
+      return {
+        code: 'source_unclaimed',
+        error:
+          'This app has a GitHub remote but no claimed source. Choose once with `deepspace app source github` (manual GitHub ownership) or `deepspace app source deepspace` (packaged DeepSpace source), then deploy again.',
+      }
+    }
+    const branch = currentBranch(appDir)
+    if (!isWorkTreeClean(appDir)) return dirtyWorktreeRefusal(branch)
+    if (!branch) return detachedHeadRefusal()
+    return null
+  } catch (error: unknown) {
+    return deployRepositoryFailure(error, appDir)
+  }
+}
+
 export async function syncDeployRepository(options: {
   deployUrl: string
   appDir: string
@@ -67,22 +98,12 @@ export async function syncDeployRepository(options: {
   }
 
   try {
-    assertSyncableRepo(appDir)
-    if (!source && listGitHubRemotes(appDir).length > 0) {
-      output.die(
-        'This app has a GitHub remote but no claimed source. Choose once with `deepspace app source github` (manual GitHub ownership) or `deepspace app source deepspace` (packaged DeepSpace source), then deploy again.',
-        'source_unclaimed',
-      )
-    }
+    const preflight = preflightDeployRepository({ appDir, push, source })
+    if (preflight) output.die(preflight.error, preflight.code)
     const sourceRemote = spaceRemoteName()
     ensureSpaceRemote(appDir, appId, sourceRemote)
     const branch = currentBranch(appDir)
     const workspaceBranchId = workspaceIdFromBranch(branch)
-
-    if (!isWorkTreeClean(appDir)) {
-      const refusal = dirtyWorktreeRefusal(branch)
-      output.die(refusal.error, refusal.code)
-    }
 
     if (!branch) {
       const refusal = detachedHeadRefusal()
@@ -207,12 +228,7 @@ function classifyRemoteState(
   let remoteTip: string | null = null
   const remoteRef = `refs/remotes/${remote}/${branch}`
   try {
-    runGitRemote(appDir, token, [
-      'fetch',
-      '--quiet',
-      remote,
-      `+refs/heads/${branch}:${remoteRef}`,
-    ])
+    runGitRemote(appDir, token, ['fetch', '--quiet', remote, `+refs/heads/${branch}:${remoteRef}`])
     remoteTip = resolveCommit(appDir, remoteRef)
     return {
       remoteTip,

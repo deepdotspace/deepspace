@@ -42,7 +42,8 @@ export default defineDeepspaceCommand({
   args: {
     provider: {
       type: 'positional',
-      description: 'Source provider: github or deepspace (omit to show)',
+      description:
+        'Source authority: deepspace is platform-hosted and commit-first; github deploys the local working tree without Git sync (omit to show)',
       required: false,
     },
     app: {

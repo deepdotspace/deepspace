@@ -14,6 +14,7 @@ import {
   BROWSER_PROXY_ROUTES,
   isPlatformReservedPath,
   platformWorkerFetch,
+  resolveAppRole,
   verifyJwt,
 } from 'deepspace/worker'
 import type { JwtVerifierConfig, VerifyResult } from 'deepspace/worker'
@@ -129,12 +130,16 @@ export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
 
   // Debug proxy → app's RecordRoom DO.
   //
-  // Both this proxy and the DO gate on ALLOW_DEBUG_ROUTES === "true". The
-  // debug handler has no auth of its own once reached, so production and
-  // staging environments must enable it deliberately through app secrets.
+  // Both this proxy and the DO gate on ALLOW_DEBUG_ROUTES === "true". The app
+  // proxy also requires the existing owner/admin role before reaching the DO.
   app.all('/api/debug/*', async (c) => {
     if (c.env.ALLOW_DEBUG_ROUTES !== 'true') {
       return c.notFound()
+    }
+    const auth = await resolveAuth(c.req.raw, c.env)
+    if (!auth) return c.json({ error: 'unauthorized' }, 401)
+    if ((await resolveAppRole(c.env, auth.userId)) !== 'admin') {
+      return c.json({ error: 'forbidden' }, 403)
     }
     const stub = c.env.RECORD_ROOMS.get(
       c.env.RECORD_ROOMS.idFromName(`app:${c.env.DEEPSPACE_APP_ID}`),
@@ -233,7 +238,6 @@ export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
     }
   })
 }
-
 
 /** Register scoped-file and authenticated browser-to-platform proxies. */
 export function registerPlatformProxyRoutes(app: Hono<AppContext>): void {

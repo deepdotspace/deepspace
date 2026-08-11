@@ -14,8 +14,9 @@
  */
 
 import { recordMatchesWhere, reconnectDelayMs } from './record-matching'
+import { RecordRoomNotReadyError } from './errors'
 import { parseServerError } from './serverErrors'
-import type { CollectionSchema } from '../../shared/types'
+import type { CollectionSchema, Query } from '../../shared/types'
 import type { RoomUser, RoomConnectionState, RecordData } from './types'
 import { MSG } from '../../shared/protocol/constants'
 
@@ -358,7 +359,7 @@ export class RecordSocket {
   ): Promise<unknown> {
     const ws = this.ws
     if (!ws || ws.readyState !== WS_OPEN) {
-      return Promise.reject(new Error('WebSocket not connected'))
+      return Promise.reject(new RecordRoomNotReadyError())
     }
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
     return new Promise((resolve, reject) => {
@@ -468,13 +469,17 @@ export class RecordSocket {
           record: RecordData
           changeType: 'create' | 'update' | 'delete'
         }
-        for (const queryKey of this.subscriptions.values()) {
+        for (const [subscriptionId, queryKey] of this.subscriptions) {
           try {
-            const query = JSON.parse(queryKey) as {
-              collection: string
-              where?: Record<string, unknown>
-            }
+            const query = JSON.parse(queryKey) as Query
             if (query.collection !== collection) continue
+            if (query.orderBy !== undefined || query.limit !== undefined) {
+              this.sendMessage({
+                type: MSG.SUBSCRIBE,
+                payload: { subscriptionId, query },
+              })
+              continue
+            }
             const matches = recordMatchesWhere(record, query.where)
             const exists = store.hasRecord(queryKey, record.recordId)
             if (changeType === 'delete') {

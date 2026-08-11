@@ -3,8 +3,8 @@
  *
  * Reads test accounts from the auth-origin-scoped registry at
  * `~/.deepspace/test-accounts.json` (the same file
- * `deepspace test accounts create` writes). Each account has at minimum
- * `{email, password}`; `name` and `label` are optional.
+ * `deepspace test accounts create` writes). Persisted accounts are bound to a
+ * remote account id; `name` and `label` are optional.
  *
  * Used by the multi-user Playwright fixture in `./fixtures.ts` and is
  * also exported standalone in case suites want to do their own
@@ -33,8 +33,6 @@ const STAGING_AUTH_ORIGIN = 'https://auth.deepspacesites.com'
 export interface TestAccountCredentialStore {
   version: 2
   scopes: Record<string, TestAccount[]>
-  /** Legacy credentials stay here until a remote id proves their plane. */
-  unscoped: TestAccount[]
 }
 
 export interface RemoteTestAccount {
@@ -65,7 +63,7 @@ export function normalizeTestAccountScope(value: string): string {
 
 export function loadAllTestAccounts(scope = currentTestAccountScope()): TestAccount[] {
   const store = readTestAccountStore()
-  return mergeTestAccounts(store.scopes[scope] ?? [], store.unscoped)
+  return store.scopes[scope] ?? []
 }
 
 /**
@@ -91,16 +89,13 @@ export function reconcileTestAccountScopes(
   scope: string,
 ): { store: TestAccountCredentialStore; accounts: TestAccount[]; removed: number } {
   const scoped = store.scopes[scope] ?? []
-  const current = reconcileTestAccounts(scoped, remote)
-  const migrated = reconcileTestAccounts(store.unscoped, remote)
-  const accounts = mergeTestAccounts(current, migrated)
+  const accounts = reconcileTestAccounts(scoped, remote)
   return {
     accounts,
-    removed: Math.max(0, scoped.length - current.length),
+    removed: Math.max(0, scoped.length - accounts.length),
     store: {
       version: 2,
       scopes: { ...store.scopes, [scope]: accounts },
-      unscoped: store.unscoped.filter((account) => !remote.some((item) => accountMatchesRemote(account, item))),
     },
   }
 }
@@ -110,9 +105,8 @@ export function reconcileTestAccounts(
   remote: RemoteTestAccount[],
 ): TestAccount[] {
   const localById = new Map(local.filter((account) => account.id).map((account) => [account.id, account]))
-  const legacyByEmail = new Map(local.filter((account) => !account.id).map((account) => [account.email, account]))
   return remote.flatMap((account) => {
-    const stored = localById.get(account.id) ?? legacyByEmail.get(account.email)
+    const stored = localById.get(account.id)
     return stored ? [{ ...stored, ...account }] : []
   })
 }
@@ -126,9 +120,6 @@ export function upsertTestAccount(account: TestAccount, scope = currentTestAccou
   saveTestAccountStore({
     version: 2,
     scopes: { ...store.scopes, [scope]: [...accounts, account] },
-    unscoped: store.unscoped.filter(
-      (stored) => stored.id !== account.id && stored.email !== account.email,
-    ),
   })
 }
 
@@ -146,48 +137,38 @@ export function removeTestAccounts(
   saveTestAccountStore({
     version: 2,
     scopes: { ...store.scopes, [scope]: (store.scopes[scope] ?? []).filter(keep) },
-    unscoped: store.unscoped.filter(keep),
   })
 }
 
 function readTestAccountStore(): TestAccountCredentialStore {
-  if (!existsSync(TEST_ACCOUNTS_PATH)) return { version: 2, scopes: {}, unscoped: [] }
+  if (!existsSync(TEST_ACCOUNTS_PATH)) return { version: 2, scopes: {} }
   try {
     const raw: unknown = JSON.parse(readFileSync(TEST_ACCOUNTS_PATH, 'utf-8'))
-    if (Array.isArray(raw)) return { version: 2, scopes: {}, unscoped: validTestAccounts(raw) }
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-      return { version: 2, scopes: {}, unscoped: [] }
+    if (Array.isArray(raw)) return { version: 2, scopes: {} }
+    if (!raw || typeof raw !== 'object') {
+      return { version: 2, scopes: {} }
     }
-    const candidate = raw as { scopes?: unknown; unscoped?: unknown }
+    const candidate = raw as { scopes?: unknown }
     const scopes = candidate.scopes && typeof candidate.scopes === 'object' && !Array.isArray(candidate.scopes)
       ? Object.fromEntries(Object.entries(candidate.scopes).map(([key, value]) => [key, validTestAccounts(value)]))
       : {}
-    return { version: 2, scopes, unscoped: validTestAccounts(candidate.unscoped) }
+    return { version: 2, scopes }
   } catch {
-    return { version: 2, scopes: {}, unscoped: [] }
+    return { version: 2, scopes: {} }
   }
 }
 
 function validTestAccounts(value: unknown): TestAccount[] {
   if (!Array.isArray(value)) return []
-  return value.filter((item): item is TestAccount => Boolean(
-    item && typeof item === 'object' &&
-    typeof (item as TestAccount).email === 'string' &&
-    typeof (item as TestAccount).password === 'string',
-  ))
-}
-
-function mergeTestAccounts(...groups: TestAccount[][]): TestAccount[] {
-  const accounts = new Map<string, TestAccount>()
-  for (const account of groups.flat()) {
-    const key = account.id ? `id:${account.id}` : `email:${account.email}`
-    if (!accounts.has(key)) accounts.set(key, account)
-  }
-  return [...accounts.values()]
-}
-
-function accountMatchesRemote(local: TestAccount, remote: RemoteTestAccount): boolean {
-  return local.id ? local.id === remote.id : local.email === remote.email
+  return value.filter((item): item is TestAccount =>
+    Boolean(
+      item &&
+        typeof item === 'object' &&
+        typeof (item as TestAccount).id === 'string' &&
+        typeof (item as TestAccount).email === 'string' &&
+        typeof (item as TestAccount).password === 'string',
+    ),
+  )
 }
 
 function saveTestAccountStore(store: TestAccountCredentialStore): void {

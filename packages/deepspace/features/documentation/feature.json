@@ -59,7 +59,8 @@
     "The feature is served at /docs on the app's existing hostname.",
     "A hostname listed in documentation.json domains serves the same release at that hostname's root after you explicitly attach it to the app.",
     "Documentation builds only when documentation.json exists; apps without this feature are unaffected.",
-    "MDX may import app components directly. documentation.tsx is the single optional shell customization point."
+    "MDX may import app components directly. documentation.tsx is the single optional shell customization point.",
+    "Agent discovery is available at /docs/llms.txt, /docs/llms-full.txt, /docs/skill.md, /docs/.well-known/mcp, and /docs/mcp."
   ],
   "agentNotes": [
     "Treat documentation.json, documentation/**/*.md, documentation/**/*.mdx, and optional documentation.tsx as one app-owned documentation feature.",

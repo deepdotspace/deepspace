@@ -1,5 +1,29 @@
 # create-deepspace
 
+## 0.19.0
+
+### Minor Changes
+
+- Block paid app checkout until the owner can accept charges and payouts; require
+  current app roles for direct job mutations and enabled production debug routes;
+  disconnect role-changed sockets; remove email/avatar data from ephemeral
+  presence; refresh ordered/limited live-query snapshots; and clean Yjs awareness
+  per subscribed document. Also retain the earlier claimable-ownership, room
+  identity, log-sanitization, generated-artifact, and first-run agent-DX fixes.
+
+  Existing beta apps must run `npx deepspace@latest app update` with this release
+  so the migration is run by the target CLI. It moves verified room identity from
+  URL parameters to internal headers and installs the stock job-role/debug-route
+  checks using the SDK's shared app-role lookup. Customized seams receive a
+  precise manual blocker; no legacy runtime compatibility branch is retained.
+
+  Generated apps also drop unused model-provider packages and the legacy
+  Documents editor migration. Record writes expose existing room readiness and
+  fail with a stable `not_ready` error before connection; Yjs rooms expose current
+  transport connectivity. Testing sign-in keeps safe server error codes,
+  workspace land returns the deterministic pull action when needed, and generated
+  Documents code is typechecked from the packed release artifact.
+
 ## 0.18.0
 
 ### Patch Changes

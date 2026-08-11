@@ -13,8 +13,8 @@
 
 export const subscriptionPlans = [
   // Example paid tier. Uncomment, edit, then `deepspace deploy` to sync it to
-  // Stripe. Once a paid plan exists, earnings queue in your platform balance
-  // until you finish Stripe Connect onboarding at /earnings.
+  // Stripe. Paid checkout becomes available after the app owner finishes
+  // Stripe Connect onboarding at /earnings.
   // {
   //   slug: 'pro',
   //   name: 'Pro',

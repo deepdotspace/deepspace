@@ -16,8 +16,8 @@ export interface ConnectionAttachment extends UserAttachment {
   subscriptions: Subscription[]
   /** Yjs docs this connection is editing */
   yjsSubscriptions: YjsSubscription[]
-  /** Client-side Yjs awareness clientId (extracted from first awareness message) */
-  awarenessClientId?: number
+  /** Client-side Yjs awareness clientId for each subscribed document. */
+  awarenessClientIds?: Partial<Record<YjsDocKey, number>>
 }
 
 /**

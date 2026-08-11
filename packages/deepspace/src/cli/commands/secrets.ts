@@ -140,7 +140,7 @@ function ok(json: boolean, data: Record<string, unknown>, human: () => void): vo
 }
 
 /**
- * Warn (once) when a write turns on the unauthenticated debug API. Applies to
+ * Warn (once) when a write turns on the privileged debug API. Applies to
  * every write path that can carry it — `set` and `upload` alike. Returns true
  * when it warned, so callers can skip the generic "run deploy" line (this
  * message already tells the user to redeploy).
@@ -148,8 +148,8 @@ function ok(json: boolean, data: Record<string, unknown>, human: () => void): vo
 function warnIfDebugRoutesEnabled(secrets: Record<string, string>): boolean {
   if (secrets.ALLOW_DEBUG_ROUTES !== 'true') return false
   console.warn(
-    '\n⚠  ALLOW_DEBUG_ROUTES=true exposes an UNAUTHENTICATED debug API on the deployed app —\n' +
-      '   anyone who can reach /api/debug/* can read and mutate any record. Redeploy to apply;\n' +
+    '\n⚠  ALLOW_DEBUG_ROUTES=true enables the owner/admin debug API on the deployed app —\n' +
+      '   those users can read and mutate any app record through /api/debug/*. Redeploy to apply;\n' +
       '   `deepspace secrets delete ALLOW_DEBUG_ROUTES` (then redeploy) turns it back off.',
   )
   return true

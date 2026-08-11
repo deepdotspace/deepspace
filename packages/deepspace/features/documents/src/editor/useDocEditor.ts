@@ -120,7 +120,7 @@ export function useDocEditor({
   canWrite,
   placeholder = 'Start typing — toolbar above for formatting…',
 }: UseDocEditorOptions): Editor | null {
-  /** Structured CRDT field that ProseMirror binds to — distinct from the legacy Y.Text('content'). */
+  /** Structured CRDT field that ProseMirror binds to. */
   const fragment = useMemo(() => doc.getXmlFragment('default'), [doc])
 
   /** CollaborationCaret expects a provider-shaped `{ awareness }` object. */

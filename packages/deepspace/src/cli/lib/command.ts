@@ -109,6 +109,8 @@ function exitWhenFlushed(code: number): never {
 export interface DeepspaceCommandDef<A extends ArgsDef> {
   meta: { name: string; description: string }
   args?: A
+  /** Override when a command streams child output before its final envelope. */
+  jsonDescription?: string
   /** Print human output yourself; return the machine payload. Throw a
    *  {@link Refusal} for an actionable failure. */
   run: (ctx: { args: Record<string, unknown> & { json: boolean } }) => Promise<CommandResult | void>
@@ -193,7 +195,7 @@ export function defineDeepspaceCommand<A extends ArgsDef>(def: DeepspaceCommandD
     ...(def.args ?? ({} as A)),
     json: {
       type: 'boolean',
-      description: 'Emit a single-line JSON result for scripts/agents',
+      description: def.jsonDescription ?? 'Emit a single-line JSON result for scripts/agents',
       default: false,
     },
   }

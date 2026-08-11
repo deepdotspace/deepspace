@@ -15,10 +15,11 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { BaseRoom } from '../base-room'
-
-;(globalThis as { WebSocketRequestResponsePair?: unknown }).WebSocketRequestResponsePair ??=
-  class { constructor(_req: string, _resp: string) {} }
+import { BaseRoom, connectionAttachmentFromRequest } from '../base-room'
+import { encodeRoomIdentityHeader } from '../../../shared/room-identity-headers'
+;(globalThis as { WebSocketRequestResponsePair?: unknown }).WebSocketRequestResponsePair ??= class {
+  constructor(_req: string, _resp: string) {}
+}
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -109,6 +110,43 @@ describe('BaseRoom.disconnectAllSockets', () => {
   })
 })
 
+describe('connectionAttachmentFromRequest', () => {
+  it('uses verified internal headers for identity', () => {
+    const attachment = connectionAttachmentFromRequest(
+      new Request('https://internal/ws/room', {
+        headers: {
+          'x-user-id': encodeRoomIdentityHeader('verified-user'),
+          'x-user-name': encodeRoomIdentityHeader('你好 👋\nSecond line'),
+          'x-user-email': encodeRoomIdentityHeader('verified@example.test'),
+          'x-user-image-url': encodeRoomIdentityHeader('https://images.example.test/verified.png'),
+          'x-user-role': encodeRoomIdentityHeader('member'),
+        },
+      }),
+    )
+
+    expect(attachment).toEqual({
+      userId: 'verified-user',
+      userName: '你好 👋\nSecond line',
+      userEmail: 'verified@example.test',
+      userImageUrl: 'https://images.example.test/verified.png',
+      role: 'member',
+    })
+  })
+
+  it('ignores identity in URL query parameters', () => {
+    const attachment = connectionAttachmentFromRequest(
+      new Request(
+        'https://internal/ws/room?userId=spoofed&userName=Attacker&userEmail=attacker%40example.test&role=admin',
+      ),
+    )
+
+    expect(attachment.userId).toMatch(/^anon-/)
+    expect(attachment.userName).toBe('Anonymous')
+    expect(attachment.userEmail).toBe('')
+    expect(attachment.role).toBeUndefined()
+  })
+})
+
 describe('POST /internal/disconnect-sockets', () => {
   it('closes N sockets and returns { success: true, closed: n }', async () => {
     const sockets = [new FakeWebSocket(), new FakeWebSocket()]
@@ -158,9 +196,7 @@ describe('POST /internal/disconnect-sockets', () => {
     const sockets = [new FakeWebSocket()]
     const room = makeRoom(sockets)
 
-    const res = await room.fetch(
-      new Request('https://internal/something-else', { method: 'POST' }),
-    )
+    const res = await room.fetch(new Request('https://internal/something-else', { method: 'POST' }))
 
     expect(res.status).toBe(404)
     expect(sockets[0].closes).toHaveLength(0)

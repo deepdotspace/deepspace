@@ -34,12 +34,10 @@ describe('test account registry reconciliation', () => {
     expect(reconcileTestAccounts(local, [recreated])).toEqual([])
   })
 
-  it('preserves legacy credentials that predate remote ids', () => {
-    const local: TestAccount[] = [{ email: live.email, password: 'legacy-secret', name: 'Live' }]
+  it('does not reuse credentials that predate remote ids', () => {
+    const local: TestAccount[] = [{ email: live.email, password: 'old-secret', name: 'Live' }]
 
-    expect(reconcileTestAccounts(local, [live])).toEqual([
-      { ...live, password: 'legacy-secret', name: 'Live' },
-    ])
+    expect(reconcileTestAccounts(local, [live])).toEqual([])
   })
 
   it('preserves passwords while reconciling production, staging, then production', () => {
@@ -53,7 +51,6 @@ describe('test account registry reconciliation', () => {
         [productionOrigin]: [{ ...production, password: 'production-secret' }],
         [stagingOrigin]: [{ ...staging, password: 'staging-secret' }],
       },
-      unscoped: [],
     }
 
     const afterStaging = reconcileTestAccountScopes(initial, [staging], stagingOrigin).store
@@ -63,9 +60,7 @@ describe('test account registry reconciliation', () => {
       productionOrigin,
     )
 
-    expect(backOnProduction.accounts).toEqual([
-      { ...production, password: 'production-secret' },
-    ])
+    expect(backOnProduction.accounts).toEqual([{ ...production, password: 'production-secret' }])
     expect(backOnProduction.store.scopes[stagingOrigin]).toEqual([
       { ...staging, password: 'staging-secret' },
     ])

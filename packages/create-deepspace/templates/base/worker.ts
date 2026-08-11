@@ -7,7 +7,15 @@
 
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { CanvasRoom, CronRoom, JobRoom, PresenceRoom, RecordRoom, YjsRoom } from 'deepspace/worker'
+import {
+  CanvasRoom,
+  CronRoom,
+  JobRoom,
+  PresenceRoom,
+  RecordRoom,
+  resolveAppRole,
+  YjsRoom,
+} from 'deepspace/worker'
 import type { DOBindings, DOManifest, Job, JobContext } from 'deepspace/worker'
 import { registerAiChatRoutes } from './src/ai/chat-routes.js'
 import { tasks as cronTasks, runTask as runCronTask } from './src/cron.js'
@@ -56,7 +64,13 @@ export class AppCronRoom extends CronRoom<Env> {
 /** Runs durable background work defined in src/jobs.ts. */
 export class AppJobRoom extends JobRoom<Env> {
   constructor(state: DurableObjectState, env: Env) {
-    super(state, env)
+    super(state, env, {
+      authorizeWrite: async (user) => {
+        if (user.userId.startsWith('anon-')) return false
+        const role = await resolveAppRole(env, user.userId)
+        return role === 'member' || role === 'admin'
+      },
+    })
   }
 
   protected async onJob(job: Job, context: JobContext): Promise<unknown> {
@@ -94,8 +108,8 @@ export interface Env extends DOBindings<typeof __DO_MANIFEST__> {
    */
   APP_OWNER_JWT: string
   /**
-   * Enables the unauthenticated /api/debug/* proxy only when exactly "true".
-   * deepspace dev/test set it locally; deployed environments must opt in.
+   * Enables /api/debug/* only when exactly "true". The route still requires
+   * an authenticated app owner/admin. deepspace dev/test set it locally.
    */
   ALLOW_DEBUG_ROUTES?: string
 }

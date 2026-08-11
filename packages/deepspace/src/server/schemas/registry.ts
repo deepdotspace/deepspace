@@ -98,7 +98,9 @@ export function dataToColumnValues(
   const values: Record<string, unknown> = {}
   for (const col of columns) {
     if (col.expression || col.readonly) continue
-    const val = data[col.id] ?? data[col.name]
+    // Record mutations use public schema names only. Accepting physical column
+    // ids here lets a second key bypass name-based RBAC/userBound checks.
+    const val = data[col.name]
     if (val !== undefined) {
       values[col.id] = coerceValue(val, col.storage, col.interpretation)
     }
@@ -347,6 +349,28 @@ export function checkFieldPermissions(
   return null
 }
 
+/**
+ * `unclaimed-or-own` lets a client claim an empty owner field, but never lets
+ * them choose another user's id. Check the post-write record so the invariant
+ * covers both creation and updates while still allowing an owner to unclaim.
+ */
+export function checkUnclaimedOwnerTransition(
+  schema: CollectionSchema,
+  role: string,
+  nextData: Record<string, unknown>,
+  userId: string,
+): string | null {
+  const permissions = getRolePermissions(schema, role)
+  if (permissions.update !== 'unclaimed-or-own' || !schema.ownerField) return null
+
+  const nextOwner = nextData[schema.ownerField]
+  if (nextOwner === undefined || nextOwner === null || nextOwner === '' || nextOwner === userId) {
+    return null
+  }
+
+  return `Role '${role}' can set '${schema.ownerField}' only to their own user id or leave it unclaimed`
+}
+
 // ============================================================================
 // System-Managed Columns (users collection)
 // ============================================================================
@@ -430,7 +454,10 @@ export function lintSchema(schema: CollectionSchema): string[] {
     const spoofableRoles = Object.entries(schema.permissions)
       .filter(
         ([role, permissions]) =>
-          role !== 'owner' && role !== 'admin' && permissions.create === true,
+          role !== 'owner' &&
+          role !== 'admin' &&
+          permissions.create === true &&
+          permissions.update !== 'unclaimed-or-own',
       )
       .map(([role]) => role)
     if (col && !col.userBound && spoofableRoles.length > 0) {

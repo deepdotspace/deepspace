@@ -21,6 +21,7 @@
 
 import { BaseRoom, type UserAttachment } from './base-room'
 import { MSG } from '../../shared/protocol/constants'
+import { ROLES } from '../../shared/roles'
 import { serverBuild } from '../../shared/protocol/messages'
 
 // ============================================================================
@@ -83,6 +84,12 @@ export interface JobRoomConfig {
   snapshotLimit?: number
   /** Delay before a failed attempt is retried, in ms. Default 1000. */
   retryBackoffMs?: number
+  /** Re-check whether a connected user may mutate the queue. Defaults to member/admin roles. */
+  authorizeWrite?: (user: UserAttachment) => boolean | Promise<boolean>
+}
+
+interface JobAttachment extends UserAttachment {
+  canWrite: boolean
 }
 
 // ============================================================================
@@ -108,6 +115,7 @@ export abstract class JobRoom<
   private readonly retentionMs: number
   private readonly snapshotLimit: number
   private readonly retryBackoffMs: number
+  private readonly authorizeWrite: (user: UserAttachment) => boolean | Promise<boolean>
 
   /** In-flight jobs in this isolate; lets same-isolate JOB_CANCEL fire the signal. */
   private readonly inFlight = new Map<string, AbortController>()
@@ -121,6 +129,8 @@ export abstract class JobRoom<
     this.retentionMs = Math.max(0, config.retentionMs ?? DEFAULT_RETENTION_MS)
     this.snapshotLimit = Math.max(1, config.snapshotLimit ?? DEFAULT_SNAPSHOT_LIMIT)
     this.retryBackoffMs = Math.max(0, config.retryBackoffMs ?? 1000)
+    this.authorizeWrite =
+      config.authorizeWrite ?? ((user) => user.role === ROLES.MEMBER || user.role === ROLES.ADMIN)
   }
 
   private ensureInitialized(): void {
@@ -168,10 +178,12 @@ export abstract class JobRoom<
     return super.fetch(request)
   }
 
-  protected onConnect(ws: WebSocket, user: UserAttachment): UserAttachment {
+  protected async onConnect(ws: WebSocket, user: UserAttachment): Promise<JobAttachment> {
     this.ensureInitialized()
+    const canWrite = await this.authorizeWrite(user)
+    this.sendTo(ws, { type: MSG.AUTH, payload: { canWrite } })
     this.sendTo(ws, serverBuild.jobSnapshot(this.getRecentJobs(this.snapshotLimit)))
-    return user
+    return { ...user, canWrite }
   }
 
   protected async onMessage(
@@ -183,6 +195,23 @@ export abstract class JobRoom<
     const { type, payload } = message as {
       type: string
       payload: Record<string, unknown>
+    }
+
+    if (type === MSG.JOB_ENQUEUE || type === MSG.JOB_CANCEL || type === MSG.JOB_RETRY) {
+      const attachment = user as JobAttachment
+      const canWrite = await this.authorizeWrite(user)
+      if (attachment.canWrite !== canWrite) {
+        attachment.canWrite = canWrite
+        ws.serializeAttachment(attachment)
+        this.sendTo(ws, { type: MSG.AUTH, payload: { canWrite } })
+      } else if (!canWrite) {
+        // Repeat the denial so a newly attempted enqueue rejects immediately.
+        this.sendTo(ws, { type: MSG.AUTH, payload: { canWrite: false } })
+      }
+      if (!canWrite) {
+        this.sendTo(ws, serverBuild.error('Write access denied: job queue requires member access'))
+        return
+      }
     }
 
     switch (type) {

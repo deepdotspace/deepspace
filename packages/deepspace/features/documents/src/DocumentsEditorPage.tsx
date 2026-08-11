@@ -6,11 +6,6 @@
  * applied as granular PM transactions (no `innerHTML` swap), the local
  * caret is migrated through concurrent edits by PM's position mapping,
  * and remote cursors are painted by `@tiptap/extension-collaboration-caret`.
- *
- * Legacy documents created with the old editor stored HTML in Y.Text('content').
- * On first open by an editor/owner we migrate that into the new XmlFragment
- * via `editor.commands.setContent(html)` and clear the legacy field. The
- * migration is a single Yjs transaction so all peers converge.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -286,20 +281,12 @@ export default function DocumentsEditorPage() {
 
   const { put } = useMutations<DocumentsDocumentFields>('documents')
 
-  /**
-   * `'content'` is kept as the field name only so legacy-doc migration can
-   * read the old HTML out of Y.Text('content') below. The Tiptap editor
-   * itself binds to a separate Y.XmlFragment('default') inside the same
-   * Y.Doc — they don't collide.
-   */
-  const {
-    doc,
-    text: legacyText,
-    synced,
-    canWrite,
-    writeAuthResolved,
-    awareness,
-  } = useYjsRoom(docId ?? 'noop', 'content')
+  // The text helper remains available to consumers of useYjsRoom; this editor
+  // binds Tiptap directly to Y.XmlFragment('default') on the returned document.
+  const { doc, synced, connected, canWrite, writeAuthResolved, awareness } = useYjsRoom(
+    docId ?? 'noop',
+    'content',
+  )
 
   const presenceAccess = useDocumentsPresenceAccess({
     docId,
@@ -387,37 +374,6 @@ export default function DocumentsEditorPage() {
     canWrite: effectiveCanWrite,
     placeholder: showReadOnlyDocUx ? 'View only' : 'Start typing — toolbar above for formatting…',
   })
-
-  // Legacy migration: if doc.getXmlFragment('default') is empty but the
-  // legacy Y.Text('content') field has HTML, parse it once into Tiptap.
-  // Only the first writer to open does this; viewers never see partial state
-  // because both the wipe and the parse run inside a single Yjs transaction.
-  const migratedRef = useRef(false)
-  useEffect(() => {
-    if (migratedRef.current) return
-    if (!editor || !synced || !effectiveCanWrite) return
-    const fragment = doc.getXmlFragment('default')
-    if (fragment.length > 0) {
-      migratedRef.current = true
-      return
-    }
-    const yText = doc.getText('content')
-    const legacy = (legacyText ?? yText.toString()).trim()
-    if (!legacy) {
-      migratedRef.current = true
-      return
-    }
-    migratedRef.current = true
-    /**
-     * Tiptap parses the HTML against its schema, then writes the resulting
-     * nodes into the bound Y.XmlFragment. We then clear the legacy field
-     * inside the same transaction so peers see one atomic step.
-     */
-    doc.transact(() => {
-      editor.commands.setContent(legacy, { emitUpdate: true })
-      if (yText.length > 0) yText.delete(0, yText.length)
-    })
-  }, [editor, synced, effectiveCanWrite, doc, legacyText])
 
   const { participants: presenceParticipants, typingNames } = useDocumentsEditorPresence({
     editor,
@@ -522,7 +478,7 @@ export default function DocumentsEditorPage() {
               {effectiveRole === 'editor' ? 'Shared editor' : 'Shared viewer'}
             </span>
           ) : null}
-          {synced ? (
+          {connected && synced ? (
             <span
               className="flex items-center gap-1.5 text-xs tabular-nums"
               style={{ color: 'var(--documents-el-muted)' }}
@@ -530,13 +486,21 @@ export default function DocumentsEditorPage() {
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden />
               Synced
             </span>
-          ) : (
+          ) : connected ? (
             <span
               className="flex items-center gap-1.5 text-xs tabular-nums"
               style={{ color: 'var(--documents-el-muted)' }}
             >
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" aria-hidden />
               Connecting…
+            </span>
+          ) : (
+            <span
+              className="flex items-center gap-1.5 text-xs tabular-nums"
+              style={{ color: 'var(--documents-el-muted)' }}
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-slate-400" aria-hidden />
+              Offline
             </span>
           )}
           {effectiveRole === 'owner' ? (

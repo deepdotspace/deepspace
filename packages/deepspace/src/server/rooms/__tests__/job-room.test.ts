@@ -26,6 +26,7 @@ import Database from 'better-sqlite3'
 import { JobRoom, type Job, type JobContext } from '../job-room'
 import { MSG } from '../../../shared/protocol/constants'
 import type { ServerMessage } from '../../../shared/protocol/messages'
+import type { UserAttachment } from '../base-room'
 
 /** The discriminated `job.update` variant of the server-message union. */
 type JobUpdateMessage = Extract<ServerMessage, { type: typeof MSG.JOB_UPDATE }>
@@ -36,10 +37,9 @@ function jobPayload(m: ServerMessage): JobUpdateMessage['payload'] {
 
 // BaseRoom's constructor calls `new WebSocketRequestResponsePair(...)`
 // which only exists in workerd. Vitest runs under node — stub it.
-;(globalThis as { WebSocketRequestResponsePair?: unknown }).WebSocketRequestResponsePair ??=
-  class {
-    constructor(_req: string, _resp: string) {}
-  }
+;(globalThis as { WebSocketRequestResponsePair?: unknown }).WebSocketRequestResponsePair ??= class {
+  constructor(_req: string, _resp: string) {}
+}
 
 // ---------------------------------------------------------------------------
 // SqlStorage shim — same pattern as cron-room.test.ts.
@@ -127,11 +127,31 @@ class TestJobRoom extends JobRoom {
     return (this as unknown as { onAlarm(): Promise<void> }).onAlarm()
   }
 
-  public dispatch(message: { type: string; payload: Record<string, unknown> }): Promise<void> {
-    const ws = {} as WebSocket
-    const user = { userId: 'tester', userName: 't', userEmail: '' }
+  public dispatch(
+    message: { type: string; payload: Record<string, unknown> },
+    user: UserAttachment = { userId: 'tester', userName: 't', userEmail: '', role: 'member' },
+  ): Promise<void> {
+    const ws = { serializeAttachment() {} } as unknown as WebSocket
     return Promise.resolve(
-      (this as unknown as { onMessage(ws: WebSocket, user: unknown, message: unknown): void | Promise<void> }).onMessage(ws, user, message),
+      (
+        this as unknown as {
+          onMessage(ws: WebSocket, user: unknown, message: unknown): void | Promise<void>
+        }
+      ).onMessage(ws, user, message),
+    )
+  }
+
+  public connect(user: UserAttachment): Promise<UserAttachment | void> {
+    const ws = {} as WebSocket
+    return Promise.resolve(
+      (
+        this as unknown as {
+          onConnect(
+            ws: WebSocket,
+            user: UserAttachment,
+          ): UserAttachment | void | Promise<UserAttachment | void>
+        }
+      ).onConnect(ws, user),
     )
   }
 }
@@ -149,6 +169,65 @@ function makeRoom(db: Database.Database, handler: Handler = () => undefined): Te
 // ---------------------------------------------------------------------------
 // Lifecycle tests
 // ---------------------------------------------------------------------------
+
+describe('JobRoom — authorization', () => {
+  it('keeps anonymous and viewer connections read-only', async () => {
+    const db = new Database(':memory:')
+    const room = makeRoom(db)
+
+    const attachment = await room.connect({
+      userId: 'anon-1',
+      userName: 'Anonymous',
+      userEmail: '',
+      role: 'viewer',
+    })
+    expect(attachment).toMatchObject({ canWrite: false })
+    expect(room.directSends).toContainEqual({
+      type: MSG.AUTH,
+      payload: { canWrite: false },
+    })
+
+    await room.dispatch(
+      { type: MSG.JOB_ENQUEUE, payload: { requestId: 'r', type: 'blocked' } },
+      { userId: 'anon-1', userName: 'Anonymous', userEmail: '', role: 'viewer' },
+    )
+
+    const count = db.prepare('SELECT COUNT(*) AS count FROM jobs').get() as { count: number }
+    expect(count.count).toBe(0)
+    expect(room.directSends.at(-1)).toMatchObject({
+      type: MSG.ERROR,
+      payload: { error: expect.stringContaining('Write access denied') },
+    })
+  })
+
+  it('rechecks a denied connection so promotion can authorize its next mutation', async () => {
+    const db = new Database(':memory:')
+    let canWrite = false
+    const room = new TestJobRoom(makeState(db).state, {}, { authorizeWrite: () => canWrite })
+    room.init()
+    const attachment = (await room.connect({
+      userId: 'user-1',
+      userName: 'User',
+      userEmail: '',
+      role: 'viewer',
+    })) as UserAttachment
+
+    await room.dispatch(
+      { type: MSG.JOB_ENQUEUE, payload: { requestId: 'blocked', type: 'example' } },
+      attachment,
+    )
+    expect(db.prepare('SELECT COUNT(*) AS count FROM jobs').get()).toEqual({ count: 0 })
+
+    canWrite = true
+    await room.dispatch(
+      { type: MSG.JOB_ENQUEUE, payload: { requestId: 'allowed', type: 'example' } },
+      attachment,
+    )
+
+    expect(room.directSends).toContainEqual({ type: MSG.AUTH, payload: { canWrite: true } })
+    expect(db.prepare('SELECT COUNT(*) AS count FROM jobs').get()).toEqual({ count: 1 })
+  })
+})
 
 describe('JobRoom — success path', () => {
   it('enqueues, runs onJob, and marks the row succeeded with the result', async () => {
@@ -183,9 +262,12 @@ describe('JobRoom — success path', () => {
 
     await room.runAlarm()
 
-    const final = db
-      .prepare(`SELECT status, result, error, attempts FROM jobs`)
-      .get() as { status: string; result: string; error: string | null; attempts: number }
+    const final = db.prepare(`SELECT status, result, error, attempts FROM jobs`).get() as {
+      status: string
+      result: string
+      error: string | null
+      attempts: number
+    }
     expect(final.status).toBe('succeeded')
     expect(JSON.parse(final.result)).toEqual({ echoed: 'hi' })
     expect(final.error).toBeNull()
@@ -231,7 +313,10 @@ describe('JobRoom — failure + retry', () => {
     await room.runAlarm() // attempt 2 → fail
     await room.runAlarm() // attempt 3 → succeed
 
-    const final = db.prepare(`SELECT status, attempts, result FROM jobs`).get() as Record<string, unknown>
+    const final = db.prepare(`SELECT status, attempts, result FROM jobs`).get() as Record<
+      string,
+      unknown
+    >
     expect(final.status).toBe('succeeded')
     expect(final.attempts).toBe(3)
     expect(JSON.parse(final.result as string)).toBe('finally ok')
@@ -260,7 +345,10 @@ describe('JobRoom — failure + retry', () => {
     await room.runAlarm() // attempt 1 → retry
     await room.runAlarm() // attempt 2 → fail permanently
 
-    const final = db.prepare(`SELECT status, attempts, error FROM jobs`).get() as Record<string, unknown>
+    const final = db.prepare(`SELECT status, attempts, error FROM jobs`).get() as Record<
+      string,
+      unknown
+    >
     expect(final.status).toBe('failed')
     expect(final.attempts).toBe(2)
     expect(final.error).toBe('never works')
@@ -447,17 +535,20 @@ describe('JobRoom — crash recovery', () => {
       .get() as Record<string, unknown>
     expect(recovered.status).toBe('queued')
     expect(recovered.started_at).toBeNull()
-    expect(
-      db.prepare(`SELECT status FROM jobs WHERE id = 'zombie-undated'`).get(),
-    ).toEqual({ status: 'queued' })
+    expect(db.prepare(`SELECT status FROM jobs WHERE id = 'zombie-undated'`).get()).toEqual({
+      status: 'queued',
+    })
 
     await room.runAlarm()
     expect(didRun).toBe(true)
-    const final = db.prepare(`SELECT status FROM jobs WHERE id = 'zombie-1'`).get() as Record<string, unknown>
+    const final = db.prepare(`SELECT status FROM jobs WHERE id = 'zombie-1'`).get() as Record<
+      string,
+      unknown
+    >
     expect(final.status).toBe('succeeded')
-    expect(
-      db.prepare(`SELECT status FROM jobs WHERE id = 'zombie-undated'`).get(),
-    ).toEqual({ status: 'succeeded' })
+    expect(db.prepare(`SELECT status FROM jobs WHERE id = 'zombie-undated'`).get()).toEqual({
+      status: 'succeeded',
+    })
   })
 
   it('permanently fails a stale `running` row that has exhausted attempts', async () => {
@@ -472,7 +563,10 @@ describe('JobRoom — crash recovery', () => {
 
     new TestJobRoom(makeState(db).state, {}).init()
 
-    const row = db.prepare(`SELECT status, error FROM jobs WHERE id = 'zombie-2'`).get() as Record<string, unknown>
+    const row = db.prepare(`SELECT status, error FROM jobs WHERE id = 'zombie-2'`).get() as Record<
+      string,
+      unknown
+    >
     expect(row.status).toBe('failed')
     expect(row.error).toMatch(/Isolate recycled|wall time/)
   })
@@ -503,7 +597,10 @@ describe('JobRoom — progress', () => {
 
     // Once the job reaches a terminal state, progress fields are cleared
     // so the persisted row doesn't claim "75% done" on a succeeded job.
-    const final = db.prepare(`SELECT status, progress, progress_message FROM jobs`).get() as Record<string, unknown>
+    const final = db.prepare(`SELECT status, progress, progress_message FROM jobs`).get() as Record<
+      string,
+      unknown
+    >
     expect(final.status).toBe('succeeded')
     expect(final.progress).toBeNull()
     expect(final.progress_message).toBeNull()

@@ -14,11 +14,8 @@ export * from './tools'
 export * from './scoped-r2-files'
 export * from './action-types'
 export { type CronContext, buildCronContext } from './cron'
-export {
-  createDeepSpaceAI,
-  type DeepSpaceAIEnv,
-  type DeepSpaceAIOptions,
-} from './ai'
+export { resolveAppRole } from './app-role'
+export { createDeepSpaceAI, type DeepSpaceAIEnv, type DeepSpaceAIOptions } from './ai'
 export * from './agent'
 export { composioTools, type ComposioToolsOptions } from './composio-tools'
 export {
@@ -29,11 +26,7 @@ export {
   type PlatformWorkerEnv,
   type AuthWorkerEnv,
 } from './proxies'
-export {
-  captureScreenshot,
-  type ScreenshotEnv,
-  type ScreenshotResult,
-} from './screenshot'
+export { captureScreenshot, type ScreenshotEnv, type ScreenshotResult } from './screenshot'
 export {
   prepareMessagesWithCompaction,
   turnsToCoreMessages,
@@ -50,11 +43,5 @@ export {
   type Summarizer,
 } from './chat-context'
 export * from './chat-history'
-export {
-  meterUsage,
-  meterAi,
-  meterVectorize,
-  COST_RATES,
-  priceBindingUsageEvent,
-} from './metering'
+export { meterUsage, meterAi, meterVectorize, COST_RATES, priceBindingUsageEvent } from './metering'
 export { runMigrations, type RunMigrationsResult } from './d1-migrations'

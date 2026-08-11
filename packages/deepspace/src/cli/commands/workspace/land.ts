@@ -3,7 +3,12 @@ import { errorCode } from '../../lib/cli-errors'
 import { defineDeepspaceCommand, Refusal } from '../../lib/command'
 import type { CliAction } from '../../lib/output'
 import { runGit } from '../../lib/git/process'
-import { isPlausibleBranchName, isWorkTreeClean, resolveCommit } from '../../lib/git/repository'
+import {
+  currentBranch,
+  isPlausibleBranchName,
+  isWorkTreeClean,
+  resolveCommit,
+} from '../../lib/git/repository'
 import { committedSecretRefusal } from '../../lib/git/safety'
 import { pushToSpace } from '../../lib/vc-push'
 import {
@@ -22,6 +27,7 @@ import {
   cleanupRefusalMessage,
   cleanupWorkspaceLocal,
   inOwnLinkedWorktree,
+  primaryAppDir,
   reportCleanupHuman,
 } from './local'
 import {
@@ -46,6 +52,17 @@ export function conflictMarkerFiles(diffCheckOutput: string): string[] {
     if (match) files.add(match[1])
   }
   return [...files]
+}
+
+/** Refresh a primary checkout that is already on the branch landing advanced. */
+export function pullAfterLandAction(
+  primaryDir: string,
+  intoBranch: string,
+  landedOid: string,
+): CliAction | null {
+  if (currentBranch(primaryDir) !== intoBranch) return null
+  if (resolveCommit(primaryDir, 'HEAD') === landedOid) return null
+  return { cwd: primaryDir, argv: ['deepspace', 'pull'] }
 }
 
 export interface LandArgs {
@@ -388,6 +405,7 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
       )
     }
     spinner?.stop(`Landed ${id} into ${intoBranch} at ${landedOid.slice(0, 10)}.`)
+    const primaryDir = primaryAppDir(appDir)
     const cleanup = keepWorktree
       ? null
       : cleanupWorkspaceLocal(appDir, id, intoBranch, { expectedBranchOid: landedOid })
@@ -422,6 +440,7 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
         { actionRequired: true, action, extra: data },
       )
     }
-    return { data }
+    const action = pullAfterLandAction(primaryDir, intoBranch, landedOid)
+    return { data, ...(action ? { action } : {}) }
   },
 })

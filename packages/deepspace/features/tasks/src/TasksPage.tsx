@@ -460,7 +460,10 @@ export default function TasksPage({ className }: TasksPageProps) {
   const handleUnclaim = async (challenge: { recordId: string; data: Challenge }) => {
     await put(challenge.recordId, {
       ...challenge.data,
-      claimedById: undefined,
+      // Empty strings are normalized to SQL NULL by the record writer. The
+      // read model omits null database fields, so this also keeps Challenge's
+      // optional-string shape honest.
+      claimedById: '',
     })
   }
 
@@ -469,8 +472,8 @@ export default function TasksPage({ className }: TasksPageProps) {
     await put(submitChallenge.recordId, {
       ...submitChallenge.data,
       submitted: true,
-      submissionUrl: url || undefined,
-      submissionNotes: notes || undefined,
+      submissionUrl: url,
+      submissionNotes: notes,
     })
     setSubmitChallenge(null)
   }

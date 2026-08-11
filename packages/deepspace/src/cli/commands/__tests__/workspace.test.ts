@@ -28,9 +28,15 @@ import {
   inspectWorkspaceCleanup,
   isManagedWorkspaceWorktree,
   materializeWorkspaceWorktree,
+  primaryAppDir,
   rematerializeWorkspaceWorktree,
 } from '../workspace/local'
-import { conflictMarkerFiles, hasLeftoverConflictMarkers, landResumeArgv } from '../workspace/land'
+import {
+  conflictMarkerFiles,
+  hasLeftoverConflictMarkers,
+  landResumeArgv,
+  pullAfterLandAction,
+} from '../workspace/land'
 import { cleanFailedFreshAttachDir, finishedWorkspaceMessage } from '../workspace/attach'
 import { overlapsWith, workspaceSyncRelation } from '../workspace/analysis'
 import { withWorkspaceOverlaps } from '../workspace/list'
@@ -373,6 +379,19 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
     expect(res.mainDir).toBeUndefined() // not run from inside
     expect(existsSync(dir)).toBe(false)
     expect(git(main, ['branch', '--list', BRANCH]).trim()).toBe('')
+  })
+
+  it('points a completed land at the matching stale primary checkout', () => {
+    const main = initRepoWithCommit()
+    const head = git(main, ['rev-parse', 'HEAD']).trim()
+    const workspaceDir = addWorktree(main)
+
+    expect(primaryAppDir(workspaceDir)).toBe(realpathSync(main))
+    expect(pullAfterLandAction(main, 'main', `${'a'.repeat(40)}`)).toEqual({
+      cwd: main,
+      argv: ['deepspace', 'pull'],
+    })
+    expect(pullAfterLandAction(main, 'main', head)).toBeNull()
   })
 
   it('retains the branch when it advances after the caller approved an older tip', () => {

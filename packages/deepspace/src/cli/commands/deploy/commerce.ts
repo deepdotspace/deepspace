@@ -185,10 +185,8 @@ export async function syncSubscriptionPlans(
     spinner.stop(`Synced ${plans.length} plan${plans.length === 1 ? '' : 's'} to Stripe`)
     if (body.connectMissing) {
       p.log.warn(
-        'Stripe Connect not yet set up. Customers can subscribe and earnings ' +
-          'will queue in your platform balance until you finish onboarding at ' +
-          '/earnings on the dashboard. The first payout after you connect ' +
-          'will sweep everything that accumulated in the meantime.',
+        'Stripe Connect is not ready. Paid checkout will remain unavailable ' +
+          'until the app owner finishes onboarding at /earnings on the dashboard.',
       )
     }
     const changes = (body.planChanges ?? []).filter((change) => change.affectedSubscribers > 0)

@@ -348,13 +348,8 @@ export async function handleSetRole(
     payload.role, now, payload.userId
   )
 
-  // Update attachment if this connection's user's role changed
-  if (attachment.userId === payload.userId) {
-    attachment.role = payload.role
-    ws.serializeAttachment(attachment)
-  }
-
-  // Update other connected users' attachments and broadcast to admins
+  // Close the changed user's live sockets. Reconnect runs the ordinary role
+  // lookup again, so no connection keeps permissions from before the change.
   const userRecords = getAllUserRecords(ctx.sql, ctx.schemaRegistry)
   const users = userRecords.map(r => ({
     id: r.recordId,
@@ -365,10 +360,13 @@ export async function handleSetRole(
     const otherAttachment = otherWs.deserializeAttachment() as ConnectionAttachment | null
     if (!otherAttachment) continue
 
-    // Update role in attachment if this user's role changed
-    if (otherAttachment.userId === payload.userId && otherWs !== ws) {
-      otherAttachment.role = payload.role
-      otherWs.serializeAttachment(otherAttachment)
+    if (otherAttachment.userId === payload.userId) {
+      try {
+        otherWs.close(1008, 'role-changed')
+      } catch {
+        // Already closing.
+      }
+      continue
     }
 
     // Send updated user list to admins

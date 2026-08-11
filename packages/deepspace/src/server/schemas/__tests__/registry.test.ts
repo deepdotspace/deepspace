@@ -1,0 +1,61 @@
+import { describe, expect, it } from 'vitest'
+import type { CollectionSchema } from '../../../shared/types'
+import { checkUnclaimedOwnerTransition, lintSchema } from '../registry'
+
+const claimableSchema: CollectionSchema = {
+  name: 'tasks',
+  columns: [
+    { name: 'title', storage: 'text', interpretation: 'plain' },
+    { name: 'claimedById', storage: 'text', interpretation: 'plain' },
+  ],
+  ownerField: 'claimedById',
+  permissions: {
+    member: {
+      read: true,
+      create: true,
+      update: 'unclaimed-or-own',
+      delete: 'own',
+    },
+    admin: { read: true, create: true, update: true, delete: true },
+  },
+}
+
+describe('checkUnclaimedOwnerTransition', () => {
+  it('allows an unclaimed row, a self-claim, and an unclaim', () => {
+    expect(checkUnclaimedOwnerTransition(claimableSchema, 'member', {}, 'user-1')).toBeNull()
+    expect(
+      checkUnclaimedOwnerTransition(claimableSchema, 'member', { claimedById: 'user-1' }, 'user-1'),
+    ).toBeNull()
+    expect(
+      checkUnclaimedOwnerTransition(claimableSchema, 'member', { claimedById: '' }, 'user-1'),
+    ).toBeNull()
+  })
+
+  it('rejects assigning another user on either create or update', () => {
+    expect(
+      checkUnclaimedOwnerTransition(claimableSchema, 'member', { claimedById: 'user-2' }, 'user-1'),
+    ).toContain('only to their own user id')
+  })
+
+  it('does not restrict trusted roles with unconditional update permission', () => {
+    expect(
+      checkUnclaimedOwnerTransition(claimableSchema, 'admin', { claimedById: 'user-2' }, 'admin-1'),
+    ).toBeNull()
+  })
+})
+
+describe('lintSchema claimable ownership', () => {
+  it('accepts the server-enforced unclaimed-or-own pattern without userBound', () => {
+    expect(lintSchema(claimableSchema)).toEqual([])
+  })
+
+  it('still warns for a spoofable ordinary own-permission schema', () => {
+    const unsafe: CollectionSchema = {
+      ...claimableSchema,
+      permissions: {
+        member: { read: true, create: true, update: 'own', delete: 'own' },
+      },
+    }
+    expect(lintSchema(unsafe)).toHaveLength(1)
+  })
+})

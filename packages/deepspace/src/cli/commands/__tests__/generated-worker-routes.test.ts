@@ -14,6 +14,7 @@ import {
 } from '../../../shared/app-routing'
 import { BROWSER_PROXY_ROUTES } from '../../../shared/platform-proxy'
 import { CLIENT_ERROR_PATH } from '../../../shared/client-errors'
+import { decodeRoomIdentityHeader } from '../../../shared/room-identity-headers'
 
 interface TestEnv {
   ASSETS?: Fetcher
@@ -22,6 +23,7 @@ interface TestEnv {
   AUTH_WORKER_URL?: string
   DEEPSPACE_APP_ID?: string
   OWNER_USER_ID?: string
+  ALLOW_DEBUG_ROUTES?: string
   RECORD_ROOMS?: DurableObjectNamespace
   YJS_ROOMS?: DurableObjectNamespace
 }
@@ -71,15 +73,15 @@ MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgViVa+AqStZtvZ49N
 oxltdAl6xlA6wVHu113ipIG5XO/5mHE51iYPAZtwLID72B1Ol2qoXEQ7
 -----END PRIVATE KEY-----`
 
-async function signTestJwt(): Promise<string> {
+async function signTestJwt(subject = 'verified-user'): Promise<string> {
   const privateKey = await importPKCS8(TEST_JWT_PRIVATE_KEY, 'ES256')
   return new SignJWT({
-    name: 'Verified Name',
+    name: '你好 👋\nSecond line',
     email: 'verified@example.test',
     image: 'https://images.example.test/verified.png',
   })
     .setProtectedHeader({ alg: 'ES256' })
-    .setSubject('verified-user')
+    .setSubject(subject)
     .setIssuer(TEST_JWT_ISSUER)
     .setIssuedAt()
     .setExpirationTime('5m')
@@ -115,7 +117,8 @@ function spaAssetLayer(present: Record<string, [body: string, contentType: strin
       if (pathname === '/index.html') {
         return new Response(null, { status: 307, headers: { location: '/' } })
       }
-      const hit = present[pathname] ?? (pathname === '/' ? ([APP_SHELL, 'text/html'] as const) : undefined)
+      const hit =
+        present[pathname] ?? (pathname === '/' ? ([APP_SHELL, 'text/html'] as const) : undefined)
       if (hit) {
         return new Response(hit[0], { status: 200, headers: { 'content-type': hit[1] } })
       }
@@ -163,11 +166,66 @@ describe('generated worker route owners', () => {
     expect(integration.status).toBe(401)
   })
 
+  it('requires owner/admin auth after production debug routes are enabled', async () => {
+    const app = new Hono<TestContext>()
+    registerAuthAndIntegrationRoutes(app)
+    const baseEnv = {
+      ALLOW_DEBUG_ROUTES: 'true',
+      AUTH_JWT_ISSUER: TEST_JWT_ISSUER,
+      AUTH_JWT_PUBLIC_KEY: TEST_JWT_PUBLIC_KEY,
+      DEEPSPACE_APP_ID: 'app_test',
+      OWNER_USER_ID: 'owner-user',
+    }
+
+    const signedOut = await app.request(
+      'https://app.test/api/debug/status',
+      undefined,
+      env(baseEnv),
+    )
+    expect(signedOut.status).toBe(401)
+
+    const viewerToken = await signTestJwt('viewer-user')
+    const viewerRooms = {
+      idFromName: (name: string) => name,
+      get: () => ({
+        fetch: () =>
+          Promise.resolve(
+            Response.json({
+              success: true,
+              data: { record: { data: { role: 'viewer' } } },
+            }),
+          ),
+      }),
+    } as unknown as DurableObjectNamespace
+    const viewer = await app.request(
+      'https://app.test/api/debug/status',
+      { headers: { Authorization: `Bearer ${viewerToken}` } },
+      env({ ...baseEnv, RECORD_ROOMS: viewerRooms }),
+    )
+    expect(viewer.status).toBe(403)
+
+    const ownerToken = await signTestJwt('owner-user')
+    const ownerRooms = {
+      idFromName: (name: string) => name,
+      get: () => ({
+        fetch: () => Promise.resolve(new Response(null, { status: 204 })),
+      }),
+    } as unknown as DurableObjectNamespace
+    const owner = await app.request(
+      'https://app.test/api/debug/status',
+      { headers: { Authorization: `Bearer ${ownerToken}` } },
+      env({ ...baseEnv, RECORD_ROOMS: ownerRooms }),
+    )
+    expect(owner.status).toBe(204)
+  })
+
   it('strips caller identity before a generic WebSocket reaches its room', async () => {
     let forwardedUrl = ''
+    let forwardedHeaders = new Headers()
     const stub = {
       fetch(request: Request) {
         forwardedUrl = request.url
+        forwardedHeaders = new Headers(request.headers)
         return Promise.resolve(new Response(null, { status: 204 }))
       },
     }
@@ -180,7 +238,13 @@ describe('generated worker route owners', () => {
 
     const response = await app.request(
       'https://app.test/ws/room-1?userId=spoofed&userName=attacker&role=admin',
-      undefined,
+      {
+        headers: {
+          'x-user-id': 'spoofed',
+          'x-user-name': 'attacker',
+          'x-user-role': 'admin',
+        },
+      },
       env({ RECORD_ROOMS: namespace }),
     )
 
@@ -189,11 +253,15 @@ describe('generated worker route owners', () => {
     expect(forwarded.searchParams.has('userId')).toBe(false)
     expect(forwarded.searchParams.has('userName')).toBe(false)
     expect(forwarded.searchParams.has('role')).toBe(false)
+    expect(forwardedHeaders.has('x-user-id')).toBe(false)
+    expect(forwardedHeaders.has('x-user-name')).toBe(false)
+    expect(forwardedHeaders.has('x-user-role')).toBe(false)
   })
 
   it('replaces spoofed Yjs identity with verified JWT claims and the document role', async () => {
     const token = await signTestJwt()
     let forwardedUrl = ''
+    let forwardedHeaders = new Headers()
     const recordRooms = {
       idFromName: (name: string) => name,
       get: () => ({
@@ -211,6 +279,7 @@ describe('generated worker route owners', () => {
       get: () => ({
         fetch(request: Request) {
           forwardedUrl = request.url
+          forwardedHeaders = new Headers(request.headers)
           return Promise.resolve(new Response(null, { status: 204 }))
         },
       }),
@@ -236,13 +305,22 @@ describe('generated worker route owners', () => {
     expect(response.status).toBe(204)
     const forwarded = new URL(forwardedUrl)
     expect(forwarded.searchParams.has('token')).toBe(false)
-    expect(forwarded.searchParams.get('userId')).toBe('verified-user')
-    expect(forwarded.searchParams.get('userName')).toBe('Verified Name')
-    expect(forwarded.searchParams.get('userEmail')).toBe('verified@example.test')
-    expect(forwarded.searchParams.get('userImageUrl')).toBe(
+    expect(forwarded.searchParams.has('userId')).toBe(false)
+    expect(forwarded.searchParams.has('userName')).toBe(false)
+    expect(forwarded.searchParams.has('userEmail')).toBe(false)
+    expect(forwarded.searchParams.has('userImageUrl')).toBe(false)
+    expect(forwarded.searchParams.has('role')).toBe(false)
+    expect(decodeRoomIdentityHeader(forwardedHeaders.get('x-user-id'))).toBe('verified-user')
+    expect(decodeRoomIdentityHeader(forwardedHeaders.get('x-user-name'))).toBe(
+      '你好 👋\nSecond line',
+    )
+    expect(decodeRoomIdentityHeader(forwardedHeaders.get('x-user-email'))).toBe(
+      'verified@example.test',
+    )
+    expect(decodeRoomIdentityHeader(forwardedHeaders.get('x-user-image-url'))).toBe(
       'https://images.example.test/verified.png',
     )
-    expect(forwarded.searchParams.get('role')).toBe('member')
+    expect(decodeRoomIdentityHeader(forwardedHeaders.get('x-user-role'))).toBe('member')
   })
 
   it('requires authentication before documents and server actions touch state', async () => {

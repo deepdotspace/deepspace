@@ -16,6 +16,7 @@ import {
   canDelete,
   canRead,
   checkFieldPermissions,
+  checkUnclaimedOwnerTransition,
   SYSTEM_MANAGED_COLUMNS,
   resolveColumn,
   columnId,
@@ -226,6 +227,14 @@ export function putRecord(
   }
 
   const columns = getResolvedColumns(schema)
+  for (const col of columns) {
+    if (col.id !== col.name && Object.hasOwn(data, col.id)) {
+      return {
+        success: false,
+        error: `FIELD ERROR: physical column id '${col.id}' is not a writable field; use '${col.name}'`,
+      }
+    }
+  }
   const existing = getRecord(ctx.sql, collection, recordId, schema)
   const isUpdate = existing !== null
 
@@ -322,6 +331,11 @@ export function putRecord(
           error: `CREATE DENIED: role=${userRole}, collection=${collection}`,
         }
       }
+    }
+
+    const ownerError = checkUnclaimedOwnerTransition(schema, userRole, finalData, userId)
+    if (ownerError) {
+      return { success: false, error: `FIELD ERROR: ${ownerError}` }
     }
   }
 

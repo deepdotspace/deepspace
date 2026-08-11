@@ -261,18 +261,25 @@ export function handleYjsLeave(
   payload: YjsLeavePayload
 ): void {
   const { collection, recordId, fieldName } = payload
+  const docKey = getYjsDocKey(collection, recordId, fieldName)
+
+  const clientId = attachment.awarenessClientIds?.[docKey]
+  if (clientId !== undefined) {
+    broadcastAwarenessClientRemoval(ctx, docKey, clientId)
+    delete attachment.awarenessClientIds![docKey]
+  }
 
   // Remove from subscriptions
   attachment.yjsSubscriptions = attachment.yjsSubscriptions.filter(s =>
     !(s.collection === collection && s.recordId === recordId && s.fieldName === fieldName)
   )
   ws.serializeAttachment(attachment)
-  unloadYjsDocIfUnused(ctx, getYjsDocKey(collection, recordId, fieldName), ws)
+  unloadYjsDocIfUnused(ctx, docKey, ws)
 }
 
 /**
  * Handle binary Yjs sync messages from clients.
- * 
+ *
  * Protocol:
  * - MSG_SYNC_STEP1: Client sends state vector → Server responds with SYNC_STEP2 (diff)
  * - MSG_SYNC_STEP2/UPDATE: Client sends update → Server applies and broadcasts
@@ -297,13 +304,14 @@ export function handleYjsBinaryMessage(
 
     if (!hasYjsSubscription(attachment, parsed)) return
 
-    // Capture the client's awareness clientId for disconnect cleanup
-    if (attachment.awarenessClientId == null) {
+    // Capture this document's awareness clientId for leave/disconnect cleanup.
+    if (attachment.awarenessClientIds?.[docKey] === undefined) {
       try {
         const pd = createDecoder(payload)
         const count = readVarUint(pd)
         if (count > 0) {
-          attachment.awarenessClientId = readVarUint(pd)
+          attachment.awarenessClientIds ??= {}
+          attachment.awarenessClientIds[docKey] = readVarUint(pd)
           ws.serializeAttachment(attachment)
         }
       } catch { /* best-effort */ }
@@ -338,7 +346,7 @@ export function handleYjsBinaryMessage(
       // Client requests sync - respond with diff based on their state vector
       const clientStateVector = readVarUint8Array(decoder)
       const diff = Y.encodeStateAsUpdate(doc, clientStateVector)
-      
+
       const encoder = createEncoder()
       writeVarUint(encoder, MSG_YJS_SYNC)
       writeVarUint8Array(encoder, new TextEncoder().encode(docKey))
@@ -390,7 +398,7 @@ export function broadcastYjsUpdate(
   // Send to all other subscribers
   for (const ws of ctx.state.getWebSockets()) {
     if (ws === excludeWs) continue
-    
+
     const attachment = ws.deserializeAttachment() as ConnectionAttachment | null
     if (!attachment) continue
 
@@ -444,21 +452,27 @@ export function broadcastAwarenessRemoval(
   ctx: YjsContext,
   attachment: ConnectionAttachment,
 ): void {
-  const clientId = attachment.awarenessClientId
-  if (clientId == null || attachment.yjsSubscriptions.length === 0) return
+  if (!attachment.awarenessClientIds) return
 
-  // Build null-state awareness payload: [1][clientId][highClock]["null"]
+  for (const sub of attachment.yjsSubscriptions) {
+    const docKey = getYjsDocKey(sub.collection, sub.recordId, sub.fieldName)
+    const clientId = attachment.awarenessClientIds[docKey]
+    if (clientId !== undefined) broadcastAwarenessClientRemoval(ctx, docKey, clientId)
+  }
+}
+
+function broadcastAwarenessClientRemoval(
+  ctx: YjsContext,
+  docKey: YjsDocKey,
+  clientId: number,
+): void {
   const payloadEncoder = createEncoder()
   writeVarUint(payloadEncoder, 1)
   writeVarUint(payloadEncoder, clientId)
   writeVarUint(payloadEncoder, 0xFFFFFF) // high clock to override any prior state
   writeVarUint8Array(payloadEncoder, new TextEncoder().encode('null'))
   const removalPayload = toUint8Array(payloadEncoder)
-
-  for (const sub of attachment.yjsSubscriptions) {
-    const docKey = getYjsDocKey(sub.collection, sub.recordId, sub.fieldName)
-    broadcastAwareness(ctx, docKey, removalPayload, null)
-  }
+  broadcastAwareness(ctx, docKey, removalPayload, null)
 }
 
 /** Clean up ephemeral awareness and cached documents for a closed connection. */

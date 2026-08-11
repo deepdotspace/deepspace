@@ -11,6 +11,7 @@ export * from './shared/protocol'
 export * from './shared/ai-models'
 export * from './shared/app-routing'
 export * from './shared/platform-proxy'
+export { authenticatedRoomRequest } from './shared/room-identity-headers'
 export * from './server/utils'
 export {
   registerDeepSpaceDocumentation,

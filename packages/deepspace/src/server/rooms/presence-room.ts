@@ -8,7 +8,7 @@
  * Each scope ID maps to its own DO instance. Clients connect via
  * /ws/presence/:scopeId and receive real-time presence for that scope.
  *
- * Peers can attach arbitrary state (cursor position, typing indicator,
+ * Peers can attach small ephemeral state (cursor position, typing indicator,
  * viewport, selection, etc.) via MSG.PRESENCE_UPDATE.
  *
  * Message types: presence.*
@@ -26,15 +26,23 @@ import { MSG } from '../../shared/protocol/constants'
 export interface PresencePeer {
   userId: string
   userName: string
-  userEmail: string
-  userImageUrl?: string
   joinedAt: string
-  /** Arbitrary per-user state (cursor, typing, viewport, etc.) */
+  /** Small per-user state (cursor, typing, viewport, etc.) */
   state: Record<string, unknown>
 }
 
 interface PresenceAttachment extends UserAttachment {
   joinedAt: string
+}
+
+const MAX_PRESENCE_STATE_BYTES = 16 * 1024
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function stateSize(state: Record<string, unknown>): number {
+  return new TextEncoder().encode(JSON.stringify(state)).byteLength
 }
 
 // ============================================================================
@@ -61,14 +69,11 @@ export class PresenceRoom<E = Record<string, unknown>> extends BaseRoom<E> {
       if (!att?.userId) continue
       if (this.peers.has(att.userId)) continue
 
-      const joinedAt =
-        typeof att.joinedAt === 'string' ? att.joinedAt : new Date().toISOString()
+      const joinedAt = typeof att.joinedAt === 'string' ? att.joinedAt : new Date().toISOString()
 
       const recovered: PresencePeer = {
         userId: att.userId,
         userName: att.userName,
-        userEmail: att.userEmail,
-        userImageUrl: att.userImageUrl,
         joinedAt,
         state: {},
       }
@@ -89,8 +94,6 @@ export class PresenceRoom<E = Record<string, unknown>> extends BaseRoom<E> {
     const peer: PresencePeer = {
       userId: user.userId,
       userName: user.userName,
-      userEmail: user.userEmail,
-      userImageUrl: user.userImageUrl,
       joinedAt: now,
       state: {},
     }
@@ -117,7 +120,7 @@ export class PresenceRoom<E = Record<string, unknown>> extends BaseRoom<E> {
   protected async onMessage(
     ws: WebSocket,
     user: UserAttachment,
-    message: { type: string; [key: string]: unknown }
+    message: { type: string; [key: string]: unknown },
   ): Promise<void> {
     const { type, payload } = message as { type: string; payload: Record<string, unknown> }
 
@@ -131,8 +134,6 @@ export class PresenceRoom<E = Record<string, unknown>> extends BaseRoom<E> {
           peer = {
             userId: user.userId,
             userName: user.userName,
-            userEmail: user.userEmail,
-            userImageUrl: user.userImageUrl,
             joinedAt,
             state: {},
           }
@@ -140,8 +141,23 @@ export class PresenceRoom<E = Record<string, unknown>> extends BaseRoom<E> {
           this.peerSockets.set(user.userId, ws)
         }
 
-        // Merge the incoming state into the peer's current state
-        peer.state = { ...peer.state, ...payload }
+        if (!isPlainObject(payload)) {
+          this.sendTo(ws, {
+            type: MSG.ERROR,
+            payload: { error: 'Presence state must be an object' },
+          })
+          return
+        }
+        const nextState = { ...peer.state, ...payload }
+        if (stateSize(nextState) > MAX_PRESENCE_STATE_BYTES) {
+          this.sendTo(ws, {
+            type: MSG.ERROR,
+            payload: { error: 'Presence state exceeds 16 KiB' },
+          })
+          return
+        }
+
+        peer.state = nextState
         this.peers.set(user.userId, peer)
 
         // Broadcast the update to all other peers
@@ -156,7 +172,10 @@ export class PresenceRoom<E = Record<string, unknown>> extends BaseRoom<E> {
       }
 
       default:
-        this.sendTo(ws, { type: MSG.ERROR, payload: { error: `Unknown presence message type: ${type}` } })
+        this.sendTo(ws, {
+          type: MSG.ERROR,
+          payload: { error: `Unknown presence message type: ${type}` },
+        })
     }
   }
 

@@ -23,7 +23,7 @@ import { buildDeployBundle, oversizedAssetRefusal } from './deploy/build'
 import { syncOneTimeProducts, syncSubscriptionPlans } from './deploy/commerce'
 import { createDeployOutput, type DeployOutput } from './deploy/output'
 import { deployBuiltBundle } from './deploy/request'
-import { syncDeployRepository } from './deploy/repository'
+import { preflightDeployRepository, syncDeployRepository } from './deploy/repository'
 import { getAppSource } from '../lib/source-api'
 import { loadDeploySecrets, prepareDeploySecrets } from './deploy/secrets'
 
@@ -147,6 +147,15 @@ export default defineCommand({
       output,
     })
     const sourceState = await getAppSource(DEPLOY_URL, token, appId)
+
+    const repositoryPreflight = preflightDeployRepository({
+      appDir,
+      push: args.push !== false,
+      source: sourceState.source,
+    })
+    if (repositoryPreflight) {
+      output.die(repositoryPreflight.error, repositoryPreflight.code)
+    }
 
     // Build and size-check BEFORE the push. The push is the irreversible step
     // — it advances the cloud repo — and an asset the platform will refuse is

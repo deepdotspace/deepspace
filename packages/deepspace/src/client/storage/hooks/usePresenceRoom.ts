@@ -4,7 +4,7 @@
  * Opens a WebSocket to /ws/presence/:scopeId for real-time presence tracking.
  * Use with any scope: canvas, doc, thread, page, etc.
  *
- * Peers can share arbitrary state (cursor position, typing indicator,
+ * Peers can share small ephemeral state (cursor position, typing indicator,
  * viewport, selection) via updateState().
  *
  * @example
@@ -25,12 +25,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { getAuthToken } from '../../auth'
 import { wsLog } from '../ws-log'
 import { MSG } from '@/shared/protocol/constants'
-import {
-  clientBuild,
-  dispatch,
-  encode,
-  type ServerMessage,
-} from '@/shared/protocol/messages'
+import { clientBuild, dispatch, encode, type ServerMessage } from '@/shared/protocol/messages'
 
 // ============================================================================
 // Types
@@ -39,8 +34,6 @@ import {
 export interface PresencePeerClient {
   userId: string
   userName: string
-  userEmail: string
-  userImageUrl?: string
   joinedAt: string
   state: Record<string, unknown>
 }

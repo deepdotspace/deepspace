@@ -1,4 +1,4 @@
-import { runGit } from './git/process'
+import { GitError, runGit } from './git/process'
 
 export interface GitHubRemote {
   name: string
@@ -69,7 +69,16 @@ export function selectGitHubRemote(
 
 /** Public branches and tags advertised by a normal Git remote. */
 export function remotePublicRefs(cwd: string, remote: string): GitRef[] {
-  const output = runGit(cwd, ['ls-remote', '--refs', remote]).stdout.toString('utf-8')
+  let output: string
+  try {
+    output = runGit(cwd, ['ls-remote', '--refs', remote]).stdout.toString('utf-8')
+  } catch (error) {
+    if (!isGitCredentialFailure(error)) throw error
+    throw new GitError(
+      'Git could not authenticate the remote. In a container, forward an SSH agent or use an ephemeral Git credential helper, then retry. Do not put tokens in remote URLs.',
+      'github_credentials_required',
+    )
+  }
   return output
     .split('\n')
     .map((line) => line.trim())
@@ -83,6 +92,13 @@ export function remotePublicRefs(cwd: string, remote: string): GitRef[] {
         /^[0-9a-f]{40}$/.test(ref.oid) &&
         (ref.name.startsWith('refs/heads/') || ref.name.startsWith('refs/tags/')),
     )
+}
+
+export function isGitCredentialFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return /authentication failed|could not read username|permission denied \(publickey\)|repository not found|terminal prompts disabled/i.test(
+    error.message,
+  )
 }
 
 export function remoteBranchOid(cwd: string, remote: string, branch: string): string | null {

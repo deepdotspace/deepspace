@@ -147,6 +147,9 @@ export function useJobs<P = unknown, R = unknown>(
 
       ws.onmessage = (event) => {
         dispatch<ServerMessage>(event.data, {
+          [MSG.AUTH]: (p) => {
+            if (!p.canWrite) rejectAllPending(new Error('JobRoom write access denied'))
+          },
           [MSG.JOB_UPDATE]: (p) => {
             if (p.kind === 'snapshot' && Array.isArray(p.jobs)) {
               setJobs(p.jobs as JobView<P, R>[])

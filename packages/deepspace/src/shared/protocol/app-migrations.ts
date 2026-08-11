@@ -5,6 +5,9 @@ const MAX_APP_MIGRATION_IDS = 256
  *  config and the worker's fallback path have to move together. */
 export const WORKER_OWNED_NOT_FOUND_MIGRATION_ID = '2026-08-worker-owned-not-found'
 
+/** Room identity moved to internal headers and privileged room routes gained app-role checks. */
+export const SECURE_ROOM_BOUNDARIES_MIGRATION_ID = '2026-08-secure-room-boundaries'
+
 export type AppMigrationIdsValidation =
   | { valid: true; ids: string[] }
   | { valid: false; reason: string }

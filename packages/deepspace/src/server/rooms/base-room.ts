@@ -4,7 +4,7 @@
  * Provides:
  * - WebSocket upgrade with Cloudflare hibernation API
  * - Connection tracking (WebSocket -> UserAttachment)
- * - Auth: parse JWT-verified user info from URL search params
+ * - Auth: parse JWT-verified user info from internal request headers
  * - Presence: connected users list, awareness on connect/disconnect
  * - Message routing: JSON parse -> dispatch by `type` field, binary hook
  * - Raw SQLite access via this.sql
@@ -20,6 +20,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import type { ServerMessage } from '../../shared/protocol/messages'
+import { decodeRoomIdentityHeader } from '../../shared/room-identity-headers'
 
 // ============================================================================
 // User Attachment (survives DO hibernation via WebSocket serialization)
@@ -32,6 +33,18 @@ export interface UserAttachment {
   userImageUrl?: string
   /** Subclass-specific data serialized alongside user info */
   [key: string]: unknown
+}
+
+/** Build the hibernation attachment from app-worker-verified headers only. */
+export function connectionAttachmentFromRequest(request: Request): UserAttachment {
+  return {
+    userId:
+      decodeRoomIdentityHeader(request.headers.get('x-user-id')) || `anon-${crypto.randomUUID()}`,
+    userName: decodeRoomIdentityHeader(request.headers.get('x-user-name')) || 'Anonymous',
+    userEmail: decodeRoomIdentityHeader(request.headers.get('x-user-email')) || '',
+    userImageUrl: decodeRoomIdentityHeader(request.headers.get('x-user-image-url')),
+    role: decodeRoomIdentityHeader(request.headers.get('x-user-role')),
+  }
 }
 
 // ============================================================================
@@ -48,9 +61,7 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
     this.env = (env ?? {}) as E
     this.sql = state.storage.sql
 
-    this.state.setWebSocketAutoResponse(
-      new WebSocketRequestResponsePair('ping', 'pong')
-    )
+    this.state.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'))
   }
 
   // ==========================================================================
@@ -100,14 +111,8 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
    * See the security note on `fetch()`: this path is only reachable via DO
    * stub fetch from the app worker, never from the public internet.
    */
-  protected async handleInternalRequest(
-    request: Request,
-    url: URL
-  ): Promise<Response | null> {
-    if (
-      request.method === 'POST' &&
-      url.pathname === '/internal/disconnect-sockets'
-    ) {
+  protected async handleInternalRequest(request: Request, url: URL): Promise<Response | null> {
+    if (request.method === 'POST' && url.pathname === '/internal/disconnect-sockets') {
       let options: { code?: number; reason?: string } | undefined
       try {
         const text = await request.text()
@@ -126,29 +131,16 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
   // WebSocket Connection
   // ==========================================================================
 
-  private async handleWebSocketUpgrade(_request: Request, url: URL): Promise<Response> {
-    const userId = url.searchParams.get('userId') || undefined
-    const userName = url.searchParams.get('userName') || 'Anonymous'
-    const userEmail = url.searchParams.get('userEmail') || ''
-    const userImageUrl = url.searchParams.get('userImageUrl') || undefined
-
+  private async handleWebSocketUpgrade(request: Request, _url: URL): Promise<Response> {
     const pair = new WebSocketPair()
     const [client, server] = Object.values(pair)
 
     this.state.acceptWebSocket(server)
 
-    const role = url.searchParams.get('role') || undefined
-
-    const attachment: UserAttachment = {
-      userId: userId ?? `anon-${crypto.randomUUID()}`,
-      userName,
-      userEmail,
-      userImageUrl,
-      role,
-    }
+    const attachment = connectionAttachmentFromRequest(request)
 
     // Let subclass augment the attachment and perform setup
-    const augmented = await this.onConnect(server, attachment) ?? attachment
+    const augmented = (await this.onConnect(server, attachment)) ?? attachment
     server.serializeAttachment(augmented)
 
     return new Response(null, { status: 101, webSocket: client })
@@ -188,7 +180,9 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
     if (attachment) {
       try {
         await this.onDisconnect(ws, attachment)
-      } catch { /* best-effort */ }
+      } catch {
+        /* best-effort */
+      }
     }
   }
 
@@ -213,7 +207,7 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
    */
   protected onConnect(
     _ws: WebSocket,
-    _user: UserAttachment
+    _user: UserAttachment,
   ): UserAttachment | void | Promise<UserAttachment | void> {
     // Default: no-op
   }
@@ -224,7 +218,7 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
   protected abstract onMessage(
     ws: WebSocket,
     user: UserAttachment,
-    message: { type: string; [key: string]: unknown }
+    message: { type: string; [key: string]: unknown },
   ): void | Promise<void>
 
   /**
@@ -233,16 +227,13 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
   protected onBinaryMessage?(
     ws: WebSocket,
     user: UserAttachment,
-    data: ArrayBuffer
+    data: ArrayBuffer,
   ): void | Promise<void>
 
   /**
    * Called when a WebSocket disconnects.
    */
-  protected onDisconnect(
-    _ws: WebSocket,
-    _user: UserAttachment
-  ): void | Promise<void> {
+  protected onDisconnect(_ws: WebSocket, _user: UserAttachment): void | Promise<void> {
     // Default: no-op
   }
 
@@ -371,24 +362,25 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(encoded)
         }
-      } catch { /* dead socket */ }
+      } catch {
+        /* dead socket */
+      }
     }
   }
 
   /**
    * Broadcast binary data to all connected WebSockets.
    */
-  protected broadcastBinary(
-    data: Uint8Array | ArrayBuffer,
-    exclude?: WebSocket
-  ): void {
+  protected broadcastBinary(data: Uint8Array | ArrayBuffer, exclude?: WebSocket): void {
     for (const ws of this.state.getWebSockets()) {
       if (ws === exclude) continue
       try {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(data)
         }
-      } catch { /* dead socket */ }
+      } catch {
+        /* dead socket */
+      }
     }
   }
 }

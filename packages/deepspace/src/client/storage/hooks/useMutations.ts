@@ -9,6 +9,7 @@
 import { useCallback, useContext, useMemo } from 'react'
 import { RecordContext } from '../context'
 import { useScopeRegistry } from '../ScopeRegistry'
+import { RecordRoomNotReadyError } from '../errors'
 import { MSG } from '@/shared/protocol/constants'
 
 /**
@@ -35,6 +36,8 @@ import { MSG } from '@/shared/protocol/constants'
  * ```
  */
 export function useMutations<T = unknown>(collection: string): {
+  /** True once the collection's RecordRoom can accept writes. */
+  ready: boolean
   create: (data: T) => Promise<string>
   put: (recordId: string, data: Partial<T>) => Promise<void>
   remove: (recordId: string) => Promise<void>
@@ -52,6 +55,7 @@ export function useMutations<T = unknown>(collection: string): {
   const preferLocal = recordCtx?.registeredCollections?.has(collection) ?? false
   const sendMessage = preferLocal ? recordCtx!.sendMessage : (scopeEntry?.sendMessage ?? recordCtx?.sendMessage)
   const sendConfirmed = preferLocal ? recordCtx!.sendConfirmed : (scopeEntry?.sendConfirmed ?? recordCtx?.sendConfirmed)
+  const ready = preferLocal ? recordCtx!.ready : (scopeEntry?.ready ?? recordCtx?.ready ?? false)
 
   if (!sendMessage || !sendConfirmed) {
     throw new Error(
@@ -59,31 +63,39 @@ export function useMutations<T = unknown>(collection: string): {
     )
   }
 
+  const assertReady = useCallback(() => {
+    if (!ready) throw new RecordRoomNotReadyError(collection)
+  }, [ready, collection])
+
   const create = useCallback(
     async (data: T): Promise<string> => {
+      assertReady()
       const recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`
       sendMessage({ type: MSG.PUT, payload: { collection, recordId, data } })
       return recordId
     },
-    [sendMessage, collection],
+    [assertReady, sendMessage, collection],
   )
 
   const put = useCallback(
     async (recordId: string, data: Partial<T>): Promise<void> => {
+      assertReady()
       sendMessage({ type: MSG.PUT, payload: { collection, recordId, data } })
     },
-    [sendMessage, collection],
+    [assertReady, sendMessage, collection],
   )
 
   const remove = useCallback(
     async (recordId: string): Promise<void> => {
+      assertReady()
       sendMessage({ type: MSG.DELETE, payload: { collection, recordId } })
     },
-    [sendMessage, collection],
+    [assertReady, sendMessage, collection],
   )
 
   const createConfirmed = useCallback(
     async (data: T): Promise<string> => {
+      assertReady()
       const recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`
       await sendConfirmed({
         type: MSG.PUT,
@@ -91,24 +103,26 @@ export function useMutations<T = unknown>(collection: string): {
       })
       return recordId
     },
-    [sendConfirmed, collection],
+    [assertReady, sendConfirmed, collection],
   )
 
   const putConfirmed = useCallback(
     async (recordId: string, data: Partial<T>): Promise<void> => {
+      assertReady()
       await sendConfirmed({
         type: MSG.PUT,
         payload: { collection, recordId, data: data as Record<string, unknown> },
       })
     },
-    [sendConfirmed, collection],
+    [assertReady, sendConfirmed, collection],
   )
 
   const removeConfirmed = useCallback(
     async (recordId: string): Promise<void> => {
+      assertReady()
       await sendConfirmed({ type: MSG.DELETE, payload: { collection, recordId } })
     },
-    [sendConfirmed, collection],
+    [assertReady, sendConfirmed, collection],
   )
 
   // Memoize the return object so consumers get a stable reference.
@@ -116,7 +130,7 @@ export function useMutations<T = unknown>(collection: string): {
   // useCallback/useEffect that depends on the useMutations() result
   // (e.g., cleanup effects re-fire and delete records they shouldn't).
   return useMemo(
-    () => ({ create, put, remove, createConfirmed, putConfirmed, removeConfirmed }),
-    [create, put, remove, createConfirmed, putConfirmed, removeConfirmed],
+    () => ({ ready, create, put, remove, createConfirmed, putConfirmed, removeConfirmed }),
+    [ready, create, put, remove, createConfirmed, putConfirmed, removeConfirmed],
   )
 }

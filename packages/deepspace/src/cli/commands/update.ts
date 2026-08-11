@@ -1,5 +1,5 @@
 /**
- * `deepspace update` — move an app onto the current SDK, and make the source
+ * `deepspace app update` — move an app onto the current SDK, and make the source
  * changes that move implies.
  *
  * An app's worker code is a COPY, scaffolded once and owned by its author
@@ -13,7 +13,7 @@
  *     file, line, and the change required — the output an agent can execute
  *   - too wide a version gap is not guessed at: it points at the docs
  *
- * Replaces `deepspace migrate`, which only ever knew one historical cutover.
+ * Replaces `deepspace app migrate`, which only ever knew one historical cutover.
  *
  * Defined with the command runtime (lib/command.ts): `--json`, the envelope,
  * the slug and the exit codes come from there. Exit 2 ("your turn") whenever
@@ -173,7 +173,10 @@ export default defineDeepspaceCommand({
         'not_in_app_repo',
       )
     }
-    const targetRaw = typeof args.to === 'string' && args.to.trim() ? args.to.trim() : await latestPublishedVersion()
+    const targetRaw =
+      typeof args.to === 'string' && args.to.trim()
+        ? args.to.trim()
+        : await latestPublishedVersion()
 
     const current = parseVersion(currentRaw)
     const target = parseVersion(targetRaw)

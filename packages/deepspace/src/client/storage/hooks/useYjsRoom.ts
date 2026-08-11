@@ -8,7 +8,7 @@
  * Uses the shared yjs-protocol.ts encoding — no duplication.
  *
  * @example
- * const { doc, text, setText, synced, canWrite } = useYjsRoom(docId, 'content')
+ * const { doc, text, setText, connected, synced, canWrite } = useYjsRoom(docId, 'content')
  */
 
 import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react'
@@ -48,6 +48,8 @@ export interface UseYjsRoomResult {
   text: string
   /** Set text (replaces full content) */
   setText: (value: string) => void
+  /** Whether the current WebSocket transport is open */
+  connected: boolean
   /** Whether initial sync is complete */
   synced: boolean
   /** Whether user has write access */
@@ -63,6 +65,7 @@ export interface UseYjsRoomResult {
  * @param fieldName - Y.Text field name within the Y.Doc
  */
 export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
+  const [connected, setConnected] = useState(false)
   const [syncedDocId, setSyncedDocId] = useState<string | null>(null)
   const [canWrite, setCanWrite] = useState(false)
   const [writeAuthResolved, setWriteAuthResolved] = useState(false)
@@ -108,6 +111,7 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
   }, [awareness, doc])
 
   useLayoutEffect(() => {
+    setConnected(false)
     setSyncedDocId(null)
     setCanWrite(false)
     setWriteAuthResolved(false)
@@ -129,6 +133,8 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
     let ws: WebSocket | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let alive = true
+    let browserOnline = typeof navigator === 'undefined' || navigator.onLine
+    let connecting = false
 
     const renewLocalAwareness = () => {
       const localState = awareness.getLocalState()
@@ -136,7 +142,10 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
     }
 
     const connect = async () => {
-      if (!alive) return
+      if (!alive || !browserOnline) return
+      if (connecting) return
+      if (ws?.readyState === WebSocket.CONNECTING || ws?.readyState === WebSocket.OPEN) return
+      connecting = true
 
       // Permissions belong to one socket handshake. Every replacement socket
       // starts closed, including reconnects and same-room field changes.
@@ -148,27 +157,35 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
       // replay is strictly newer and peers accept it immediately.
       renewLocalAwareness()
 
-      const token = await getAuthToken()
+      let token: string | null
+      try {
+        token = await getAuthToken()
+      } finally {
+        connecting = false
+      }
       // Unmounted (or reconnect superseded) while awaiting the token — bail so
       // we don't open a socket the cleanup can no longer reach and close.
-      if (!alive) return
+      if (!alive || !browserOnline) return
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const baseUrl = `${protocol}//${window.location.host}`
       const url = new URL(`/ws/yjs/${encodeURIComponent(docId)}`, baseUrl)
       if (token) url.searchParams.set('token', token)
 
       wsLog('connecting', `yjs:${docId}`)
-      ws = new WebSocket(url.toString())
-      ws.binaryType = 'arraybuffer'
-      wsRef.current = ws
+      const socket = new WebSocket(url.toString())
+      ws = socket
+      socket.binaryType = 'arraybuffer'
+      wsRef.current = socket
 
-      ws.onopen = () => {
+      socket.onopen = () => {
+        if (ws !== socket) return socket.close()
         wsLog('connected', `yjs:${docId}`)
+        setConnected(true)
         setSyncedDocId(null)
         renewLocalAwareness()
       }
 
-      ws.onmessage = (event) => {
+      socket.onmessage = (event) => {
         if (typeof event.data === 'string') {
           try {
             const msg = JSON.parse(event.data) as { type?: string; canWrite?: unknown }
@@ -197,7 +214,7 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
               writeVarUint(enc, MSG_SYNC)
               writeVarUint(enc, MSG_SYNC_STEP2)
               writeVarUint8Array(enc, diff)
-              ws?.send(toUint8Array(enc).buffer)
+              socket.send(toUint8Array(enc).buffer)
               setSyncedDocId(docId)
               break
             }
@@ -229,24 +246,44 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
         }
       }
 
-      ws.onclose = () => {
+      socket.onclose = () => {
+        if (ws !== socket) return
         wsLog('disconnected', `yjs:${docId}`)
+        ws = null
         wsRef.current = null
+        setConnected(false)
         setSyncedDocId(null)
         setCanWrite(false)
         setWriteAuthResolved(false)
-        if (alive) reconnectTimer = setTimeout(connect, 1000)
+        if (alive && browserOnline) reconnectTimer = setTimeout(connect, 1000)
       }
 
-      ws.onerror = () => ws?.close()
+      socket.onerror = () => socket.close()
     }
 
-    connect()
+    const handleOffline = () => {
+      browserOnline = false
+      setConnected(false)
+      setSyncedDocId(null)
+      setCanWrite(false)
+      setWriteAuthResolved(false)
+      ws?.close()
+    }
+    const handleOnline = () => {
+      browserOnline = true
+      void connect()
+    }
+
+    window.addEventListener('offline', handleOffline)
+    window.addEventListener('online', handleOnline)
+    void connect()
 
     return () => {
       wsLog('closing', `yjs:${docId}`)
       alive = false
       if (reconnectTimer) clearTimeout(reconnectTimer)
+      window.removeEventListener('offline', handleOffline)
+      window.removeEventListener('online', handleOnline)
       // This effect owns the socket, so it must drain a pending local batch
       // before closing it. A later effect cleanup cannot safely do so.
       flushPendingUpdate(ws)
@@ -324,5 +361,5 @@ export function useYjsRoom(docId: string, fieldName: string): UseYjsRoomResult {
     [doc, yText, canWrite],
   )
 
-  return { doc, awareness, text, setText, synced, canWrite, writeAuthResolved }
+  return { doc, awareness, text, setText, connected, synced, canWrite, writeAuthResolved }
 }

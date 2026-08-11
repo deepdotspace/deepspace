@@ -110,6 +110,13 @@ export function appDirInWorktree(appDir: string, worktreeRoot: string): string {
   return appRelative ? join(worktreeRoot, appRelative) : worktreeRoot
 }
 
+/** The same app directory inside the repository's primary checkout. */
+export function primaryAppDir(appDir: string): string {
+  const primary = listWorktrees(appDir)[0]
+  if (!primary) throw new Error('Git did not report a primary worktree')
+  return appDirInWorktree(appDir, primary.path)
+}
+
 /** Create a local workspace checkout and apply its standard local setup. */
 export function materializeWorkspaceWorktree(
   appDir: string,

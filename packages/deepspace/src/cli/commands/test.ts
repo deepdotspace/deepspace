@@ -52,12 +52,26 @@ import { syncTestAccountStore } from '../lib/test-account-service'
 import { noAppDirMessage } from './dev'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
+export const PLAYWRIGHT_OUTPUT_DIR = '.deepspace/test-results'
+
+export function playwrightTestArgs(testFiles: string[]): string[] {
+  return [
+    'playwright',
+    'test',
+    '--config',
+    'tests/playwright.config.ts',
+    '--output',
+    PLAYWRIGHT_OUTPUT_DIR,
+    ...testFiles,
+  ]
+}
 
 export default defineDeepspaceCommand({
   meta: {
     name: 'test',
     description: 'Run tests for your DeepSpace app',
   },
+  jsonDescription: 'Stream test output; emit the final JSON result on the last line',
   args: {
     suite: {
       type: 'positional',
@@ -223,15 +237,14 @@ function runPlaywright(
     return 1
   }
   try {
-    const result = spawnSync(
-      'npx',
-      ['playwright', 'test', '--config', 'tests/playwright.config.ts', ...testFiles],
-      {
-        cwd: appDir,
-        stdio: 'inherit',
-        env: wranglerViteEnv(process.env, wranglerConfig, { DEEPSPACE_PORT: String(port) }),
-      },
-    )
+    const result = spawnSync('npx', playwrightTestArgs(testFiles), {
+      cwd: appDir,
+      stdio: 'inherit',
+      env: wranglerViteEnv(process.env, wranglerConfig, {
+        DEEPSPACE_PORT: String(port),
+        PLAYWRIGHT_HTML_OUTPUT_DIR: '.deepspace/playwright-report',
+      }),
+    })
     return result.status ?? 1
   } finally {
     wranglerConfig.cleanup()

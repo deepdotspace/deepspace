@@ -346,6 +346,24 @@ describe('Yjs document identity ownership', () => {
 })
 
 describe('useYjsRoom transport behavior', () => {
+  it('reports transport connectivity and reconnects when the browser returns online', async () => {
+    await render(<RoomProbe docId="room-online-state" />)
+    const firstSocket = FakeWebSocket.instances.at(-1)!
+    expect(roomResult!.connected).toBe(true)
+
+    await act(async () => window.dispatchEvent(new Event('offline')))
+    expect(firstSocket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(roomResult!.connected).toBe(false)
+    expect(roomResult!.synced).toBe(false)
+
+    await act(async () => {
+      window.dispatchEvent(new Event('online'))
+      await Promise.resolve()
+    })
+    expect(FakeWebSocket.instances.at(-1)).not.toBe(firstSocket)
+    expect(roomResult!.connected).toBe(true)
+  })
+
   it('distinguishes unresolved write auth from a resolved read-only role', async () => {
     await render(<RoomProbe docId="room-auth" />)
     expect(roomResult!.canWrite).toBe(false)

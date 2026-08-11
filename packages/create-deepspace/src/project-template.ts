@@ -377,7 +377,7 @@ function writeLaunchJson(appDir: string, appName: string): void {
   }
 }
 
-function writeGitignoreIfMissing(appDir: string): void {
+export function writeGitignoreIfMissing(appDir: string): void {
   const gitignorePath = join(appDir, '.gitignore')
   const required = [
     'node_modules',
@@ -389,6 +389,8 @@ function writeGitignoreIfMissing(appDir: string): void {
     '.deepspace',
     '.worker-bundle.js',
     '*.tgz',
+    'test-results/',
+    'playwright-report/',
     'src/router.ts',
     'src/modals.tsx',
     '.claude/launch.json',

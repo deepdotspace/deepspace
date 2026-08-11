@@ -96,13 +96,11 @@ function peerToDocumentsParticipant(peer: PresencePeerClient): DocumentsPresence
   const participant: DocumentsPresenceParticipant = {
     clientId: 0,
     userId: peer.userId,
-    name: peer.userName?.trim() || peer.userEmail?.trim() || 'Guest',
+    name: peer.userName?.trim() || 'Guest',
     mode,
     typing: state.typing === true,
     isSelf: false,
   }
-  if (peer.userEmail) participant.email = peer.userEmail
-  if (peer.userImageUrl) participant.imageUrl = peer.userImageUrl
   if (lastTypedAt != null) participant.lastTypedAt = lastTypedAt
   return participant
 }

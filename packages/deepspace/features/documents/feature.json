@@ -3,7 +3,7 @@
   "name": "Documents",
   "category": "data",
   "description": "Real-time collaborative document editing with Tiptap + Yjs",
-  "details": "Document library with folders & favorites. Collaborative editor built on Tiptap (ProseMirror) with Y.XmlFragment via @tiptap/extension-collaboration and live remote cursors via @tiptap/extension-collaboration-caret — buttery typing, no innerHTML rebuilds, no contenteditable quirks. Invite-only documents with viewer/editor roles: owner shares via an in-app dialog that resolves an email to a DeepSpace user. RBAC is enforced by the documents schema and the starter template's built-in Yjs route. Includes a one-shot migration shim that converts documents created with the legacy contenteditable editor (HTML stored in Y.Text('content')) into Tiptap on first open.",
+  "details": "Document library with folders & favorites. Collaborative editor built on Tiptap (ProseMirror) with Y.XmlFragment via @tiptap/extension-collaboration and live remote cursors via @tiptap/extension-collaboration-caret — buttery typing, no innerHTML rebuilds, no contenteditable quirks. Invite-only documents with viewer/editor roles: owner shares via an in-app dialog that resolves an email to a DeepSpace user. RBAC is enforced by the documents schema and the starter template's built-in Yjs route.",
   "files": [
     {
       "src": "src/DocumentsListPage.tsx",

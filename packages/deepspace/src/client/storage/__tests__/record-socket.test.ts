@@ -519,9 +519,10 @@ describe('sendConfirmed', () => {
 
   it('rejects immediately when not connected', async () => {
     const h = makeSocket()
-    await expect(h.socket.sendConfirmed({ type: 'mutate', payload: {} })).rejects.toThrow(
-      'not connected',
-    )
+    await expect(h.socket.sendConfirmed({ type: 'mutate', payload: {} })).rejects.toMatchObject({
+      name: 'RecordRoomNotReadyError',
+      code: 'not_ready',
+    })
   })
 })
 
@@ -559,6 +560,38 @@ describe('dispatch', () => {
       'delete',
     )
   })
+
+  it.each([
+    ['ordered', { collection: 'todos', orderBy: 'title' }],
+    ['limited', { collection: 'todos', limit: 10 }],
+  ])(
+    'RECORD_CHANGE refreshes a %s query instead of incrementally patching it',
+    async (_name, query) => {
+      const h = makeSocket()
+      const queryKey = JSON.stringify(query)
+      h.socket.registerSubscription('windowed-sub', queryKey)
+      await h.socket.connect()
+      h.ws().serverOpen()
+      const before = h.ws().sentOfType(MSG.SUBSCRIBE).length
+
+      h.ws().serverMessage(MSG.RECORD_CHANGE, {
+        collection: 'todos',
+        record: { recordId: 'r1', data: { title: 'A' } },
+        changeType: 'create',
+      })
+
+      expect(h.store.applyChange).not.toHaveBeenCalledWith(
+        queryKey,
+        expect.anything(),
+        expect.anything(),
+      )
+      expect(h.ws().sentOfType(MSG.SUBSCRIBE)).toHaveLength(before + 1)
+      expect(h.ws().sentOfType(MSG.SUBSCRIBE).at(-1)?.payload).toEqual({
+        subscriptionId: 'windowed-sub',
+        query,
+      })
+    },
+  )
 
   it('ERROR with a subscriptionId sets the query error; a bare permission error hits the callback', async () => {
     const h = await openSocket()

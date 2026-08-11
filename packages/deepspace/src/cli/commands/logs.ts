@@ -62,7 +62,11 @@ export function followInitialLimit(limit: number | undefined, maxLimit: number):
  * floored at the original window start so a tail never scans before the user's
  * `--since`. Exported for tests.
  */
-export function nextPollSince(cursor: number, floor: number, lagMs: number = FOLLOW_LAG_MS): number {
+export function nextPollSince(
+  cursor: number,
+  floor: number,
+  lagMs: number = FOLLOW_LAG_MS,
+): number {
   return Math.max(cursor - lagMs, floor)
 }
 
@@ -75,16 +79,24 @@ export function parseSince(input: string, now: number = Date.now()): number {
   const rel = /^(\d+)([smhd])$/.exec(trimmed)
   let ts: number
   if (rel) {
-    const unit = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[rel[2] as 's' | 'm' | 'h' | 'd']
+    const unit = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[
+      rel[2] as 's' | 'm' | 'h' | 'd'
+    ]
     ts = now - Number(rel[1]) * unit
   } else {
     ts = Date.parse(trimmed)
     if (Number.isNaN(ts)) {
-      throw new InputError(`Invalid --since "${input}" — use 30s, 15m, 2h, 7d, or an ISO timestamp.`, 'invalid_since')
+      throw new InputError(
+        `Invalid --since "${input}" — use 30s, 15m, 2h, 7d, or an ISO timestamp.`,
+        'invalid_since',
+      )
     }
   }
   if (now - ts > RETENTION_MS) {
-    throw new InputError('Logs are retained for 7 days — --since can reach back at most 7d.', 'since_out_of_range')
+    throw new InputError(
+      'Logs are retained for 7 days — --since can reach back at most 7d.',
+      'since_out_of_range',
+    )
   }
   return ts
 }
@@ -159,7 +171,8 @@ export function formatEvent(e: AppLogEvent, color: boolean, now: number = Date.n
       // (e.g. "    at fetch (index.js:1:1)") with NO header, so only strip the
       // first line when it actually IS that header. Otherwise we'd eat a frame.
       const lines = e.exception.stack.split('\n')
-      const firstIsHeader = lines.length > 0 && !/^\s*at\s/.test(lines[0]) && lines[0].includes(e.exception.message)
+      const firstIsHeader =
+        lines.length > 0 && !/^\s*at\s/.test(lines[0]) && lines[0].includes(e.exception.message)
       const frames = (firstIsHeader ? lines.slice(1) : lines)
         .map((l) => '    ' + l.trim())
         .filter((l) => l.trim().length > 0)
@@ -243,13 +256,19 @@ export default defineCommand({
     const appId = await resolveAppTarget(DEPLOY_URL, token, args.app, { wranglerEnv: envArg })
 
     if (args.level && !(LOG_LEVELS as readonly string[]).includes(args.level)) {
-      throw new InputError(`Invalid --level "${args.level}". Use: ${LOG_LEVELS.join(', ')}`, 'invalid_level')
+      throw new InputError(
+        `Invalid --level "${args.level}". Use: ${LOG_LEVELS.join(', ')}`,
+        'invalid_level',
+      )
     }
     let limit: number | undefined
     if (args.limit !== undefined) {
       limit = Number(args.limit)
       if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
-        throw new InputError('Invalid --limit — expected an integer between 1 and 500.', 'invalid_limit')
+        throw new InputError(
+          'Invalid --limit — expected an integer between 1 and 500.',
+          'invalid_limit',
+        )
       }
     }
 
@@ -275,7 +294,9 @@ export default defineCommand({
 
     const print = (events: AppLogEvent[]) => {
       for (const e of events) {
-        process.stdout.write(args.json ? JSON.stringify(e) + '\n' : formatEvent(e, stdoutColor()) + '\n')
+        process.stdout.write(
+          args.json ? JSON.stringify(e) + '\n' : formatEvent(e, stdoutColor()) + '\n',
+        )
       }
     }
 
@@ -291,7 +312,9 @@ export default defineCommand({
           // An empty NDJSON stream is indistinguishable from a crash without a
           // trailing record — emit a discriminable meta line so an agent can
           // tell "ran, no events" from "died". (events never carry `type`.)
-          process.stdout.write(JSON.stringify({ type: 'meta', count: 0, window: windowLabel }) + '\n')
+          process.stdout.write(
+            JSON.stringify({ type: 'meta', count: 0, window: windowLabel }) + '\n',
+          )
         } else {
           console.log(
             `No logs in the last ${windowLabel} for ${appId}. New logs can take up to a minute to appear; retention is 7 days.`,
@@ -300,8 +323,16 @@ export default defineCommand({
       } else if (first.truncated) {
         // A machine consumer reading NDJSON needs the signal too — emit a
         // discriminable meta record (events never carry a `type` field).
-        if (args.json) process.stdout.write(JSON.stringify({ type: 'meta', truncated: true }) + '\n')
-        else console.error(`(showing the newest ${first.events.length} events — narrow with --since/--level/--search)`)
+        if (args.json)
+          process.stdout.write(JSON.stringify({ type: 'meta', truncated: true }) + '\n')
+        else if (args.search)
+          console.error(
+            `(showing the newest ${first.events.length} matches — search scans at most the newest 500 level-filtered events per fetch; narrow with --since/--level or raise --limit)`,
+          )
+        else
+          console.error(
+            `(showing the newest ${first.events.length} events — narrow with --since/--level)`,
+          )
       }
       return
     }
@@ -336,14 +367,20 @@ export default defineCommand({
         process.stdout.write(JSON.stringify({ type: 'meta', truncated: true }) + '\n')
       } else {
         console.error(
-          paint('33', `(more than ${followLimit} events in the initial ${windowLabel} window — some older events not shown; narrow with --since/--level/--search)`, stderrColor()),
+          paint(
+            '33',
+            args.search
+              ? `(search scanned only the newest ${MAX_LIMIT} level-filtered events in the initial ${windowLabel} window — older matches may be omitted; narrow with --since/--level)`
+              : `(more than ${followLimit} events in the initial ${windowLabel} window — some older events not shown; narrow with --since/--level)`,
+            stderrColor(),
+          ),
         )
       }
     }
 
     for (;;) {
       await sleep(backoff || interval)
-      // Refresh the token BEFORE the retryable fetch: the JWT is 5-minute-lived
+      // Refresh the token BEFORE the retryable fetch: the JWT is 15-minute-lived
       // and a tail outlives it. A refresh failure (session expired / logged out)
       // throws a plain Error and is fatal — it will not fix itself by retrying,
       // so let it propagate and end the tail cleanly.
@@ -359,25 +396,34 @@ export default defineCommand({
         if (err instanceof ApiError && [401, 403, 404].includes(err.status)) throw err
         backoff = Math.min(backoff ? backoff * 2 : MIN_POLL_MS, 30_000)
         const msg = err instanceof Error ? err.message : String(err)
-        console.error(paint('2', `(logs fetch failed: ${msg} — retrying in ${backoff / 1000}s)`, stderrColor()))
+        console.error(
+          paint('2', `(logs fetch failed: ${msg} — retrying in ${backoff / 1000}s)`, stderrColor()),
+        )
         continue
       }
       backoff = 0
       interval = Math.max(page.pollIntervalMs || 0, MIN_POLL_MS)
       const fresh = seen.fresh(page.events)
       print(fresh)
-      // Warn only when a poll delivered a FULL page of genuinely-new events —
-      // the real drop signal. `page.truncated` counts the re-scanned (already
-      // seen, deduped) lag-window overlap toward the cap, so it cries wolf on a
-      // busy-but-lossless tail; `fresh.length` excludes that overlap.
-      const realDrop = fresh.length >= followLimit
+      // Normally only a full page of genuinely-new events proves a drop;
+      // `page.truncated` can merely count re-scanned lag-window overlap. With
+      // search, however, the server scans a fixed newest-500 raw page before
+      // filtering, so a truncated scan can omit older matches even when very
+      // few matching DTOs survive.
+      const realDrop = fresh.length >= followLimit || Boolean(args.search && page.truncated)
       if (realDrop && !warnedTruncated) {
         warnedTruncated = true
         if (args.json) {
           process.stdout.write(JSON.stringify({ type: 'meta', truncated: true }) + '\n')
         } else {
           console.error(
-            paint('33', `(burst exceeded ${followLimit} events/poll — some may be dropped; narrow with --level/--search)`, stderrColor()),
+            paint(
+              '33',
+              args.search
+                ? `(search scanned only the newest ${MAX_LIMIT} level-filtered events this poll — older matches may be omitted; narrow with --level)`
+                : `(burst exceeded ${followLimit} events/poll — some may be dropped; narrow with --level)`,
+              stderrColor(),
+            ),
           )
         }
       } else if (!realDrop) {

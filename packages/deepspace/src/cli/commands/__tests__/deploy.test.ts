@@ -2,7 +2,15 @@
 
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -15,6 +23,7 @@ import {
   oversizedAssetRefusal,
   readDeployAssetConfig,
   resolveDeployRunWorkerFirst,
+  secureBuildDevVars,
 } from '../deploy/build'
 import {
   assetManifest,
@@ -27,6 +36,7 @@ import {
   deployRepositoryFailure,
   dirtyWorktreeRefusal,
   detachedHeadRefusal,
+  preflightDeployRepository,
   pushWithTransientRetry,
   shouldSendLineage,
   syncDeployRepository,
@@ -81,6 +91,32 @@ describe('static asset control files', () => {
       expect(isDeployAssetControlFile('_headers')).toBe(true)
       expect(isDeployAssetControlFile('_redirects')).toBe(true)
       expect(isDeployAssetControlFile('index.html')).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('build secret permissions', () => {
+  it('restricts Cloudflare preview secrets without removing preview support', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'deepspace-build-secrets-'))
+    try {
+      const path = join(dir, '.dev.vars')
+      writeFileSync(path, 'SECRET=value\n', { mode: 0o644 })
+      expect(secureBuildDevVars(dir)).toBe(true)
+      expect(statSync(path).mode & 0o777).toBe(0o600)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a symlink at the generated secret path', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'deepspace-build-secrets-'))
+    try {
+      const target = join(dir, 'target')
+      writeFileSync(target, 'SECRET=value\n')
+      symlinkSync(target, join(dir, '.dev.vars'))
+      expect(() => secureBuildDevVars(dir)).toThrow(/unsafe build secret path/)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -780,6 +816,43 @@ describe('dirtyWorktreeRefusal (DeepSpace source deploy is commit-first)', () =>
   it('off a workspace branch, suggests creating one for work in progress', () => {
     expect(dirtyWorktreeRefusal('main').error).toContain('deepspace workspace new')
     expect(dirtyWorktreeRefusal(null).error).toContain('deepspace workspace new')
+  })
+})
+
+describe('preflightDeployRepository', () => {
+  it('detects a dirty DeepSpace-source checkout before build work begins', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ds-deploy-preflight-'))
+    try {
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo })
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo })
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo })
+      writeFileSync(join(repo, 'app.txt'), 'committed\n')
+      execFileSync('git', ['add', 'app.txt'], { cwd: repo })
+      execFileSync('git', ['commit', '-q', '-m', 'source'], { cwd: repo })
+      writeFileSync(join(repo, 'app.txt'), 'dirty\n')
+
+      expect(
+        preflightDeployRepository({
+          appDir: repo,
+          push: true,
+          source: { provider: 'deepspace' },
+        }),
+      ).toMatchObject({ code: 'dirty_worktree' })
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  it('does not impose commit-first rules on GitHub source or --no-push', () => {
+    const missingRepo = join(tmpdir(), 'not-a-repository')
+    expect(
+      preflightDeployRepository({
+        appDir: missingRepo,
+        push: true,
+        source: { provider: 'github', repository: 'deepdotspace/example' },
+      }),
+    ).toBeNull()
+    expect(preflightDeployRepository({ appDir: missingRepo, push: false, source: null })).toBeNull()
   })
 })
 

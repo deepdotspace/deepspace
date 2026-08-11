@@ -75,6 +75,12 @@ function Tasks() {
 }
 ```
 
+`useMutations(collection)` exposes the existing RecordRoom `ready` state.
+Writes attempted before it is true reject with `RecordRoomNotReadyError`
+(`code: "not_ready"`) instead of disappearing into a closed socket. For direct
+Yjs rooms, `connected` describes the current WebSocket and `synced` describes
+completion of the current connection's initial document sync.
+
 Worker — expose a `RecordRoom` Durable Object:
 
 ```ts
@@ -92,6 +98,16 @@ npx deepspace auth login # authenticate
 npx deepspace dev start  # run locally
 npx deepspace deploy     # deploy to *.app.space
 ```
+
+When updating an existing app, run the target CLI rather than the app's old
+installed binary:
+
+```bash
+npx deepspace@latest app update
+```
+
+The target CLI owns the source migrations required by the SDK version it
+installs. Review and commit its source changes before deploying.
 
 The hierarchy shown by `deepspace --help` keeps durable app lifecycle under
 `deepspace app`, while checkout-oriented Git, workspace, release, and deploy
@@ -120,6 +136,11 @@ atomic authority change; switching back uses the same commands. Commands support
 `--json` for agents. Use `deepspace --help`, command-specific `--help`, and the
 [public manual](https://documentation.deep.space) for workspaces, releases, and
 rollback.
+
+In a container, give Git its own credentials before a private-repository
+verification. Forward an SSH agent, or configure an ephemeral Git credential
+helper in the container. Never embed a token in the remote URL: URLs can appear
+in process listings, logs, and copied configuration.
 
 Use the current command-specific release notes for supported upgrade steps. If
 an app or checkout still carries a name-shaped legacy id, stop and contact the

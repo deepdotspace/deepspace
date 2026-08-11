@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { runGit } from '../git/process'
 import {
   githubRepositoryFromUrl,
+  isGitCredentialFailure,
   listGitHubRemotes,
   localTransferRefs,
   selectGitHubRemote,
@@ -26,6 +27,21 @@ describe('GitHub URL canonicalization', () => {
     'git@example.com:owner/repo.git',
   ])('rejects non-GitHub or malformed URL %s', (url) => {
     expect(githubRepositoryFromUrl(url)).toBeNull()
+  })
+})
+
+describe('Git credential diagnostics', () => {
+  it.each([
+    'fatal: Authentication failed',
+    'fatal: could not read Username for github.com: terminal prompts disabled',
+    'git@github.com: Permission denied (publickey).',
+    'ERROR: Repository not found.',
+  ])('recognizes %s', (message) => {
+    expect(isGitCredentialFailure(new Error(message))).toBe(true)
+  })
+
+  it('does not relabel unrelated transport failures', () => {
+    expect(isGitCredentialFailure(new Error('connection timed out'))).toBe(false)
   })
 })
 

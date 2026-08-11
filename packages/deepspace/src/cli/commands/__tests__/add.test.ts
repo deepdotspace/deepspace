@@ -250,8 +250,16 @@ describe('documents feature assembly', () => {
         'utf-8',
       )
       expect(page).toContain('useYjsRoom')
+      expect(page).toContain('connected')
       expect(page).toContain("from 'deepspace'")
       expect(page).not.toContain('useYjsRoomWithAwareness')
+      expect(page).not.toContain('Legacy migration')
+      const presenceAccess = readFileSync(
+        join(dir, 'src/pages/(app)/(protected)/documents/use-documents-presence-access.ts'),
+        'utf-8',
+      )
+      expect(presenceAccess).not.toContain('userEmail')
+      expect(presenceAccess).not.toContain('userImageUrl')
       expect(
         existsSync(
           join(dir, 'src/pages/(app)/(protected)/documents/use-yjs-room-with-awareness.ts'),

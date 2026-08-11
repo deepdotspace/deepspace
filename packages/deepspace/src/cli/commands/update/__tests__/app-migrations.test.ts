@@ -19,6 +19,7 @@ import {
 } from '../app-migrations'
 
 const MIGRATION_ID = '2026-08-worker-owned-not-found'
+const IDENTITY_MIGRATION_ID = '2026-08-secure-room-boundaries'
 
 /** The fallback the 0.13 scaffold shipped, verbatim. */
 const OLD_FALLBACK = `export function registerStaticRoutes(app: Hono<AppContext>): void {
@@ -92,6 +93,11 @@ describe('worker-owned not_found migration', () => {
         // toml handling + fallback target + inserted guard
         replacements: 3,
       }),
+      expect.objectContaining({
+        id: IDENTITY_MIGRATION_ID,
+        files: [],
+        replacements: 0,
+      }),
     ])
 
     applyAppMigrationPlan(dir, plan)
@@ -114,7 +120,7 @@ describe('worker-owned not_found migration', () => {
         '      }\n',
     )
 
-    expect(readAppliedAppMigrations(dir)).toEqual([MIGRATION_ID])
+    expect(readAppliedAppMigrations(dir)).toEqual([MIGRATION_ID, IDENTITY_MIGRATION_ID])
     expect(planAppMigrations(dir).pending).toEqual([])
   })
 
@@ -134,11 +140,12 @@ url.pathname = '/'
     expect(plan.blockers).toEqual([])
     expect(plan.pending).toEqual([
       expect.objectContaining({ id: MIGRATION_ID, files: [], replacements: 0 }),
+      expect.objectContaining({ id: IDENTITY_MIGRATION_ID, files: [], replacements: 0 }),
     ])
     expect(plan.changedFiles).toEqual([APP_MIGRATIONS_MANIFEST])
 
     applyAppMigrationPlan(dir, plan)
-    expect(readAppliedAppMigrations(dir)).toEqual([MIGRATION_ID])
+    expect(readAppliedAppMigrations(dir)).toEqual([MIGRATION_ID, IDENTITY_MIGRATION_ID])
   })
 
   it('applies its edits and reports the rest when a fallback is hand-rolled', () => {
@@ -191,6 +198,372 @@ export default { optimizeDeps: { entries: ['./index.html'] } }
   })
 })
 
+const LEGACY_REALTIME_ROUTES = `import { verifyJwt } from 'deepspace/worker'
+
+const IDENTITY_QUERY_PARAMS = ['userId', 'userName', 'userEmail', 'userImageUrl', 'role'] as const
+
+function authenticatedRoomUrl(
+  requestUrl: string,
+  auth: VerifyResult | null,
+  extraParams?: (auth: VerifyResult) => Record<string, string>,
+): URL {
+  const doUrl = new URL(requestUrl)
+  doUrl.searchParams.delete('token')
+  for (const key of IDENTITY_QUERY_PARAMS) {
+    doUrl.searchParams.delete(key)
+  }
+
+  if (!auth) return doUrl
+
+  doUrl.searchParams.set('userId', auth.userId)
+  if (auth.claims.name) doUrl.searchParams.set('userName', auth.claims.name)
+  if (auth.claims.email) doUrl.searchParams.set('userEmail', auth.claims.email)
+  if (auth.claims.image) doUrl.searchParams.set('userImageUrl', auth.claims.image)
+  if (extraParams) {
+    for (const [key, value] of Object.entries(extraParams(auth))) {
+      doUrl.searchParams.set(key, value)
+    }
+  }
+  return doUrl
+}
+
+function wsRoute(
+  doNamespace: (env: Env) => DurableObjectNamespace,
+  extraParams?: (auth: VerifyResult) => Record<string, string>,
+) {
+  return async (c: Context<AppContext>) => {
+    const doUrl = authenticatedRoomUrl(c.req.url, auth, extraParams)
+    const stub = doNamespace(c.env).get('room')
+    return stub.fetch(new Request(doUrl.toString(), c.req.raw))
+  }
+}
+
+async function yjs(c: Context<AppContext>, auth: VerifyResult, role: string) {
+    const doUrl = authenticatedRoomUrl(c.req.url, auth, () => ({ role }))
+    const stub = c.env.YJS_ROOMS.get('doc')
+    return stub.fetch(new Request(doUrl.toString(), c.req.raw))
+}
+`
+
+describe('internal identity header migration', () => {
+  it('atomically carries a stock room proxy from URL identity to headers', () => {
+    const dir = makeRepo({
+      [APP_MIGRATIONS_MANIFEST]: `${JSON.stringify([MIGRATION_ID])}\n`,
+      'src/server/realtime-routes.ts': LEGACY_REALTIME_ROUTES,
+    })
+
+    const plan = planAppMigrations(dir)
+    expect(plan.blockers).toEqual([])
+    expect(plan.pending).toEqual([
+      expect.objectContaining({
+        id: IDENTITY_MIGRATION_ID,
+        files: ['src/server/realtime-routes.ts'],
+        replacements: 7,
+      }),
+    ])
+
+    applyAppMigrationPlan(dir, plan)
+    const migrated = read(dir, 'src/server/realtime-routes.ts')
+    expect(migrated).toContain(
+      "import { authenticatedRoomRequest, verifyJwt } from 'deepspace/worker'",
+    )
+    expect(migrated).not.toContain('function authenticatedRoomRequest(')
+    expect(migrated).toContain('const roomRequest = authenticatedRoomRequest(')
+    expect(migrated).toContain('return stub.fetch(roomRequest)')
+    expect(migrated).not.toContain("doUrl.searchParams.set('userId'")
+    expect(readAppliedAppMigrations(dir)).toEqual([MIGRATION_ID, IDENTITY_MIGRATION_ID])
+  })
+
+  it('reports one precise blocker rather than half-rewriting a customized proxy', () => {
+    const customized = LEGACY_REALTIME_ROUTES.replace(
+      'return stub.fetch(new Request(doUrl.toString(), c.req.raw))',
+      'return instrument(stub.fetch(new Request(doUrl.toString(), c.req.raw)))',
+    )
+    const dir = makeRepo({
+      [APP_MIGRATIONS_MANIFEST]: `${JSON.stringify([MIGRATION_ID])}\n`,
+      'src/server/realtime-routes.ts': customized,
+    })
+
+    const plan = planAppMigrations(dir)
+    expect(plan.pending).toEqual([
+      expect.objectContaining({ id: IDENTITY_MIGRATION_ID, replacements: 0 }),
+    ])
+    expect(plan.blockers).toEqual([
+      expect.objectContaining({
+        migrationId: IDENTITY_MIGRATION_ID,
+        file: 'src/server/realtime-routes.ts',
+        message: expect.stringContaining('authenticatedRoomRequest()'),
+      }),
+    ])
+    expect(plan.edits).toEqual([])
+  })
+
+  it('does not stamp a mixed proxy that has a new helper but retains a legacy path', () => {
+    const dir = makeRepo({
+      [APP_MIGRATIONS_MANIFEST]: `${JSON.stringify([MIGRATION_ID])}\n`,
+      'src/server/realtime-routes.ts':
+        'function authenticatedRoomRequest() {}\n' + LEGACY_REALTIME_ROUTES,
+    })
+
+    const plan = planAppMigrations(dir)
+    expect(plan.pending).toEqual([
+      expect.objectContaining({ id: IDENTITY_MIGRATION_ID, replacements: 0 }),
+    ])
+    expect(plan.blockers).toEqual([expect.objectContaining({ migrationId: IDENTITY_MIGRATION_ID })])
+    expect(plan.edits).toEqual([])
+  })
+
+  it('blocks a customized role-only URL identity path', () => {
+    const dir = makeRepo({
+      [APP_MIGRATIONS_MANIFEST]: `${JSON.stringify([MIGRATION_ID])}\n`,
+      'src/server/realtime-routes.ts': `function authenticatedRoomRequest() {}
+const doUrl = new URL(c.req.url)
+doUrl.searchParams.append('role', auth.claims.role)
+return stub.fetch(new Request(doUrl.toString(), c.req.raw))
+`,
+    })
+
+    const plan = planAppMigrations(dir)
+    expect(plan.pending).toEqual([
+      expect.objectContaining({ id: IDENTITY_MIGRATION_ID, replacements: 0 }),
+    ])
+    expect(plan.blockers).toEqual([
+      expect.objectContaining({ migrationId: IDENTITY_MIGRATION_ID, line: 3 }),
+    ])
+    expect(plan.edits).toEqual([])
+  })
+
+  it('blocks renamed proxies that inject verified identity through dynamic query keys', () => {
+    const dir = makeRepo({
+      [APP_MIGRATIONS_MANIFEST]: `${JSON.stringify([MIGRATION_ID])}\n`,
+      'src/server/realtime-routes.ts': `function customRoomRequest(auth: VerifyResult) {
+  const target = new URL(c.req.url)
+  const identity = { userId: auth.userId }
+  for (const [key, value] of Object.entries(identity)) target.searchParams.set(key, value)
+  const forwarded = new Request(target.toString(), c.req.raw)
+  return stub.fetch(forwarded)
+}
+`,
+    })
+
+    const plan = planAppMigrations(dir)
+    expect(plan.pending).toEqual([
+      expect.objectContaining({ id: IDENTITY_MIGRATION_ID, replacements: 0 }),
+    ])
+    expect(plan.blockers).toEqual([
+      expect.objectContaining({ migrationId: IDENTITY_MIGRATION_ID, line: 4 }),
+    ])
+    expect(plan.edits).toEqual([])
+  })
+
+  it('adds stock job-role and owner/admin debug gates using the SDK role resolver', () => {
+    const dir = makeRepo({
+      [APP_MIGRATIONS_MANIFEST]: `${JSON.stringify([MIGRATION_ID])}\n`,
+      'src/server/realtime-routes.ts': `function authenticatedRoomRequest() {}
+`,
+      'worker.ts': `import type { DOBindings, DOManifest, Job, JobContext } from 'deepspace/worker'
+export class AppJobRoom extends JobRoom<Env> {
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env)
+  }
+}
+`,
+      'src/server/http-routes.ts': `import type { AppContext, Env } from '../../worker.js'
+export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
+  app.all('/api/debug/*', async (c) => {
+    if (c.env.ALLOW_DEBUG_ROUTES !== 'true') {
+      return c.notFound()
+    }
+    const stub = c.env.RECORD_ROOMS.get(
+      c.env.RECORD_ROOMS.idFromName('app:test'),
+    )
+    return stub.fetch(c.req.raw)
+  })
+}
+`,
+    })
+
+    const plan = planAppMigrations(dir)
+    expect(plan.blockers).toEqual([])
+    expect(plan.pending).toEqual([
+      expect.objectContaining({
+        id: IDENTITY_MIGRATION_ID,
+        files: ['src/server/http-routes.ts', 'worker.ts'],
+        replacements: 4,
+      }),
+    ])
+
+    applyAppMigrationPlan(dir, plan)
+    expect(read(dir, 'src/server/realtime-routes.ts')).not.toContain('resolveAppRole')
+    expect(read(dir, 'worker.ts')).toContain("import { resolveAppRole } from 'deepspace/worker'")
+    expect(read(dir, 'worker.ts')).toContain('authorizeWrite: async (user) =>')
+    const http = read(dir, 'src/server/http-routes.ts')
+    expect(http).toContain("import { resolveAppRole } from 'deepspace/worker'")
+    expect(http).toContain("if (!auth) return c.json({ error: 'unauthorized' }, 401)")
+    expect(http).toContain("(await resolveAppRole(c.env, auth.userId)) !== 'admin'")
+    expect(readAppliedAppMigrations(dir)).toEqual([MIGRATION_ID, IDENTITY_MIGRATION_ID])
+  })
+
+  it.each(["'", '"'] as const)(
+    'does not certify a live %s-quoted unsafe debug route from a commented secure handler',
+    (quote) => {
+      const dir = makeRepo({
+        [APP_MIGRATIONS_MANIFEST]: `${JSON.stringify([MIGRATION_ID])}\n`,
+        'src/server/http-routes.ts': `import type { AppContext, Env } from '../../worker.js'
+/*
+import { resolveAppRole } from 'deepspace/worker'
+  app.all('/api/debug/*', async (c) => {
+    if (c.env.ALLOW_DEBUG_ROUTES !== 'true') {
+      return c.notFound()
+    }
+    const auth = await resolveAuth(c.req.raw, c.env)
+    if (!auth) return c.json({ error: 'unauthorized' }, 401)
+    if ((await resolveAppRole(c.env, auth.userId)) !== 'admin') {
+      return c.json({ error: 'forbidden' }, 403)
+    }
+    const stub = c.env.RECORD_ROOMS.get(c.env.RECORD_ROOMS.idFromName('commented'))
+  })
+*/
+export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
+  app.all(${quote}/api/debug/*${quote}, async (c) => {
+    if (c.env.ALLOW_DEBUG_ROUTES !== 'true') {
+      return c.notFound()
+    }
+    const stub = c.env.RECORD_ROOMS.get(c.env.RECORD_ROOMS.idFromName('live'))
+    return stub.fetch(c.req.raw)
+  })
+}
+`,
+      })
+
+      const plan = planAppMigrations(dir)
+      expect(plan.pending).toEqual([
+        expect.objectContaining({ id: IDENTITY_MIGRATION_ID, replacements: 0 }),
+      ])
+      expect(plan.blockers).toEqual([
+        expect.objectContaining({
+          migrationId: IDENTITY_MIGRATION_ID,
+          file: 'src/server/http-routes.ts',
+        }),
+      ])
+      expect(plan.edits).toEqual([])
+    },
+  )
+
+  it('blocks a customized JobRoom authorizer instead of stamping source-wide keywords', () => {
+    const dir = makeRepo({
+      [APP_MIGRATIONS_MANIFEST]: `${JSON.stringify([MIGRATION_ID])}\n`,
+      'worker.ts': `import { resolveAppRole } from 'deepspace/worker'
+const unrelated = resolveAppRole
+export class AppJobRoom extends JobRoom<Env> {
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env, {
+      authorizeWrite: async (user) => !user.userId.startsWith('anon-'),
+    })
+  }
+}
+`,
+    })
+
+    const plan = planAppMigrations(dir)
+    expect(plan.pending).toEqual([
+      expect.objectContaining({ id: IDENTITY_MIGRATION_ID, replacements: 0 }),
+    ])
+    expect(plan.blockers).toEqual([
+      expect.objectContaining({
+        migrationId: IDENTITY_MIGRATION_ID,
+        file: 'worker.ts',
+      }),
+    ])
+    expect(plan.edits).toEqual([])
+  })
+
+  it.each([
+    [
+      'a sibling class',
+      `export class SiblingJobRoom extends JobRoom<Env> {
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env, {
+      authorizeWrite: async (user) => {
+        if (user.userId.startsWith('anon-')) return false
+        const role = await resolveAppRole(env, user.userId)
+        return role === 'member' || role === 'admin'
+      },
+    })
+  }
+}`,
+    ],
+    [
+      'a commented stock block',
+      `/*
+export class AppJobRoom extends JobRoom<Env> {
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env, {
+      authorizeWrite: async (user) => {
+        if (user.userId.startsWith('anon-')) return false
+        const role = await resolveAppRole(env, user.userId)
+        return role === 'member' || role === 'admin'
+      },
+    })
+  }
+}
+*/`,
+    ],
+  ])('does not certify an unsafe AppJobRoom from %s', (_label, misleadingSource) => {
+    const dir = makeRepo({
+      [APP_MIGRATIONS_MANIFEST]: `${JSON.stringify([MIGRATION_ID])}\n`,
+      'worker.ts': `import { resolveAppRole } from 'deepspace/worker'
+${misleadingSource}
+export class AppJobRoom extends JobRoom<Env> {
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env, {
+      authorizeWrite: async () => true,
+    })
+  }
+}
+`,
+    })
+
+    const plan = planAppMigrations(dir)
+    expect(plan.blockers).toEqual([
+      expect.objectContaining({ migrationId: IDENTITY_MIGRATION_ID, file: 'worker.ts' }),
+    ])
+    expect(plan.edits).toEqual([])
+  })
+
+  it('does not certify a custom class declaration from a commented stock block', () => {
+    const dir = makeRepo({
+      [APP_MIGRATIONS_MANIFEST]: `${JSON.stringify([MIGRATION_ID])}\n`,
+      'worker.ts': `import { resolveAppRole } from 'deepspace/worker'
+/*
+export class AppJobRoom extends JobRoom<Env> {
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env, {
+      authorizeWrite: async (user) => {
+        if (user.userId.startsWith('anon-')) return false
+        const role = await resolveAppRole(env, user.userId)
+        return role === 'member' || role === 'admin'
+      },
+    })
+  }
+}
+*/
+export default class AppJobRoom extends JobRoom<Env> {
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env, { authorizeWrite: async () => true })
+  }
+}
+`,
+    })
+
+    const plan = planAppMigrations(dir)
+    expect(plan.blockers).toEqual([
+      expect.objectContaining({ migrationId: IDENTITY_MIGRATION_ID, file: 'worker.ts' }),
+    ])
+    expect(plan.edits).toEqual([])
+  })
+})
+
 describe('migration manifest', () => {
   it('preserves migration ids written by a newer CLI', () => {
     const dir = makeRepo({ 'wrangler.toml': OLD_WRANGLER })
@@ -198,7 +571,11 @@ describe('migration manifest', () => {
 
     applyAppMigrationPlan(dir, planAppMigrations(dir))
 
-    expect(readAppliedAppMigrations(dir)).toEqual(['2027-01-future', MIGRATION_ID])
+    expect(readAppliedAppMigrations(dir)).toEqual([
+      '2027-01-future',
+      MIGRATION_ID,
+      IDENTITY_MIGRATION_ID,
+    ])
   })
 
   it('rejects a malformed migration manifest', () => {

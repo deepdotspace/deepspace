@@ -11,6 +11,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import {
+  SECURE_ROOM_BOUNDARIES_MIGRATION_ID,
   WORKER_OWNED_NOT_FOUND_MIGRATION_ID,
   validateAppMigrationIds,
 } from '../../../shared/protocol/app-migrations'
@@ -67,7 +68,7 @@ interface SourceMigration extends AppMigrationDefinition {
 
 /**
  * Ordered migration registry. Future breaking releases add a structural,
- * idempotent step here; callers keep using `deepspace app migrate`.
+ * idempotent step here; callers keep using `deepspace app update`.
  */
 const SOURCE_MIGRATIONS: readonly SourceMigration[] = [
   {
@@ -75,6 +76,12 @@ const SOURCE_MIGRATIONS: readonly SourceMigration[] = [
     description: 'Let the worker answer misses, so deleted files 404 instead of serving HTML',
     transform: migrateWorkerOwnedNotFound,
     findBlockers: findWorkerOwnedNotFoundBlockers,
+  },
+  {
+    id: SECURE_ROOM_BOUNDARIES_MIGRATION_ID,
+    description: 'Secure room identity, job mutations, and production debug routes',
+    transform: migrateSecureRoomBoundaries,
+    findBlockers: findSecureRoomBoundaryBlockers,
   },
 ]
 
@@ -249,6 +256,292 @@ function isSourcePath(repoPath: string, appPrefix: string): boolean {
   return /\.(?:[cm]?[jt]sx?)$/.test(repoPath)
 }
 
+const LEGACY_AUTHENTICATED_ROOM_HELPER = `const IDENTITY_QUERY_PARAMS = ['userId', 'userName', 'userEmail', 'userImageUrl', 'role'] as const
+
+function authenticatedRoomUrl(
+  requestUrl: string,
+  auth: VerifyResult | null,
+  extraParams?: (auth: VerifyResult) => Record<string, string>,
+): URL {
+  const doUrl = new URL(requestUrl)
+  doUrl.searchParams.delete('token')
+  for (const key of IDENTITY_QUERY_PARAMS) {
+    doUrl.searchParams.delete(key)
+  }
+
+  if (!auth) return doUrl
+
+  doUrl.searchParams.set('userId', auth.userId)
+  if (auth.claims.name) doUrl.searchParams.set('userName', auth.claims.name)
+  if (auth.claims.email) doUrl.searchParams.set('userEmail', auth.claims.email)
+  if (auth.claims.image) doUrl.searchParams.set('userImageUrl', auth.claims.image)
+  if (extraParams) {
+    for (const [key, value] of Object.entries(extraParams(auth))) {
+      doUrl.searchParams.set(key, value)
+    }
+  }
+  return doUrl
+}`
+
+const IDENTITY_ROUTE_REPLACEMENTS: ReadonlyArray<readonly [string, string, number]> = [
+  [
+    `import { verifyJwt } from 'deepspace/worker'`,
+    `import { authenticatedRoomRequest, verifyJwt } from 'deepspace/worker'`,
+    1,
+  ],
+  [LEGACY_AUTHENTICATED_ROOM_HELPER, '', 1],
+  [
+    `function wsRoute(
+  doNamespace: (env: Env) => DurableObjectNamespace,
+  extraParams?: (auth: VerifyResult) => Record<string, string>,
+) {`,
+    `function wsRoute(
+  doNamespace: (env: Env) => DurableObjectNamespace,
+  extraIdentity?: (auth: VerifyResult) => { role?: string },
+) {`,
+    1,
+  ],
+  [
+    `    const doUrl = authenticatedRoomUrl(c.req.url, auth, extraParams)`,
+    `    const roomRequest = authenticatedRoomRequest(
+      c.req.raw,
+      auth,
+      auth ? extraIdentity?.(auth) : undefined,
+    )`,
+    1,
+  ],
+  [
+    `    const doUrl = authenticatedRoomUrl(c.req.url, auth, () => ({ role }))`,
+    `    const roomRequest = authenticatedRoomRequest(c.req.raw, auth, { role })`,
+    1,
+  ],
+  [
+    `    return stub.fetch(new Request(doUrl.toString(), c.req.raw))`,
+    `    return stub.fetch(roomRequest)`,
+    2,
+  ],
+]
+
+function occurrences(source: string, pattern: string): number {
+  return source.split(pattern).length - 1
+}
+
+const SECURE_JOB_ROOM_CONSTRUCTOR = `  constructor(state: DurableObjectState, env: Env) {
+    super(state, env, {
+      authorizeWrite: async (user) => {
+        if (user.userId.startsWith('anon-')) return false
+        const role = await resolveAppRole(env, user.userId)
+        return role === 'member' || role === 'admin'
+      },
+    })
+  }`
+
+const APP_JOB_ROOM_CLASS = `export class AppJobRoom extends JobRoom<Env> {`
+const SECURE_APP_JOB_ROOM = `${APP_JOB_ROOM_CLASS}
+${SECURE_JOB_ROOM_CONSTRUCTOR}`
+
+function hasSecureAppJobRoom(source: string): boolean {
+  return occurrences(source, 'class AppJobRoom') === 1 && source.includes(SECURE_APP_JOB_ROOM)
+}
+
+const WORKER_JOB_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
+  [
+    `import type { DOBindings, DOManifest, Job, JobContext } from 'deepspace/worker'`,
+    `import { resolveAppRole } from 'deepspace/worker'
+import type { DOBindings, DOManifest, Job, JobContext } from 'deepspace/worker'`,
+  ],
+  [
+    `export class AppJobRoom extends JobRoom<Env> {
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env)
+  }`,
+    `export class AppJobRoom extends JobRoom<Env> {
+${SECURE_JOB_ROOM_CONSTRUCTOR}`,
+  ],
+]
+
+const HTTP_ROLE_IMPORT = `import { resolveAppRole } from 'deepspace/worker'`
+const HTTP_ROLE_IMPORT_SEAM = `import type { AppContext, Env } from '../../worker.js'`
+const DEBUG_ROUTE_SEAM = `  app.all('/api/debug/*', async (c) => {
+    if (c.env.ALLOW_DEBUG_ROUTES !== 'true') {
+      return c.notFound()
+    }
+    const stub = c.env.RECORD_ROOMS.get(`
+const DOUBLE_QUOTED_DEBUG_ROUTE_SEAM = DEBUG_ROUTE_SEAM.replace(
+  "app.all('/api/debug/*'",
+  'app.all("/api/debug/*"',
+)
+const SECURE_DEBUG_ROUTE_SEAM = `  app.all('/api/debug/*', async (c) => {
+    if (c.env.ALLOW_DEBUG_ROUTES !== 'true') {
+      return c.notFound()
+    }
+    const auth = await resolveAuth(c.req.raw, c.env)
+    if (!auth) return c.json({ error: 'unauthorized' }, 401)
+    if ((await resolveAppRole(c.env, auth.userId)) !== 'admin') {
+      return c.json({ error: 'forbidden' }, 403)
+    }
+    const stub = c.env.RECORD_ROOMS.get(`
+const DOUBLE_QUOTED_SECURE_DEBUG_ROUTE_SEAM = SECURE_DEBUG_ROUTE_SEAM.replace(
+  "app.all('/api/debug/*'",
+  'app.all("/api/debug/*"',
+)
+const DEBUG_ROUTE_REPLACEMENTS = [
+  [DEBUG_ROUTE_SEAM, SECURE_DEBUG_ROUTE_SEAM],
+  [DOUBLE_QUOTED_DEBUG_ROUTE_SEAM, DOUBLE_QUOTED_SECURE_DEBUG_ROUTE_SEAM],
+] as const
+const DEBUG_ROUTE_PATTERN = /\bapp\.all\(\s*(['"])\/api\/debug\/\*\1\s*,/
+
+function debugRouteOccurrences(source: string): number {
+  return source.match(new RegExp(DEBUG_ROUTE_PATTERN.source, 'g'))?.length ?? 0
+}
+
+function secureDebugRouteOccurrences(source: string): number {
+  return DEBUG_ROUTE_REPLACEMENTS.reduce(
+    (count, [, secure]) => count + occurrences(source, secure),
+    0,
+  )
+}
+
+function hasSecureDebugRoute(source: string): boolean {
+  return (
+    debugRouteOccurrences(source) === 1 &&
+    secureDebugRouteOccurrences(source) === 1 &&
+    occurrences(source, HTTP_ROLE_IMPORT) === 1
+  )
+}
+
+/** Apply only when every stock seam in a file is present. */
+function migrateSecureRoomBoundaries(source: string, file: string): SourceTransformResult {
+  if (file.endsWith('src/server/realtime-routes.ts')) {
+    return migrateRealtimeRoomBoundaries(source)
+  }
+  if (file.endsWith('worker.ts')) return migrateWorkerJobAuthorization(source)
+  if (file.endsWith('src/server/http-routes.ts')) return migrateDebugRouteAuthorization(source)
+  return { source, replacements: 0 }
+}
+
+function migrateRealtimeRoomBoundaries(source: string): SourceTransformResult {
+  let migrated = source
+  let replacements = 0
+  // A file containing both generations is customized or partially migrated.
+  // Leave it untouched so the blocker scan below can report the legacy seam.
+  if (!migrated.includes('authenticatedRoomRequest(')) {
+    if (
+      IDENTITY_ROUTE_REPLACEMENTS.some(
+        ([before, , expected]) => occurrences(migrated, before) !== expected,
+      )
+    ) {
+      return { source, replacements: 0 }
+    }
+    for (const [before, after, expected] of IDENTITY_ROUTE_REPLACEMENTS) {
+      migrated = migrated.replaceAll(before, after)
+      replacements += expected
+    }
+  }
+
+  return { source: migrated, replacements }
+}
+
+function migrateWorkerJobAuthorization(source: string): SourceTransformResult {
+  if (!source.includes('class AppJobRoom')) return { source, replacements: 0 }
+  if (hasSecureAppJobRoom(source)) return { source, replacements: 0 }
+  if (WORKER_JOB_REPLACEMENTS.some(([before]) => occurrences(source, before) !== 1)) {
+    return { source, replacements: 0 }
+  }
+  let migrated = source
+  for (const [before, after] of WORKER_JOB_REPLACEMENTS) migrated = migrated.replace(before, after)
+  return { source: migrated, replacements: WORKER_JOB_REPLACEMENTS.length }
+}
+
+function migrateDebugRouteAuthorization(source: string): SourceTransformResult {
+  if (debugRouteOccurrences(source) === 0 || hasSecureDebugRoute(source)) {
+    return { source, replacements: 0 }
+  }
+  const matchingRoutes = DEBUG_ROUTE_REPLACEMENTS.filter(
+    ([before]) => occurrences(source, before) === 1,
+  )
+  if (
+    debugRouteOccurrences(source) !== 1 ||
+    matchingRoutes.length !== 1 ||
+    occurrences(source, HTTP_ROLE_IMPORT) !== 0 ||
+    occurrences(source, HTTP_ROLE_IMPORT_SEAM) !== 1
+  ) {
+    return { source, replacements: 0 }
+  }
+  const [before, after] = matchingRoutes[0]
+  return {
+    source: source
+      .replace(HTTP_ROLE_IMPORT_SEAM, `${HTTP_ROLE_IMPORT_SEAM}\n${HTTP_ROLE_IMPORT}`)
+      .replace(before, after),
+    replacements: 2,
+  }
+}
+
+function findSecureRoomBoundaryBlockers(source: string, file: string): AppMigrationBlocker[] {
+  if (file.endsWith('worker.ts') && source.includes('class AppJobRoom')) {
+    if (!hasSecureAppJobRoom(source)) {
+      return [
+        roomBoundaryBlocker(
+          file,
+          source,
+          'class AppJobRoom',
+          'Configure AppJobRoom with authorizeWrite using the current users.role.',
+        ),
+      ]
+    }
+    return []
+  }
+  if (file.endsWith('src/server/http-routes.ts') && debugRouteOccurrences(source) > 0) {
+    if (!hasSecureDebugRoute(source)) {
+      const route = source.match(DEBUG_ROUTE_PATTERN)?.[0] ?? '/api/debug/*'
+      return [
+        roomBoundaryBlocker(
+          file,
+          source,
+          route,
+          'Require verified owner/admin access inside the enabled debug-route handler.',
+        ),
+      ]
+    }
+    return []
+  }
+  if (!file.endsWith('src/server/realtime-routes.ts')) return []
+  const lines = source.split('\n')
+  let index = lines.findIndex(
+    (line) =>
+      line.includes('authenticatedRoomUrl') ||
+      /searchParams\.(?:set|append)\(\s*['"](?:userId|userName|userEmail|userImageUrl|role)['"]/.test(
+        line,
+      ),
+  )
+  // Customized proxies sometimes rename the helper, inject identity through a
+  // dynamic Object.entries loop, or construct the forwarded Request separately
+  // from stub.fetch(). Fail closed on verified auth plus query mutation; the
+  // header-safe scaffold only deletes public identity query inputs.
+  if (index < 0 && /\bauth\.(?:userId|claims)\b/.test(source)) {
+    index = lines.findIndex((line) => /searchParams\.(?:set|append)\s*\(/.test(line))
+  }
+  if (index < 0) return []
+  return [
+    {
+      migrationId: SECURE_ROOM_BOUNDARIES_MIGRATION_ID,
+      file,
+      line: index + 1,
+      message:
+        'This customized room proxy still places verified user identity in its internal URL. Replace that forwarding code with authenticatedRoomRequest() from deepspace/worker before the Durable Object fetch.',
+    },
+  ]
+}
+
+function roomBoundaryBlocker(
+  file: string,
+  source: string,
+  seam: string,
+  message: string,
+): AppMigrationBlocker {
+  const line = source.slice(0, source.indexOf(seam)).split('\n').length
+  return { migrationId: SECURE_ROOM_BOUNDARIES_MIGRATION_ID, file, line, message }
+}
 
 /**
  * Deploys used to tell Cloudflare's asset layer to answer ANY unmatched path
