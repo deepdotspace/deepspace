@@ -3,7 +3,7 @@
  *
  * A claimable task system demonstrating:
  * - 'unclaimed-or-own' permission for claiming unclaimed items
- * - writableFields for restricting which fields users can update
+ * - writableFields for restricting which fields users can create or update
  * - timestampTrigger for automatic timestamp fields
  * - Admin-only grading workflow
  */

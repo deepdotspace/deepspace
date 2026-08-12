@@ -35,6 +35,10 @@ import {
 
 const REGISTRY = 'https://registry.npmjs.org/deepspace/latest'
 const DOCS_URL = 'https://documentation.deep.space/cli-reference/commands'
+const BUILD_PREVIEW_SECRETS_GUIDE =
+  'https://github.com/deepdotspace/deepspace-sdk/blob/main/docs/migrations/build-preview-secrets.md'
+const USERS_SCHEMA_VISIBILITY_GUIDE =
+  'https://github.com/deepdotspace/deepspace-sdk/blob/main/docs/migrations/users-schema-member-visibility.md'
 const COMPATIBLE_AI_VERSION = sdkPackage.dependencies.ai
 
 /**
@@ -84,20 +88,60 @@ export function readAppSdkVersion(appDir: string): string | null {
 export function pinSdkVersion(appDir: string, version: string): boolean {
   const path = join(appDir, 'package.json')
   const source = readFileSync(path, 'utf8')
-  let updated = source.replace(
-    /("deepspace"\s*:\s*")[^"]+(")/,
-    (_match, head: string, tail: string) => `${head}^${version}${tail}`,
-  )
+  const manifest = JSON.parse(source) as { dependencies?: Record<string, unknown> }
+  const dependencies = manifest.dependencies
+  if (!dependencies || typeof dependencies !== 'object' || Array.isArray(dependencies)) return false
+
+  let changed = false
+  if (
+    Object.prototype.hasOwnProperty.call(dependencies, 'deepspace') &&
+    typeof dependencies.deepspace === 'string' &&
+    dependencies.deepspace !== `^${version}`
+  ) {
+    dependencies.deepspace = `^${version}`
+    changed = true
+  }
   // Apps use AI SDK types directly for tools and actions. A second `ai` minor
   // can carry incompatible branded types even though both packages compile on
   // their own, so update the existing direct dependency with the SDK.
-  updated = updated.replace(
-    /("ai"\s*:\s*")[^"]+(")/,
-    (_match, head: string, tail: string) => `${head}${COMPATIBLE_AI_VERSION}${tail}`,
-  )
-  if (updated === source) return false
-  writeFileSync(path, updated)
+  if (
+    Object.prototype.hasOwnProperty.call(dependencies, 'ai') &&
+    typeof dependencies.ai === 'string' &&
+    dependencies.ai !== COMPATIBLE_AI_VERSION
+  ) {
+    dependencies.ai = COMPATIBLE_AI_VERSION
+    changed = true
+  }
+  if (!changed) return false
+  const eol = source.includes('\r\n') ? '\r\n' : '\n'
+  const indent = source.match(/\r?\n([\t ]+)"/)?.[1] ?? '  '
+  const finalEol = source.endsWith('\n') ? eol : ''
+  writeFileSync(path, JSON.stringify(manifest, null, indent).replaceAll('\n', eol) + finalEol)
   return true
+}
+
+/** Existing app-owned Vite configs need the fresh scaffold's post-build cleanup. */
+export function buildPreviewSecretsUpgradeInstruction(appDir: string): string | null {
+  const configName = [
+    'vite.config.ts',
+    'vite.config.mts',
+    'vite.config.js',
+    'vite.config.mjs',
+  ].find((candidate) => existsSync(join(appDir, candidate)))
+  if (!configName) return null
+  const source = readFileSync(join(appDir, configName), 'utf8')
+  if (source.includes('deepspace-remove-build-preview-secrets')) return null
+  return `${configName}: add the build-preview secret cleanup from ${BUILD_PREVIEW_SECRETS_GUIDE}; app update left this app-owned file unchanged.`
+}
+
+/** Existing app-owned users schemas keep their current visibility until edited explicitly. */
+export function usersSchemaVisibilityUpgradeInstruction(appDir: string): string | null {
+  const schemaName = 'src/schemas/users-schema.ts'
+  const path = join(appDir, schemaName)
+  if (!existsSync(path)) return null
+  const source = readFileSync(path, 'utf8')
+  if (!/\bmember\s*:\s*\{[^}]*\bread\s*:\s*true\b/s.test(source)) return null
+  return `${schemaName}: review the member user-row visibility change at ${USERS_SCHEMA_VISIBILITY_GUIDE}; app update left this app-owned schema unchanged.`
 }
 
 async function latestPublishedVersion(): Promise<string> {
@@ -209,32 +253,40 @@ export default defineDeepspaceCommand({
 
     const dryRun = args['dry-run'] === true
     const plan = planAppMigrations(appDir)
+    const previewSecretsInstruction = buildPreviewSecretsUpgradeInstruction(appDir)
+    const usersSchemaInstruction = usersSchemaVisibilityUpgradeInstruction(appDir)
+    const manualInstructions = [previewSecretsInstruction, usersSchemaInstruction].filter(
+      (instruction): instruction is string => instruction !== null,
+    )
     const pinned = dryRun ? false : pinSdkVersion(appDir, targetRaw)
     if (!dryRun && plan.edits.length) applyAppMigrationPlan(appDir, plan)
 
     if (!args.json) {
       p.log.info(`deepspace ${currentRaw} → ${targetRaw}`)
       if (pinned) p.log.success('package.json now asks for the current SDK')
+      for (const instruction of manualInstructions) p.log.warn(instruction)
       if (!plan.pending.length && !plan.blockers.length) {
-        p.log.success('No source changes required.')
+        p.log.success('No automatic source changes required.')
       }
       reportPlan(plan, !dryRun)
     }
 
     // Manual work outstanding is exit 2 — "it worked, your turn" — so an agent
     // branches on the code rather than parsing prose.
-    if (plan.blockers.length) {
+    if (plan.blockers.length || manualInstructions.length) {
+      const remaining = plan.blockers.length + manualInstructions.length
       throw new Refusal(
-        `${plan.blockers.length} change(s) need a human or agent edit; each is listed above with ` +
-          `its file, line, and the change required.`,
+        `${remaining} change(s) need a human or agent edit; follow the returned manual instructions and blockers.`,
         'manual_changes_required',
         {
+          ...(pinned ? { action: cliAction('npm', 'install') } : {}),
           actionRequired: true,
           extra: {
             currentVersion: currentRaw,
             targetVersion: targetRaw,
             applied: plan.pending.map((migration) => migration.id),
             blockers: plan.blockers,
+            manualInstructions,
           },
         },
       )
@@ -246,6 +298,7 @@ export default defineDeepspaceCommand({
         targetVersion: targetRaw,
         pinned,
         dryRun,
+        manualInstructions,
         applied: plan.pending.map((migration) => ({
           id: migration.id,
           description: migration.description,

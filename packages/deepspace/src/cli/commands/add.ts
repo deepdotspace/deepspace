@@ -337,6 +337,7 @@ export default defineDeepspaceCommand({
 
     if (!outcome.ok) {
       throw new Refusal(outcome.error, outcome.code, {
+        actionRequired: outcome.code === 'manual_integration_required',
         ...('data' in outcome ? { extra: outcome.data } : {}),
       })
     }

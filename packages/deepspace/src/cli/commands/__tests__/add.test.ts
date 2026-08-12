@@ -269,6 +269,74 @@ describe('documents feature assembly', () => {
   })
 })
 
+describe('feature route roles and cron integration', () => {
+  it('wires the admin page into admin-only navigation without manual nav guidance', () => {
+    const { dir, cleanup } = makeApp()
+    try {
+      const { status } = installInto(dir, ['admin-page'])
+      expect(status).toBe(0)
+      expect(readFileSync(join(dir, 'src/nav.ts'), 'utf8')).toContain(
+        "{ path: '/admin', label: 'Admin Page', roles: ['admin' as Role] }",
+      )
+      expect(readFeatureConfig('admin-page', PKG_ROOT)?.instructions).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('adds the heartbeat through generic code insertion on the stock scaffold', () => {
+    const { dir, cleanup } = makeApp()
+    try {
+      const firstInstall = installInto(dir, ['cron'])
+      expect(firstInstall.status).toBe(0)
+      const cronPath = join(dir, 'src/cron.ts')
+      const first = readFileSync(cronPath, 'utf8')
+      expect(first).toContain("tasks.push({ name: 'heartbeat', intervalMinutes: 1 })")
+
+      expect(firstInstall.out).toContain('--- Next steps ---')
+      expect(firstInstall.out).not.toContain('Manual wiring needed')
+
+      expect(installInto(dir, ['cron']).status).toBe(0)
+      expect(readFileSync(cronPath, 'utf8')).toBe(first)
+      expect(readFeatureConfig('cron', PKG_ROOT)?.instructions).toEqual(
+        expect.arrayContaining([expect.stringContaining('/ws/cron/<SCOPE_ID>')]),
+      )
+      expect(JSON.stringify(readFeatureConfig('cron', PKG_ROOT)?.instructions)).not.toContain(
+        'app:<APP_NAME>',
+      )
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('reports a customized cron task file instead of guessing an insertion point', () => {
+    const { dir, cleanup } = makeApp()
+    try {
+      const cronPath = join(dir, 'src/cron.ts')
+      const customized = `export const tasks = [{ name: 'custom', intervalMinutes: 5 }]\n`
+      writeFileSync(cronPath, customized)
+
+      const { status, outcome } = installInto(dir, ['cron'])
+      expect(status).toBe(1)
+      expect(outcome).toMatchObject({
+        ok: false,
+        code: 'manual_integration_required',
+        data: {
+          unresolvedIntegrations: [
+            expect.objectContaining({
+              area: 'code',
+              reason: expect.stringContaining('insertion point'),
+            }),
+          ],
+        },
+      })
+      expect(readFileSync(cronPath, 'utf8')).toBe(customized)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
 describe('documentation feature assembly', () => {
   it('enables /docs with config and Markdown without adding an application route', () => {
     const { dir, cleanup } = makeApp()
@@ -583,10 +651,11 @@ describe('agent-facing install result', () => {
         install: false,
         list: false,
       })
-      expect(exitCode).toBe(1)
+      expect(exitCode).toBe(2)
       expect(result).toMatchObject({
         ok: false,
         code: 'manual_integration_required',
+        actionRequired: true,
         feature: 'items',
         installed: false,
         unresolvedIntegrations: expect.arrayContaining([

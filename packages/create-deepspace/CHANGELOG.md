@@ -1,5 +1,14 @@
 # create-deepspace
 
+## 0.19.2
+
+### Patch Changes
+
+- Harden post-release upgrade and scaffold behavior: pin only real package
+  dependencies, expose PresenceRoom offline state, restrict fresh user rows to
+  their owners, wire feature roles and cron tasks correctly, and remove generated
+  build-preview secrets from deploy output while guiding existing Vite configs.
+
 ## 0.19.1
 
 ### Patch Changes

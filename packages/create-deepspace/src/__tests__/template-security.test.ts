@@ -16,6 +16,18 @@ describe('base scaffold static headers', () => {
   })
 })
 
+describe('base scaffold user visibility', () => {
+  it('does not let regular members enumerate full users rows', () => {
+    const schema = readFileSync(
+      fileURLToPath(new URL('../../templates/base/src/schemas/users-schema.ts', import.meta.url)),
+      'utf8',
+    )
+
+    expect(schema).toContain("member: { read: 'own', create: false, update: 'own', delete: false }")
+    expect(schema).not.toContain('member: { read: true')
+  })
+})
+
 describe('base scaffold dependency contract', () => {
   it('uses the same Zod major as the SDK-owned agent runtime', () => {
     const template = JSON.parse(

@@ -22,8 +22,11 @@ let openedUrls: string[]
 let sockets: FakeWebSocket[]
 
 class FakeWebSocket {
+  static readonly CONNECTING = 0
   static readonly OPEN = 1
-  readonly readyState = FakeWebSocket.OPEN
+  static readonly CLOSED = 3
+  readyState = FakeWebSocket.OPEN
+  closeCalls = 0
   onopen: (() => void) | null = null
   onmessage: ((event: MessageEvent) => void) | null = null
   onclose: (() => void) | null = null
@@ -35,7 +38,11 @@ class FakeWebSocket {
   }
 
   send() {}
-  close() {}
+  close() {
+    this.closeCalls++
+    this.readyState = FakeWebSocket.CLOSED
+    this.onclose?.()
+  }
 }
 
 function Probe() {
@@ -158,5 +165,32 @@ describe('usePresenceRoom auth', () => {
 
     expect(container.querySelector('output')?.dataset.connected).toBe('false')
     expect(container.querySelector('output')?.textContent).toBe('0')
+  })
+
+  it('reports offline immediately and reconnects once when the browser returns online', async () => {
+    providerToken.mockResolvedValue(null)
+    recordAuth.mockReturnValue({ getAuthToken: providerToken } as never)
+
+    await act(async () => {
+      root.render(<Probe />)
+      await Promise.resolve()
+    })
+    await act(async () => sockets[0]?.onopen?.())
+    expect(container.querySelector('output')?.dataset.connected).toBe('true')
+
+    await act(async () => window.dispatchEvent(new Event('offline')))
+    expect(container.querySelector('output')?.dataset.connected).toBe('false')
+    expect(sockets[0]?.closeCalls).toBe(1)
+
+    await act(async () => {
+      window.dispatchEvent(new Event('online'))
+      window.dispatchEvent(new Event('online'))
+      await Promise.resolve()
+    })
+    expect(sockets).toHaveLength(2)
+    expect(providerToken).toHaveBeenCalledTimes(2)
+
+    await act(async () => sockets[1]?.onopen?.())
+    expect(container.querySelector('output')?.dataset.connected).toBe('true')
   })
 })

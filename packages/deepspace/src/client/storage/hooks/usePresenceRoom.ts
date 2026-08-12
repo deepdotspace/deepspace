@@ -65,27 +65,38 @@ export function usePresenceRoom(scopeId: string): UsePresenceRoomResult {
     let ws: WebSocket | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let alive = true
+    let browserOnline = typeof navigator === 'undefined' || navigator.onLine
+    let connecting = false
 
     const connect = async () => {
-      if (!alive) return
+      if (!alive || !browserOnline || connecting) return
+      if (ws?.readyState === WebSocket.CONNECTING || ws?.readyState === WebSocket.OPEN) return
+      connecting = true
 
-      const token = await tokenProvider()
-      if (!alive) return
+      let token: string | null
+      try {
+        token = await tokenProvider()
+      } finally {
+        connecting = false
+      }
+      if (!alive || !browserOnline) return
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const baseUrl = `${protocol}//${window.location.host}`
       const url = new URL(`/ws/presence/${encodeURIComponent(scopeId)}`, baseUrl)
       if (token) url.searchParams.set('token', token)
 
       wsLog('connecting', `presence:${scopeId}`)
-      ws = new WebSocket(url.toString())
-      wsRef.current = ws
+      const socket = new WebSocket(url.toString())
+      ws = socket
+      wsRef.current = socket
 
-      ws.onopen = () => {
+      socket.onopen = () => {
+        if (ws !== socket) return socket.close()
         wsLog('connected', `presence:${scopeId}`)
         setConnected(true)
       }
 
-      ws.onmessage = (event) => {
+      socket.onmessage = (event) => {
         dispatch<ServerMessage>(event.data, {
           [MSG.PRESENCE_SYNC]: (p) => {
             setPeers(p.peers as PresencePeerClient[])
@@ -107,22 +118,38 @@ export function usePresenceRoom(scopeId: string): UsePresenceRoomResult {
         })
       }
 
-      ws.onclose = () => {
+      socket.onclose = () => {
+        if (ws !== socket) return
         wsLog('disconnected', `presence:${scopeId}`)
+        ws = null
         wsRef.current = null
         setConnected(false)
-        if (alive) reconnectTimer = setTimeout(connect, 1000)
+        if (alive && browserOnline) reconnectTimer = setTimeout(connect, 1000)
       }
 
-      ws.onerror = () => ws?.close()
+      socket.onerror = () => socket.close()
     }
 
-    connect()
+    const handleOffline = () => {
+      browserOnline = false
+      setConnected(false)
+      ws?.close()
+    }
+    const handleOnline = () => {
+      browserOnline = true
+      void connect()
+    }
+
+    window.addEventListener('offline', handleOffline)
+    window.addEventListener('online', handleOnline)
+    void connect()
 
     return () => {
       wsLog('closing', `presence:${scopeId}`)
       alive = false
       if (reconnectTimer) clearTimeout(reconnectTimer)
+      window.removeEventListener('offline', handleOffline)
+      window.removeEventListener('online', handleOnline)
       if (ws) {
         ws.onclose = null
         ws.onmessage = null

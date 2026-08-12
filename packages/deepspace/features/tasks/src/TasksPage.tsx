@@ -3,7 +3,7 @@
  *
  * Demonstrates:
  * - 'unclaimed-or-own' permission for claimable tasks
- * - writableFields for restricting which fields can be updated
+ * - writableFields for restricting which fields can be created or updated
  * - timestampTrigger for automatic timestamps
  * - Admin grading workflow
  */

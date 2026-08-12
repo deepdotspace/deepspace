@@ -52,7 +52,7 @@ export interface RolePermissions {
   create: boolean
   update: PermissionLevel
   delete: PermissionLevel
-  /** If set, only these columns can be updated by this role. */
+  /** If set, only these caller-supplied columns can be created or updated by this role. */
   writableFields?: string[]
 }
 

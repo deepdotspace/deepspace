@@ -74,7 +74,11 @@ export interface FeatureConfig {
   internal?: boolean
   files: FeatureFile[]
   ignore?: string[]
-  route?: { path?: string; protected?: boolean }
+  route?: {
+    path?: string
+    protected?: boolean
+    roles?: Array<'viewer' | 'member' | 'admin'>
+  }
   schema?: FeatureSchema
   actions?: FeatureAction[]
   code?: FeatureCodeInsertion[]
@@ -515,9 +519,9 @@ function integrateCode(
     let content = original
     if (insertion.import && !content.includes(insertion.import)) {
       const importIndex = content.search(/^import\s/m)
-      content = `${content.slice(0, importIndex < 0 ? 0 : importIndex)}${insertion.import}\n${
-        content.slice(importIndex < 0 ? 0 : importIndex)
-      }`
+      content = `${content.slice(0, importIndex < 0 ? 0 : importIndex)}${insertion.import}\n${content.slice(
+        importIndex < 0 ? 0 : importIndex,
+      )}`
     }
     const currentMarkerIndex = content.indexOf(insertion.marker)
     const insertAt =
@@ -707,14 +711,22 @@ function unresolvedRoute(
   reason: string,
   emit: FeatureInstallerOutput,
 ): UnresolvedIntegration {
+  const roles = routeRolesSuffix(route)
   emit('')
   emit('   Add manually to src/nav.ts:')
-  emit(`     { path: '${route.path}', label: '${config.name}' },`)
+  emit(`     { path: '${route.path}', label: '${config.name}'${roles} },`)
   return {
     area: 'nav',
     reason,
-    steps: [`Add { path: '${route.path}', label: '${config.name}' } to the exported nav array.`],
+    steps: [
+      `Add { path: '${route.path}', label: '${config.name}'${roles} } to the exported nav array.`,
+    ],
   }
+}
+
+function routeRolesSuffix(route: NonNullable<FeatureConfig['route']>): string {
+  const roles = route.roles?.length ? route.roles : route.protected === false ? [] : ['member']
+  return roles.length ? `, roles: [${roles.map((role) => `'${role}' as Role`).join(', ')}]` : ''
 }
 
 function integrateRoute(
@@ -744,7 +756,7 @@ function integrateRoute(
       ),
     ]
   }
-  const roles = config.route.protected === false ? '' : ", roles: ['member' as Role]"
+  const roles = routeRolesSuffix(config.route)
   const entry = `  { path: '${routePath}', label: '${config.name}'${roles} },`
   content = content.replace(NAV_MARKER, `${NAV_MARKER}\n${entry}`)
   writeFileSync(navPath, content)
@@ -999,7 +1011,7 @@ export function installFeature(options: FeatureInstallOptions): FeatureInstallOu
 
   if (config.instructions?.length) {
     emit('')
-    emit('--- Manual wiring needed ---')
+    emit('--- Next steps ---')
     emit('')
     config.instructions.forEach((instruction, index) => {
       emit(`${index + 1}. ${instruction}`)
