@@ -5,6 +5,15 @@ import {
   isDocumentsOwner,
   resolveDocumentsAccessRole,
 } from '../use-documents-presence-access'
+import { recordsReadyForMutation } from '../documents-library-types'
+
+describe('document mutation readiness', () => {
+  it('requires both a ready query and a ready mutation transport', () => {
+    expect(recordsReadyForMutation('loading', true)).toBe(false)
+    expect(recordsReadyForMutation('ready', false)).toBe(false)
+    expect(recordsReadyForMutation('ready', true)).toBe(true)
+  })
+})
 
 describe('document access policy', () => {
   const document = {
@@ -42,8 +51,12 @@ describe('document access policy', () => {
     expect(deriveDocumentsAccessChange('viewer', 'editor', null)).toBe('upgrade')
     expect(deriveDocumentsAccessChange('viewer', 'none', null)).toBe('revoked')
     expect(deriveDocumentsAccessChange('owner', 'owner', null)).toBeNull()
-    expect(deriveDocumentsAccessChange(null, 'viewer', { kind: 'downgrade', at: 20 })).toBe('downgrade')
-    expect(deriveDocumentsAccessChange('editor', 'viewer', { kind: 'revoked', at: 20 })).toBe('revoked')
+    expect(deriveDocumentsAccessChange(null, 'viewer', { kind: 'downgrade', at: 20 })).toBe(
+      'downgrade',
+    )
+    expect(deriveDocumentsAccessChange('editor', 'viewer', { kind: 'revoked', at: 20 })).toBe(
+      'revoked',
+    )
   })
 
   it('accepts only a fresh ACL signal addressed to the current user', () => {

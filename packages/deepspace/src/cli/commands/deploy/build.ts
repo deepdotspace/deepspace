@@ -1,7 +1,7 @@
 import * as p from '@clack/prompts'
 import { execSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { readDocumentationDeployManifest } from '../../../documentation/deploy'
 import { DEEPSPACE_ENV } from '../../env'
@@ -73,18 +73,6 @@ interface OutputWranglerConfig extends Record<string, unknown> {
   assets?: { directory: string; run_worker_first?: unknown; not_found_handling?: unknown }
   durable_objects?: { bindings: Array<{ name: string; class_name: string }> }
   migrations?: Array<{ new_sqlite_classes?: string[] }>
-}
-
-/** Cloudflare materializes `.dev.vars` beside the preview worker; keep it private. */
-export function secureBuildDevVars(workerDir: string): boolean {
-  const path = join(workerDir, '.dev.vars')
-  if (!existsSync(path)) return false
-  const stat = lstatSync(path)
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new Error(`Refusing unsafe build secret path: ${path}`)
-  }
-  chmodSync(path, 0o600)
-  return true
 }
 
 /**
@@ -177,11 +165,6 @@ export async function buildDeployBundle(options: {
   }
 
   const workerDir = dirname(outputWranglerPath)
-  try {
-    secureBuildDevVars(workerDir)
-  } catch (error) {
-    output.die(errorMessage(error), 'build_output_unsafe')
-  }
   const workerBundlePath = join(workerDir, outputConfig.main)
   const clientDir = outputConfig.assets?.directory
     ? resolve(workerDir, outputConfig.assets.directory)

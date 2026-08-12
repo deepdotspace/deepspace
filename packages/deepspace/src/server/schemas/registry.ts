@@ -329,7 +329,7 @@ export function canDelete(
   return checkPermissionLevel(getRolePermissions(schema, role).delete, schema, record, userId, ctx)
 }
 
-/** Check if a field update violates writableFields restrictions. */
+/** Check if a caller-supplied field write violates writableFields restrictions. */
 export function checkFieldPermissions(
   schema: CollectionSchema,
   role: string,

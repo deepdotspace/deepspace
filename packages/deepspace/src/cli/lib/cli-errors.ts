@@ -34,6 +34,21 @@ export class InputError extends Error {
 }
 
 /**
+ * Thrown by an output owner (deploy's `die()`/`bail()`) AFTER it has fully
+ * rendered a failure, purely to end control flow; it carries only the exit
+ * code. {@link renderCliError} recognizes it and records the code without a
+ * second rendering. A thrown sentinel rather than process.exit() because on
+ * Windows exiting after a completed built-in fetch() aborts the process —
+ * see lib/command.ts.
+ */
+export class CliExit extends Error {
+  constructor(readonly exitCode: number) {
+    super(`exit ${exitCode}`)
+    this.name = 'CliExit'
+  }
+}
+
+/**
  * The machine `code` slug an error carries, if any — an {@link ApiError} (server
  * failure) or an {@link InputError} (client-side validation). Lets a command's
  * `--json` catch surface `code` uniformly without knowing the concrete type.
@@ -95,9 +110,22 @@ export function formatCliError(err: unknown): string {
   return hint && !message.includes(hint) ? `${message}\n${hint}` : message
 }
 
-export function renderCliError(err: unknown): never {
-  // A command may throw with its progress spinner still live; stop it before
-  // the process.exit below so the exit can't abort on Windows (see spinner.ts).
+/**
+ * Records the exit code via process.exitCode and RETURNS — never
+ * process.exit(), which on Windows aborts the process when called after a
+ * completed built-in fetch() (see lib/command.ts). Every caller is the last
+ * act of its command, so returning lets Node exit naturally.
+ */
+export function renderCliError(err: unknown): void {
+  // A CliExit was already rendered by its thrower (deploy's die()/bail());
+  // just record its code — a second rendering would double the output.
+  if (err instanceof CliExit) {
+    process.exitCode = err.exitCode
+    return
+  }
+  // A command may throw with its progress spinner still live; stop it — its
+  // repaint interval would keep the naturally-exiting process alive, and its
+  // exit-time frame can abort on Windows (see spinner.ts).
   stopActiveSpinner()
   const message = formatCliError(err)
   const slug = errorCode(err)
@@ -108,7 +136,8 @@ export function renderCliError(err: unknown): never {
   // this is the fallback for the ~15 that don't.
   if (process.argv.includes('--json')) {
     console.log(JSON.stringify({ ok: false, ...(slug ? { code: slug } : {}), error: message }))
-    process.exit(1)
+    process.exitCode = 1
+    return
   }
   // Human path: the last line carries the machine slug, per the output
   // contract (lib/output.ts).
@@ -119,7 +148,7 @@ export function renderCliError(err: unknown): never {
     if (apiPath) console.error(`\nAPI ${apiPath}${status ? ` (${status})` : ''}`)
     if (err instanceof Error && err.stack) console.error('\n' + err.stack)
   }
-  process.exit(1)
+  process.exitCode = 1
 }
 
 type RunFn = NonNullable<CommandDef['run']>

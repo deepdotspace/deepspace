@@ -353,9 +353,9 @@ if (rawArgs.includes('--json') && !wantsHelp) {
     stopActiveSpinner()
     // citty's CLIError carries a `.code` per condition; map each to its own
     // stable slug (EARG = a missing/invalid positional or flag). A genuinely
-    // escaped run() error is already handled by wrapCommandErrors → renderCliError
-    // and exits before this catch, so the errorCode() branch only guards the
-    // rare non-citty throw that reaches here.
+    // escaped run() error is already handled and consumed by wrapCommandErrors
+    // → renderCliError before this catch, so the errorCode() branch only
+    // guards the rare non-citty throw that reaches here.
     const cittyCode =
       err instanceof Error && err.name === 'CLIError' ? (err as { code?: string }).code : undefined
     const code =

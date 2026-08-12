@@ -13,6 +13,9 @@ import undeploy from '../undeploy'
 afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+  // Clear the exit code the runtime records, so a refusal-path test cannot
+  // poison the vitest worker's own exit code.
+  process.exitCode = undefined
   mocks.ensureToken.mockClear()
   mocks.resolveAppSelector.mockClear()
 })
@@ -35,14 +38,14 @@ describe('undeploy partial failure', () => {
     )
     const lines: string[] = []
     vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
-    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
-      throw new Error(`exit:${code ?? 0}`)
-    }) as never)
 
     const command = undeploy as unknown as {
       run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
     }
-    await expect(command.run({ args: { name: appId, json: true } })).rejects.toThrow('exit:2')
+    // The runtime records the code on process.exitCode instead of calling
+    // process.exit (see lib/command.ts); the afterEach above clears it.
+    await command.run({ args: { name: appId, json: true } })
+    expect(process.exitCode).toBe(2)
 
     expect(JSON.parse(lines[0])).toMatchObject({
       ok: false,

@@ -17,10 +17,14 @@ import { type Editor, useEditorState } from '@tiptap/react'
 import { useDocEditor } from './editor/useDocEditor'
 import { DocEditorSurface, PAGE_HEIGHT_PX, PAGE_WIDTH_PX } from './editor/DocEditorSurface'
 import { DocumentsTiptapToolbar } from './editor/DocumentsTiptapToolbar'
-import { DocumentsOutlinePanel, DOCUMENT_OUTLINE_WIDTH_PX, type OutlineEntry } from './DocumentsOutlinePanel'
+import {
+  DocumentsOutlinePanel,
+  DOCUMENT_OUTLINE_WIDTH_PX,
+  type OutlineEntry,
+} from './DocumentsOutlinePanel'
 import { DocumentsPresence } from './DocumentsPresence'
 import { InviteDialog } from './InviteDialog'
-import type { DocumentsDocumentFields } from './documents-library-types'
+import { recordsReadyForMutation, type DocumentsDocumentFields } from './documents-library-types'
 import {
   useDocumentsEditorPresence,
   useDocumentsPresenceAccess,
@@ -175,7 +179,10 @@ function AccessChangedOverlay({
             <AlertTriangle className="h-4 w-4" strokeWidth={2} />
           </span>
           <div className="min-w-0 flex-1">
-            <h2 id="documents-access-change-title" className="text-base font-semibold tracking-tight">
+            <h2
+              id="documents-access-change-title"
+              className="text-base font-semibold tracking-tight"
+            >
               {title}
             </h2>
             <p className="mt-1.5 text-sm" style={{ color: 'var(--documents-el-muted)' }}>
@@ -279,7 +286,8 @@ export default function DocumentsEditorPage() {
     [documents, docId],
   )
 
-  const { put } = useMutations<DocumentsDocumentFields>('documents')
+  const { put, ready: documentsMutationsReady } = useMutations<DocumentsDocumentFields>('documents')
+  const documentWritesReady = recordsReadyForMutation(status, documentsMutationsReady)
 
   // The text helper remains available to consumers of useYjsRoom; this editor
   // binds Tiptap directly to Y.XmlFragment('default') on the returned document.
@@ -397,10 +405,10 @@ export default function DocumentsEditorPage() {
   const docTitle = selectedDoc?.data.title?.trim() || 'Untitled Document'
   const handleTitleSave = useCallback(
     async (next: string) => {
-      if (!selectedDoc) return
+      if (!documentWritesReady || !selectedDoc) return
       await put(selectedDoc.recordId, { ...selectedDoc.data, title: next }).catch(() => {})
     },
-    [put, selectedDoc],
+    [documentWritesReady, put, selectedDoc],
   )
 
   /**
@@ -450,7 +458,11 @@ export default function DocumentsEditorPage() {
           <ArrowLeft className="h-4 w-4" strokeWidth={2} />
         </button>
 
-        <InlineTitle title={docTitle} canEdit={isOwner ?? false} onSave={handleTitleSave} />
+        <InlineTitle
+          title={docTitle}
+          canEdit={Boolean(isOwner && documentWritesReady)}
+          onSave={handleTitleSave}
+        />
 
         <DocumentsPresence participants={presenceParticipants} typingNames={typingNames} />
 
@@ -473,7 +485,10 @@ export default function DocumentsEditorPage() {
           ) : effectiveRole === 'editor' || effectiveRole === 'viewer' ? (
             <span
               className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium"
-              style={{ borderColor: 'var(--documents-el-line)', color: 'var(--documents-el-muted)' }}
+              style={{
+                borderColor: 'var(--documents-el-line)',
+                color: 'var(--documents-el-muted)',
+              }}
             >
               {effectiveRole === 'editor' ? 'Shared editor' : 'Shared viewer'}
             </span>
@@ -639,7 +654,10 @@ export function ErrorBoundary() {
     >
       <div
         className="w-full max-w-md rounded-xl border p-6 shadow-md"
-        style={{ borderColor: 'var(--documents-el-line)', backgroundColor: 'var(--documents-el-surface)' }}
+        style={{
+          borderColor: 'var(--documents-el-line)',
+          backgroundColor: 'var(--documents-el-surface)',
+        }}
       >
         <div className="mb-3 flex items-center justify-center">
           <span
@@ -654,7 +672,10 @@ export function ErrorBoundary() {
           </span>
         </div>
         <h1 className="text-base font-semibold tracking-tight">This document needs to reload</h1>
-        <p className="mx-auto mt-1.5 max-w-xs text-sm" style={{ color: 'var(--documents-el-muted)' }}>
+        <p
+          className="mx-auto mt-1.5 max-w-xs text-sm"
+          style={{ color: 'var(--documents-el-muted)' }}
+        >
           Your access to this document just changed. Refresh to load the latest version.
         </p>
         <p

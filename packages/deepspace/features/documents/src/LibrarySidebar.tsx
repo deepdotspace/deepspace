@@ -182,6 +182,7 @@ export interface LibrarySidebarProps {
   selection: LibraryNavSelection
   onSelect: (s: LibraryNavSelection) => void
   folders: RecordData<DocFolderFields>[]
+  canManageFolders: boolean
   collapsed: boolean
   onToggleCollapsed: () => void
   onCreateFolder: (name: string) => void | Promise<void>
@@ -198,6 +199,7 @@ export function LibrarySidebar({
   selection,
   onSelect,
   folders,
+  canManageFolders,
   collapsed,
   onToggleCollapsed,
   onCreateFolder,
@@ -337,7 +339,7 @@ export function LibrarySidebar({
             </span>
             <div className="space-y-0.5">
               {sortedFolders.map((f) =>
-                renamingFolderId === f.recordId ? (
+                canManageFolders && renamingFolderId === f.recordId ? (
                   <div
                     key={f.recordId}
                     className="group flex w-full min-w-0 items-center gap-0.5 rounded-md bg-[color:var(--documents-el-accent)]/10 py-0.5 pl-0.5 dark:bg-[color:var(--documents-el-accent)]/15"
@@ -369,96 +371,102 @@ export function LibrarySidebar({
                     onClick={() => onSelect({ kind: 'folder', folderId: f.recordId })}
                     collapsed={collapsed}
                     trailing={
-                      <span className="relative z-[1] flex shrink-0 items-center gap-0.5">
-                        <button
-                          type="button"
-                          data-testid={`rename-folder-${f.recordId}`}
-                          onMouseDown={(e) => {
-                            e.preventDefault()
-                            e.stopPropagation()
-                          }}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onStartRenameFolder(f)
-                          }}
-                          className="rounded p-1 text-[color:var(--documents-el-muted)] opacity-0 transition-all hover:bg-black/[0.04] hover:text-[color:var(--documents-el-accent)] group-hover:opacity-100 dark:hover:bg-white/[0.06]"
-                          title="Rename folder"
-                          aria-label={`Rename folder ${f.data.name}`}
-                        >
-                          <Pencil className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          data-testid={`delete-folder-${f.recordId}`}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            if (
-                              confirm(
-                                `Delete folder “${f.data.name}”? Documents inside will move to uncategorized.`,
-                              )
-                            ) {
-                              void onDeleteFolder(f.recordId)
-                            }
-                          }}
-                          className="rounded p-1 text-[color:var(--documents-el-muted)] opacity-0 transition-all hover:bg-red-500/10 hover:text-red-600 group-hover:opacity-100"
-                          title="Delete folder"
-                          aria-label={`Delete folder ${f.data.name}`}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </span>
+                      canManageFolders ? (
+                        <span className="relative z-[1] flex shrink-0 items-center gap-0.5">
+                          <button
+                            type="button"
+                            data-testid={`rename-folder-${f.recordId}`}
+                            onMouseDown={(e) => {
+                              e.preventDefault()
+                              e.stopPropagation()
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              onStartRenameFolder(f)
+                            }}
+                            className="rounded p-1 text-[color:var(--documents-el-muted)] opacity-0 transition-all hover:bg-black/[0.04] hover:text-[color:var(--documents-el-accent)] group-hover:opacity-100 dark:hover:bg-white/[0.06]"
+                            title="Rename folder"
+                            aria-label={`Rename folder ${f.data.name}`}
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            data-testid={`delete-folder-${f.recordId}`}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              if (
+                                confirm(
+                                  `Delete folder “${f.data.name}”? Documents inside will move to uncategorized.`,
+                                )
+                              ) {
+                                void onDeleteFolder(f.recordId)
+                              }
+                            }}
+                            className="rounded p-1 text-[color:var(--documents-el-muted)] opacity-0 transition-all hover:bg-red-500/10 hover:text-red-600 group-hover:opacity-100"
+                            title="Delete folder"
+                            aria-label={`Delete folder ${f.data.name}`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </span>
+                      ) : undefined
                     }
                   />
                 ),
               )}
 
-              {addingFolder ? (
-                <div className="py-1">
-                  <input
-                    autoFocus
-                    value={newFolderName}
-                    onChange={(e) => setNewFolderName(e.target.value)}
-                    onBlur={() => void submitNewFolder()}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') void submitNewFolder()
-                      if (e.key === 'Escape') {
-                        setAddingFolder(false)
-                        setNewFolderName('')
+              {canManageFolders &&
+                (addingFolder ? (
+                  <div className="py-1">
+                    <input
+                      autoFocus
+                      value={newFolderName}
+                      onChange={(e) => setNewFolderName(e.target.value)}
+                      onBlur={() => void submitNewFolder()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void submitNewFolder()
+                        if (e.key === 'Escape') {
+                          setAddingFolder(false)
+                          setNewFolderName('')
+                        }
+                      }}
+                      placeholder="Folder name"
+                      data-testid="new-folder-input"
+                      className="w-full rounded-md border px-2 py-1.5 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+                      style={{
+                        borderColor: 'var(--documents-el-line)',
+                        backgroundColor: 'var(--documents-el-bg)',
+                        color: 'var(--documents-el-text)',
+                      }}
+                    />
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    data-testid="new-folder-btn"
+                    onClick={() => {
+                      if (!collapsed) {
+                        setAddingFolder(true)
+                        return
                       }
+                      const name = window.prompt('Folder name')?.trim()
+                      if (name) void onCreateFolder(name)
                     }}
-                    placeholder="Folder name"
-                    data-testid="new-folder-input"
-                    className="w-full rounded-md border px-2 py-1.5 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
-                    style={{
-                      borderColor: 'var(--documents-el-line)',
-                      backgroundColor: 'var(--documents-el-bg)',
-                      color: 'var(--documents-el-text)',
-                    }}
-                  />
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  data-testid="new-folder-btn"
-                  onClick={() => {
-                    if (!collapsed) {
-                      setAddingFolder(true)
-                      return
-                    }
-                    const name = window.prompt('Folder name')?.trim()
-                    if (name) void onCreateFolder(name)
-                  }}
-                  title={collapsed ? 'New folder' : undefined}
-                  className="flex h-9 w-full min-w-0 items-center gap-0 rounded-md pl-0.5 pr-0 text-left text-[13px] text-[color:var(--documents-el-muted)] transition-colors hover:bg-black/[0.04] hover:text-[color:var(--documents-el-accent)] dark:hover:bg-white/[0.06]"
-                >
-                  <span className="flex h-9 w-10 shrink-0 items-center justify-center" aria-hidden>
-                    <FolderPlus className="h-3.5 w-3.5 shrink-0" />
-                  </span>
-                  <span className={collapsed ? 'sr-only' : 'min-w-0 flex-1 truncate pr-2'}>
-                    New folder
-                  </span>
-                </button>
-              )}
+                    title={collapsed ? 'New folder' : undefined}
+                    className="flex h-9 w-full min-w-0 items-center gap-0 rounded-md pl-0.5 pr-0 text-left text-[13px] text-[color:var(--documents-el-muted)] transition-colors hover:bg-black/[0.04] hover:text-[color:var(--documents-el-accent)] dark:hover:bg-white/[0.06]"
+                  >
+                    <span
+                      className="flex h-9 w-10 shrink-0 items-center justify-center"
+                      aria-hidden
+                    >
+                      <FolderPlus className="h-3.5 w-3.5 shrink-0" />
+                    </span>
+                    <span className={collapsed ? 'sr-only' : 'min-w-0 flex-1 truncate pr-2'}>
+                      New folder
+                    </span>
+                  </button>
+                ))}
             </div>
           </div>
         </nav>

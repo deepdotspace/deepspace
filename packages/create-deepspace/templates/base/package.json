@@ -21,7 +21,6 @@
   "scripts": {
     "dev": "deepspace dev start",
     "build": "vite build",
-    "preview": "vite preview",
     "login": "deepspace auth login",
     "deploy": "deepspace deploy",
     "undeploy": "deepspace app undeploy",
@@ -41,7 +40,7 @@
     "@base-ui/react": "~1.6.0",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.0",
-    "ai": "^5.0.0",
+    "ai": "5.0.222",
     "deepspace": "workspace:*",
     "hono": "^4.7.0",
     "lucide-react": "^0.460.0",

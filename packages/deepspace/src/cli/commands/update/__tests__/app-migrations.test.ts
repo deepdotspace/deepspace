@@ -10,6 +10,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   APP_MIGRATIONS_MANIFEST,
@@ -20,6 +21,10 @@ import {
 
 const MIGRATION_ID = '2026-08-worker-owned-not-found'
 const IDENTITY_MIGRATION_ID = '2026-08-secure-room-boundaries'
+const TEMPLATE_ROOT = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../../../../../create-deepspace/templates/base',
+)
 
 /** The fallback the 0.13 scaffold shipped, verbatim. */
 const OLD_FALLBACK = `export function registerStaticRoutes(app: Hono<AppContext>): void {
@@ -78,6 +83,29 @@ function read(dir: string, path: string): string {
 }
 
 describe('worker-owned not_found migration', () => {
+  it('recognizes the current secure scaffold without migration stamps', () => {
+    const dir = makeRepo({
+      'wrangler.toml': readFileSync(join(TEMPLATE_ROOT, 'wrangler.toml'), 'utf8'),
+      'worker.ts': readFileSync(join(TEMPLATE_ROOT, 'worker.ts'), 'utf8'),
+      'src/server/http-routes.ts': readFileSync(
+        join(TEMPLATE_ROOT, 'src/server/http-routes.ts'),
+        'utf8',
+      ),
+      'src/server/realtime-routes.ts': readFileSync(
+        join(TEMPLATE_ROOT, 'src/server/realtime-routes.ts'),
+        'utf8',
+      ),
+    })
+
+    const plan = planAppMigrations(dir)
+    expect(plan.blockers).toEqual([])
+    expect(plan.pending).toEqual([
+      expect.objectContaining({ id: MIGRATION_ID, files: [], replacements: 0 }),
+      expect.objectContaining({ id: IDENTITY_MIGRATION_ID, files: [], replacements: 0 }),
+    ])
+    expect(plan.changedFiles).toEqual([APP_MIGRATIONS_MANIFEST])
+  })
+
   it('carries a stock 0.13 app to worker-owned misses', () => {
     const dir = makeRepo({
       'wrangler.toml': OLD_WRANGLER,
@@ -615,5 +643,84 @@ describe('migration manifest', () => {
     writeFileSync(join(dir, 'wrangler.toml'), `${OLD_WRANGLER}# edited after planning\n`)
 
     expect(() => applyAppMigrationPlan(dir, plan)).toThrow('changed after planning')
+  })
+})
+
+/**
+ * Line endings are a property of the CHECKOUT, not of the app.
+ *
+ * Git for Windows sets `core.autocrlf=true` system-wide and scaffolded apps
+ * ship no `.gitattributes`, so every Windows clone lands CRLF. The seams are LF
+ * template literals matched by exact substring, so a CRLF tree once declined
+ * every multi-line migration AND reported the untouched file as customized.
+ *
+ * Parametrized rather than written twice so it covers every migration added to
+ * SOURCE_MIGRATIONS from here on. Bytes are written directly, so this proves
+ * the behaviour on ordinary Linux CI — no Windows runner required.
+ */
+describe.each([
+  ['LF', '\n'],
+  ['CRLF', '\r\n'],
+])('a %s working tree migrates identically', (_label, eol) => {
+  const withEol = (source: string): string => source.replaceAll('\n', eol)
+
+  /** A stock 0.18 app: both room-boundary seams present, neither secured. */
+  const stockApp = (): Record<string, string> => ({
+    [APP_MIGRATIONS_MANIFEST]: withEol(`${JSON.stringify([MIGRATION_ID])}\n`),
+    'src/server/realtime-routes.ts': withEol(`function authenticatedRoomRequest() {}\n`),
+    'worker.ts': withEol(`import type { DOBindings, DOManifest, Job, JobContext } from 'deepspace/worker'
+export class AppJobRoom extends JobRoom<Env> {
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env)
+  }
+}
+`),
+    'src/server/http-routes.ts': withEol(`import type { AppContext, Env } from '../../worker.js'
+export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
+  app.all('/api/debug/*', async (c) => {
+    if (c.env.ALLOW_DEBUG_ROUTES !== 'true') {
+      return c.notFound()
+    }
+    const stub = c.env.RECORD_ROOMS.get(
+      c.env.RECORD_ROOMS.idFromName('app:test'),
+    )
+    return stub.fetch(c.req.raw)
+  })
+}
+`),
+  })
+
+  it('plans the same edits and reports no blockers', () => {
+    const plan = planAppMigrations(makeRepo(stockApp()))
+
+    expect(plan.blockers).toEqual([])
+    expect(plan.pending).toEqual([
+      expect.objectContaining({
+        id: IDENTITY_MIGRATION_ID,
+        files: ['src/server/http-routes.ts', 'worker.ts'],
+        replacements: 4,
+      }),
+    ])
+  })
+
+  it('applies the guards and leaves the file in ONE line-ending style', () => {
+    const dir = makeRepo(stockApp())
+    applyAppMigrationPlan(dir, planAppMigrations(dir))
+
+    const worker = read(dir, 'worker.ts')
+    expect(worker).toContain('authorizeWrite: async (user) =>')
+    // The inserted lines must adopt the file's endings — a migration that
+    // splices LF into a CRLF file leaves a mixed-ending file behind.
+    expect(worker.split(eol).join('')).not.toMatch(/[\r\n]/)
+  })
+
+  it('re-planning after apply finds nothing left to do', () => {
+    const dir = makeRepo(stockApp())
+    applyAppMigrationPlan(dir, planAppMigrations(dir))
+
+    const replan = planAppMigrations(dir)
+    expect(replan.changedFiles).toEqual([])
+    expect(replan.blockers).toEqual([])
+    expect(readAppliedAppMigrations(dir)).toContain(IDENTITY_MIGRATION_ID)
   })
 })

@@ -23,6 +23,7 @@
 import * as p from '@clack/prompts'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import sdkPackage from '../../../package.json'
 import { hasWranglerConfig } from '../lib/wrangler-env'
 import { assertSyncableRepo } from '../lib/git/repository'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
@@ -34,6 +35,7 @@ import {
 
 const REGISTRY = 'https://registry.npmjs.org/deepspace/latest'
 const DOCS_URL = 'https://documentation.deep.space/cli-reference/commands'
+const COMPATIBLE_AI_VERSION = sdkPackage.dependencies.ai
 
 /**
  * The oldest version this command will carry forward in one step. Below it the
@@ -78,13 +80,20 @@ export function readAppSdkVersion(appDir: string): string | null {
   return parsed.dependencies?.deepspace ?? null
 }
 
-/** Point the app's manifest at `version`; the install itself is the caller's. */
-function pinSdkVersion(appDir: string, version: string): boolean {
+/** Point the app's manifest at one compatible SDK/AI dependency set. */
+export function pinSdkVersion(appDir: string, version: string): boolean {
   const path = join(appDir, 'package.json')
   const source = readFileSync(path, 'utf8')
-  const updated = source.replace(
+  let updated = source.replace(
     /("deepspace"\s*:\s*")[^"]+(")/,
     (_match, head: string, tail: string) => `${head}^${version}${tail}`,
+  )
+  // Apps use AI SDK types directly for tools and actions. A second `ai` minor
+  // can carry incompatible branded types even though both packages compile on
+  // their own, so update the existing direct dependency with the SDK.
+  updated = updated.replace(
+    /("ai"\s*:\s*")[^"]+(")/,
+    (_match, head: string, tail: string) => `${head}${COMPATIBLE_AI_VERSION}${tail}`,
   )
   if (updated === source) return false
   writeFileSync(path, updated)

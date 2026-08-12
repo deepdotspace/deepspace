@@ -99,13 +99,19 @@ function fmtDate(iso: string | null | undefined): string {
  */
 async function confirm(message: string): Promise<boolean> {
   process.stdout.write(`${message} [y/N] `)
-  return new Promise((resolve) => {
+  const answer = await new Promise<string>((resolve) => {
     process.stdin.setEncoding('utf-8')
-    process.stdin.once('data', (data) => {
-      const answer = data.toString().trim().toLowerCase()
-      resolve(answer === 'y' || answer === 'yes')
-    })
+    process.stdin.once('data', (data) => resolve(data.toString().trim().toLowerCase()))
   })
+  // `once('data')` put stdin into flowing mode — a ref'd handle that keeps the
+  // naturally-exiting process (lib/command.ts finishCommand) alive forever
+  // after the command finishes. Release it HERE, after the await: a pause()
+  // inside the 'data' handler does not stick because the stream is re-resumed
+  // when the handler returns (verified by measurement). Assumes one prompt per
+  // command run (`buy` and `detach` are separate commands); a second
+  // sequential prompt after this release would need re-verification.
+  process.stdin.pause()
+  return answer === 'y' || answer === 'yes'
 }
 
 /** True when asking a question would hang the caller (agent, pipe, `--json`). */

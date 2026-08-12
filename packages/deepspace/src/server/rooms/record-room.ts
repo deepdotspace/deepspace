@@ -491,6 +491,7 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
       sql: this.sql,
       state: this.state,
       schemaRegistry: this.schemaRegistry,
+      getPermissionContext: () => this.getPermissionContext(),
       send: (ws: WebSocket, msg: ServerMessage) => this.send(ws, msg),
     }
   }

@@ -23,6 +23,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { getAuthToken } from '../../auth'
+import { useRecordAuth } from '../context'
 import { wsLog } from '../ws-log'
 import { MSG } from '@/shared/protocol/constants'
 import { clientBuild, dispatch, encode, type ServerMessage } from '@/shared/protocol/messages'
@@ -52,11 +53,15 @@ export interface UsePresenceRoomResult {
 // ============================================================================
 
 export function usePresenceRoom(scopeId: string): UsePresenceRoomResult {
+  const auth = useRecordAuth()
+  const tokenProvider = auth?.getAuthToken ?? getAuthToken
   const [peers, setPeers] = useState<PresencePeerClient[]>([])
   const [connected, setConnected] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
+    setConnected(false)
+    setPeers([])
     let ws: WebSocket | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let alive = true
@@ -64,7 +69,8 @@ export function usePresenceRoom(scopeId: string): UsePresenceRoomResult {
     const connect = async () => {
       if (!alive) return
 
-      const token = await getAuthToken()
+      const token = await tokenProvider()
+      if (!alive) return
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const baseUrl = `${protocol}//${window.location.host}`
       const url = new URL(`/ws/presence/${encodeURIComponent(scopeId)}`, baseUrl)
@@ -125,7 +131,7 @@ export function usePresenceRoom(scopeId: string): UsePresenceRoomResult {
       }
       wsRef.current = null
     }
-  }, [scopeId])
+  }, [scopeId, tokenProvider])
 
   const updateState = useCallback((state: Record<string, unknown>) => {
     const ws = wsRef.current

@@ -43,8 +43,9 @@ export function createSpinner(): Spinner {
 }
 
 /**
- * Stop whatever spinner is currently painting, if any. Call before
- * process.exit() on an error path so a live spinner never tears down mid-write
+ * Stop whatever spinner is currently painting, if any. Call on every exit
+ * path: a live spinner's repaint interval would keep a naturally-exiting
+ * process alive, and its exit-time frame tears down mid-write on Windows
  * (see activeSpinner above). Idempotent and safe when nothing is active.
  */
 export function stopActiveSpinner(): void {

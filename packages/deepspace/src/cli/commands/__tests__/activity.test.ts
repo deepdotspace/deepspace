@@ -19,7 +19,12 @@ const ev = (partial: Partial<RemoteActivityEvent>): RemoteActivityEvent => ({
 const OID = 'a'.repeat(40)
 const OTHER = 'b'.repeat(40)
 
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.restoreAllMocks()
+  // The runtime records exit codes on process.exitCode now; clear it so a
+  // refusal-path test cannot poison the vitest worker's own exit code.
+  process.exitCode = undefined
+})
 
 describe('landIndex + formatEvent land labeling', () => {
   const landed = ev({
@@ -72,25 +77,19 @@ describe('activity --since/--limit validation fires before any network', () => {
   }
   const drive = async (args: Record<string, unknown>) => {
     const logs: string[] = []
-    const exits: number[] = []
     const logSpy = vi.spyOn(console, 'log').mockImplementation(((s?: unknown) => {
       logs.push(String(s))
     }) as never)
     const errSpy = vi.spyOn(console, 'error').mockImplementation((() => {}) as never)
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((c?: number) => {
-      exits.push(Number(c ?? 0))
-      throw new Error(`exit:${c ?? ''}`)
-    }) as never)
+    process.exitCode = undefined
     try {
       await cmd.run({ args })
-    } catch {
-      // expected: the mocked exit throws to unwind
     } finally {
       logSpy.mockRestore()
       errSpy.mockRestore()
-      exitSpy.mockRestore()
     }
-    return { logs, exits }
+    // The runtime records the code instead of calling process.exit.
+    return { logs, exits: [process.exitCode] as Array<number | undefined> }
   }
 
   it('rejects a fractional --since with invalid_cursor (the flagship malformed-cursor case)', async () => {
@@ -121,24 +120,20 @@ describe('one-shot activity pagination', () => {
     vi.spyOn(actorLabelsModule, 'actorLabels').mockResolvedValue(new Map())
     vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({ listActivity } as never)
     vi.spyOn(console, 'log').mockImplementation(() => {})
-    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
-      throw new Error(`exit:${code ?? 0}`)
-    }) as never)
 
     const cmd = activity as unknown as {
       run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
     }
-    await expect(
-      cmd.run({
-        args: {
-          app: 'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
-          follow: false,
-          json: false,
-          limit: '1',
-          since: '0',
-        },
-      }),
-    ).rejects.toThrow('exit:0')
+    await cmd.run({
+      args: {
+        app: 'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
+        follow: false,
+        json: false,
+        limit: '1',
+        since: '0',
+      },
+    })
+    expect(process.exitCode).toBe(0)
     expect(listActivity).toHaveBeenCalledTimes(1)
   })
 })

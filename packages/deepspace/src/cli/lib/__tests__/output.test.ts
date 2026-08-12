@@ -6,7 +6,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { defineDeepspaceCommand, Refusal } from '../command'
 import { assertExecutableAction, cliAction, resolveActionArgv } from '../output'
 
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.restoreAllMocks()
+  // The runtime records exit codes on process.exitCode now; clear it so a
+  // refusal-path test cannot poison the vitest worker's own exit code.
+  process.exitCode = undefined
+})
 
 /** A throwaway package tree: <root>/node_modules/<name>/dist/cli.js + a bin symlink. */
 function fakeCliInstall(packageName: string): { entry: string; binLink: string } {
@@ -64,16 +69,13 @@ describe('structured CLI actions', () => {
       vi.spyOn(process, 'argv', 'get').mockReturnValue(['node', binLink])
       const logs: string[] = []
       vi.spyOn(console, 'log').mockImplementation((line?: unknown) => logs.push(String(line)))
-      vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
-        throw new Error(`exit:${code ?? 0}`)
-      }) as never)
       const command = defineDeepspaceCommand({
         meta: { name: 'success-action-test', description: 'test only' },
         async run() {
           return { data: {}, action: { cwd: process.cwd(), argv: ['deepspace', 'pull'] } }
         },
       }) as CommandDef & { run: (ctx: { args: Record<string, unknown> }) => Promise<unknown> }
-      await expect(command.run({ args: { json: true } })).rejects.toThrow('exit:0')
+      await command.run({ args: { json: true } })
       expect(JSON.parse(logs[0]).action.argv).toEqual([process.execPath, entry, 'pull'])
     })
 
@@ -101,23 +103,24 @@ describe('structured CLI actions', () => {
 })
 
 describe('shared command output', () => {
-  it('flushes queued large JSON before exiting', async () => {
+  // The flush contract, inverted: the runtime used to drain stdout and then
+  // process.exit(), but on Windows any exit() after a successful built-in
+  // fetch() aborts the process (libuv `!(handle->flags & UV_HANDLE_CLOSING)`,
+  // src/win/async.c, exit code 0xC0000409) AFTER the result printed. What
+  // this pins now: even with a large payload QUEUED on stdout, the runtime
+  // never calls process.exit — it records process.exitCode and returns, and
+  // Node itself drains the queued pipe write (an active libuv handle) before
+  // the loop empties.
+  it('records the exit code without process.exit even with queued large JSON', async () => {
     const payload = 'x'.repeat(128 * 1024)
-    const writes: string[] = []
     const fakeStdout = {
       writableLength: payload.length,
-      write: vi.fn((chunk: string, callback: () => void) => {
-        writes.push(chunk)
-        callback()
-        return true
-      }),
+      write: vi.fn(() => true),
     }
     vi.spyOn(process, 'stdout', 'get').mockReturnValue(fakeStdout as never)
     const logs: string[] = []
     vi.spyOn(console, 'log').mockImplementation((line?: unknown) => logs.push(String(line)))
-    const exits: number[] = []
-    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
-      exits.push(code ?? 0)
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`exit:${code ?? 0}`)
     }) as never)
     const command = defineDeepspaceCommand({
@@ -129,9 +132,38 @@ describe('shared command output', () => {
       run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
     }
 
-    await expect(command.run({ args: { json: true } })).rejects.toThrow('exit:0')
+    await command.run({ args: { json: true } })
     expect(JSON.parse(logs[0])).toEqual({ ok: true, payload })
-    expect(writes).toEqual([''])
-    expect(exits).toEqual([0])
+    expect(exitSpy).not.toHaveBeenCalled()
+    expect(fakeStdout.write).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(0)
+  })
+
+  // Regression guard for the Windows fetch-abort: the runtime must never call
+  // process.exit on ANY outcome. The refusal path records 2 ("your turn") the
+  // same way the success path records 0.
+  it('never calls process.exit on the refusal path either', async () => {
+    const logs: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line?: unknown) => logs.push(String(line)))
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`exit:${code ?? 0}`)
+    }) as never)
+    const command = defineDeepspaceCommand({
+      meta: { name: 'refusal-exit-test', description: 'test only' },
+      async run() {
+        throw new Refusal('a local step remains', 'demo_slug', { actionRequired: true })
+      },
+    }) as CommandDef & {
+      run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+    }
+
+    await command.run({ args: { json: true } })
+    expect(exitSpy).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(2)
+    expect(JSON.parse(logs[0])).toMatchObject({
+      ok: false,
+      code: 'demo_slug',
+      actionRequired: true,
+    })
   })
 })

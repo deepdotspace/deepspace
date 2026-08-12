@@ -72,11 +72,16 @@ function makeSql(db: Database.Database): SqlStorage {
   } as unknown as SqlStorage
 }
 
-function makeState(db: Database.Database): {
+function makeState(
+  db: Database.Database,
+  webSockets: WebSocket[] = [],
+): {
   state: DurableObjectState
   alarms: number[]
+  settled(): Promise<void>
 } {
   const alarms: number[] = []
+  const pending: Promise<unknown>[] = []
   const state = {
     storage: {
       sql: makeSql(db),
@@ -86,11 +91,20 @@ function makeState(db: Database.Database): {
     },
     setWebSocketAutoResponse() {},
     getWebSockets(): WebSocket[] {
-      return []
+      return webSockets
+    },
+    waitUntil(promise: Promise<unknown>) {
+      pending.push(promise)
     },
     acceptWebSocket() {},
   } as unknown as DurableObjectState
-  return { state, alarms }
+  return {
+    state,
+    alarms,
+    settled: async () => {
+      await Promise.all(pending)
+    },
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -105,17 +119,20 @@ class TestJobRoom extends JobRoom {
   /** Per-socket sends (sendTo). Captured so tests can assert that the
    * enqueue ack with `requestId` is delivered only to the originator. */
   public directSends: ServerMessage[] = []
+  public directRecipients: WebSocket[] = []
   public handler: Handler = () => undefined
 
   protected async onJob(job: Job, ctx: JobContext) {
     return await this.handler(job, ctx)
   }
 
-  protected broadcast(message: ServerMessage): void {
+  protected broadcast(message: ServerMessage, exclude?: WebSocket): void {
     this.broadcasts.push(message)
+    super.broadcast(message, exclude)
   }
 
-  protected sendTo(_ws: WebSocket, message: ServerMessage): void {
+  protected sendTo(ws: WebSocket, message: ServerMessage): void {
+    this.directRecipients.push(ws)
     this.directSends.push(message)
   }
 
@@ -200,6 +217,49 @@ describe('JobRoom — authorization', () => {
     })
   })
 
+  it('reauthorizes every live job payload after access is revoked', async () => {
+    const db = new Database(':memory:')
+    const allowedUsers = new Set(['allowed'])
+    const allowed = {
+      deserializeAttachment: () => ({ userId: 'allowed', userName: '', userEmail: '' }),
+    } as unknown as WebSocket
+    const denied = {
+      deserializeAttachment: () => ({ userId: 'denied', userName: '', userEmail: '' }),
+    } as unknown as WebSocket
+    const { state, settled } = makeState(db, [allowed, denied])
+    const room = new TestJobRoom(
+      state,
+      {},
+      {
+        authorizeRead: (user) => allowedUsers.has(user.userId),
+      },
+    )
+    room.init()
+    room.enqueue('secret', { token: 'do-not-leak' })
+    await settled()
+
+    expect(room.directRecipients).toEqual([allowed])
+    room.directSends = []
+    room.directRecipients = []
+
+    allowedUsers.clear()
+    room.enqueue('new-secret', { token: 'still-private' })
+    await settled()
+    expect(room.directRecipients).toEqual([])
+
+    const attachment = await room.connect({
+      userId: 'anon-1',
+      userName: 'Anonymous',
+      userEmail: '',
+      role: 'viewer',
+    })
+    expect(attachment).toMatchObject({ canWrite: false })
+    const snapshot = room.directSends.find(
+      (message) => message.type === MSG.JOB_UPDATE && jobPayload(message).kind === 'snapshot',
+    )
+    expect(snapshot && jobPayload(snapshot)).toMatchObject({ kind: 'snapshot', jobs: [] })
+  })
+
   it('rechecks a denied connection so promotion can authorize its next mutation', async () => {
     const db = new Database(':memory:')
     let canWrite = false
@@ -228,7 +288,6 @@ describe('JobRoom — authorization', () => {
     expect(db.prepare('SELECT COUNT(*) AS count FROM jobs').get()).toEqual({ count: 1 })
   })
 })
-
 describe('JobRoom — success path', () => {
   it('enqueues, runs onJob, and marks the row succeeded with the result', async () => {
     const db = new Database(':memory:')

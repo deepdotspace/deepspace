@@ -2,14 +2,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   exists: vi.fn<(path: string) => boolean>(),
-  read: vi.fn(() => 'session'),
+  read: vi.fn<(path: string) => string>(() => 'session'),
   exchange: vi.fn(async () => null as string | null),
+  write: vi.fn(),
+  chmod: vi.fn(),
 }))
 
 vi.mock('node:fs', () => ({
   existsSync: mocks.exists,
   readFileSync: mocks.read,
-  writeFileSync: vi.fn(),
+  writeFileSync: mocks.write,
+  chmodSync: mocks.chmod,
   mkdirSync: vi.fn(),
 }))
 vi.mock('node:os', () => ({ homedir: () => '/tmp/deepspace-auth-action-test' }))
@@ -22,6 +25,8 @@ beforeEach(() => {
   mocks.exists.mockReset()
   mocks.read.mockClear()
   mocks.exchange.mockClear()
+  mocks.write.mockClear()
+  mocks.chmod.mockClear()
 })
 
 const loginRefusal = {
@@ -44,5 +49,15 @@ describe('ensureToken recovery action', () => {
 
     await expect(ensureToken()).rejects.toMatchObject(loginRefusal)
     expect(mocks.exchange).toHaveBeenCalledOnce()
+  })
+
+  it('tightens the refreshed token file even when it already exists', async () => {
+    mocks.exists.mockImplementation((path) => path === SESSION_PATH || path === TOKEN_PATH)
+    mocks.read.mockImplementation((path) => (path === SESSION_PATH ? 'session' : 'expired-token'))
+    mocks.exchange.mockResolvedValueOnce('fresh-token')
+
+    await expect(ensureToken()).resolves.toBe('fresh-token')
+    expect(mocks.write).toHaveBeenCalledWith(TOKEN_PATH, 'fresh-token', { mode: 0o600 })
+    expect(mocks.chmod).toHaveBeenCalledWith(TOKEN_PATH, 0o600)
   })
 })

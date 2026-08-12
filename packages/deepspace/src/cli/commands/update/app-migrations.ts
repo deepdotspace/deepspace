@@ -130,7 +130,11 @@ export function planAppMigrations(appDir: string): AppMigrationPlan {
     }
     if (!stat.isFile() || stat.isSymbolicLink()) continue
 
-    const before = readRegularFile(absolutePath)
+    // Match against LF text, but keep the checkout's own bytes as the snapshot:
+    // a CRLF working tree is what Git hands every Windows clone, not evidence
+    // that the author edited the file. See normalizeEol.
+    const checkout = readRegularFile(absolutePath)
+    const before = normalizeEol(checkout)
     let after = before
     for (const migration of pendingMigrations) {
       const result = migration.transform(after, repoPath)
@@ -148,7 +152,12 @@ export function planAppMigrations(appDir: string): AppMigrationPlan {
       }
       blockers.push(...migration.findBlockers(after, repoPath))
     }
-    if (after !== before) edits.push({ path: repoPath, before, after })
+    // `before` is the raw checkout so the apply-time drift check stays
+    // byte-exact; `after` is handed back in the checkout's own endings so a
+    // CRLF file is not rewritten line-for-line.
+    if (after !== before) {
+      edits.push({ path: repoPath, before: checkout, after: restoreEol(after, checkout) })
+    }
   }
 
   const pending = pendingMigrations.map((migration) => {
@@ -194,6 +203,28 @@ export function applyAppMigrationPlan(appDir: string, plan: AppMigrationPlan): v
     }
   }
   for (const edit of plan.edits) writeRegularFile(join(repo, edit.path), edit.before, edit.after)
+}
+
+/**
+ * Line endings are a checkout artifact, never a customization.
+ *
+ * Git for Windows ships `core.autocrlf=true` at system level and scaffolded
+ * apps carry no `.gitattributes`, so every Windows clone materializes CRLF.
+ * The seams below are LF template literals matched by exact substring, so
+ * without this every multi-line migration declined on Windows AND reported the
+ * stock file as customized — an exit-2 blocker naming code the author never
+ * touched, which then never stamped the manifest and re-reported forever.
+ *
+ * Normalizing here rather than in each seam keeps every future migration
+ * ending-oblivious: authors go on writing plain LF constants.
+ */
+function normalizeEol(source: string): string {
+  return source.replaceAll('\r\n', '\n')
+}
+
+/** Give a transformed file back the line endings its checkout actually uses. */
+function restoreEol(source: string, checkout: string): string {
+  return checkout.includes('\r\n') ? source.replaceAll('\n', '\r\n') : source
 }
 
 /** Read through a descriptor and prove the path still names that regular file. */
@@ -361,6 +392,8 @@ ${SECURE_JOB_ROOM_CONSTRUCTOR}`,
 ]
 
 const HTTP_ROLE_IMPORT = `import { resolveAppRole } from 'deepspace/worker'`
+const HTTP_ROLE_IMPORT_PATTERN =
+  /\bimport\s*\{[^}]*\bresolveAppRole\b[^}]*\}\s*from\s*(['"])deepspace\/worker\1/
 const HTTP_ROLE_IMPORT_SEAM = `import type { AppContext, Env } from '../../worker.js'`
 const DEBUG_ROUTE_SEAM = `  app.all('/api/debug/*', async (c) => {
     if (c.env.ALLOW_DEBUG_ROUTES !== 'true') {
@@ -402,11 +435,15 @@ function secureDebugRouteOccurrences(source: string): number {
   )
 }
 
+function httpRoleImportOccurrences(source: string): number {
+  return source.match(new RegExp(HTTP_ROLE_IMPORT_PATTERN.source, 'g'))?.length ?? 0
+}
+
 function hasSecureDebugRoute(source: string): boolean {
   return (
     debugRouteOccurrences(source) === 1 &&
     secureDebugRouteOccurrences(source) === 1 &&
-    occurrences(source, HTTP_ROLE_IMPORT) === 1
+    httpRoleImportOccurrences(source) === 1
   )
 }
 
@@ -463,7 +500,7 @@ function migrateDebugRouteAuthorization(source: string): SourceTransformResult {
   if (
     debugRouteOccurrences(source) !== 1 ||
     matchingRoutes.length !== 1 ||
-    occurrences(source, HTTP_ROLE_IMPORT) !== 0 ||
+    httpRoleImportOccurrences(source) !== 0 ||
     occurrences(source, HTTP_ROLE_IMPORT_SEAM) !== 1
   ) {
     return { source, replacements: 0 }
@@ -647,9 +684,12 @@ function findWorkerOwnedNotFoundBlockers(source: string, file: string): AppMigra
   const blockers: AppMigrationBlocker[] = []
   const lines = source.split('\n')
   for (const [index, line] of lines.entries()) {
-    // The quote has to sit against the leading slash: a build config naming
-    // './index.html' is not this worker serving a shell.
-    if (!/['"`]\/index\.html/.test(line)) continue
+    // Match the two legacy executable shapes this migration owns. Plain text
+    // in comments and build config entries such as './index.html' are not a
+    // Worker shell fallback.
+    if (!/(?:\burl\.pathname\s*=\s*|\bnew\s+URL\s*\(\s*)['"`]\/index\.html/.test(line)) {
+      continue
+    }
     blockers.push({
       migrationId: WORKER_OWNED_NOT_FOUND_MIGRATION_ID,
       file,

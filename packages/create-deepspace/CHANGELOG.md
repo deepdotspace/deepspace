@@ -1,5 +1,25 @@
 # create-deepspace
 
+## 0.19.1
+
+### Patch Changes
+
+- Enforce `users` read permissions in user-list responses and `writableFields`
+  on record creation. Reauthorize job snapshots and live events so revoked users
+  cannot retain queue access. Generated canvas and cron routes forward current
+  app roles without removing anonymous read-only access. Generic authenticated
+  Yjs rooms remain available when no `documents` schema exists, while a missing
+  document in a documents-backed app fails closed. Existing apps can apply the
+  documented app-owned route edits manually; `deepspace app update` does not
+  rewrite them.
+- Fix the clear post-release AX issues: avoid anonymous presence token failures,
+  remove direct-build secret artifacts and secure existing credential files, make the
+  Documents feature honor mutation readiness and confirmed ACL writes, and pin
+  the AI SDK family away from its moderate/high advisory path. Keep anonymous
+  RecordRooms from exposing the user directory, and limit non-admin user lists to
+  the public identity fields required for collaboration. Keep an app's direct AI
+  SDK dependency on the compatible version when `app update` advances DeepSpace.
+
 ## 0.19.0
 
 ### Minor Changes

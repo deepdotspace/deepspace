@@ -29,6 +29,12 @@ export type LibraryNavSelection =
   | { kind: 'uncategorized' }
   | { kind: 'folder'; folderId: string }
 
+/** Record controls are usable only after both the initial query and mutation
+ * transport are ready. Keep that boundary identical across feature pages. */
+export function recordsReadyForMutation(queryStatus: string, mutationsReady: boolean): boolean {
+  return queryStatus === 'ready' && mutationsReady
+}
+
 export function parseDocumentsIdList(raw: string | undefined): string[] {
   if (!raw) return []
   try {

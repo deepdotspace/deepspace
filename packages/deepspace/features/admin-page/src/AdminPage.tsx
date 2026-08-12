@@ -118,11 +118,11 @@ export default function AdminPage() {
 interface UsersPanelProps {
   users: Array<{
     id: string
-    email: string
+    email?: string
     name: string
     imageUrl?: string
     role: string
-    lastSeenAt: string
+    lastSeenAt?: string
   }>
   currentUserId?: string
   onSetRole: (userId: string, role: string) => void
@@ -132,7 +132,7 @@ function UsersPanel({ users, currentUserId, onSetRole }: UsersPanelProps) {
   // Sort users by last seen
   const sortedUsers = useMemo(() => {
     return [...users].sort((a, b) =>
-      new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime()
+      new Date(b.lastSeenAt ?? '').getTime() - new Date(a.lastSeenAt ?? '').getTime()
     )
   }, [users])
 
@@ -163,7 +163,7 @@ function UsersPanel({ users, currentUserId, onSetRole }: UsersPanelProps) {
 
                 <div className="flex items-center gap-3">
                   <p className="text-xs text-muted-foreground">
-                    Last seen: {new Date(user.lastSeenAt).toLocaleDateString()}
+                    Last seen: {user.lastSeenAt ? new Date(user.lastSeenAt).toLocaleDateString() : '—'}
                   </p>
 
                   <div className="flex items-center gap-2">

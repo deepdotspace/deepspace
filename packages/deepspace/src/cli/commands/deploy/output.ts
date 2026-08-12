@@ -1,4 +1,5 @@
 import * as p from '@clack/prompts'
+import { CliExit } from '../../lib/cli-errors'
 import { executableAction, printAction, withSlug, type CliAction } from '../../lib/output'
 
 export interface DeployOutput {
@@ -69,7 +70,11 @@ export function createDeployOutput(json: boolean): DeployOutput {
         else console.error(withSlug(message, code))
         if (action) printAction(action)
       }
-      process.exit(opts.actionRequired ? 2 : 1)
+      // Throw, never process.exit(): deploy has completed fetch() requests by
+      // the time most refusals fire, and exiting after one aborts on Windows
+      // (see lib/command.ts). The sentinel unwinds to wrapCommandErrors →
+      // renderCliError, which records the exit code without re-rendering.
+      throw new CliExit(opts.actionRequired ? 2 : 1)
     },
   }
 }

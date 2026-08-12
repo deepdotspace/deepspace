@@ -8,7 +8,7 @@
  */
 
 import type { Context, Hono } from 'hono'
-import { authenticatedRoomRequest, verifyJwt } from 'deepspace/worker'
+import { authenticatedRoomRequest, resolveAppRole, verifyJwt } from 'deepspace/worker'
 import type { JwtVerifierConfig, VerifyResult } from 'deepspace/worker'
 import type { AppContext, Env } from '../../worker.js'
 
@@ -18,7 +18,7 @@ function jwtConfig(env: Env): JwtVerifierConfig {
 
 function wsRoute(
   doNamespace: (env: Env) => DurableObjectNamespace,
-  extraIdentity?: (auth: VerifyResult) => { role?: string },
+  extraIdentity?: (auth: VerifyResult, env: Env) => { role?: string } | Promise<{ role?: string }>,
 ) {
   return async (c: Context<AppContext>) => {
     const id = c.req.param('roomId') ?? c.req.param('docId') ?? c.req.param('scopeId')
@@ -31,11 +31,10 @@ function wsRoute(
       auth = (await verifyJwt(jwtConfig(c.env), token)).result
       if (!auth) return new Response('Unauthorized', { status: 401 })
     }
-
     const roomRequest = authenticatedRoomRequest(
       c.req.raw,
       auth,
-      auth ? extraIdentity?.(auth) : undefined,
+      auth ? await extraIdentity?.(auth, c.env) : undefined,
     )
 
     const namespace = doNamespace(c.env)
@@ -92,10 +91,7 @@ async function getDocumentForAccess(env: Env, docId: string): Promise<DocumentAc
     if (json.success && json.data?.record?.data) {
       return { kind: 'found', doc: json.data.record.data }
     }
-    if (
-      json.error === 'Record not found' ||
-      json.error?.startsWith('Schema not registered for collection: documents')
-    ) {
+    if (json.error?.startsWith('Schema not registered for collection: documents')) {
       return { kind: 'not-docs-room' }
     }
     return { kind: 'error' }
@@ -150,7 +146,7 @@ export function registerRealtimeRoutes(app: Hono<AppContext>): void {
     '/ws/canvas/:docId',
     wsRoute(
       (env) => env.CANVAS_ROOMS,
-      () => ({ role: 'member' }),
+      async (auth, env) => ({ role: await resolveAppRole(env, auth.userId) }),
     ),
   )
 
@@ -163,9 +159,9 @@ export function registerRealtimeRoutes(app: Hono<AppContext>): void {
     '/ws/cron/:roomId',
     wsRoute(
       (env) => env.CRON_ROOMS,
-      // Authenticated users can trigger/pause/resume. Anonymous connections
+      // Authenticated users get their current app role. Anonymous connections
       // have no role and CronRoom enforces them as read-only viewers.
-      () => ({ role: 'member' }),
+      async (auth, env) => ({ role: await resolveAppRole(env, auth.userId) }),
     ),
   )
 

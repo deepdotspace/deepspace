@@ -287,8 +287,16 @@ export default defineDeepspaceCommand({
     // line has no other signal, so silence would hang it for as long as vite
     // stays up. Not fatal — vite may still come up late, and the exit envelope
     // remains authoritative.
+    //
+    // The poller must not outlive vite: the runtime no longer force-exits
+    // (lib/command.ts), so its ref'd probe socket/timer would hold the process
+    // open for up to READINESS_TIMEOUT_MS after a vite that died before the
+    // port ever answered. Aborted on vite close — silently, exactly like the
+    // old process.exit: vite's exit envelope is the caller's signal then.
+    const readiness = new AbortController()
     if (args.json) {
-      void waitForPortListening(port, host, READINESS_TIMEOUT_MS).then((ready) => {
+      void waitForPortListening(port, host, READINESS_TIMEOUT_MS, readiness.signal).then((ready) => {
+        if (readiness.signal.aborted) return
         console.log(
           JSON.stringify(
             ready
@@ -326,6 +334,7 @@ export default defineDeepspaceCommand({
     })
     process.off('SIGINT', stop)
     process.off('SIGTERM', stop)
+    readiness.abort()
     // A signal-terminated vite reports code null — that's Ctrl-C, i.e. the
     // normal way this command ends, so it stays a success.
     if (!devExitSucceeded(code, stopping)) {

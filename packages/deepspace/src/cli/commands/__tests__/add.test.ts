@@ -74,22 +74,19 @@ async function invokeAddJson(
   args: Record<string, unknown>,
 ): Promise<{ exitCode: number; result: Record<string, unknown> }> {
   const logs: string[] = []
-  let exitCode: number | undefined
   const logSpy = vi.spyOn(console, 'log').mockImplementation((line?: unknown) => {
     logs.push(String(line))
   })
-  const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
-    exitCode = code ?? 0
-    throw new Error(`exit:${exitCode}`)
-  }) as never)
   const command = addCommand as unknown as {
     run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
   }
 
   try {
-    await command.run({ args: { ...args, json: true } }).catch((error: unknown) => {
-      if (!(error instanceof Error) || !error.message.startsWith('exit:')) throw error
-    })
+    // The runtime records the code on process.exitCode instead of calling
+    // process.exit (see lib/command.ts).
+    process.exitCode = undefined
+    await command.run({ args: { ...args, json: true } })
+    const exitCode = process.exitCode as number | undefined
     expect(exitCode).toBeDefined()
     expect(logs).toHaveLength(1)
     return {
@@ -97,7 +94,8 @@ async function invokeAddJson(
       result: JSON.parse(logs[0]) as Record<string, unknown>,
     }
   } finally {
-    exitSpy.mockRestore()
+    // Don't let a recorded failure code poison the vitest worker's own exit.
+    process.exitCode = undefined
     logSpy.mockRestore()
   }
 }

@@ -1,5 +1,13 @@
 import * as p from '@clack/prompts'
-import { mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { shQuote } from '../../lib/cli-format'
 import { runGit } from '../../lib/git/process'
@@ -229,7 +237,13 @@ export interface CleanupOutcome {
   branchDeleted: string | null
   mainDir?: string
   error?: string
+  /** A worktree Git still has registered — `git worktree remove` remains the remedy. */
   worktreeDir: string | null
+  /** A directory Git no longer tracks whose files a failed removal left behind
+   *  (`git worktree remove` is not atomic everywhere: on Windows one locked
+   *  file can make git deregister the worktree and then fail to delete its
+   *  files). Not a worktree any more — the only remedy is deleting the files. */
+  leftoverDir?: string
   branch: string
 }
 
@@ -246,6 +260,7 @@ export function cleanupJson(outcome: CleanupOutcome): Record<string, unknown> {
     worktreeRetained: outcome.worktreeRetained,
     branchDeleted: outcome.branchDeleted,
     ...(outcome.mainDir ? { mainDir: outcome.mainDir } : {}),
+    ...(outcome.leftoverDir ? { leftoverDir: outcome.leftoverDir } : {}),
     ...(outcome.error ? { error: outcome.error } : {}),
   }
 }
@@ -345,7 +360,52 @@ export function cleanupWorkspaceLocal(
       }
       const remove = runGit(mainDir, ['worktree', 'remove', linked.path], { allowFail: true })
       if (remove.status !== 0) {
-        out.error = `git worktree remove ${linked.path} failed: ${remove.stderr.toString('utf-8').trim() || 'unknown git error'}`
+        const reason = remove.stderr.toString('utf-8').trim() || 'unknown git error'
+        // A non-zero exit does NOT mean nothing happened. git's remove_worktree()
+        // calls delete_git_dir() even when the recursive delete failed, so the
+        // worktree can end up deregistered — `.git/worktrees/<name>` and the
+        // checkout's `.git` link both gone — with its files still on disk. Most
+        // common on Windows, where one locked file (a running dev server) blocks
+        // deletion, but reachable on POSIX too (a root-owned file inside the
+        // worktree, a nested mountpoint, an NFS silly-rename). Re-check what
+        // actually remains instead of assuming the removal was refused up front.
+        const registered = listWorktrees(mainDir)
+        // THREE states, not two. listWorktrees returns [] on ANY non-zero git
+        // exit, so an empty list means the probe FAILED, not that the worktree
+        // is gone — the primary worktree is always listed otherwise. Treat
+        // unknown as still-registered: refusing is recoverable, while deleting
+        // a branch out from under a live checkout is not.
+        const stillRegistered =
+          registered.length === 0 ||
+          registered.some((worktree, index) => index > 0 && worktree.path === linked.path)
+        if (stillRegistered) {
+          out.error = `git worktree remove ${linked.path} failed: ${reason}`
+          return out
+        }
+        // The worktree is gone as far as Git is concerned; only file deletion
+        // failed. Clear any half-deleted admin data, then finish the teardown
+        // so the branch does not leak.
+        runGit(mainDir, ['worktree', 'prune'], { allowFail: true })
+        out.worktreeDir = null
+        const leftover = existsSync(linked.path)
+        if (leftover) out.leftoverDir = linked.path
+        // Nothing left on disk either — the removal effectively completed.
+        else out.worktreeRemoved = linked.path
+        // Delete the branch BEFORE composing our own message. deleteWsBranch
+        // reports its failures with `out.error ??=`, so an error set here first
+        // would silently swallow a RETAINED branch — the exact leak this whole
+        // change exists to stop.
+        deleteWsBranch(mainDir, branch, expectedBranchOid, out)
+        if (leftover) {
+          const branchProblem = out.error
+          // Deliberately short, and states only what was checked: the worktree
+          // IS gone from git, the files ARE still there, and `reason` is git's
+          // own words. The path lives in `leftoverDir` (and in git's reason) —
+          // repeating it here is what made this message unreadable.
+          out.error =
+            `git removed the worktree but could not delete its files (${reason})` +
+            (branchProblem ? `. Also: ${branchProblem}` : '')
+        }
         return out
       }
       out.worktreeRemoved = linked.path
@@ -368,26 +428,54 @@ export function cleanupWorkspaceLocal(
 export function cleanupRefusalMessage(outcome: {
   error: string
   worktreeDir: string | null
+  leftoverDir?: string | null
   branch: string
 }): string {
   if (outcome.worktreeDir) {
     const dir = shQuote(outcome.worktreeDir)
+    // Diagnose "uncommitted or untracked work" only when git actually said
+    // so — a removal can also be refused for a locked worktree, say.
+    if (outcome.error.includes('contains modified or untracked files')) {
+      return (
+        `Cleanup incomplete: ${outcome.error}. The worktree at ${dir} still holds uncommitted or untracked work — ` +
+        `that's why the plain removal refused. Inspect it (\`git -C ${dir} status\`) and commit anything worth ` +
+        `keeping to the workspace branch. Once it's clean, remove it from the main checkout: \`git worktree remove ${dir}\`.`
+      )
+    }
     return (
-      `Cleanup incomplete: ${outcome.error}. The worktree at ${dir} still holds uncommitted or untracked work — ` +
-      `that's why the plain removal refused. Inspect it (\`git -C ${dir} status\`) and commit anything worth ` +
-      `keeping to the workspace branch. Once it's clean, remove it from the main checkout: \`git worktree remove ${dir}\`.`
+      `Cleanup incomplete: ${outcome.error}. The worktree at ${dir} is still registered; git refused the plain ` +
+      `removal for the reason above. Inspect it (\`git -C ${dir} status\`), resolve that, then remove it from ` +
+      `the main checkout: \`git worktree remove ${dir}\`.`
+    )
+  }
+  if (outcome.leftoverDir) {
+    // No "probably"/"usually": nothing here checked WHAT holds the files, so
+    // naming a cause would be the same invented diagnosis this whole path
+    // exists to remove. The culprits are listed as things to close, not as a
+    // claim about what is running. No platform is named either — a failed
+    // delete is reachable on POSIX too (root-owned files, nested mountpoints).
+    return (
+      `Cleanup incomplete: ${outcome.error}. Close anything using that folder — a dev server, ` +
+      `an editor, or a shell inside it — then delete: ${shQuote(outcome.leftoverDir)}`
     )
   }
   return `Cleanup incomplete: ${outcome.error}. Finish it from the main checkout once ${shQuote(outcome.branch)} is safe to delete.`
 }
 
-export function cleanupAction(outcome: { worktreeDir: string | null; branch: string }): {
+export function cleanupAction(outcome: {
+  worktreeDir: string | null
+  leftoverDir?: string | null
+  branch: string
+}): {
   cwd: string
   argv: string[]
 } {
-  return outcome.worktreeDir
-    ? { cwd: outcome.worktreeDir, argv: ['git', 'status'] }
-    : { cwd: process.cwd(), argv: ['git', 'branch', '--list', outcome.branch] }
+  if (outcome.worktreeDir) return { cwd: outcome.worktreeDir, argv: ['git', 'status'] }
+  // Never point at a leftover directory: it is no longer a repository, so git
+  // would walk up and report on whatever parent repo contains it. Confirm the
+  // deregistration from the current (main) checkout instead.
+  if (outcome.leftoverDir) return { cwd: process.cwd(), argv: ['git', 'worktree', 'list'] }
+  return { cwd: process.cwd(), argv: ['git', 'branch', '--list', outcome.branch] }
 }
 
 export function reportCleanupHuman(outcome: CleanupOutcome): void {
@@ -396,6 +484,7 @@ export function reportCleanupHuman(outcome: CleanupOutcome): void {
       cleanupRefusalMessage({
         error: outcome.error,
         worktreeDir: outcome.worktreeDir,
+        leftoverDir: outcome.leftoverDir,
         branch: outcome.branch,
       }),
     )

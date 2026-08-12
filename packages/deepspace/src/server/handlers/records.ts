@@ -320,10 +320,6 @@ export function putRecord(
           error: `UPDATE DENIED: role=${userRole}, collection=${collection}`,
         }
       }
-      const fieldError = checkFieldPermissions(schema, userRole, finalData, existing.data)
-      if (fieldError) {
-        return { success: false, error: `FIELD ERROR: ${fieldError}` }
-      }
     } else {
       if (!canCreate(schema, userRole)) {
         return {
@@ -331,6 +327,18 @@ export function putRecord(
           error: `CREATE DENIED: role=${userRole}, collection=${collection}`,
         }
       }
+    }
+
+    // Check only caller-supplied fields. Defaults, user-bound values, and
+    // timestamp triggers are server-owned and must not trip writableFields.
+    const fieldError = checkFieldPermissions(
+      schema,
+      userRole,
+      data,
+      isUpdate ? existing.data : undefined,
+    )
+    if (fieldError) {
+      return { success: false, error: `FIELD ERROR: ${fieldError}` }
     }
 
     const ownerError = checkUnclaimedOwnerTransition(schema, userRole, finalData, userId)

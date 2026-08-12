@@ -58,15 +58,18 @@ export function isPortListening(port: number, host: string, timeoutMs = 500): Pr
 /**
  * Wait until the dev server answers. This is the only readiness signal
  * available: vite inherits stdio, so its "Local: http://…" line is never ours
- * to parse.
+ * to parse. `signal` ends the poll early (resolving false) once the caller
+ * knows the server can no longer come up — the poll's ref'd socket/timer must
+ * not keep a naturally-exiting process alive.
  */
 export async function waitForPortListening(
   port: number,
   host: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !signal?.aborted) {
     if (await isPortListening(port, host)) return true
     await new Promise((resolve) => setTimeout(resolve, 250))
   }

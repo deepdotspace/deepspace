@@ -20,6 +20,7 @@
  */
 
 import { defineCommand } from 'citty'
+import { setTimeout as delay } from 'node:timers/promises'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { apiFetch, ApiError } from '../lib/api'
@@ -197,7 +198,9 @@ export function formatEvent(e: AppLogEvent, color: boolean, now: number = Date.n
 
 // ── Command ──────────────────────────────────────────────────────────────────
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+// node:timers/promises so follow mode can abort the inter-poll wait on
+// Ctrl+C; rejects with an AbortError when the signal fires.
+const sleep = (ms: number, signal?: AbortSignal) => delay(ms, undefined, { signal })
 
 export default defineCommand({
   meta: {
@@ -284,12 +287,18 @@ export default defineCommand({
       since: number,
       pageLimit: number | undefined,
       token: string,
+      signal?: AbortSignal,
     ): Promise<AppLogsResponse> => {
       const params = new URLSearchParams({ since: String(since) })
       if (pageLimit !== undefined) params.set('limit', String(pageLimit))
       if (args.level) params.set('level', args.level)
       if (args.search) params.set('search', args.search)
-      return apiFetch<AppLogsResponse>(DEPLOY_URL, token, `/api/apps/${appId}/logs?${params}`)
+      return apiFetch<AppLogsResponse>(
+        DEPLOY_URL,
+        token,
+        `/api/apps/${appId}/logs?${params}`,
+        signal ? { signal } : undefined,
+      )
     }
 
     const print = (events: AppLogEvent[]) => {
@@ -338,7 +347,15 @@ export default defineCommand({
     }
 
     // ── Follow mode ──────────────────────────────────────────────────────────
-    process.on('SIGINT', () => process.exit(0))
+    // Ctrl+C ends the tail by ABORTING the poll loop, never process.exit(0):
+    // exiting while undici still holds the connection a poll just used trips
+    // libuv's `!(handle->flags & UV_HANDLE_CLOSING)` assertion on Windows and
+    // turns a clean stop into a 0xC0000409 abort (see lib/command.ts).
+    // Returning lets Node exit naturally with 0. `once`, so a second Ctrl+C
+    // falls back to Node's default hard kill if a hung request ignores the
+    // abort.
+    const tail = new AbortController()
+    process.once('SIGINT', () => tail.abort())
     if (!args.json) {
       console.error(`Tailing logs for ${appId} — Ctrl+C to stop.`)
     }
@@ -379,18 +396,30 @@ export default defineCommand({
     }
 
     for (;;) {
-      await sleep(backoff || interval)
+      try {
+        await sleep(backoff || interval, tail.signal)
+      } catch {
+        return // aborted: Ctrl+C — exit 0 through the natural path
+      }
       // Refresh the token BEFORE the retryable fetch: the JWT is 15-minute-lived
       // and a tail outlives it. A refresh failure (session expired / logged out)
       // throws a plain Error and is fatal — it will not fix itself by retrying,
       // so let it propagate and end the tail cleanly.
       const freshToken = await ensureToken()
+      if (tail.signal.aborted) return
       let page: AppLogsResponse
       try {
         // Re-scan a lag window before the cursor so a late-ingested,
         // earlier-stamped event isn't skipped; SeenEvents drops the overlap.
-        page = await fetchPage(nextPollSince(cursor, initialSince), followLimit, freshToken)
+        page = await fetchPage(
+          nextPollSince(cursor, initialSince),
+          followLimit,
+          freshToken,
+          tail.signal,
+        )
       } catch (err) {
+        // Ctrl+C aborted the in-flight poll — not a fetch failure to report.
+        if (tail.signal.aborted) return
         // Auth/authz/absence is fatal — the situation won't improve by
         // retrying. Everything else (5xx, 429, network) backs off.
         if (err instanceof ApiError && [401, 403, 404].includes(err.status)) throw err

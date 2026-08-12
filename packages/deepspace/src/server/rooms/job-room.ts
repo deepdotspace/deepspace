@@ -22,7 +22,7 @@
 import { BaseRoom, type UserAttachment } from './base-room'
 import { MSG } from '../../shared/protocol/constants'
 import { ROLES } from '../../shared/roles'
-import { serverBuild } from '../../shared/protocol/messages'
+import { serverBuild, type ServerMessage } from '../../shared/protocol/messages'
 
 // ============================================================================
 // Types
@@ -86,6 +86,8 @@ export interface JobRoomConfig {
   retryBackoffMs?: number
   /** Re-check whether a connected user may mutate the queue. Defaults to member/admin roles. */
   authorizeWrite?: (user: UserAttachment) => boolean | Promise<boolean>
+  /** Re-check whether a connected user may observe the queue. Defaults to authorizeWrite. */
+  authorizeRead?: (user: UserAttachment) => boolean | Promise<boolean>
 }
 
 interface JobAttachment extends UserAttachment {
@@ -116,6 +118,8 @@ export abstract class JobRoom<
   private readonly snapshotLimit: number
   private readonly retryBackoffMs: number
   private readonly authorizeWrite: (user: UserAttachment) => boolean | Promise<boolean>
+  private readonly authorizeRead: (user: UserAttachment) => boolean | Promise<boolean>
+  private broadcastQueue: Promise<void> = Promise.resolve()
 
   /** In-flight jobs in this isolate; lets same-isolate JOB_CANCEL fire the signal. */
   private readonly inFlight = new Map<string, AbortController>()
@@ -131,6 +135,7 @@ export abstract class JobRoom<
     this.retryBackoffMs = Math.max(0, config.retryBackoffMs ?? 1000)
     this.authorizeWrite =
       config.authorizeWrite ?? ((user) => user.role === ROLES.MEMBER || user.role === ROLES.ADMIN)
+    this.authorizeRead = config.authorizeRead ?? this.authorizeWrite
   }
 
   private ensureInitialized(): void {
@@ -180,9 +185,9 @@ export abstract class JobRoom<
 
   protected async onConnect(ws: WebSocket, user: UserAttachment): Promise<JobAttachment> {
     this.ensureInitialized()
-    const canWrite = await this.authorizeWrite(user)
+    const { canRead, canWrite } = await this.resolveAccess(user)
     this.sendTo(ws, { type: MSG.AUTH, payload: { canWrite } })
-    this.sendTo(ws, serverBuild.jobSnapshot(this.getRecentJobs(this.snapshotLimit)))
+    this.sendTo(ws, serverBuild.jobSnapshot(canRead ? this.getRecentJobs(this.snapshotLimit) : []))
     return { ...user, canWrite }
   }
 
@@ -199,7 +204,7 @@ export abstract class JobRoom<
 
     if (type === MSG.JOB_ENQUEUE || type === MSG.JOB_CANCEL || type === MSG.JOB_RETRY) {
       const attachment = user as JobAttachment
-      const canWrite = await this.authorizeWrite(user)
+      const { canWrite } = await this.resolveAccess(user)
       if (attachment.canWrite !== canWrite) {
         attachment.canWrite = canWrite
         ws.serializeAttachment(attachment)
@@ -644,6 +649,34 @@ export abstract class JobRoom<
       .exec(`SELECT status FROM jobs WHERE id = ?`, jobId)
       .toArray()[0] as { status: JobStatus } | undefined
     return row?.status ?? null
+  }
+
+  /** Reauthorize every live event so role revocation does not leave a stale reader. */
+  protected broadcast(message: ServerMessage, exclude?: WebSocket): void {
+    this.broadcastQueue = this.broadcastQueue.then(async () => {
+      await Promise.all(
+        this.getWebSockets().map(async (ws) => {
+          if (ws === exclude) return
+          try {
+            const user = this.getAttachment(ws)
+            if (!user) return
+            if (await this.authorizeRead(user)) this.sendTo(ws, message)
+          } catch {
+            // Authorization failures deny this event without poisoning the queue.
+          }
+        }),
+      )
+    })
+    this.state.waitUntil(this.broadcastQueue)
+  }
+
+  private async resolveAccess(
+    user: UserAttachment,
+  ): Promise<{ canRead: boolean; canWrite: boolean }> {
+    const canRead = await this.authorizeRead(user)
+    if (!canRead) return { canRead: false, canWrite: false }
+    const canWrite = this.authorizeRead === this.authorizeWrite || (await this.authorizeWrite(user))
+    return { canRead: true, canWrite }
   }
 
   // ==========================================================================

@@ -3,7 +3,11 @@ import type { RecordData } from 'deepspace'
 import { useMutations, useQuery, useUser } from 'deepspace'
 import { Mail, ShieldCheck, UserMinus, Users } from 'lucide-react'
 import { Modal, useToast } from '@/components/ui'
-import { parseDocumentsIdList, type DocumentsDocumentFields, type InviteAclDiff } from './documents-library-types'
+import {
+  parseDocumentsIdList,
+  type DocumentsDocumentFields,
+  type InviteAclDiff,
+} from './documents-library-types'
 
 interface UserFields {
   email?: string
@@ -42,12 +46,14 @@ function initialsFor(name: string): string {
 
 export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: InviteDialogProps) {
   const { user } = useUser()
-  const { records: users } = useQuery<UserFields>('users')
-  const { put } = useMutations<DocumentsDocumentFields>('documents')
+  const { records: users, status: usersStatus } = useQuery<UserFields>('users')
+  const { putConfirmed, ready: documentsMutationsReady } =
+    useMutations<DocumentsDocumentFields>('documents')
   const toast = useToast()
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<InviteRole>('editor')
   const [saving, setSaving] = useState(false)
+  const ready = usersStatus === 'ready' && documentsMutationsReady
 
   const collaborators = useMemo(
     () => parseDocumentsIdList(doc.data.collaborators),
@@ -70,7 +76,11 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
 
   if (!isOwner) return null
 
-  const saveAccess = async (nextCollaborators: string[], nextEditors: string[]) => {
+  const saveAccess = async (
+    nextCollaborators: string[],
+    nextEditors: string[],
+  ): Promise<boolean> => {
+    if (!ready) return false
     const prevCollaborators = parseDocumentsIdList(doc.data.collaborators)
     const prevEditors = parseDocumentsIdList(doc.data.editors)
     const nextCollabList = uniqueIds(nextCollaborators)
@@ -80,7 +90,7 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
 
     setSaving(true)
     try {
-      await put(doc.recordId, {
+      await putConfirmed(doc.recordId, {
         ...doc.data,
         collaborators: JSON.stringify(nextCollabList),
         editors: JSON.stringify(nextEditorList),
@@ -98,6 +108,13 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
           onAclChange({ removedUserIds, demotedUserIds, promotedUserIds })
         }
       }
+      return true
+    } catch {
+      toast.error(
+        'Access not saved',
+        'DeepSpace did not confirm the change. Reconnect and try again.',
+      )
+      return false
     } finally {
       setSaving(false)
     }
@@ -109,7 +126,10 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
 
     const target = users.find((u) => u.data.email?.trim().toLowerCase() === normalized)
     if (!target) {
-      toast.error('User not found', 'No DeepSpace user with that email has used this app yet.')
+      toast.error(
+        'User not found',
+        'Ask them to sign in to this app once, then invite the same email again.',
+      )
       return
     }
     if (target.recordId === doc.data.ownerId || target.recordId === user?.id) {
@@ -123,7 +143,7 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
 
     const nextCollaborators = [...collaborators, target.recordId]
     const nextEditors = role === 'editor' ? [...editors, target.recordId] : editors
-    await saveAccess(nextCollaborators, nextEditors)
+    if (!(await saveAccess(nextCollaborators, nextEditors))) return
     setEmail('')
     toast.success('Invite added', `${target.data.email ?? normalized} now has ${role} access.`)
   }
@@ -151,7 +171,12 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
     'Owner'
 
   return (
-    <Modal open={open} onClose={() => onOpenChange(false)} size="lg" className="documents-feature-scope">
+    <Modal
+      open={open}
+      onClose={() => onOpenChange(false)}
+      size="lg"
+      className="documents-feature-scope"
+    >
       <Modal.Header>
         <Modal.Title>Share document</Modal.Title>
         <Modal.Description>
@@ -174,6 +199,7 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
                 style={{ color: 'var(--documents-el-muted)' }}
               />
               <input
+                disabled={!ready || saving}
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 onKeyDown={(e) => {
@@ -181,7 +207,10 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
                 }}
                 placeholder="person@gmail.com"
                 className="h-10 w-full rounded-lg border bg-transparent pl-9 pr-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
-                style={{ borderColor: 'var(--documents-el-line)', color: 'var(--documents-el-text)' }}
+                style={{
+                  borderColor: 'var(--documents-el-line)',
+                  color: 'var(--documents-el-text)',
+                }}
               />
             </div>
             <select
@@ -196,7 +225,7 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
             <button
               type="button"
               onClick={() => void addInvite()}
-              disabled={saving || !email.trim()}
+              disabled={!ready || saving || !email.trim()}
               className="h-10 rounded-lg px-4 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
               style={{ backgroundColor: 'var(--documents-el-accent)' }}
             >
@@ -253,7 +282,10 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
                   )}
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium">{name}</div>
-                    <div className="truncate text-xs" style={{ color: 'var(--documents-el-muted)' }}>
+                    <div
+                      className="truncate text-xs"
+                      style={{ color: 'var(--documents-el-muted)' }}
+                    >
                       {u.data.email ?? 'No email'}
                     </div>
                   </div>
@@ -262,9 +294,12 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
                     onChange={(e) =>
                       void setCollaboratorRole(u.recordId, e.target.value as InviteRole)
                     }
-                    disabled={saving}
+                    disabled={!ready || saving}
                     className="h-8 rounded-lg border bg-transparent px-2 text-xs font-medium outline-none"
-                    style={{ borderColor: 'var(--documents-el-line)', color: 'var(--documents-el-text)' }}
+                    style={{
+                      borderColor: 'var(--documents-el-line)',
+                      color: 'var(--documents-el-text)',
+                    }}
                   >
                     <option value="editor">Editor</option>
                     <option value="viewer">Viewer</option>
@@ -272,7 +307,7 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
                   <button
                     type="button"
                     onClick={() => void removeCollaborator(u.recordId)}
-                    disabled={saving}
+                    disabled={!ready || saving}
                     className="rounded-lg p-1.5 text-red-600 transition-colors hover:bg-red-500/10 disabled:opacity-50"
                     title="Remove access"
                   >

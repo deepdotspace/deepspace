@@ -6,7 +6,7 @@
  * `JSON.stringify` quotes the URL so query strings / special chars can't break
  * out of the shell command.
  */
-import { exec } from 'node:child_process'
+import { spawn } from 'node:child_process'
 
 export function openBrowser(url: string): void {
   const quoted = JSON.stringify(url)
@@ -17,6 +17,13 @@ export function openBrowser(url: string): void {
         ? `start "" ${quoted}`
         : `xdg-open ${quoted}`
 
-  // Swallow errors — the URL was already shown, so launching is optional.
-  exec(cmd, () => {})
+  // A ref'd exec() child (plus its stdout/stderr pipes) held the
+  // naturally-exiting process (lib/command.ts finishCommand) open until the
+  // launcher exited — measured ~3s vs ~30ms. Detach with no stdio and unref
+  // so nothing waits on it; `windowsHide` stops `detached` from flashing a
+  // console window on Windows. The no-op 'error' handler swallows launch
+  // failures — the URL was already shown, so launching is optional.
+  spawn(cmd, { shell: true, detached: true, stdio: 'ignore', windowsHide: true })
+    .on('error', () => {})
+    .unref()
 }

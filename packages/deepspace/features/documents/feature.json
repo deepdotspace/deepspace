@@ -86,7 +86,8 @@
     "@tiptap/extension-task-item": "^3.22.0"
   },
   "instructions": [
-    "Run `npm install` (or your package manager) to install the Tiptap dependencies that were just added to package.json — the editor imports @tiptap/react and friends, so the dev server will fail to resolve them otherwise."
+    "Run `npm install` (or your package manager) to install the Tiptap dependencies that were just added to package.json — the editor imports @tiptap/react and friends, so the dev server will fail to resolve them otherwise.",
+    "Before sharing a document by email, ask that person to sign in to the deployed app once. The privacy-preserving invite lookup uses the app-local users collection, not a global user directory."
   ],
   "patterns": []
 }

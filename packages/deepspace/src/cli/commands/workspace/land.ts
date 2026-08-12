@@ -428,12 +428,14 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
     if (cleanup?.error) {
       const action = cleanupAction({
         worktreeDir: cleanup.worktreeDir,
+        leftoverDir: cleanup.leftoverDir,
         branch: cleanup.branch,
       })
       throw new Refusal(
         cleanupRefusalMessage({
           error: cleanup.error,
           worktreeDir: cleanup.worktreeDir,
+          leftoverDir: cleanup.leftoverDir,
           branch: cleanup.branch,
         }),
         'cleanup_incomplete',

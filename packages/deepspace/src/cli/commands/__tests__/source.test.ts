@@ -24,6 +24,9 @@ let repo: string | undefined
 
 afterEach(() => {
   vi.restoreAllMocks()
+  // Clear the exit code the runtime records, so a refusal-path test cannot
+  // poison the vitest worker's own exit code.
+  process.exitCode = undefined
   if (repo) rmSync(repo, { recursive: true, force: true })
   repo = undefined
 })
@@ -42,19 +45,18 @@ function makeRepo(): { dir: string; oid: string } {
 
 async function runSourceJson(provider: 'github' | 'deepspace') {
   const logs: string[] = []
-  const exits: number[] = []
   vi.spyOn(console, 'log').mockImplementation((line?: unknown) => logs.push(String(line)))
-  vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
-    exits.push(code ?? 0)
-    throw new Error(`exit:${code ?? 0}`)
-  }) as never)
   const command = source as unknown as {
     run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
   }
-  await command.run({ args: { provider, json: true } }).catch((error: unknown) => {
-    if (!(error instanceof Error) || !error.message.startsWith('exit:')) throw error
-  })
-  return { output: JSON.parse(logs[0]) as Record<string, unknown>, exits }
+  // The runtime records the code on process.exitCode instead of calling
+  // process.exit (see lib/command.ts); the afterEach above clears it.
+  process.exitCode = undefined
+  await command.run({ args: { provider, json: true } })
+  return {
+    output: JSON.parse(logs[0]) as Record<string, unknown>,
+    exits: [process.exitCode] as Array<number | undefined>,
+  }
 }
 
 function arrangeGitHubClaim(oid: string | null) {

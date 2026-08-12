@@ -191,16 +191,26 @@ export function noTargetsMessage(opts: {
   swept: boolean
   all: boolean
   port: number
+  /** Injectable for tests. The remedy has to name the tool THIS platform uses —
+   *  "install lsof (or procps for pgrep)" is unactionable on Windows, which has
+   *  neither and needs none of them. */
+  platform?: NodeJS.Platform
 }): { ok: boolean; message: string } {
-  const { enumerated, swept, all, port } = opts
+  const { enumerated, swept, all, port, platform = process.platform } = opts
   const couldObserve = enumerated || (all && swept)
   if (!couldObserve) {
     return {
       ok: false,
       message:
-        `Couldn't determine what's running on :${port}: no lsof/pgrep and /proc ` +
-        `is unavailable, so nothing was inspected or killed. Install lsof (or ` +
-        `procps for pgrep), or find and kill the process manually.`,
+        platform === 'win32'
+          ? `Couldn't determine what's running on :${port}: the PowerShell port query ` +
+            `could not be run, so nothing was inspected or killed. Either powershell.exe ` +
+            `(or pwsh) is not on PATH, or Get-NetTCPConnection is unavailable on this ` +
+            `Windows edition. Find the process manually with ` +
+            `\`netstat -ano | findstr :${port}\`.`
+          : `Couldn't determine what's running on :${port}: no lsof/pgrep and /proc ` +
+            `is unavailable, so nothing was inspected or killed. Install lsof (or ` +
+            `procps for pgrep), or find and kill the process manually.`,
     }
   }
   return {
@@ -216,11 +226,17 @@ export function noTargetsMessage(opts: {
  * `enumerated:false` means every available method (lsof / PowerShell / /proc)
  * was missing — a genuine "don't know", not "nothing there".
  */
-function enumerateListeners(port: number): { pids: number[]; enumerated: boolean } {
+export function enumerateListeners(port: number): { pids: number[]; enumerated: boolean } {
   if (IS_WIN) {
     // Get-NetTCPConnection is the modern replacement for netstat -ano.
-    // -ErrorAction SilentlyContinue swallows "No matching connection" so
-    // the command exits 0 with empty stdout instead of a noisy red error.
+    // -ErrorAction SilentlyContinue swallows the "No matching connection" error
+    // record, so a free port stays a non-terminating, sentinel-reaching run
+    // under withSentinel's $ErrorActionPreference='Stop'. Do not remove it: the
+    // query would then terminate on a free port and `kill` would refuse instead
+    // of reporting the port free. It does NOT make the command exit 0 — see
+    // PS_SENTINEL. Residual: it also silences an error record from a degraded
+    // CIM provider, which would read as "nothing listening"; the genuine
+    // failures (cmdlet or module missing) terminate and are caught.
     const r = runPowershellChecked(
       `Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess`,
     )
@@ -325,16 +341,27 @@ function childPids(parentPid: number): number[] {
  * (pgrep / PowerShell) actually ran — so `--all` doesn't falsely claim "no
  * stray processes" when it never got to look.
  */
-function sweepByName(names: string[]): { pids: number[]; swept: boolean } {
+export function sweepByName(names: string[]): { pids: number[]; swept: boolean } {
   const all = new Set<number>()
   if (IS_WIN) {
     // Match against process Name (e.g. "workerd") AND CommandLine (catches
     // npx-launched scripts like "vite" that show up as node.exe with vite
-    // in the args).
+    // in the args). Matching CommandLine is deliberate and matches `pgrep -f`
+    // on posix — keep the two platforms equally thorough.
+    //
+    // `$_.ProcessId -ne $PID` is what stops the query matching ITSELF. Every
+    // search term is written into this command line, so the powershell.exe
+    // running it has "workerd", "wrangler" and "vite" in its own CommandLine
+    // and satisfies the filter. The caller's `pid !== process.pid` guard below
+    // only excludes the NODE process, not the PowerShell child it spawns — so
+    // a clean machine returned one phantom pid and `--all` reported "Killed 1
+    // process(es)" having killed nothing (plus a narrow window where Windows
+    // had already recycled that pid onto an unrelated process). posix needs no
+    // equivalent: pgrep runs once per name, and never reports itself.
     const orClauses = names
       .map((n) => `($_.Name -like '*${n}*') -or ($_.CommandLine -like '*${n}*')`)
       .join(' -or ')
-    const script = `Get-CimInstance Win32_Process | Where-Object { ${orClauses} } | Select-Object -ExpandProperty ProcessId`
+    const script = `Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and (${orClauses}) } | Select-Object -ExpandProperty ProcessId`
     const r = runPowershellChecked(script)
     for (const pid of r.pids) if (pid !== process.pid) all.add(pid)
     return { pids: [...all], swept: r.ran }
@@ -385,17 +412,55 @@ function runPowershell(script: string): number[] {
   return runPowershellChecked(script).pids
 }
 
+/**
+ * Proof-of-completion marker for a PowerShell query.
+ *
+ * PowerShell's exit code CANNOT answer "did the query run?". `powershell.exe
+ * -Command` exits with the status of the last command, and `-ErrorAction
+ * SilentlyContinue` suppresses the "no matching connection" MESSAGE while
+ * still leaving `$?` false — so a port with nothing on it exits 1, which the
+ * old code read as "PowerShell is absent". Every Windows `dev kill` against a
+ * free port therefore died with the lsof/procps refusal (DEV-1) instead of
+ * reporting the port free.
+ *
+ * A sentinel printed after the query answers the question the exit code can't.
+ */
+const PS_SENTINEL = '__deepspace_ps_ok__'
+
+/**
+ * Wrap a query so the sentinel is reached on success and skipped on a genuine
+ * failure. `$ErrorActionPreference='Stop'` promotes an unrunnable query (a
+ * cmdlet this Windows edition lacks, a broken WMI) into a terminating error the
+ * catch swallows, leaving no sentinel — which is what preserves DEV-1: we must
+ * never report a port free when we never managed to look. A per-cmdlet
+ * `-ErrorAction SilentlyContinue` still wins over the preference, so the
+ * ordinary "nothing matched" case stays non-terminating and reaches the
+ * sentinel.
+ */
+function withSentinel(script: string): string {
+  return `$ErrorActionPreference='Stop'; try { ${script}; '${PS_SENTINEL}' } catch { }`
+}
+
+/** Pure half of runPowershellChecked, exported for tests: the sentinel — never
+ *  the exit code — decides whether the query actually ran. */
+export function readPowershellPids(stdout: string): { pids: number[]; ran: boolean } {
+  if (!stdout.includes(PS_SENTINEL)) return { pids: [], ran: false }
+  return { pids: parsePidLines(stdout.replace(PS_SENTINEL, '')), ran: true }
+}
+
 /** Like runPowershell but reports whether PowerShell actually ran (`ran`),
- *  so callers can tell "no matches" (exit 0, empty) from "PowerShell absent". */
+ *  so callers can tell "no matches" from "PowerShell absent". */
 function runPowershellChecked(script: string): { pids: number[]; ran: boolean } {
   const exe = pwshOrPowershell()
   try {
-    const r = spawnSync(exe, ['-NoProfile', '-NonInteractive', '-Command', script], {
+    const r = spawnSync(exe, ['-NoProfile', '-NonInteractive', '-Command', withSentinel(script)], {
       encoding: 'utf-8',
     })
+    // ENOENT: no PowerShell on PATH at all. A query that started but terminated
+    // (a cmdlet this Windows edition lacks) is caught below by the missing
+    // sentinel — both are "we could not look", which is what the refusal says.
     if (r.error) return { pids: [], ran: false }
-    // With -ErrorAction SilentlyContinue the query exits 0 even with no matches.
-    return { pids: r.status === 0 ? parsePidLines(r.stdout) : [], ran: r.status === 0 }
+    return readPowershellPids(r.stdout ?? '')
   } catch {
     return { pids: [], ran: false }
   }

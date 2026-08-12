@@ -56,6 +56,9 @@ let repo: string
 const ORIG_CWD = process.cwd()
 afterEach(() => {
   vi.restoreAllMocks()
+  // Clear the exit code the runtime records, so a refusal-path test cannot
+  // poison the vitest worker's own exit code.
+  process.exitCode = undefined
   // cleanupWorkspaceLocal chdir's to the main checkout when run from inside a
   // worktree — restore before removing the temp repo.
   process.chdir(ORIG_CWD)
@@ -69,24 +72,23 @@ type RunnableCommand = {
 async function runWorkspaceJson(
   commandName: string,
   args: Record<string, unknown>,
-): Promise<{ output: Record<string, unknown>; exits: number[] }> {
+): Promise<{ output: Record<string, unknown>; exits: Array<number | undefined> }> {
   const command = (workspace.subCommands as Record<string, CommandDef>)[
     commandName
   ] as RunnableCommand
   const logs: string[] = []
-  const exits: number[] = []
   vi.spyOn(console, 'log').mockImplementation((line?: unknown) => logs.push(String(line)))
   vi.spyOn(console, 'error').mockImplementation(() => {})
-  vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
-    exits.push(code ?? 0)
-    throw new Error(`exit:${code ?? 0}`)
-  }) as never)
 
-  await command.run({ args: { ...args, json: true } }).catch((error: unknown) => {
-    if (!(error instanceof Error) || !error.message.startsWith('exit:')) throw error
-  })
+  // The runtime records the code on process.exitCode instead of calling
+  // process.exit (see lib/command.ts); the afterEach above clears it.
+  process.exitCode = undefined
+  await command.run({ args: { ...args, json: true } })
   expect(logs).toHaveLength(1)
-  return { output: JSON.parse(logs[0]) as Record<string, unknown>, exits }
+  return {
+    output: JSON.parse(logs[0]) as Record<string, unknown>,
+    exits: [process.exitCode] as Array<number | undefined>,
+  }
 }
 
 function initRepo(): string {

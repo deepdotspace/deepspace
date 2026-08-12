@@ -31,6 +31,7 @@ const schema: CollectionSchema = {
   columns: [
     { name: 'title', storage: 'text', interpretation: 'plain', required: true },
     { name: 'claimedById', storage: 'text', interpretation: 'plain' },
+    { name: 'internalState', storage: 'text', interpretation: 'plain', default: 'pending' },
   ],
   ownerField: 'claimedById',
   permissions: {
@@ -58,6 +59,28 @@ function makeContext(): RecordContext {
 }
 
 describe('claimable record ownership', () => {
+  it('enforces writableFields on create without rejecting server defaults', () => {
+    const ctx = makeContext()
+    expect(
+      putRecord(
+        ctx,
+        'tasks',
+        'forged-state',
+        { title: 'Forged', internalState: 'approved' },
+        'user-1',
+        'member',
+      ),
+    ).toMatchObject({
+      success: false,
+      error: "FIELD ERROR: Role 'member' cannot modify field 'internalState'",
+    })
+
+    expect(putRecord(ctx, 'tasks', 'safe', { title: 'Safe' }, 'user-1', 'member')).toMatchObject({
+      success: true,
+    })
+    expect(getRecord(ctx.sql, 'tasks', 'safe', schema)?.data.internalState).toBe('pending')
+  })
+
   it('rejects another user id on both create and claim', () => {
     const ctx = makeContext()
     const forgedCreate = putRecord(

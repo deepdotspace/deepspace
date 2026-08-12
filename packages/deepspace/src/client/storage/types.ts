@@ -73,12 +73,15 @@ export interface User extends UserProfile {
  */
 export interface RoomUser {
   id: string
-  email: string
+  /** Present only in the admin user-management view. */
+  email?: string
   name: string
   imageUrl?: string
   role: string
-  createdAt: string
-  lastSeenAt: string
+  /** Present only in the admin user-management view. */
+  createdAt?: string
+  /** Present only in the admin user-management view. */
+  lastSeenAt?: string
 }
 
 // ============================================================================

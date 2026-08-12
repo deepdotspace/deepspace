@@ -9,6 +9,8 @@ import type { ConnectionAttachment } from '../../shared/protocol/types'
 import type { SetRolePayload } from '../../shared/types'
 import { MSG } from '../../shared/protocol/constants'
 import {
+  canRead,
+  type PermissionContext,
   type User,
   type ResolvedColumn,
   SchemaRegistry,
@@ -22,6 +24,7 @@ export interface UserContext {
   sql: SqlStorage
   state: DurableObjectState
   schemaRegistry: SchemaRegistry
+  getPermissionContext(): PermissionContext
   send(ws: WebSocket, message: { type: string; payload: unknown }): void
 }
 
@@ -172,7 +175,7 @@ export function getAllUsers(sql: SqlStorage, schemaRegistry?: SchemaRegistry): U
 /**
  * Get all user records including app-specific fields.
  */
-export function getAllUserRecords(sql: SqlStorage, schemaRegistry?: SchemaRegistry): Array<{ recordId: string; data: UserRecord }> {
+export function getAllUserRecords(sql: SqlStorage, schemaRegistry?: SchemaRegistry): Array<{ recordId: string; data: UserRecord; createdBy: string }> {
   const columns = schemaRegistry ? getUsersColumns(schemaRegistry) : []
   const selectSql = columns.length > 0
     ? buildTableSelect('users', columns) + ` ORDER BY _created_at DESC`
@@ -182,6 +185,7 @@ export function getAllUserRecords(sql: SqlStorage, schemaRegistry?: SchemaRegist
     const r = row as TableRow
     return {
       recordId: r._row_id,
+      createdBy: r._created_by,
       data: columns.length > 0 ? rowToUserRecord(r, columns) : {
         email: (r.col_email as string) || '',
         name: (r.col_name as string) || '',
@@ -269,21 +273,39 @@ export async function registerUser(
   return { id: userId, email, name, imageUrl, role, createdAt: now, lastSeenAt: now }
 }
 
-/**
- * Handle user list request.
- * Returns all users with full data (system + app fields).
- */
+/** Handle user list requests without bypassing the users collection's privacy boundary. */
 export function handleUserList(
   ctx: UserContext,
   ws: WebSocket,
-  _attachment: ConnectionAttachment
+  attachment: ConnectionAttachment
 ): void {
-  // Return all user records (includes app-specific fields)
-  const userRecords = getAllUserRecords(ctx.sql, ctx.schemaRegistry)
-  const users = userRecords.map(r => ({
-    id: r.recordId,
-    ...r.data,
-  }))
+  // Public rooms support anonymous sockets, but that must not turn the users
+  // table into a public directory. Apply the schema's ordinary row policy,
+  // then expose only stable public identity fields to non-admin callers.
+  const schema = ctx.schemaRegistry.get('users')
+  const permissionContext = ctx.getPermissionContext()
+  const visibleRecords =
+    attachment.userId.startsWith('anon-') || !schema
+      ? []
+      : getAllUserRecords(ctx.sql, ctx.schemaRegistry).filter((record) =>
+          canRead(
+            schema,
+            attachment.role,
+            record,
+            attachment.userId,
+            permissionContext,
+          ),
+        )
+  const users = visibleRecords.map((record) => {
+    if (attachment.role === 'admin') return { id: record.recordId, ...record.data }
+    const { name, imageUrl, role } = record.data
+    return {
+      id: record.recordId,
+      name,
+      ...(imageUrl ? { imageUrl } : {}),
+      role,
+    }
+  })
   ctx.send(ws, { type: MSG.USER_LIST, payload: { users } })
 }
 
@@ -350,12 +372,6 @@ export async function handleSetRole(
 
   // Close the changed user's live sockets. Reconnect runs the ordinary role
   // lookup again, so no connection keeps permissions from before the change.
-  const userRecords = getAllUserRecords(ctx.sql, ctx.schemaRegistry)
-  const users = userRecords.map(r => ({
-    id: r.recordId,
-    ...r.data,
-  }))
-
   for (const otherWs of ctx.state.getWebSockets()) {
     const otherAttachment = otherWs.deserializeAttachment() as ConnectionAttachment | null
     if (!otherAttachment) continue
@@ -369,9 +385,10 @@ export async function handleSetRole(
       continue
     }
 
-    // Send updated user list to admins
+    // Send the updated list through the same row and field filtering as a
+    // direct request so role changes cannot bypass users-schema privacy.
     if (otherAttachment.role === 'admin') {
-      ctx.send(otherWs, { type: MSG.USER_LIST, payload: { users } })
+      handleUserList(ctx, otherWs, otherAttachment)
     }
   }
 }

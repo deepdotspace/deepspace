@@ -25,9 +25,8 @@
  */
 
 import { credentialPaths } from '../auth'
-import { writeFileSync, mkdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { homedir } from 'node:os'
+import { mkdirSync, readFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { randomBytes, createHash } from 'node:crypto'
 import * as p from '@clack/prompts'
 
@@ -37,6 +36,7 @@ import { exchangeSession, SESSION_COOKIE } from '../session'
 import { decodeJwtPayload } from '../jwt'
 import { openBrowser } from '../lib/open-browser'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
+import { writeSecretFileSync } from '../lib/secure-file'
 
 const AUTH_URL = process.env.DEEPSPACE_AUTH_URL ?? PLATFORM_URLS.auth
 const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
@@ -54,7 +54,8 @@ export default defineDeepspaceCommand({
     },
     password: {
       type: 'string',
-      description: 'Password (discouraged — visible in ps/history; prefer --password-stdin or $DEEPSPACE_PASSWORD)',
+      description:
+        'Password (discouraged — visible in ps/history; prefer --password-stdin or $DEEPSPACE_PASSWORD)',
       required: false,
     },
     'password-stdin': {
@@ -165,9 +166,13 @@ export default defineDeepspaceCommand({
     const result = await pollForCompletion(sessionId, codeVerifier)
 
     if (!result) {
-      throw new Refusal('Login timed out. Run `deepspace auth login` to try again.', 'login_timeout', {
-        action: cliAction('deepspace', 'auth', 'login'),
-      })
+      throw new Refusal(
+        'Login timed out. Run `deepspace auth login` to try again.',
+        'login_timeout',
+        {
+          action: cliAction('deepspace', 'auth', 'login'),
+        },
+      )
     }
 
     // 4. Store credentials + provision the billing profile (see provisionProfile)
@@ -237,7 +242,8 @@ export function loginModeDecision(opts: {
     return {
       mode: 'error',
       code: 'missing_email',
-      message: 'Non-interactive login needs an email: --email <you@example.com> (or $DEEPSPACE_EMAIL).',
+      message:
+        'Non-interactive login needs an email: --email <you@example.com> (or $DEEPSPACE_EMAIL).',
     }
   }
   return {
@@ -312,14 +318,13 @@ async function pollForCompletion(
 }
 
 function storeCredentials(sessionToken: string, jwt: string) {
-  const dir = join(homedir(), '.deepspace')
-  mkdirSync(dir, { recursive: true, mode: 0o700 })
   // Per-plane paths: a staging login must not overwrite the production
   // session (that clobber surfaced as a bogus "Session expired" on the next
   // prod command).
   const { sessionPath, tokenPath } = credentialPaths(AUTH_URL)
-  writeFileSync(sessionPath, sessionToken, { mode: 0o600 })
-  writeFileSync(tokenPath, jwt, { mode: 0o600 })
+  mkdirSync(dirname(sessionPath), { recursive: true, mode: 0o700 })
+  writeSecretFileSync(sessionPath, sessionToken)
+  writeSecretFileSync(tokenPath, jwt)
 }
 
 /**

@@ -12,7 +12,8 @@ import { useUsers } from './useUsers'
 
 export interface UserInfo {
   id: string
-  email: string
+  /** Available to admins; ordinary collaborators receive public identity only. */
+  email?: string
   name: string
   imageUrl?: string
   role: string
@@ -49,7 +50,7 @@ export function useUserLookup() {
     }
     return map
   }, [users])
-  
+
   /**
    * Get full user info by userId
    */

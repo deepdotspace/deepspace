@@ -122,10 +122,13 @@ async function resolveTarget(args: {
   return { appId, configName, token }
 }
 
-function fail(err: unknown): never {
+function fail(err: unknown): void {
   // Route through the shared renderer so `secrets` obeys the output contract
   // like every other command: `--json` gets the {ok,code,error} envelope on
-  // stdout, the human path gets the message with its slug appended.
+  // stdout, the human path gets the message with its slug appended. The
+  // renderer records process.exitCode and RETURNS (see lib/command.ts for
+  // why never process.exit); every fail() is the last statement on its path,
+  // so mid-body refusals must THROW their InputError instead.
   renderCliError(err)
 }
 
@@ -266,7 +269,7 @@ const get = defineCommand({
       const { secrets } = await listSecrets(DEPLOY_URL, t.token, t.appId, t.configName)
       const item = secrets.find((s) => s.key === key)
       if (!item)
-        fail(new InputError(`Secret "${key}" not found in ${t.configName}`, 'secret_not_found'))
+        throw new InputError(`Secret "${key}" not found in ${t.configName}`, 'secret_not_found')
       ok(
         args.json === true,
         {
@@ -343,7 +346,7 @@ const upload = defineCommand({
         args.file === '-' ? readFileSync(0, 'utf-8') : readFileSync(args.file, 'utf-8')
       const secrets = parseSecretsUpload(content)
       if (Object.keys(secrets).length === 0)
-        fail(new InputError('No secrets found in the input.', 'empty_input'))
+        throw new InputError('No secrets found in the input.', 'empty_input')
       await uploadSecrets(DEPLOY_URL, t.token, t.appId, t.configName, secrets, args.replace)
       const uploaded = Object.keys(secrets)
       ok(
@@ -376,11 +379,9 @@ const download = defineCommand({
       const t = await resolveTarget(args)
       const format = args.format as SecretsDownloadFormat
       if (!['dotenv', 'json', 'shell'].includes(format)) {
-        fail(
-          new InputError(
-            `Unknown format "${args.format}" — use dotenv, json, or shell.`,
-            'invalid_format',
-          ),
+        throw new InputError(
+          `Unknown format "${args.format}" — use dotenv, json, or shell.`,
+          'invalid_format',
         )
       }
       const { secrets } = await fetchSecretsValues(DEPLOY_URL, t.token, t.appId, t.configName)
@@ -399,11 +400,9 @@ const pull = defineCommand({
       const wranglerEnv = args.env?.trim() || undefined
       const appDir = findAppDir()
       if (!appDir)
-        fail(
-          new InputError(
-            'Run from a DeepSpace app directory (one containing wrangler.toml).',
-            'not_in_app_repo',
-          ),
+        throw new InputError(
+          'Run from a DeepSpace app directory (one containing wrangler.toml).',
+          'not_in_app_repo',
         )
       const t = await resolveTarget(args)
       const ownerId = decodeJwtPayload<{ sub: string }>(t.token).sub
@@ -473,11 +472,9 @@ const configsCreate = defineCommand({
       const { configs } = await listConfigs(DEPLOY_URL, t.token, t.appId)
       if (configs.some((c) => c.name === name)) {
         if (copyFrom) {
-          fail(
-            new InputError(
-              `Config "${name}" already exists — refusing to copy "${copyFrom}" over it. Delete it first, or pick a new name.`,
-              'config_exists',
-            ),
+          throw new InputError(
+            `Config "${name}" already exists — refusing to copy "${copyFrom}" over it. Delete it first, or pick a new name.`,
+            'config_exists',
           )
         }
         ok(args.json === true, { appId: t.appId, config: name, created: false }, () =>

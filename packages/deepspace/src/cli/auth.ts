@@ -5,7 +5,7 @@
  * a fresh JWT is available at ~/.deepspace/token.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -14,6 +14,7 @@ import { decodeJwtPayload } from './jwt'
 import { exchangeSession } from './session'
 import { registerAuthRefresh } from './lib/api'
 import { cliAction, Refusal } from './lib/command'
+import { writeSecretFileSync } from './lib/secure-file'
 
 const AUTH_URL = process.env.DEEPSPACE_AUTH_URL ?? PLATFORM_URLS.auth
 /** The plane whose credentials keep the historical un-suffixed filenames. */
@@ -91,7 +92,7 @@ export async function ensureToken(): Promise<string> {
   }
 
   mkdirSync(DIR, { recursive: true, mode: 0o700 })
-  writeFileSync(TOKEN_PATH, token, { mode: 0o600 })
+  writeSecretFileSync(TOKEN_PATH, token)
 
   return token
 }
@@ -119,7 +120,7 @@ registerAuthRefresh(async (): Promise<string | null> => {
     const token = await exchangeSession(AUTH_URL, sessionToken)
     if (!token) return null
     mkdirSync(DIR, { recursive: true, mode: 0o700 })
-    writeFileSync(TOKEN_PATH, token, { mode: 0o600 })
+    writeSecretFileSync(TOKEN_PATH, token)
     return token
   } catch {
     return null

@@ -7,8 +7,6 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
-  statSync,
-  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -23,7 +21,6 @@ import {
   oversizedAssetRefusal,
   readDeployAssetConfig,
   resolveDeployRunWorkerFirst,
-  secureBuildDevVars,
 } from '../deploy/build'
 import {
   assetManifest,
@@ -91,32 +88,6 @@ describe('static asset control files', () => {
       expect(isDeployAssetControlFile('_headers')).toBe(true)
       expect(isDeployAssetControlFile('_redirects')).toBe(true)
       expect(isDeployAssetControlFile('index.html')).toBe(false)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-})
-
-describe('build secret permissions', () => {
-  it('restricts Cloudflare preview secrets without removing preview support', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'deepspace-build-secrets-'))
-    try {
-      const path = join(dir, '.dev.vars')
-      writeFileSync(path, 'SECRET=value\n', { mode: 0o644 })
-      expect(secureBuildDevVars(dir)).toBe(true)
-      expect(statSync(path).mode & 0o777).toBe(0o600)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('refuses a symlink at the generated secret path', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'deepspace-build-secrets-'))
-    try {
-      const target = join(dir, 'target')
-      writeFileSync(target, 'SECRET=value\n')
-      symlinkSync(target, join(dir, '.dev.vars'))
-      expect(() => secureBuildDevVars(dir)).toThrow(/unsafe build secret path/)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

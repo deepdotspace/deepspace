@@ -27,6 +27,7 @@ import {
 import { LibrarySidebar, readSidebarCollapsed, writeSidebarCollapsed } from './LibrarySidebar'
 import {
   parseDocumentsIdList,
+  recordsReadyForMutation,
   type DocFolderFields,
   type DocumentsDocumentFields,
   type LibraryNavSelection,
@@ -81,7 +82,7 @@ export default function DocumentsListPage() {
   const { user } = useUser()
   const navigate = useNavigate()
   const userRole = (user?.role ?? ROLES.VIEWER) as Role
-  const canCreate = userRole === ROLES.MEMBER || userRole === ROLES.ADMIN
+  const roleCanCreate = userRole === ROLES.MEMBER || userRole === ROLES.ADMIN
 
   const [searchQuery, setSearchQuery] = useState('')
   const [sortBy, setSortBy] = useState<SortOption>('lastEdited')
@@ -101,17 +102,31 @@ export default function DocumentsListPage() {
     orderBy: 'createdAt',
     orderDir: 'desc',
   })
-  const { create, remove, put } = useMutations<DocumentsDocumentFields>('documents')
+  const {
+    createConfirmed,
+    remove,
+    put,
+    ready: documentsMutationsReady,
+  } = useMutations<DocumentsDocumentFields>('documents')
 
-  const { records: folderRecords } = useQuery<DocFolderFields>('doc_folders', {
-    orderBy: 'createdAt',
-    orderDir: 'asc',
-  })
+  const { records: folderRecords, status: foldersStatus } = useQuery<DocFolderFields>(
+    'doc_folders',
+    {
+      orderBy: 'createdAt',
+      orderDir: 'asc',
+    },
+  )
   const {
     create: createFolder,
     put: putFolder,
     remove: removeFolder,
+    ready: folderMutationsReady,
   } = useMutations<DocFolderFields>('doc_folders')
+  const documentWritesReady = recordsReadyForMutation(status, documentsMutationsReady)
+  const folderWritesReady = recordsReadyForMutation(foldersStatus, folderMutationsReady)
+  const canCreate = roleCanCreate && documentWritesReady
+  const canManageFolders = canCreate && folderWritesReady
+  const canMoveDocuments = canCreate && foldersStatus === 'ready'
 
   const myFolders = useMemo(
     () => (folderRecords ?? []).filter((f) => f.data.ownerId === user?.id),
@@ -218,7 +233,7 @@ export default function DocumentsListPage() {
 
   const handleNewDocument = useCallback(async () => {
     if (!user || !canCreate) return
-    const id = await create({
+    const id = await createConfirmed({
       title: UNTITLED,
       ownerId: user.id,
       collaborators: '[]',
@@ -226,36 +241,42 @@ export default function DocumentsListPage() {
       folderId: folderIdForNew,
     })
     navigate(`/documents/${id}`)
-  }, [canCreate, create, folderIdForNew, navigate, user])
+  }, [canCreate, createConfirmed, folderIdForNew, navigate, user])
 
   const handleDelete = useCallback(
     async (docId: string) => {
+      if (!canCreate) return
       if (confirm('Delete this document?')) await remove(docId)
     },
-    [remove],
+    [canCreate, remove],
   )
 
   const handleRenameCommit = useCallback(
     async (docId: string) => {
+      if (!canCreate) {
+        setRenamingId(null)
+        return
+      }
       const rec = documents.find((d) => d.recordId === docId)
       const t = renameValue.trim()
       setRenamingId(null)
       if (!rec || !t || t === rec.data.title) return
       await put(docId, { ...rec.data, title: t }).catch(() => {})
     },
-    [documents, put, renameValue],
+    [canCreate, documents, put, renameValue],
   )
 
   const handleCreateFolder = useCallback(
     async (name: string) => {
-      if (!user) return
+      if (!user || !canManageFolders) return
       await createFolder({ name, ownerId: user.id })
     },
-    [createFolder, user],
+    [canManageFolders, createFolder, user],
   )
 
   const handleDeleteFolder = useCallback(
     async (folderId: string) => {
+      if (!canManageFolders) return
       const owned = (documents ?? []).filter(
         (d) => d.data.ownerId === user?.id && (d.data.folderId ?? '') === folderId,
       )
@@ -266,7 +287,7 @@ export default function DocumentsListPage() {
         nav.kind === 'folder' && nav.folderId === folderId ? { kind: 'all' } : nav,
       )
     },
-    [documents, put, removeFolder, user?.id],
+    [canManageFolders, documents, put, removeFolder, user?.id],
   )
 
   const commitRenameFolderRef = useRef<() => Promise<void>>(async () => {})
@@ -274,22 +295,23 @@ export default function DocumentsListPage() {
     const id = folderRenamingId
     const trimmed = folderRenameValue.trim()
     setFolderRenamingId(null)
-    if (!id || !trimmed) return
+    if (!canManageFolders || !id || !trimmed) return
     const folder = sortedFolders.find((f) => f.recordId === id)
     if (!folder || trimmed === (folder.data.name ?? '').trim()) return
     await putFolder(id, { ...folder.data, name: trimmed }).catch(() => {})
-  }, [folderRenameValue, folderRenamingId, putFolder, sortedFolders])
+  }, [canManageFolders, folderRenameValue, folderRenamingId, putFolder, sortedFolders])
 
   commitRenameFolderRef.current = commitRenameFolder
 
   const handleMoveDoc = useCallback(
     async (docId: string, folderId: string) => {
+      if (!canMoveDocuments) return
       const rec = documents.find((d) => d.recordId === docId)
       if (!rec) return
       await put(docId, { ...rec.data, folderId })
       setMoveMenuId(null)
     },
-    [documents, put],
+    [canMoveDocuments, documents, put],
   )
 
   const isLoading = status === 'loading'
@@ -316,6 +338,7 @@ export default function DocumentsListPage() {
           selection={libraryNav}
           onSelect={setLibraryNav}
           folders={myFolders}
+          canManageFolders={canManageFolders}
           collapsed={sidebarCollapsed}
           onToggleCollapsed={toggleSidebar}
           onCreateFolder={handleCreateFolder}
@@ -342,7 +365,10 @@ export default function DocumentsListPage() {
               {greetingForTime()}, {displayFirstName}
             </h1>
           </div>
-          <p className="mb-8 text-[13px] font-medium" style={{ color: 'var(--documents-el-muted)' }}>
+          <p
+            className="mb-8 text-[13px] font-medium"
+            style={{ color: 'var(--documents-el-muted)' }}
+          >
             {ownedDocumentCount} {ownedDocumentCount === 1 ? 'document' : 'documents'} in your
             documents.
           </p>
@@ -571,7 +597,10 @@ export default function DocumentsListPage() {
                   aria-hidden
                 />
               </div>
-              <h3 className="mb-2 text-lg font-semibold" style={{ color: 'var(--documents-el-text)' }}>
+              <h3
+                className="mb-2 text-lg font-semibold"
+                style={{ color: 'var(--documents-el-text)' }}
+              >
                 {searchQuery ? 'No matches' : 'No documents yet'}
               </h3>
               <p className="mb-6 max-w-sm text-sm" style={{ color: 'var(--documents-el-muted)' }}>
@@ -591,7 +620,8 @@ export default function DocumentsListPage() {
                   className="group w-full cursor-pointer rounded-xl border-2 border-dashed p-4 text-left shadow-sm transition-all hover:shadow-md"
                   style={{
                     borderColor: 'var(--documents-el-line)',
-                    backgroundColor: 'color-mix(in srgb, var(--documents-el-surface) 20%, transparent)',
+                    backgroundColor:
+                      'color-mix(in srgb, var(--documents-el-surface) 20%, transparent)',
                   }}
                 >
                   <div
@@ -668,6 +698,7 @@ export default function DocumentsListPage() {
                       <div className="min-w-0 flex-1">
                         {renamingId === doc.recordId ? (
                           <input
+                            disabled={!canCreate}
                             value={renameValue}
                             onChange={(e) => setRenameValue(e.target.value)}
                             onBlur={() => void handleRenameCommit(doc.recordId)}
@@ -676,7 +707,7 @@ export default function DocumentsListPage() {
                               if (e.key === 'Escape') setRenamingId(null)
                             }}
                             onClick={(e) => e.stopPropagation()}
-                            className="mb-0.5 w-full rounded-md border px-2 py-1 text-[13px] font-semibold outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+                            className="mb-0.5 w-full rounded-md border px-2 py-1 text-[13px] font-semibold outline-none focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
                             style={{
                               borderColor: 'var(--documents-el-line)',
                               backgroundColor: 'var(--documents-el-bg)',
@@ -724,6 +755,7 @@ export default function DocumentsListPage() {
                             <button
                               type="button"
                               title="More"
+                              disabled={!canCreate}
                               onClick={(e) => {
                                 e.stopPropagation()
                                 setActionsMenuId((id) =>
@@ -731,12 +763,12 @@ export default function DocumentsListPage() {
                                 )
                                 setMoveMenuId(null)
                               }}
-                              className="rounded-lg p-1.5"
+                              className="rounded-lg p-1.5 disabled:cursor-not-allowed disabled:opacity-40"
                               style={{ color: 'var(--documents-el-muted)' }}
                             >
                               <MoreVertical className="h-4 w-4" />
                             </button>
-                            {actionsMenuId === doc.recordId ? (
+                            {canCreate && actionsMenuId === doc.recordId ? (
                               <>
                                 <button
                                   type="button"
@@ -786,7 +818,7 @@ export default function DocumentsListPage() {
                                       <button
                                         type="button"
                                         className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-black/[0.04]"
-                                        disabled={fid === ''}
+                                        disabled={!canMoveDocuments || fid === ''}
                                         onClick={() => void handleMoveDoc(doc.recordId, '')}
                                       >
                                         Uncategorized
@@ -795,7 +827,7 @@ export default function DocumentsListPage() {
                                         <button
                                           key={f.recordId}
                                           type="button"
-                                          disabled={fid === f.recordId}
+                                          disabled={!canMoveDocuments || fid === f.recordId}
                                           className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-black/[0.04] disabled:opacity-40"
                                           onClick={() =>
                                             void handleMoveDoc(doc.recordId, f.recordId)
@@ -931,11 +963,12 @@ export default function DocumentsListPage() {
                           </button>
                           <button
                             type="button"
+                            disabled={!canCreate}
                             onClick={(e) => {
                               e.stopPropagation()
                               void handleDelete(doc.recordId)
                             }}
-                            className="rounded-lg p-1.5 opacity-0 transition-opacity group-hover:opacity-100"
+                            className="rounded-lg p-1.5 opacity-0 transition-opacity group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-0"
                             style={{ color: 'var(--documents-el-muted)' }}
                           >
                             <Trash2 className="h-4 w-4" />

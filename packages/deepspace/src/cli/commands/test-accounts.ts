@@ -279,9 +279,12 @@ const clear = defineDeepspaceCommand({
 
     if (!args.yes) {
       // p.confirm needs a TTY it can prompt on. A `--json` caller is a script by
-      // definition, so prompting would block forever with nothing on stdout —
-      // refuse with the flag that resolves it instead of hanging.
-      if (args.json) {
+      // definition, and a piped stdin (agent, `printf 'y' |`) is no better:
+      // clack resolves off the pipe, but its paused pipe stays a ref'd open
+      // handle that hangs the naturally-exiting process AFTER the accounts are
+      // deleted. Refuse with the flag that resolves it instead of hanging
+      // (same gate as transfer.ts).
+      if (!process.stdin.isTTY || args.json) {
         throw new Refusal(
           'Deleting test accounts needs confirmation. Pass --yes to confirm non-interactively.',
           'confirmation_required',

@@ -91,19 +91,21 @@ function withoutReservedKeys(payload: Record<string, unknown>): Record<string, u
 }
 
 /**
- * Exit only once stdout has drained. `console.log` on a PIPE is asynchronous
- * past the OS buffer (64 KiB on Linux/macOS), so exiting immediately truncates
- * a large payload mid-write — `integrations list --json` is already ~29 KB and
- * the catalog grows. The empty write's callback fires after the queue flushes.
+ * Record the exit code and hand control back, letting Node exit naturally once
+ * the event loop drains. Never process.exit(): on Windows, exiting after a
+ * successful built-in fetch() trips libuv's
+ * `!(handle->flags & UV_HANDLE_CLOSING)` assertion (src/win/async.c) and
+ * aborts the process (0xC0000409) AFTER the result was printed. Natural exit
+ * still guarantees stdout lands whole: `console.log` on a PIPE is asynchronous
+ * past the OS buffer (64 KiB on Linux/macOS), but a queued stdout write is an
+ * active libuv handle, so Node drains it before the loop empties — no
+ * flush-then-exit dance needed for large `--json` payloads.
  */
-function exitWhenFlushed(code: number): never {
-  // Nothing queued (a TTY, a small payload, or a test harness capturing
-  // console.log) — exit synchronously. Deferring unconditionally would break
-  // any caller that mocks process.exit and asserts synchronously, and would
-  // let execution continue past a `never` return.
-  if (process.stdout.writableLength === 0) process.exit(code)
-  process.stdout.write('', () => process.exit(code))
-  return undefined as never
+function finishCommand(code: number): void {
+  // A live spinner's repaint interval would keep the naturally-exiting
+  // process alive forever; stop it (idempotent) before handing the loop back.
+  stopActiveSpinner()
+  process.exitCode = code
 }
 
 export interface DeepspaceCommandDef<A extends ArgsDef> {
@@ -262,12 +264,12 @@ export function defineDeepspaceCommand<A extends ArgsDef>(def: DeepspaceCommandD
           if (refusal?.action) printAction(refusal.action)
         }
         // 2 = "it worked, but a local step remains"; 1 = it failed.
-        exitWhenFlushed(refusal?.actionRequired ? 2 : 1)
+        finishCommand(refusal?.actionRequired ? 2 : 1)
       }
-      // OUTSIDE the try on purpose: a test that mocks process.exit to throw
-      // would otherwise have the success path land in the catch above and be
-      // re-rendered as a failure.
-      if (succeeded) exitWhenFlushed(0)
+      // `succeeded` gates the fall-through from the catch above: a failure
+      // has already recorded its 1/2 exit code and must not be overwritten
+      // with 0.
+      if (succeeded) finishCommand(0)
     },
   }) as CommandDef
 }

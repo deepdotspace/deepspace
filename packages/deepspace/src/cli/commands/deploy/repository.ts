@@ -17,7 +17,7 @@ import {
 } from '../../lib/vc-push'
 import { ensureSpaceRemote, runGitRemote, spaceRemoteName } from '../../lib/vc-remote'
 import { workspaceIdFromBranch } from '../../lib/workspace-id'
-import { errorCode } from '../../lib/cli-errors'
+import { CliExit, errorCode } from '../../lib/cli-errors'
 import { listGitHubRemotes } from '../../lib/source-control'
 import { getAppSource, type AppSource, type AppSourceState } from '../../lib/source-api'
 import type { DeployOutput } from './output'
@@ -211,6 +211,9 @@ export async function syncDeployRepository(options: {
       sourceRevision = claimed.revision
     }
   } catch (error: unknown) {
+    // The die() refusals above unwind through here as an already-rendered
+    // CliExit — let it pass rather than re-wrapping it as vc_sync_failed.
+    if (error instanceof CliExit) throw error
     const failure = deployRepositoryFailure(error, appDir)
     output.die(failure.error, failure.code)
   }

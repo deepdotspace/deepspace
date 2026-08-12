@@ -26,6 +26,7 @@ interface TestEnv {
   ALLOW_DEBUG_ROUTES?: string
   RECORD_ROOMS?: DurableObjectNamespace
   YJS_ROOMS?: DurableObjectNamespace
+  CANVAS_ROOMS?: DurableObjectNamespace
 }
 
 type TestContext = { Bindings: TestEnv }
@@ -321,6 +322,95 @@ describe('generated worker route owners', () => {
       'https://images.example.test/verified.png',
     )
     expect(decodeRoomIdentityHeader(forwardedHeaders.get('x-user-role'))).toBe('member')
+  })
+
+  it('forwards the current app role instead of promoting canvas users', async () => {
+    const token = await signTestJwt('viewer-user')
+    let forwardedHeaders = new Headers()
+    const recordRooms = {
+      idFromName: (name: string) => name,
+      get: () => ({
+        fetch: () =>
+          Promise.resolve(
+            Response.json({
+              success: true,
+              data: { record: { data: { role: 'viewer' } } },
+            }),
+          ),
+      }),
+    } as unknown as DurableObjectNamespace
+    const canvasRooms = {
+      idFromName: (name: string) => name,
+      get: () => ({
+        fetch(request: Request) {
+          forwardedHeaders = new Headers(request.headers)
+          return Promise.resolve(new Response(null, { status: 204 }))
+        },
+      }),
+    } as unknown as DurableObjectNamespace
+    const app = new Hono<TestContext>()
+    registerRealtimeRoutes(app)
+
+    const response = await app.request(
+      `https://app.test/ws/canvas/canvas-1?token=${encodeURIComponent(token)}`,
+      undefined,
+      env({
+        AUTH_JWT_ISSUER: TEST_JWT_ISSUER,
+        AUTH_JWT_PUBLIC_KEY: TEST_JWT_PUBLIC_KEY,
+        DEEPSPACE_APP_ID: 'app_test',
+        OWNER_USER_ID: 'owner-user',
+        RECORD_ROOMS: recordRooms,
+        CANVAS_ROOMS: canvasRooms,
+      }),
+    )
+
+    expect(response.status).toBe(204)
+    expect(decodeRoomIdentityHeader(forwardedHeaders.get('x-user-id'))).toBe('viewer-user')
+    expect(decodeRoomIdentityHeader(forwardedHeaders.get('x-user-role'))).toBe('viewer')
+  })
+
+  it('fails closed when a Yjs document has no authorization record', async () => {
+    const token = await signTestJwt()
+    let yjsRequests = 0
+    const recordRooms = {
+      idFromName: (name: string) => name,
+      get: () => ({
+        fetch: () =>
+          Promise.resolve(
+            Response.json({
+              success: false,
+              error: 'Record not found',
+            }),
+          ),
+      }),
+    } as unknown as DurableObjectNamespace
+    const yjsRooms = {
+      idFromName: (name: string) => name,
+      get: () => ({
+        fetch: () => {
+          yjsRequests++
+          return Promise.resolve(new Response(null, { status: 204 }))
+        },
+      }),
+    } as unknown as DurableObjectNamespace
+    const app = new Hono<TestContext>()
+    registerRealtimeRoutes(app)
+
+    const response = await app.request(
+      `https://app.test/ws/yjs/doc-1?token=${encodeURIComponent(token)}`,
+      undefined,
+      env({
+        AUTH_JWT_ISSUER: TEST_JWT_ISSUER,
+        AUTH_JWT_PUBLIC_KEY: TEST_JWT_PUBLIC_KEY,
+        DEEPSPACE_APP_ID: 'app_test',
+        OWNER_USER_ID: 'owner-user',
+        RECORD_ROOMS: recordRooms,
+        YJS_ROOMS: yjsRooms,
+      }),
+    )
+
+    expect(response.status).toBe(403)
+    expect(yjsRequests).toBe(0)
   })
 
   it('requires authentication before documents and server actions touch state', async () => {

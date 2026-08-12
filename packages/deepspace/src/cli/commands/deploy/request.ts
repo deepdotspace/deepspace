@@ -1,5 +1,6 @@
 import * as p from '@clack/prompts'
 import { readFileSync } from 'node:fs'
+import { CliExit } from '../../lib/cli-errors'
 import { executableAction, printAction, withSlug, type CliAction } from '../../lib/output'
 import type { Spinner } from '../../lib/spinner'
 import type { DeployAsset, DeployBundle } from './build'
@@ -114,7 +115,11 @@ export async function deployBuiltBundle(options: {
         ...(action ? { action } : {}),
       })
     }
-    process.exit(actionRequired ? 2 : 1)
+    // Throw, never process.exit(): the deploy POST/uploads above leave undici
+    // connections that make an exit() abort on Windows (see lib/command.ts).
+    // The sentinel unwinds to wrapCommandErrors → renderCliError, which
+    // records the exit code without re-rendering.
+    throw new CliExit(actionRequired ? 2 : 1)
   }
 
   const makeForm = (): FormData => {
