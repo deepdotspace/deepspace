@@ -8,6 +8,7 @@ import updateCommand, {
   pinSdkVersion,
   usersSchemaVisibilityUpgradeInstruction,
 } from '../update'
+import sdkPackage from '../../../../package.json'
 import { APP_MIGRATION_DEFINITIONS } from '../update/app-migrations'
 
 describe('app update dependency pinning', () => {
@@ -101,8 +102,8 @@ describe('app update build-preview guidance', () => {
     const source = `export default { plugins: [] }\n`
     writeFileSync(configPath, source)
 
-    expect(buildPreviewSecretsUpgradeInstruction(appDir)).toMatch(
-      /vite\.config\.ts: add the build-preview secret cleanup.*docs\/migrations\/build-preview-secrets\.md/,
+    expect(buildPreviewSecretsUpgradeInstruction(appDir)).toContain(
+      `https://github.com/deepdotspace/deepspace/blob/v${sdkPackage.version}/docs/migrations/build-preview-secrets.md`,
     )
     expect(readFileSync(configPath, 'utf8')).toBe(source)
   })
@@ -176,8 +177,8 @@ describe('app update build-preview guidance', () => {
     mkdirSync(join(appDir, 'src/schemas'), { recursive: true })
     writeFileSync(schemaPath, source)
 
-    expect(usersSchemaVisibilityUpgradeInstruction(appDir)).toMatch(
-      /src\/schemas\/users-schema\.ts.*users-schema-member-visibility\.md/,
+    expect(usersSchemaVisibilityUpgradeInstruction(appDir)).toContain(
+      `https://github.com/deepdotspace/deepspace/blob/v${sdkPackage.version}/docs/migrations/users-schema-member-visibility.md`,
     )
     expect(readFileSync(schemaPath, 'utf8')).toBe(source)
   })

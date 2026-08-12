@@ -1,5 +1,11 @@
 # create-deepspace
 
+## 0.19.3
+
+### Patch Changes
+
+- Publish the manual app-update migration guides in the public release mirror and link each updater result to its version-matched guide.
+
 ## 0.19.2
 
 ### Patch Changes

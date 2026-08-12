@@ -35,10 +35,9 @@ import {
 
 const REGISTRY = 'https://registry.npmjs.org/deepspace/latest'
 const DOCS_URL = 'https://documentation.deep.space/cli-reference/commands'
-const BUILD_PREVIEW_SECRETS_GUIDE =
-  'https://github.com/deepdotspace/deepspace-sdk/blob/main/docs/migrations/build-preview-secrets.md'
-const USERS_SCHEMA_VISIBILITY_GUIDE =
-  'https://github.com/deepdotspace/deepspace-sdk/blob/main/docs/migrations/users-schema-member-visibility.md'
+const RELEASE_DOCS_URL = `https://github.com/deepdotspace/deepspace/blob/v${sdkPackage.version}/docs/migrations`
+const BUILD_PREVIEW_SECRETS_GUIDE = `${RELEASE_DOCS_URL}/build-preview-secrets.md`
+const USERS_SCHEMA_VISIBILITY_GUIDE = `${RELEASE_DOCS_URL}/users-schema-member-visibility.md`
 const COMPATIBLE_AI_VERSION = sdkPackage.dependencies.ai
 
 /**
