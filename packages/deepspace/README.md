@@ -134,7 +134,7 @@ DeepSpace verifies GitHub but never writes it. Inspect or transfer authority wit
 `deepspace app source deepspace`. Transfers mirror branches and tags before one
 atomic authority change; switching back uses the same commands. Commands support
 `--json` for agents. Use `deepspace --help`, command-specific `--help`, and the
-[public manual](https://documentation.deep.space) for workspaces, releases, and
+[public manual](https://docs.deep.space) for workspaces, releases, and
 rollback.
 
 In a container, give Git its own credentials before a private-repository

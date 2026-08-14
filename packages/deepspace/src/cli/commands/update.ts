@@ -34,7 +34,7 @@ import {
 } from './update/app-migrations'
 
 const REGISTRY = 'https://registry.npmjs.org/deepspace/latest'
-const DOCS_URL = 'https://documentation.deep.space/cli-reference/commands'
+const DOCS_URL = 'https://docs.deep.space/cli-reference/commands'
 const RELEASE_DOCS_URL = `https://github.com/deepdotspace/deepspace/blob/v${sdkPackage.version}/docs/migrations`
 const BUILD_PREVIEW_SECRETS_GUIDE = `${RELEASE_DOCS_URL}/build-preview-secrets.md`
 const USERS_SCHEMA_VISIBILITY_GUIDE = `${RELEASE_DOCS_URL}/users-schema-member-visibility.md`

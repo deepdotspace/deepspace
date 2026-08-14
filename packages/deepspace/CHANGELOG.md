@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.19.5
+
+### Patch Changes
+
+- The CLI's documentation pointer follows the docs cutover: `deepspace app update` guidance and the npm README now link https://docs.deep.space (documentation.deep.space is retired).
+
 ## 0.19.4
 
 ### Patch Changes
