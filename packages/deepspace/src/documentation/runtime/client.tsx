@@ -148,28 +148,31 @@ export function DocumentationRuntimeRoot({
       }
       syncDocument(runtime, target)
       renderedLocationRef.current = targetKey
-      const startViewTransition = typeof document.startViewTransition === 'function'
-        ? document.startViewTransition.bind(document)
-        : undefined
-      const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-      if (startViewTransition && !prefersReducedMotion) {
-        const transition = startViewTransition(() => {
-          flushSync(() => setData(runtime.data))
-        })
-        await transition.updateCallbackDone
-      } else {
-        flushSync(() => setData(runtime.data))
-      }
+      // The swap is a cut: one synchronous commit with the scroll applied in
+      // the same frame, so from a settled scroll exactly [oldY, 0] is ever
+      // observable and the new page never composites at the old offset.
+      // Anything softer — fades, slides, view transitions — draws two bodies
+      // of text at once and reads as ghosting. Navigation feedback belongs to
+      // the chrome progress bar, never the prose.
+      flushSync(() => setData(runtime.data))
       scrollToTarget(target, historyMode === 'none' ? restoredScroll : undefined)
       restoringHistoryRef.current = false
       replaceHistoryScroll(window.scrollY)
-      focusArticleHeading()
+      // Moving focus is for the reading flow; never steal it from someone
+      // mid-thought in the assistant, launcher, or search input.
+      const activeElement = document.activeElement
+      const focusInOverlay = activeElement instanceof Element
+        && activeElement.closest('.documentation-assistant, .documentation-assistant-launcher, .documentation-search-dialog')
+      if (!focusInOverlay) focusArticleHeading()
       if (navigationId === navigationIdRef.current) setNavigating(false)
     } catch (error) {
       if (navigationId !== navigationIdRef.current) return
       restoringHistoryRef.current = false
       console.error('[DeepSpace Documentation] Client navigation failed; falling back to a document navigation', error)
-      window.location.assign(target.href)
+      // On popstate the URL already matches, so assign() to a hash URL would
+      // be a same-document no-op that leaves stale content in place.
+      if (historyMode === 'none') window.location.reload()
+      else window.location.assign(target.href)
     } finally {
       window.clearTimeout(progressTimer)
     }
@@ -205,15 +208,25 @@ export function DocumentationRuntimeRoot({
       const href = anchorFor(event.target)?.getAttribute('href')
       if (href && shouldHandleDocumentationNavigation(href, basePath)) prefetch(href)
     }
+    const handleDragStart = (event: DragEvent): void => {
+      const target = event.target instanceof Element ? event.target : null
+      // Dragging stays a content feature (prose links and images, assistant
+      // answers); a press-and-drag on chrome — sidebar, outline, pagination,
+      // header — must never spawn the native floating link ghost.
+      if (!target || target.closest('[data-prose], .documentation-assistant-messages, input, textarea')) return
+      event.preventDefault()
+    }
     root.addEventListener('click', handleClick)
     root.addEventListener('focusin', handlePrefetch)
     root.addEventListener('mouseover', handlePrefetch)
     root.addEventListener('pointerdown', handlePrefetch)
+    root.addEventListener('dragstart', handleDragStart)
     return () => {
       root.removeEventListener('click', handleClick)
       root.removeEventListener('focusin', handlePrefetch)
       root.removeEventListener('mouseover', handlePrefetch)
       root.removeEventListener('pointerdown', handlePrefetch)
+      root.removeEventListener('dragstart', handleDragStart)
     }
   }, [basePath, navigate, prefetch])
 

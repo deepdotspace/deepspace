@@ -41,6 +41,7 @@ export function renderPage(options: DocumentationPageRenderOptions, assets: {
   const { data: runtimeData, document: runtimeDocument } = runtime
   const theme = runtimeData.config.theme
   const accent = documentationAccent(theme)
+  const accentDark = validCssColor(theme.accentDark) ? theme.accentDark : undefined
   const background = validCssColor(theme.background) ? theme.background : '#fbfcfe'
   const backgroundDark = validCssColor(theme.backgroundDark) ? theme.backgroundDark : '#0c0e14'
   const defaultMode = theme.defaultMode ?? 'system'
@@ -70,6 +71,7 @@ export function renderPage(options: DocumentationPageRenderOptions, assets: {
   <meta property="og:description" content="${escapeHtml(runtimeDocument.openGraph['og:description'] ?? '')}">
   ${runtimeDocument.openGraph['og:url'] ? `<meta property="og:url" content="${escapeHtml(runtimeDocument.openGraph['og:url'])}">` : ''}
   ${config.seo.ogImage ? `<meta property="og:image" content="${escapeHtml(config.seo.ogImage)}">` : ''}
+  ${config.seo.ogImage ? `<meta name="twitter:image" content="${escapeHtml(config.seo.ogImage)}">` : ''}
   <meta name="twitter:card" content="${config.seo.ogImage ? 'summary_large_image' : 'summary'}">
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="${background}">
   <meta name="theme-color" media="(prefers-color-scheme: dark)" content="${backgroundDark}">
@@ -78,7 +80,7 @@ export function renderPage(options: DocumentationPageRenderOptions, assets: {
   ${fontPreloads}
   <link rel="stylesheet" href="${assetRoot}/documentation.css">
   ${(assets.customStylesheets ?? []).map((href) => `<link rel="stylesheet" href="${escapeHtml(href)}">`).join('\n  ')}
-  <style>${fontFaces}:root{--documentation-accent:${accent};--documentation-brand-bg:${background};--documentation-brand-bg-dark:${backgroundDark};--documentation-font-body:${bodyFont};--documentation-font-heading:${headingFont};--documentation-font-mono:${monoFont}}</style>
+  <style>${fontFaces}:root{--documentation-accent-light:${accent};${accentDark ? `--documentation-accent-dark:${accentDark};` : ''}--documentation-brand-bg:${background};--documentation-brand-bg-dark:${backgroundDark};--documentation-font-body:${bodyFont};--documentation-font-heading:${headingFont};--documentation-font-mono:${monoFont}}</style>
   <script src="${assetRoot}/documentation-theme.js"></script>
 </head>
 <body data-route="${escapeHtml(page.route)}">

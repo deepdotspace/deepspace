@@ -19,8 +19,9 @@ export const DOCUMENTATION_RESPONSIVE_CSS = String.raw`
   .documentation-top-links { display: none; }
   .documentation-breadcrumbs { display: flex; }
   .documentation-outline-disclosure { display: block; }
-  /* Too narrow to dock beside the article; fall back to the floating card. */
-  .documentation-assistant { inset: auto auto 18px 50%; width: min(620px, calc(100vw - 36px)); height: min(570px, calc(100vh - 94px)); border: 1px solid var(--documentation-border-strong); border-radius: 16px; box-shadow: 0 28px 80px rgba(15, 18, 28, .18), 0 6px 22px rgba(15, 18, 28, .08); transform: translateX(-50%); animation: documentation-assistant-in .2s ease-out; }
+  /* Too narrow to dock beside the article; fall back to the floating card.
+   * The article passes beneath it, so this surface is honest glass. */
+  .documentation-assistant { inset: auto auto 18px 50%; width: min(620px, calc(100vw - 36px)); height: min(570px, calc(100vh - 94px)); border: 1px solid var(--documentation-glass-border); border-radius: 16px; background: var(--documentation-glass-bg); backdrop-filter: blur(24px) saturate(1.2); -webkit-backdrop-filter: blur(24px) saturate(1.2); box-shadow: inset 0 1px 0 var(--documentation-glass-highlight), var(--documentation-shadow-lg); transform: translateX(-50%); animation: documentation-assistant-in .2s ease-out; }
   .documentation-app.is-assistant-open .documentation-main { margin-right: 0; }
   .documentation-app.is-assistant-open .documentation-header { right: 0; }
 }
@@ -60,8 +61,6 @@ export const DOCUMENTATION_RESPONSIVE_CSS = String.raw`
   .documentation-search-results { max-height: none; }
   .documentation-search-dialog > footer { justify-content: center; }
   .documentation-launcher-dock { padding-bottom: 12px; }
-  .documentation-launcher-agent { padding: 0 9px; }
-  .documentation-launcher-agent .documentation-launcher-agent-name { display: none; }
   .documentation-launcher-hint { display: none; }
   .documentation-assistant { inset: auto auto 0 0; width: 100%; height: calc(100vh - 8px); transform: none; border-width: 1px 0 0; border-radius: 18px 18px 0 0; }
   .documentation-assistant-suggestions { grid-template-columns: 1fr; }

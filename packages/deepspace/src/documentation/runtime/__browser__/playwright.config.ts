@@ -9,7 +9,7 @@ const customRuntime = 'http://127.0.0.1:4179'
  * 4178 serves Markdown pages through the default runtime (the compiler's HTML is
  * injected), 4179 serves MDX pages with an app-owned `documentation.tsx` through
  * the executable runtime (React renders the prose). Runtime-agnostic specs run
- * against both, with view transitions on and off.
+ * against both.
  */
 export default defineConfig({
   testDir: '.',
@@ -19,9 +19,7 @@ export default defineConfig({
   projects: [
     // `routing.browser.ts` asserts the default fixture's own titles and canonical
     // URLs, so it stays on the default runtime; everything else is
-    // runtime-agnostic and runs against both. View transitions on and off are
-    // driven per test by `page.emulateMedia`, not by a project, so the two
-    // motion paths stay visible in the spec that depends on them.
+    // runtime-agnostic and runs against both.
     { name: 'default-runtime', use: { baseURL: defaultRuntime } },
     {
       name: 'custom-runtime',

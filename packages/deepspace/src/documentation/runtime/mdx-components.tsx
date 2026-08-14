@@ -1,6 +1,6 @@
 import type { ComponentPropsWithoutRef, ReactElement, ReactNode } from 'react'
 import { Children, createElement, isValidElement } from 'react'
-import { CodeBlock, TabGroup, type TabGroupPanel } from './code-block'
+import { CodeBlock, CodeGroupProvider, TabGroup, type TabGroupPanel } from './code-block'
 
 interface TitledProps {
   children?: ReactNode
@@ -66,13 +66,15 @@ export function CodeGroup({ children, label, title }: TitledProps): ReactElement
     content: child,
   }))
   return (
-    <TabGroup
-      className="documentation-code-group"
-      panels={panels}
-      title={title ?? label
-        ? <div className="documentation-code-group-title">{title ?? label}</div>
-        : undefined}
-    />
+    <CodeGroupProvider value={true}>
+      <TabGroup
+        className="documentation-code-group"
+        panels={panels}
+        title={title ?? label
+          ? <div className="documentation-code-group-title">{title ?? label}</div>
+          : undefined}
+      />
+    </CodeGroupProvider>
   )
 }
 

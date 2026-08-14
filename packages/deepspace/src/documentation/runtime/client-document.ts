@@ -86,7 +86,10 @@ export function routeDataUrl(url: URL, basePath: string): string {
 export function scrollToTarget(target: URL, restoredScroll?: number): void {
   if (target.hash) {
     const id = decodeURIComponent(target.hash.slice(1))
-    document.getElementById(id)?.scrollIntoView()
+    // Instant: this path runs only on cross-page/popstate arrivals, where the
+    // page just swapped — inheriting the CSS smooth behavior glides across a
+    // brand-new document. Same-page anchor clicks never reach here.
+    document.getElementById(id)?.scrollIntoView({ behavior: 'instant', block: 'start' })
     return
   }
   window.scrollTo({ top: restoredScroll ?? 0, behavior: 'instant' })

@@ -94,19 +94,23 @@ export function SearchCommand({
             aria-controls="documentation-search-results"
             aria-expanded="true"
             aria-label={`Search ${documentationSubject(name)}`}
+            autoCapitalize="none"
             autoComplete="off"
+            autoCorrect="off"
             data-autofocus
+            enterKeyHint="go"
             onChange={(event) => { setQuery(event.target.value); setActiveIndex(0) }}
             onKeyDown={handleKeyDown}
             placeholder={`Search ${name}`}
             role="combobox"
+            spellCheck={false}
             value={query}
           />
           <kbd>Esc</kbd>
         </label>
         <div className="documentation-search-results" id="documentation-search-results" ref={resultsRef} role="listbox" aria-label="Search results">
           {!query.trim() && (
-            <div className="documentation-search-empty"><OrbitMark /><strong>Find an answer in this commit</strong><span>Search pages, headings, APIs, and examples.</span></div>
+            <div className="documentation-search-empty"><OrbitMark /><strong>Find an answer in these docs</strong><span>Search pages, headings, APIs, and examples.</span></div>
           )}
           {query.trim() && loading && <div className="documentation-search-state">Searching this documentation…</div>}
           {query.trim() && !loading && results.length === 0 && <div className="documentation-search-state">No documentation matched “{query.trim()}”.</div>}

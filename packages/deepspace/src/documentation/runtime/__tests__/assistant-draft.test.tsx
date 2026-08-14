@@ -65,7 +65,8 @@ describe('documentation assistant draft ownership', () => {
       launcher?.dispatchEvent(new Event('input', { bubbles: true }))
     })
     act(() => {
-      container.querySelector<HTMLButtonElement>('.documentation-launcher-agent')?.click()
+      // The chip is gone; ⌘I is the non-submitting way to open the panel.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'i', metaKey: true, bubbles: true }))
     })
 
     expect(container.querySelector<HTMLTextAreaElement>(

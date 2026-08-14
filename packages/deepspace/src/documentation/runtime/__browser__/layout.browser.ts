@@ -47,34 +47,73 @@ test('the assistant launcher docks to the viewport bottom while reading', async 
   expect(await page.locator('.documentation-launcher-dock').evaluate((node) =>
     getComputedStyle(node).position)).toBe('sticky')
 
-  // It still scrolls away above the pagination at the end of the article.
+  // At the end of the article it settles into its in-flow slot above the
+  // pagination — still fully present and interactive. The end of a page is
+  // exactly where questions form, so there is no auto-hide.
   await page.evaluate(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' }))
   await page.waitForTimeout(200)
   const pagination = await page.locator('.documentation-pagination').boundingBox()
   const docked = await page.locator('.documentation-launcher-dock').boundingBox()
   expect(docked!.y + docked!.height).toBeLessThanOrEqual(pagination!.y + 1)
+  const launcher = page.locator('.documentation-assistant-launcher')
+  await expect(launcher).toBeVisible()
+  const settled = await launcher.evaluate((node) => {
+    const style = getComputedStyle(node)
+    return { opacity: style.opacity, pointerEvents: style.pointerEvents }
+  })
+  expect(settled.opacity).toBe('1')
+  expect(settled.pointerEvents).not.toBe('none')
 })
 
-test('the launcher chip never truncates, whatever the site is called', async ({ page }) => {
+test('the launcher is a single input row — no chip, accessible name intact', async ({ page }) => {
   await hydrate(page)
-  const chip = page.locator('.documentation-launcher-agent')
-  await expect(chip).toBeVisible()
-  const label = page.locator('.documentation-launcher-agent-name')
-  const overflow = await label.evaluate((node) => ({
-    scrollWidth: node.scrollWidth,
-    clientWidth: node.clientWidth,
-  }))
-  expect(
-    overflow.scrollWidth,
-    'the chip label fits without ellipsis at any configured site name length',
-  ).toBeLessThanOrEqual(overflow.clientWidth)
-  // The accessible name still identifies the site, even though the chip does not.
-  const name = await chip.getAttribute('aria-label')
+  await expect(page.locator('.documentation-launcher-agent')).toHaveCount(0)
+  const input = page.locator('.documentation-assistant-launcher input')
+  await expect(input).toBeVisible()
+  const name = await input.getAttribute('aria-label')
   expect(name).toMatch(/agent$/)
-  // The 40% column clamp stays a guard, not the thing that sizes the chip.
-  const chipBox = await chip.boundingBox()
+  // The input owns the row: it spans most of the launcher width.
+  const inputBox = await input.boundingBox()
   const launcher = await page.locator('.documentation-assistant-launcher').boundingBox()
-  expect(chipBox!.width).toBeLessThan(launcher!.width * 0.4)
+  expect(inputBox!.width).toBeGreaterThan(launcher!.width * 0.5)
+})
+
+test('anchors land at the single scroll-padding clearance — no stacked offsets', async ({ page }) => {
+  await hydrate(page)
+  await page.evaluate(() => {
+    document.querySelector<HTMLAnchorElement>('.documentation-outline a')?.click()
+  })
+  await page.waitForTimeout(700)
+  const landing = await page.evaluate(() => {
+    const id = decodeURIComponent(location.hash.slice(1))
+    const target = document.getElementById(id)
+    return {
+      top: target ? Math.round(target.getBoundingClientRect().top) : null,
+      scrollPadding: getComputedStyle(document.documentElement).scrollPaddingTop,
+      scrollMargin: target ? getComputedStyle(target).scrollMarginTop : null,
+    }
+  })
+  expect(landing.scrollPadding).toBe('96px')
+  expect(landing.scrollMargin, 'clearance is owned once, by the container').toBe('0px')
+  expect(Math.abs((landing.top ?? 0) - 96), 'anchor target sits at the clearance line').toBeLessThanOrEqual(2)
+})
+
+test('clicking every outline entry moves the highlight to it — including the last', async ({ page }) => {
+  await hydrate(page)
+  const hrefs: string[] = await page.$$eval('.documentation-outline a', (nodes) =>
+    nodes.map((node) => node.getAttribute('href') ?? ''))
+  expect(hrefs.length).toBeGreaterThan(2)
+  // The last entry is the one an intersection-band spy could never activate
+  // when its section is short; walk them all, ending on it.
+  for (const href of [...hrefs.slice(0, 2), hrefs[hrefs.length - 2]!, hrefs[hrefs.length - 1]!]) {
+    await page.evaluate((target) => {
+      document.querySelector<HTMLAnchorElement>(`.documentation-outline a[href="${target}"]`)?.click()
+    }, href)
+    await page.waitForTimeout(750)
+    const active = await page.evaluate(() =>
+      document.querySelector('.documentation-outline a.is-active')?.getAttribute('href') ?? null)
+    expect(active, `outline highlight follows a click on ${href}`).toBe(href)
+  }
 })
 
 test('the search trigger matches the surrounding chrome type scale', async ({ page }) => {

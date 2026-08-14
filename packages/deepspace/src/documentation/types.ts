@@ -28,6 +28,7 @@ export interface DocumentationFontConfig {
 export interface DocumentationThemeConfig {
   preset?: string
   accent?: string
+  accentDark?: string
   background?: string
   backgroundDark?: string
   backgroundDecoration?: 'none' | 'gradient' | 'grid'

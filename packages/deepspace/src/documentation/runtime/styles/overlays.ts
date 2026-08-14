@@ -37,30 +37,34 @@ export const DOCUMENTATION_OVERLAYS_CSS = String.raw`
 .documentation-mobile-nav > footer { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 13px; padding: 13px 18px; border-top: 1px solid var(--documentation-border); }
 .documentation-mobile-nav > footer a { color: var(--documentation-muted); font-size: 13px; text-decoration: none; }
 
-/* Sticky inside the reading column instead of fixed to the viewport: it tracks
- * the column's centre line, never covers the sidebar or outline, and scrolls
- * away above the pagination rather than sitting on top of it. */
-.documentation-launcher-dock { position: sticky; z-index: 40; bottom: 0; display: flex; justify-content: center; margin-top: auto; padding: 44px 0 16px; pointer-events: none; }
-.documentation-launcher-dock::before { content: ""; position: absolute; z-index: -1; inset: 0; background: linear-gradient(to bottom, transparent, var(--documentation-brand-bg) 58%); }
+/* The launcher owns a reserved slot in the reading column: sticky at the
+ * viewport bottom while reading, ordinary flow above the pagination once the
+ * end of the article arrives. It is present on the whole page — no auto-hide,
+ * no protective gradient, no mask. The pill's own glass is its legibility
+ * over prose, dark code, and images, and its in-flow slot means it never
+ * crosses the pagination. */
+.documentation-launcher-dock { position: sticky; z-index: 40; bottom: 0; display: flex; justify-content: center; margin-top: auto; padding: 30px 0 18px; pointer-events: none; }
 .documentation-launcher-dock + .documentation-pagination { margin-top: 0; }
-.documentation-assistant-launcher { view-transition-name: documentation-assistant-launcher; position: relative; display: grid; grid-template-columns: fit-content(40%) minmax(0, 1fr) auto auto; align-items: center; gap: 0; width: min(452px, 100%); min-height: 48px; padding: 5px; border: 1px solid color-mix(in srgb, var(--documentation-border-strong) 92%, var(--documentation-accent)); border-radius: 13px; background: color-mix(in srgb, var(--documentation-surface-raised) 96%, transparent); color: var(--documentation-text); box-shadow: 0 18px 45px rgba(15, 18, 28, .11), 0 2px 8px rgba(15, 18, 28, .05); pointer-events: auto; backdrop-filter: blur(18px) saturate(1.1); transition: border-color .16s, box-shadow .16s, transform .16s; }
-.documentation-assistant-launcher:hover { border-color: color-mix(in srgb, var(--documentation-accent) 32%, var(--documentation-border-strong)); box-shadow: 0 20px 48px rgba(15, 18, 28, .14), 0 2px 8px rgba(15, 18, 28, .06); transform: translateY(-1px); }
-.documentation-assistant-launcher input { min-width: 0; height: 36px; padding: 0 12px; border: 0; outline: 0; background: transparent; color: var(--documentation-text); font-size: 14px; }
+.documentation-assistant-launcher { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 0; width: min(452px, 100%); min-height: 48px; padding: 5px; border: 1px solid var(--documentation-glass-border); border-radius: 15px; background: var(--documentation-glass-bg); color: var(--documentation-text); box-shadow: inset 0 1px 0 var(--documentation-glass-highlight), 0 16px 40px rgba(15, 18, 28, .12), 0 2px 8px rgba(15, 18, 28, .05); pointer-events: auto; backdrop-filter: blur(20px) saturate(1.2); -webkit-backdrop-filter: blur(20px) saturate(1.2); transition: border-color .16s, box-shadow .16s, transform .22s cubic-bezier(.4, 0, .2, 1); }
+.documentation-assistant-launcher:hover { border-color: color-mix(in srgb, var(--documentation-accent) 32%, var(--documentation-border-strong)); box-shadow: inset 0 1px 0 var(--documentation-glass-highlight), 0 20px 48px rgba(15, 18, 28, .15), 0 2px 8px rgba(15, 18, 28, .06); transform: translateY(-1px); }
+.documentation-assistant-launcher:focus-within { border-color: color-mix(in srgb, var(--documentation-accent) 48%, var(--documentation-border-strong)); box-shadow: inset 0 1px 0 var(--documentation-glass-highlight), 0 0 0 3px color-mix(in srgb, var(--documentation-accent) 10%, transparent), 0 16px 40px rgba(15, 18, 28, .12); }
+.documentation-assistant-launcher input { min-width: 0; height: 36px; padding: 0 6px 0 14px; border: 0; outline: 0; background: transparent; color: var(--documentation-text); font-size: 14px; }
 .documentation-assistant-launcher input::placeholder { color: var(--documentation-muted); }
-.documentation-launcher-send { display: grid; place-items: center; height: 36px; border: 0; border-radius: 9px; cursor: pointer; }
 /* The 40% cap lives on the grid track: a percentage max-width here would
  * resolve against that track instead of the launcher. */
-.documentation-launcher-agent { display: flex; align-items: center; gap: 4px; min-width: 0; height: 36px; padding: 0 13px 0 9px; border: 0; border-right: 1px solid var(--documentation-border); border-radius: 0; background: transparent; color: var(--documentation-text-soft); cursor: pointer; font-size: 12.5px; font-weight: 650; white-space: nowrap; }
-.documentation-launcher-agent-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.documentation-launcher-agent:hover { color: var(--documentation-accent); }
 .documentation-launcher-hint { display: grid; grid-auto-flow: column; gap: 3px; padding-right: 8px; }
 .documentation-launcher-hint kbd { padding: 2px 5px; border: 1px solid var(--documentation-border); border-radius: 5px; background: var(--documentation-panel); color: var(--documentation-faint); font: 600 11px/1.3 var(--documentation-font-mono); }
-.documentation-launcher-send { width: 36px; padding: 0; background: var(--documentation-accent); color: #fff; }
-.documentation-launcher-send:disabled { background: var(--documentation-panel); color: var(--documentation-faint); cursor: default; }
-.documentation-launcher-send svg { width: 15px; }
+/* One send-button spec for the launcher and the composer: a circular accent
+ * button with a gentle press cycle, dim while empty. */
+.documentation-launcher-send, .documentation-assistant-composer > button { display: grid; flex: 0 0 auto; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 999px; background: var(--documentation-accent); color: var(--documentation-accent-contrast); cursor: pointer; transition: background-color .15s ease, color .15s ease, transform .15s ease; }
+.documentation-launcher-send { width: 36px; height: 36px; }
+.documentation-launcher-send:hover:not(:disabled), .documentation-assistant-composer > button:hover:not(:disabled) { transform: scale(1.06); }
+.documentation-launcher-send:active:not(:disabled), .documentation-assistant-composer > button:active:not(:disabled) { transform: scale(.96); }
+.documentation-launcher-send:disabled, .documentation-assistant-composer > button:disabled { background: var(--documentation-panel-strong); color: var(--documentation-faint); cursor: default; }
+.documentation-launcher-send svg, .documentation-assistant-composer > button svg { width: 14px; height: 14px; }
 /* Docked beside the article on desktop so the page being asked about stays
  * readable; the narrow breakpoints below restore the floating card and sheet. */
-.documentation-assistant { view-transition-name: documentation-assistant; position: fixed; z-index: 90; inset: var(--documentation-header-height) 0 0 auto; display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; width: var(--documentation-assistant-width); overflow: hidden; border-left: 1px solid var(--documentation-border-strong); background: var(--documentation-surface); box-shadow: -18px 0 48px rgba(15, 18, 28, .06); animation: documentation-assistant-dock-in .2s ease-out; }
+.documentation-assistant { position: fixed; z-index: 90; inset: var(--documentation-header-height) 0 0 auto; display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; width: var(--documentation-assistant-width); overflow: hidden; border-left: 1px solid var(--documentation-border-strong); background: var(--documentation-surface); box-shadow: -18px 0 48px rgba(15, 18, 28, .06); animation: documentation-assistant-dock-in .2s ease-out; }
 .documentation-app.is-assistant-open .documentation-main { margin-right: var(--documentation-assistant-width); }
 .documentation-app.is-assistant-open .documentation-header { right: var(--documentation-assistant-width); }
 .documentation-assistant > header { display: flex; align-items: center; justify-content: space-between; min-height: 54px; padding: 0 11px 0 18px; border-bottom: 1px solid var(--documentation-border); }
@@ -77,7 +81,7 @@ export const DOCUMENTATION_OVERLAYS_CSS = String.raw`
 .documentation-assistant-message > div { min-width: 0; max-width: 590px; }
 .documentation-assistant-message.is-user { justify-content: flex-end; margin-left: 54px; }
 .documentation-assistant-message.is-user > div { padding: 8px 11px; border: 1px solid var(--documentation-border); border-radius: 10px; background: var(--documentation-panel); color: var(--documentation-text); }
-.documentation-assistant-message.is-error > div { color: #c64b50; }
+.documentation-assistant-message.is-error > div { padding: 10px 13px; border: 1px solid color-mix(in srgb, #d05a60 32%, var(--documentation-border)); border-radius: 10px; background: color-mix(in srgb, #d05a60 7%, var(--documentation-surface)); color: color-mix(in srgb, #d05a60 58%, var(--documentation-text)); font-size: 13.5px; }
 .documentation-assistant-message a { color: color-mix(in srgb, var(--documentation-accent) 79%, var(--documentation-text)); font-weight: 580; text-underline-offset: 3px; }
 .documentation-assistant-markdown > :first-child { margin-top: 0; }
 .documentation-assistant-markdown > :last-child { margin-bottom: 0; }
@@ -96,19 +100,17 @@ export const DOCUMENTATION_OVERLAYS_CSS = String.raw`
 .documentation-assistant-suggestions p { margin: 0 0 1px; color: var(--documentation-faint); font-size: 12px; font-weight: 650; letter-spacing: .035em; text-transform: uppercase; }
 .documentation-assistant-suggestions button { min-height: 40px; padding: 9px 12px; border: 1px solid var(--documentation-border); border-radius: 9px; background: var(--documentation-bg); color: var(--documentation-muted); cursor: pointer; font-size: 13.5px; text-align: left; transition: border-color .14s, background .14s, color .14s; }
 .documentation-assistant-suggestions button:hover { border-color: var(--documentation-border-strong); background: var(--documentation-panel); color: var(--documentation-text); }
-.documentation-assistant-composer { display: flex; align-items: flex-end; gap: 7px; margin: 0 16px 9px; padding: 7px; border: 1px solid var(--documentation-border-strong); border-radius: 11px; background: var(--documentation-bg); box-shadow: 0 3px 12px rgba(15, 18, 28, .045); }
+.documentation-assistant-composer { display: flex; align-items: flex-end; gap: 8px; margin: 0 16px 10px; padding: 8px; border: 1px solid var(--documentation-border-strong); border-radius: 16px; background: var(--documentation-surface-raised); box-shadow: 0 3px 12px rgba(15, 18, 28, .045); transition: border-color .15s ease, box-shadow .15s ease; }
 .documentation-assistant-composer:focus-within { border-color: color-mix(in srgb, var(--documentation-accent) 52%, var(--documentation-border)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--documentation-accent) 9%, transparent); }
-.documentation-assistant-composer textarea { min-height: 41px; max-height: 160px; flex: 1; padding: 4px 5px; resize: none; border: 0; outline: 0; background: transparent; color: var(--documentation-text); font-size: 14px; line-height: 1.5; }
-.documentation-assistant-composer button { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 8px; background: var(--documentation-accent); color: white; cursor: pointer; }
-.documentation-assistant-composer button:disabled { background: var(--documentation-panel-strong); color: var(--documentation-faint); cursor: default; }
+/* The field grows with its content (the runtime sets the height); it never
+ * shows a scrollbar until the growth cap, and never clips a glyph. */
+.documentation-assistant-composer textarea { min-height: 24px; max-height: 160px; flex: 1; padding: 5px 6px; resize: none; border: 0; outline: 0; background: transparent; color: var(--documentation-text); font-size: 14px; line-height: 1.5; overflow-y: hidden; scrollbar-width: thin; }
 .documentation-assistant > footer { padding: 0 18px 12px; color: var(--documentation-faint); font-size: 12px; text-align: center; }
 @keyframes documentation-fade-in { from { opacity: 0; } }
 @keyframes documentation-dialog-in { from { opacity: 0; transform: translateY(-8px) scale(.99); } }
 @keyframes documentation-drawer-in { from { transform: translateX(-24px); } }
 @keyframes documentation-assistant-dock-in { from { transform: translateX(24px); opacity: .5; } }
 @keyframes documentation-assistant-in { from { transform: translateX(-50%) translateY(18px) scale(.985); opacity: .7; } }
-@keyframes documentation-page-out { to { opacity: 0; transform: translateY(-3px); } }
-@keyframes documentation-page-in { from { opacity: 0; transform: translateY(4px); } }
 @keyframes documentation-activity { 50% { opacity: .42; transform: scale(.82); } }
 @keyframes documentation-navigation-progress { from { transform: translateX(-20%); } to { transform: translateX(155%); } }
 

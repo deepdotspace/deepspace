@@ -345,13 +345,20 @@ function renderCodeGroup(innerHtml: string, title: string): string {
   return `<div class="documentation-code-group" data-tab-group data-tab-persist="code">${title ? `<div class="documentation-code-group-title">${title}</div>` : ''}${tabs}</div>`
 }
 
-function parseCodeFenceInfo(value: string | undefined): { language?: string; title?: string } {
+export function parseCodeFenceInfo(value: string | undefined): { language?: string; title?: string } {
   const raw = value?.trim() ?? ''
   if (!raw) return {}
   const language = raw.split(/\s+/, 1)[0]?.toLowerCase()
   const metadata = raw.slice(language?.length ?? 0).trim()
   const quotedTitle = metadata.match(/(?:^|\s)title=(?:"([^"]+)"|'([^']+)')/i)
-  const title = quotedTitle?.[1] ?? quotedTitle?.[2] ?? (metadata && !metadata.includes('=') ? metadata : undefined)
+  // A bare token is a title (or code-group tab label) unless it is an option
+  // shape: {1,3-4} ranges, key=value pairs, or a known option keyword — those
+  // must never render as a header bar.
+  const optionKeyword = /^(?:wrap|expandable|twoslash|focus)$/i.test(metadata)
+  const bareTitle = metadata && !metadata.includes('=') && !metadata.startsWith('{') && !optionKeyword
+    ? metadata
+    : undefined
+  const title = quotedTitle?.[1] ?? quotedTitle?.[2] ?? bareTitle
   return {
     ...(language ? { language } : {}),
     ...(title ? { title: title.trim() } : {}),

@@ -54,6 +54,7 @@ export const openapiItemSchema = z.union([
 const themeObjectSchema = z.object({
   preset: z.string().trim().min(1).optional(),
   accent: z.string().trim().optional(),
+  accentDark: z.string().trim().optional(),
   background: z.string().trim().optional(),
   logo: z.string().trim().optional(),
   logoDark: z.string().trim().optional(),
@@ -96,7 +97,6 @@ const navigationRootSchema = z.union([
         pages: z.array(navigationSchema).min(1),
       }),
     ),
-    global: z.record(z.string(), z.unknown()).optional(),
   }),
 ])
 

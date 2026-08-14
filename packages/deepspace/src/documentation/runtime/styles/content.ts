@@ -2,7 +2,7 @@ export const DOCUMENTATION_CONTENT_CSS = String.raw`
 .documentation-main { min-width: 0; margin-left: var(--documentation-sidebar-width); margin-right: 0; transition: margin-right .24s ease; }
 .documentation-reader-grid { display: grid; grid-template-columns: minmax(0, 720px) 250px; justify-content: center; gap: 70px; width: 100%; padding: 62px 52px 96px; }
 .documentation-reader-column { display: flex; min-width: 0; min-height: calc(100vh - var(--documentation-header-height) - 158px); flex-direction: column; }
-.documentation-article { display: flex; min-width: 0; flex: 1; flex-direction: column; view-transition-name: documentation-article; }
+.documentation-article { display: flex; min-width: 0; flex: 1; flex-direction: column; }
 .documentation-breadcrumbs { display: none; align-items: center; gap: 5px; margin-bottom: 24px; color: var(--documentation-muted); font-size: 13px; }
 .documentation-breadcrumbs span { display: inline-flex; align-items: center; gap: 5px; }
 .documentation-breadcrumbs svg { width: 12px; height: 12px; }
@@ -33,7 +33,10 @@ export const DOCUMENTATION_CONTENT_CSS = String.raw`
 
 .documentation-prose { color: var(--documentation-text-soft); }
 .documentation-prose > :first-child { margin-top: 0; }
-.documentation-prose h1, .documentation-prose h2, .documentation-prose h3, .documentation-prose h4, .documentation-prose h5, .documentation-prose h6 { position: relative; color: var(--documentation-text); font-family: var(--documentation-font-heading); scroll-margin-top: 96px; }
+/* Anchor clearance is owned once, by scroll-padding-top on the html element
+ * — a per-heading scroll-margin here stacked with it and landed anchors a
+ * full header-height too low. */
+.documentation-prose h1, .documentation-prose h2, .documentation-prose h3, .documentation-prose h4, .documentation-prose h5, .documentation-prose h6 { position: relative; color: var(--documentation-text); font-family: var(--documentation-font-heading); }
 .documentation-prose h1 { margin: 48px 0 18px; font-size: 30px; letter-spacing: -.025em; line-height: 1.2; }
 .documentation-prose h2 { margin: 50px 0 16px; padding-top: 5px; font-size: 25px; font-weight: 625; letter-spacing: -.025em; line-height: 1.28; }
 .documentation-prose h3 { margin: 34px 0 12px; font-size: 20px; font-weight: 620; letter-spacing: -.015em; line-height: 1.4; }
@@ -65,8 +68,12 @@ export const DOCUMENTATION_CONTENT_CSS = String.raw`
 .documentation-code-actions button { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 1px solid rgba(255, 255, 255, .14); border-radius: 7px; background: color-mix(in srgb, var(--documentation-code-panel) 88%, transparent); color: #aeb5c6; cursor: pointer; backdrop-filter: blur(6px); }
 .documentation-code-actions button:hover { background: rgba(255, 255, 255, .14); color: #fff; }
 .documentation-code-actions svg { width: 15px; height: 15px; }
-.documentation-code-language { position: absolute; z-index: 1; top: 14px; left: 20px; color: #7f889c; font: 650 11.5px/1 var(--documentation-font-mono); letter-spacing: .06em; text-transform: uppercase; pointer-events: none; }
-.documentation-code-block:has(.documentation-code-language) pre { padding-top: 38px; }
+/* The language rides in the hover actions row as a passive chip instead of a
+ * permanently visible label that cost every block 38px of top padding. */
+.documentation-code-language { display: inline-flex; align-items: center; height: 30px; padding: 0 9px; border: 1px solid rgba(255, 255, 255, .14); border-radius: 7px; background: color-mix(in srgb, var(--documentation-code-panel) 88%, transparent); color: #7f889c; font: 650 11px/1 var(--documentation-font-mono); letter-spacing: .06em; text-transform: uppercase; pointer-events: none; backdrop-filter: blur(6px); }
+/* Fence titles (filenames) get a slim header bar above the code. */
+.documentation-code-title { display: flex; align-items: center; min-height: 36px; padding: 0 16px; border: 1px solid color-mix(in srgb, var(--documentation-border-strong) 50%, #000); border-bottom: 0; border-radius: 12px 12px 0 0; background: var(--documentation-code-panel); color: #aeb5c6; font: 600 12px/1.3 var(--documentation-font-mono); }
+.documentation-code-block:has(.documentation-code-title) pre { margin-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
 
 .hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-section, .hljs-link { color: #b7a7ff; }
 .hljs-string, .hljs-title, .hljs-name, .hljs-type, .hljs-attribute, .hljs-symbol, .hljs-bullet, .hljs-addition { color: #73dfb4; }
@@ -87,7 +94,8 @@ export const DOCUMENTATION_CONTENT_CSS = String.raw`
 :root[data-code-mode="system"][data-theme="light"] .documentation-prose pre { border-color: var(--documentation-border); background: linear-gradient(145deg, #f7f8fb, #f1f3f7); color: var(--documentation-code-plain); box-shadow: 0 8px 26px rgba(15, 18, 28, .06); }
 :root[data-code-mode="system"][data-theme="light"] .documentation-code-actions button { border-color: rgba(17, 19, 26, .12); background: rgba(255, 255, 255, .82); color: #606675; }
 :root[data-code-mode="system"][data-theme="light"] .documentation-code-actions button:hover { background: #fff; color: #11131a; }
-:root[data-code-mode="system"][data-theme="light"] .documentation-code-language { color: #757c8c; }
+:root[data-code-mode="system"][data-theme="light"] .documentation-code-language { border-color: rgba(17, 19, 26, .12); background: rgba(255, 255, 255, .82); color: #757c8c; }
+:root[data-code-mode="system"][data-theme="light"] .documentation-code-title { border-color: var(--documentation-border); background: #eef1f6; color: #5c6270; }
 :root[data-code-mode="system"][data-theme="light"] :is(.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-section, .hljs-link) { color: var(--documentation-code-keyword); }
 :root[data-code-mode="system"][data-theme="light"] :is(.hljs-string, .hljs-title, .hljs-name, .hljs-type, .hljs-attribute, .hljs-symbol, .hljs-bullet, .hljs-addition) { color: var(--documentation-code-string); }
 :root[data-code-mode="system"][data-theme="light"] :is(.hljs-number, .hljs-meta, .hljs-built_in, .hljs-builtin-name, .hljs-params) { color: var(--documentation-code-number); }
@@ -101,15 +109,17 @@ export const DOCUMENTATION_CONTENT_CSS = String.raw`
 .documentation-prose tr:last-child td { border-bottom: 0; }
 .documentation-prose th { color: var(--documentation-text); font-size: 13px; font-weight: 700; letter-spacing: .02em; }
 
-.documentation-callout { --callout-accent: var(--documentation-accent); position: relative; margin: 24px 0; padding: 16px 18px 16px 20px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--callout-accent) 25%, var(--documentation-border)); border-radius: 11px; background: linear-gradient(105deg, color-mix(in srgb, var(--callout-accent) 7%, var(--documentation-surface)), var(--documentation-surface)); }
+.documentation-callout { --callout-accent: var(--documentation-accent); position: relative; margin: 24px 0; padding: 16px 18px 16px 20px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--callout-accent) 25%, var(--documentation-border)); border-radius: 11px; background: color-mix(in srgb, var(--callout-accent) 6%, var(--documentation-surface)); }
 .documentation-callout::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 2px; background: var(--callout-accent); }
 .documentation-callout > strong { display: block; margin-bottom: 3px; color: color-mix(in srgb, var(--callout-accent) 72%, var(--documentation-text)); font-size: 14px; }
 .documentation-callout > :last-child { margin-bottom: 0; }
-.documentation-callout-warning { --callout-accent: #e58a21; }
+.documentation-callout-warning { --callout-accent: #c9771a; }
 .documentation-callout-tip { --callout-accent: #17a673; }
 .documentation-callout-info { --callout-accent: #278fdb; }
 .documentation-callout-note { --callout-accent: var(--documentation-accent); }
-.documentation-card { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; margin: 14px 0; padding: 16px 17px; border: 1px solid var(--documentation-border); border-radius: 11px; background: var(--documentation-surface); box-shadow: var(--documentation-shadow-sm); text-decoration: none !important; transition: border-color .16s, box-shadow .16s, transform .16s; }
+/* Card bodies are body copy, not links — without this the anchor's link color
+ * bleeds into every description. */
+.documentation-card { color: var(--documentation-text-soft); display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; margin: 14px 0; padding: 16px 17px; border: 1px solid var(--documentation-border); border-radius: 11px; background: var(--documentation-surface); box-shadow: var(--documentation-shadow-sm); text-decoration: none !important; transition: border-color .16s, box-shadow .16s, transform .16s; }
 .documentation-card:hover { border-color: color-mix(in srgb, var(--documentation-accent) 42%, var(--documentation-border)); box-shadow: 0 7px 24px rgba(15, 18, 28, .07); transform: translateY(-1px); }
 .documentation-card strong { display: block; margin-bottom: 2px; }
 .documentation-accordion-group { margin: 21px 0; border: 1px solid var(--documentation-border); border-radius: 11px; overflow: hidden; }
@@ -151,7 +161,7 @@ export const DOCUMENTATION_CONTENT_CSS = String.raw`
 .documentation-playground > p { color: var(--documentation-muted); font-size: 12px; }
 .documentation-playground label { display: grid; gap: 5px; margin: 13px 0; color: var(--documentation-muted); font-size: 11px; font-weight: 650; }
 .documentation-playground input, .documentation-playground textarea { width: 100%; padding: 10px; border: 1px solid var(--documentation-border-strong); border-radius: 8px; background: var(--documentation-surface); color: var(--documentation-text); font: 12.5px/1.55 var(--documentation-font-mono); resize: vertical; }
-.documentation-playground > button { padding: 9px 13px; border: 0; border-radius: 8px; background: var(--documentation-accent); color: white; cursor: pointer; font-size: 12px; font-weight: 680; }
+.documentation-playground > button { padding: 9px 13px; border: 0; border-radius: 8px; background: var(--documentation-accent); color: var(--documentation-accent-contrast); cursor: pointer; font-size: 12px; font-weight: 680; }
 .documentation-playground > button:disabled { opacity: .58; cursor: wait; }
 .documentation-playground > pre { max-height: 320px; overflow: auto; margin: 14px 0 0; padding: 13px; border-radius: 8px; background: var(--documentation-code-bg); color: var(--documentation-code-text); font: 11.5px/1.55 var(--documentation-font-mono); white-space: pre-wrap; }
 

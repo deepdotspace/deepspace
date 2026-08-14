@@ -2,7 +2,6 @@ export const DOCUMENTATION_NAVIGATION_CSS = String.raw`
 .documentation-header { position: fixed; z-index: 50; inset: 0 0 auto; display: grid; grid-template-columns: var(--documentation-sidebar-width) minmax(300px, 1fr) auto; align-items: center; height: var(--documentation-header-height); border-bottom: 1px solid color-mix(in srgb, var(--documentation-border) 84%, transparent); background: color-mix(in srgb, var(--documentation-bg) 91%, transparent); backdrop-filter: blur(18px) saturate(1.15); transition: right .24s ease; }
 .documentation-brand { display: flex; align-items: center; gap: 10px; min-width: 0; height: 100%; padding: 0 23px; color: var(--documentation-text); text-decoration: none; }
 .documentation-brand-mark { position: relative; display: grid; place-items: center; width: 27px; height: 27px; color: var(--documentation-accent); }
-.documentation-brand-mark::before { content: ""; position: absolute; inset: -7px; border-radius: 50%; background: radial-gradient(circle, color-mix(in srgb, var(--documentation-accent-2) 15%, transparent), transparent 68%); }
 .documentation-brand-mark svg { position: relative; width: 27px; height: 27px; }
 .documentation-brand-name { overflow: hidden; font-size: 16px; font-weight: 720; letter-spacing: -.025em; text-overflow: ellipsis; white-space: nowrap; }
 .documentation-brand-product { padding-left: 10px; border-left: 1px solid var(--documentation-border-strong); color: var(--documentation-muted); font-size: 13px; font-weight: 600; letter-spacing: .04em; }
@@ -35,8 +34,10 @@ export const DOCUMENTATION_NAVIGATION_CSS = String.raw`
 .documentation-nav-link > span { min-width: 0; overflow-wrap: anywhere; }
 .documentation-nav-link > svg { flex: 0 0 auto; width: 12px; height: 12px; }
 .documentation-nav-link:hover { background: var(--documentation-panel); color: var(--documentation-text); }
-.documentation-nav-link.is-active { position: relative; background: linear-gradient(90deg, color-mix(in srgb, var(--documentation-accent) 11%, transparent), color-mix(in srgb, var(--documentation-accent-2) 5%, transparent)); color: color-mix(in srgb, var(--documentation-accent) 77%, var(--documentation-text)); font-weight: 650; }
-.documentation-nav-link.is-active::before { content: ""; position: absolute; inset: 8px auto 8px -5px; width: 2px; border-radius: 4px; background: linear-gradient(var(--documentation-accent), var(--documentation-accent-2)); box-shadow: 0 0 10px color-mix(in srgb, var(--documentation-accent-2) 52%, transparent); }
+/* Paper, not neon: the active state is a flat tint and a solid hairline —
+ * no gradients, no glow. */
+.documentation-nav-link.is-active { position: relative; background: color-mix(in srgb, var(--documentation-accent) 10%, transparent); color: color-mix(in srgb, var(--documentation-accent) 72%, var(--documentation-text)); font-weight: 650; }
+.documentation-nav-link.is-active::before { content: ""; position: absolute; inset: 8px auto 8px -5px; width: 2px; border-radius: 4px; background: var(--documentation-accent); }
 .documentation-nav-folder { margin: 2px 0; }
 .documentation-nav-folder > summary { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding: 6px 9px; border-radius: 8px; color: var(--documentation-muted); cursor: pointer; font-size: 14px; font-weight: 620; list-style: none; }
 .documentation-nav-folder > summary::-webkit-details-marker { display: none; }

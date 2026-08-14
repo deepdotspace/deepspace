@@ -152,6 +152,8 @@ export function loadDocumentationConfig(appDir: string): LoadedDocumentationConf
     theme: {
       ...themeInput,
       accent: themeInput.accent ?? data.colors?.primary ?? data.colors?.light ?? data.colors?.dark,
+      // Mintlify's colors.light is "the anchor color used in dark mode".
+      accentDark: themeInput.accentDark ?? data.colors?.light,
       background: background?.light ?? themeInput.background,
       backgroundDark: background && 'dark' in background ? background.dark : undefined,
       backgroundDecoration: data.background?.decoration,

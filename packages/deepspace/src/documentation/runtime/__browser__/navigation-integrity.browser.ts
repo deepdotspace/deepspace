@@ -1,10 +1,12 @@
 import { expect, test, type Page } from '@playwright/test'
 
 /**
- * The DOM-ownership gate. It runs against both runtimes — the default runtime
- * injects the compiler's HTML, the executable runtime renders the prose with
- * React — and with view transitions both enabled and disabled, because the
- * route swap commits through `flushSync` either way.
+ * The DOM-ownership and swap-integrity gate. It runs against both runtimes —
+ * the default runtime injects the compiler's HTML, the executable runtime
+ * renders the prose with React. Every route swap commits through one
+ * synchronous `flushSync`; there is deliberately no view-transition or
+ * motion-dependent branch left in the router, so one code path is the whole
+ * surface under test.
  *
  * Two independent failure signals: any uncaught error or `console.error` during
  * navigation, and a direct check that no React-owned node has drifted away from
@@ -59,15 +61,7 @@ async function ownershipViolations(page: Page): Promise<{ checked: number; viola
   })
 }
 
-/**
- * `reduce` takes the router's `flushSync` path directly; `no-preference` takes
- * it inside `document.startViewTransition`. Both commit the route swap, so both
- * have to be gated.
- */
-const MOTION_MODES = ['no-preference', 'reduce'] as const
-
-async function hydrate(page: Page, motion: (typeof MOTION_MODES)[number]): Promise<void> {
-  await page.emulateMedia({ reducedMotion: motion })
+async function hydrate(page: Page): Promise<void> {
   await page.goto('/docs')
   await expect(page.locator('#deepspace-documentation-root')).toHaveAttribute(
     'data-documentation-hydrated',
@@ -86,7 +80,7 @@ async function navigateTo(page: Page, name: string): Promise<void> {
 }
 
 test('the prose subtree declares exactly one writer', async ({ page }) => {
-  await hydrate(page, 'no-preference')
+  await hydrate(page)
   const prose = page.locator('.documentation-prose').first()
   expect(
     await prose.getAttribute('data-prose'),
@@ -106,7 +100,7 @@ test('the prose subtree declares exactly one writer', async ({ page }) => {
 
 test('tab groups stay interactive across navigation', async ({ page }) => {
   const failures = watchForFailures(page)
-  await hydrate(page, 'no-preference')
+  await hydrate(page)
   const group = page.locator('[data-tab-group]').first()
   test.skip(await group.count() === 0, 'this fixture has no tab groups')
 
@@ -132,57 +126,89 @@ test('tab groups stay interactive across navigation', async ({ page }) => {
   expect(failures).toEqual([])
 })
 
-for (const motion of MOTION_MODES) {
-  test(`multi-page navigation in both directions holds ownership (${motion})`, async ({ page }) => {
-    const failures = watchForFailures(page)
-    await hydrate(page, motion)
+test('multi-page navigation in both directions holds ownership', async ({ page }) => {
+  const failures = watchForFailures(page)
+  await hydrate(page)
 
-    for (const name of ['Guide', 'Reference', 'Guide', 'Home', 'Reference', 'Home']) {
-      await navigateTo(page, name)
-      expect((await ownershipViolations(page)).violations, `after navigating to ${name}`).toEqual([])
-      expect(failures, `after navigating to ${name}`).toEqual([])
-    }
+  for (const name of ['Guide', 'Reference', 'Guide', 'Home', 'Reference', 'Home']) {
+    await navigateTo(page, name)
+    expect((await ownershipViolations(page)).violations, `after navigating to ${name}`).toEqual([])
+    expect(failures, `after navigating to ${name}`).toEqual([])
+  }
 
-    await page.goBack()
-    await expect(page.locator('.documentation-article h1')).toHaveText('Reference')
-    await page.goBack()
-    await expect(page.locator('.documentation-article h1')).toHaveText('Home')
-    await page.goForward()
-    await expect(page.locator('.documentation-article h1')).toHaveText('Reference')
+  await page.goBack()
+  await expect(page.locator('.documentation-article h1')).toHaveText('Reference')
+  await page.goBack()
+  await expect(page.locator('.documentation-article h1')).toHaveText('Home')
+  await page.goForward()
+  await expect(page.locator('.documentation-article h1')).toHaveText('Reference')
 
-    expect(failures).toEqual([])
-    expect((await ownershipViolations(page)).violations).toEqual([])
-    // The article must still be intact: a torn subtree renders no prose at all.
-    expect(await page.locator('.documentation-prose').count()).toBe(1)
-    expect(await page.locator('.documentation-code-block').count()).toBeGreaterThan(0)
+  expect(failures).toEqual([])
+  expect((await ownershipViolations(page)).violations).toEqual([])
+  // The article must still be intact: a torn subtree renders no prose at all.
+  expect(await page.locator('.documentation-prose').count()).toBe(1)
+  expect(await page.locator('.documentation-code-block').count()).toBeGreaterThan(0)
+})
+
+test('rapid navigation without settling holds ownership', async ({ page }) => {
+  const failures = watchForFailures(page)
+  await hydrate(page)
+
+  for (const name of ['Guide', 'Reference', 'Home', 'Guide', 'Reference']) {
+    // Deliberately no settle: overlapping route swaps must not interleave two
+    // writers on the article subtree.
+    await navigationLink(page, name).click()
+    await page.waitForTimeout(40)
+  }
+  await expect(page.locator('.documentation-article h1')).toHaveText('Reference')
+  await page.waitForTimeout(400)
+
+  expect(failures).toEqual([])
+  expect((await ownershipViolations(page)).violations).toEqual([])
+  expect(await page.locator('.documentation-prose').count()).toBe(1)
+})
+
+test('code-block controls survive navigation and stay operable', async ({ page }) => {
+  const failures = watchForFailures(page)
+  await hydrate(page)
+  const before = await page.locator('.documentation-code-actions button').count()
+  await navigateTo(page, 'Guide')
+  await navigateTo(page, 'Home')
+  expect(await page.locator('.documentation-code-actions button').count()).toBe(before)
+  await page.locator('.documentation-code-actions button').first().click()
+  expect(failures).toEqual([])
+})
+
+test('the route swap is a cut: settled scroll observes exactly [oldY, 0] and nothing animates the article', async ({ page }) => {
+  const failures = watchForFailures(page)
+  await hydrate(page)
+
+  // Settle at a deep scroll offset and let the router record it.
+  await page.evaluate(() => window.scrollTo({ top: 1500, behavior: 'instant' }))
+  await page.waitForTimeout(180)
+  await page.evaluate(() => {
+    const seen: number[] = [window.scrollY]
+    ;(window as unknown as Record<string, unknown>).__scrollTrace = seen
+    window.addEventListener('scroll', () => {
+      if (seen[seen.length - 1] !== window.scrollY) seen.push(window.scrollY)
+    })
   })
 
-  test(`rapid navigation without settling holds ownership (${motion})`, async ({ page }) => {
-    const failures = watchForFailures(page)
-    await hydrate(page, motion)
+  await navigateTo(page, 'Guide')
+  await page.waitForTimeout(150)
 
-    for (const name of ['Guide', 'Reference', 'Home', 'Guide', 'Reference']) {
-      // Deliberately no settle: overlapping route swaps must not interleave two
-      // writers on the article subtree.
-      await navigationLink(page, name).click()
-      await page.waitForTimeout(40)
-    }
-    await expect(page.locator('.documentation-article h1')).toHaveText('Reference')
-    await page.waitForTimeout(400)
+  // The scroll happens inside the same commit as the swap: no frame at the old
+  // offset on the new page, no smooth glide, no post-swap snap.
+  const trace = await page.evaluate(() => (window as unknown as Record<string, unknown>).__scrollTrace)
+  expect(trace).toEqual([1500, 0])
 
-    expect(failures).toEqual([])
-    expect((await ownershipViolations(page)).violations).toEqual([])
-    expect(await page.locator('.documentation-prose').count()).toBe(1)
-  })
-
-  test(`code-block controls survive navigation and stay operable (${motion})`, async ({ page }) => {
-    const failures = watchForFailures(page)
-    await hydrate(page, motion)
-    const before = await page.locator('.documentation-code-actions button').count()
-    await navigateTo(page, 'Guide')
-    await navigateTo(page, 'Home')
-    expect(await page.locator('.documentation-code-actions button').count()).toBe(before)
-    await page.locator('.documentation-code-actions button').first().click()
-    expect(failures).toEqual([])
-  })
-}
+  // The article never animates on navigation — a fade or view transition here
+  // is the text-ghosting failure mode this gate exists to keep dead.
+  const articleAnimations = await page.evaluate(() =>
+    document.getAnimations().filter((animation) => {
+      const target = (animation.effect as KeyframeEffect | null)?.target
+      return target instanceof Element && target.closest('.documentation-article') !== null
+    }).length)
+  expect(articleAnimations).toBe(0)
+  expect(failures).toEqual([])
+})

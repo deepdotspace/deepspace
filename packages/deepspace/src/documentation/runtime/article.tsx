@@ -77,7 +77,9 @@ export function Article({
         ))}
       </CodeBlockControlsProvider>
       {data.page.openapi?.playground && <ApiPlayground operation={data.page.openapi} />}
-      {launcher}
+      {launcher && (
+        <div className="documentation-launcher-dock">{launcher}</div>
+      )}
       <nav className="documentation-pagination" aria-label="Page navigation">
         {data.previous ? (
           <a rel="prev" href={documentationPublicPath(data.basePath, data.previous.route)}><small>Previous</small><span><ChevronRightIcon className="is-back" />{data.previous.title}</span></a>
@@ -150,15 +152,64 @@ export function ContextRail({
   const headings = useMemo(() => outlineHeadings(data.page.headings), [data.page.headings])
   const [active, setActive] = useState(headings[0]?.id ?? '')
   useEffect(() => setActive(headings[0]?.id ?? ''), [headings])
+  // Reading-line scroll spy: the active heading is the last one above the
+  // anchor clearance line, and at the very bottom of a scrollable page it is
+  // the final heading. An intersection band fails the case that matters most —
+  // a short last section can never scroll high enough to enter the band, so
+  // clicking its outline entry moved the page but not the highlight.
   useEffect(() => {
-    if (typeof IntersectionObserver === 'undefined') return
-    const elements = headings.map((heading) => document.getElementById(heading.id)).filter(Boolean) as HTMLElement[]
-    const observer = new IntersectionObserver((entries) => {
-      const visible = entries.filter((entry) => entry.isIntersecting).sort((left, right) => left.boundingClientRect.top - right.boundingClientRect.top)
-      if (visible[0]?.target.id) setActive(visible[0].target.id)
-    }, { rootMargin: '-88px 0px -68% 0px', threshold: [0, 1] })
-    elements.forEach((element) => observer.observe(element))
-    return () => observer.disconnect()
+    let frame: number | null = null
+    const measure = (): void => {
+      frame = null
+      const root = document.documentElement
+      // Clearance has one owner: the container's scroll-padding-top.
+      const clearance = (Number.parseFloat(getComputedStyle(root).scrollPaddingTop) || 96) + 4
+      const scrollable = root.scrollHeight > window.innerHeight + 4
+      const atBottom = scrollable && window.innerHeight + window.scrollY >= root.scrollHeight - 2
+      let next = headings[0]?.id ?? ''
+      for (const heading of headings) {
+        const element = document.getElementById(heading.id)
+        if (!element) continue
+        if (element.getBoundingClientRect().top <= clearance) next = heading.id
+        else break
+      }
+      // Clamped tail: at the very bottom, a short section's heading can sit
+      // below the reading line forever. An explicit anchor target (the hash)
+      // that is visible there wins — the reader said which section they meant.
+      if (atBottom) {
+        const hashId = decodeURIComponent(window.location.hash.slice(1))
+        if (hashId && headings.some((heading) => heading.id === hashId)) {
+          const top = document.getElementById(hashId)?.getBoundingClientRect().top
+          if (top !== undefined && top > clearance && top < window.innerHeight) next = hashId
+        }
+      }
+      setActive(next)
+    }
+    const schedule = (): void => {
+      if (frame === null) frame = window.requestAnimationFrame(measure)
+    }
+    // An outline click at the very bottom changes the hash without producing a
+    // scroll event, and pushState fires no hashchange — re-measure after the
+    // router's synchronous same-page handling has updated the hash.
+    const onOutlineClick = (event: MouseEvent): void => {
+      if (event.target instanceof Element && event.target.closest('.documentation-outline a')) {
+        window.setTimeout(schedule, 0)
+      }
+    }
+    measure()
+    window.addEventListener('scroll', schedule, { passive: true })
+    window.addEventListener('resize', schedule, { passive: true })
+    window.addEventListener('popstate', schedule)
+    window.addEventListener('hashchange', schedule)
+    document.addEventListener('click', onOutlineClick)
+    return () => {
+      window.removeEventListener('scroll', schedule)
+      window.removeEventListener('resize', schedule)
+      window.removeEventListener('popstate', schedule)
+      window.removeEventListener('hashchange', schedule)
+      document.removeEventListener('click', onOutlineClick)
+      if (frame !== null) window.cancelAnimationFrame(frame)
+    }
   }, [headings])
   return (
     <aside className="documentation-context-rail" aria-label="Page context">
@@ -204,8 +255,8 @@ function ApiPlayground({ operation }: { operation: NonNullable<DocumentationRunt
     <section className="documentation-playground" data-playground>
       <div className="documentation-playground-title"><div><span className={`method method-${operation.method.toLowerCase()}`}>{operation.method}</span><strong>Try this operation</strong></div><code>{url}</code></div>
       <p>Requests run in your browser. Tokens stay in memory and never enter search or assistant context.</p>
-      <label><span>Bearer token</span><input type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} placeholder="Optional" /></label>
-      <label><span>JSON body</span><textarea rows={7} spellCheck="false" value={body} onChange={(event) => setBody(event.target.value)} placeholder="{}" /></label>
+      <label><span>Bearer token</span><input type="password" autoCapitalize="none" autoComplete="off" autoCorrect="off" spellCheck={false} value={token} onChange={(event) => setToken(event.target.value)} placeholder="Optional" /></label>
+      <label><span>JSON body</span><textarea rows={7} autoCapitalize="none" autoComplete="off" autoCorrect="off" spellCheck={false} value={body} onChange={(event) => setBody(event.target.value)} placeholder="{}" /></label>
       <button type="button" disabled={sending} onClick={send}>{sending ? 'Sending…' : `Send ${operation.method} request`}</button>
       <pre aria-live="polite">{responseText}</pre>
     </section>
@@ -243,15 +294,23 @@ function useCodeBlockMounts(
       block.className = 'documentation-code-block'
       pre.replaceWith(block)
       block.appendChild(pre)
+      // Inside a code group the tab already carries the fence title.
+      const title = pre.getAttribute('data-code-title')
+      if (title && !block.closest('[data-tab-group]')) {
+        const bar = document.createElement('div')
+        bar.className = 'documentation-code-title'
+        bar.textContent = title
+        block.insertBefore(bar, pre)
+      }
+      const host = document.createElement('div')
+      host.className = 'documentation-code-actions'
       const language = codeBlockLanguage(pre.querySelector('code')?.className ?? '')
       if (language) {
         const label = document.createElement('span')
         label.className = 'documentation-code-language'
         label.textContent = language
-        block.appendChild(label)
+        host.appendChild(label)
       }
-      const host = document.createElement('div')
-      host.className = 'documentation-code-actions'
       block.appendChild(host)
       created.push({ block, pre })
       next.push({ key: `${route}:${index}`, host, pre })

@@ -22,7 +22,7 @@
  * ## One transport discipline
  *
  * Both upload paths obey the rule the deploy asset transport established
- * (`docs/projects/2026-08-05-deploy-asset-transport/README.md`): nothing here
+ * (`docs/platform/deploy-asset-transport.md`): nothing here
  * ever holds more than one bounded request in memory. The single-request path
  * exists so a small file still costs one round trip; above
  * {@link UPLOAD_PART_BYTES} a file travels as parts, each streamed into R2

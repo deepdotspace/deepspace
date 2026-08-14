@@ -65,6 +65,17 @@ function childCodeClassName(children: ReactNode): string {
   return typeof code?.props?.className === 'string' ? code.props.className : ''
 }
 
+/** MDX attaches fence info to the `code` child, not the `pre`. */
+function childCodeTitle(children: ReactNode): string | undefined {
+  const code = children as { props?: Record<string, unknown> } | null
+  const title = code?.props?.['data-code-title']
+  return typeof title === 'string' && title ? title : undefined
+}
+
+/** Inside a CodeGroup the fence title is already the tab label. */
+const CodeGroupContext = createContext(false)
+export const CodeGroupProvider = CodeGroupContext.Provider
+
 /**
  * The MDX `pre` replacement. The wrapper, language label, and controls are all
  * React children of the same element, so the reconciler is the only writer of
@@ -73,14 +84,22 @@ function childCodeClassName(children: ReactNode): string {
  */
 export function CodeBlock({ children, ...props }: ComponentPropsWithoutRef<'pre'>): ReactElement {
   const preRef = useRef<HTMLPreElement>(null)
+  const inCodeGroup = useContext(CodeGroupContext)
   const language = codeBlockLanguage(childCodeClassName(children))
+  const preTitle = (props as Record<string, unknown>)['data-code-title']
+  const title = inCodeGroup
+    ? undefined
+    : childCodeTitle(children) ?? (typeof preTitle === 'string' && preTitle ? preTitle : undefined)
   const readCode = (): string =>
     preRef.current?.querySelector('code')?.textContent ?? preRef.current?.textContent ?? ''
   return (
     <div className="documentation-code-block">
+      {title ? <div className="documentation-code-title">{title}</div> : null}
       <pre {...props} ref={preRef}>{children}</pre>
-      {language ? <span className="documentation-code-language">{language}</span> : null}
-      <div className="documentation-code-actions"><CodeBlockActions readCode={readCode} /></div>
+      <div className="documentation-code-actions">
+        {language ? <span className="documentation-code-language">{language}</span> : null}
+        <CodeBlockActions readCode={readCode} />
+      </div>
     </div>
   )
 }

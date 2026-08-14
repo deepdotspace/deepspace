@@ -4,7 +4,7 @@ import { toMarkdown } from 'mdast-util-to-markdown'
 import remarkFrontmatter from 'remark-frontmatter'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
-import { parseFrontmatter, parseMarkdown, type ParsedMarkdown } from './markdown'
+import { parseCodeFenceInfo, parseFrontmatter, parseMarkdown, type ParsedMarkdown } from './markdown'
 import { createSlugger, errorMessage } from './text'
 import { DocumentationError } from './types'
 
@@ -12,6 +12,7 @@ interface SyntaxNode {
   type: string
   value?: string
   depth?: number
+  lang?: string | null
   meta?: string | null
   name?: string | null
   attributes?: Array<{ type?: string; name?: string; value?: unknown }>
@@ -109,12 +110,17 @@ function addRuntimeMetadata() {
         }
       }
       if (node.type === 'code' && typeof node.meta === 'string' && node.meta.trim()) {
-        node.data = {
-          ...node.data,
-          hProperties: {
-            ...asRecord(node.data?.hProperties),
-            'data-code-title': node.meta.trim(),
-          },
+        // Same fence-info grammar as the Markdown path: a bare word or a
+        // title="…" pair after the language becomes the block title.
+        const { title } = parseCodeFenceInfo(`${node.lang ?? ''} ${node.meta}`.trim())
+        if (title) {
+          node.data = {
+            ...node.data,
+            hProperties: {
+              ...asRecord(node.data?.hProperties),
+              'data-code-title': title,
+            },
+          }
         }
       }
     })

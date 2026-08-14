@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.19.4
+
+### Patch Changes
+
+- Documentation feature quality pass. Navigation is a hard cut: the view-transition machinery is deleted outright, a route swap commits in one synchronous frame with scroll applied in the same commit (from a settled scroll exactly [oldY, 0] is observable — cross-page hash arrivals included), and a failed popstate restore reloads instead of leaving stale content. The Ask AI launcher is a single glass input row (the "Ask AI" chip is gone), stays present through the end of the article, and no longer paints a gradient band over content; the composer auto-grows to a 160px cap with no visible scrollbar below it; send buttons share one circular spec with readable ink on the accent in both themes; assistant errors render as callouts. Dark mode gets a readable accent via the new theme.accentDark option (also mapped from Mintlify's colors.light) with an automatic lightened fallback. The outline highlight follows every click, including short last sections (reading-line scroll spy). Sidebar active state, callouts, and the navigation progress bar are flat — no gradients, no glow. Code blocks: the language label becomes a hover chip (reclaiming 38px per block), filename fences render a title bar on both content paths, and fence options like {1,3-4} or wrap no longer masquerade as titles. Anchors land at a single scroll-padding clearance. Chrome spawns no native drag ghosts, never selects its labels, and its inputs never invite autofill; og:image now pairs with twitter:image; the unused navigation.global config field is removed.
+
 ## 0.19.3
 
 ### Patch Changes

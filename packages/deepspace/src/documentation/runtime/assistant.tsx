@@ -32,13 +32,11 @@ export function AssistantLauncher({
   input,
   name,
   onInputChange,
-  onOpen,
   onSubmit,
 }: {
   input: string
   name: string
   onInputChange: (value: string) => void
-  onOpen: () => void
   onSubmit: (question: string) => void
 }): ReactElement {
   const subject = documentationSubject(name)
@@ -54,18 +52,17 @@ export function AssistantLauncher({
       id="deepspace-documentation-assistant-launcher"
       onSubmit={submit}
     >
-      {/* A short, fixed label: the site name belongs in the accessible name, not
-          in a chip that has to share one row with the question field. Reading it
-          from `name` clipped every site whose name was longer than "Acme Docs". */}
-      <button className="documentation-launcher-agent" type="button" onClick={onOpen} aria-label={`Open the ${subject} agent`}>
-        Ask <span className="documentation-launcher-agent-name">AI</span>
-      </button>
       <input
         aria-label={`Ask the ${subject} agent`}
+        autoCapitalize="sentences"
+        autoComplete="off"
+        autoCorrect="off"
+        enterKeyHint="send"
         id="deepspace-documentation-assistant-launcher-input"
         maxLength={4000}
         onChange={(event) => onInputChange(event.target.value)}
         placeholder="Ask anything…"
+        spellCheck={false}
         value={input}
       />
       <span aria-hidden="true" className="documentation-launcher-hint"><kbd>⌘</kbd><kbd>I</kbd></span>
@@ -100,6 +97,7 @@ export function DocumentationAssistant({
   const panelRef = useRef<HTMLElement>(null)
   const formRef = useRef<HTMLFormElement>(null)
   const messagesRef = useRef<HTMLDivElement>(null)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const queuedQuestionRef = useRef<string | null>(null)
   const handledSeedRef = useRef(0)
@@ -120,6 +118,15 @@ export function DocumentationAssistant({
     const element = messagesRef.current
     if (element) element.scrollTop = element.scrollHeight
   }, [messages])
+  // Grow the composer with its content up to the cap; a fixed two-row box
+  // scrolled and clipped glyphs instead.
+  useEffect(() => {
+    const element = composerRef.current
+    if (!element) return
+    element.style.height = 'auto'
+    element.style.height = `${Math.min(element.scrollHeight, 160)}px`
+    element.style.overflowY = element.scrollHeight > 160 ? 'auto' : 'hidden'
+  }, [input, open])
   useEffect(() => () => abortRef.current?.abort(), [])
   if (!open) return null
 
@@ -247,7 +254,11 @@ export function DocumentationAssistant({
       <form className="documentation-assistant-composer" onSubmit={submit} ref={formRef}>
         <textarea
           aria-label="Ask a documentation question"
+          autoCapitalize="sentences"
+          autoComplete="off"
+          autoCorrect="off"
           data-autofocus
+          enterKeyHint="send"
           maxLength={4000}
           onChange={(event) => onInputChange(event.target.value)}
           onKeyDown={(event) => {
@@ -257,7 +268,9 @@ export function DocumentationAssistant({
             }
           }}
           placeholder="Ask a question about this documentation"
-          rows={2}
+          ref={composerRef}
+          rows={1}
+          spellCheck={false}
           value={input}
         />
         {sending ? (

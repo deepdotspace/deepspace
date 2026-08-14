@@ -158,7 +158,10 @@ describe('app update build-preview guidance', () => {
       vi.restoreAllMocks()
       rmSync(appDir, { recursive: true, force: true })
     }
-  })
+  // Five git subprocesses plus the real updater run: comfortably fast alone,
+  // but the release gate runs every package's suite concurrently and the
+  // default 5s budget flakes under that load.
+  }, 20_000)
 
   it('does not report a fresh config that already owns the cleanup', () => {
     const appDir = mkdtempSync(join(tmpdir(), 'deepspace-update-'))

@@ -90,15 +90,12 @@ export function DocumentationApp({
               <Article
                 data={data}
                 launcher={assistantAccess && !assistantOpen ? (
-                  <div className="documentation-launcher-dock">
-                    <AssistantLauncher
-                      input={assistantDraft}
-                      name={data.config.name}
-                      onOpen={() => openAssistant()}
-                      onInputChange={setAssistantDraft}
-                      onSubmit={(question) => openAssistant(question, true)}
-                    />
-                  </div>
+                  <AssistantLauncher
+                    input={assistantDraft}
+                    name={data.config.name}
+                    onInputChange={setAssistantDraft}
+                    onSubmit={(question) => openAssistant(question, true)}
+                  />
                 ) : undefined}
                 onAssistantOpen={openAssistant}
               >{children}</Article>
