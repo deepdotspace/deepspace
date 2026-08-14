@@ -78,6 +78,7 @@ describe('a request that declares no length', () => {
   const session = 'uploadKey=video.mp4&uploadId=up-1'
 
   it.each([
+    ['single upload', '/api/files/upload?scope=app', 'POST'],
     ['init', '/api/files/multipart?scope=app&key=video.mp4', 'POST'],
     ['part', `/api/files/multipart/part?scope=app&${session}&partNumber=1`, 'PUT'],
     ['complete', `/api/files/multipart/complete?scope=app&${session}`, 'POST'],
@@ -126,5 +127,17 @@ describe('a request that declares no length', () => {
       const res = await handler(request, url, bucket, { userId: 'user-1' })
       expect(res.status, bad).toBe(411)
     }
+  })
+
+  it('requires a retry-stable request id before creating a multipart session', async () => {
+    const body = JSON.stringify({ name: 'k.mp4', mimeType: 'video/mp4', size: 10 })
+    const res = await call(
+      '/api/files/multipart?scope=app&key=k.mp4',
+      'POST',
+      body,
+      new TextEncoder().encode(body).byteLength,
+    )
+    expect(res.status).toBe(400)
+    expect(await res.json()).toMatchObject({ code: 'bad_request' })
   })
 })

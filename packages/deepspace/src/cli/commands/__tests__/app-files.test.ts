@@ -82,9 +82,9 @@ describe('key rendering', () => {
 
   it('shows listings relative to the mounted prefix', () => {
     expect(relativeKey(`apps/${APP}/img/hero.jpg`, `apps/${APP}/`)).toBe('img/hero.jpg')
-    expect(relativeKey(`apps/${APP}/weird\nname.txt`, appPrefixOf(`apps/${APP}/weird\nname.txt`))).toBe(
-      'weird\nname.txt',
-    )
+    expect(
+      relativeKey(`apps/${APP}/weird\nname.txt`, appPrefixOf(`apps/${APP}/weird\nname.txt`)),
+    ).toBe('weird\nname.txt')
   })
 
   it('leaves a key alone when it does not carry the prefix', () => {
@@ -169,7 +169,10 @@ describe('app files transport', () => {
       const local = join(workdir, 'hero.png')
       const contents = Buffer.alloc(64 * 1024, 9)
       writeFileSync(local, contents)
-      reply = { status: 200, body: JSON.stringify({ key: `apps/${APP}/hero.png`, name: 'hero.png' }) }
+      reply = {
+        status: 200,
+        body: JSON.stringify({ key: `apps/${APP}/hero.png`, name: 'hero.png' }),
+      }
 
       const result = await uploadAppFile(baseUrl, 'tok', APP, local, 'hero.png')
       expect(result).toMatchObject({ key: `apps/${APP}/hero.png`, size: contents.length })
@@ -214,26 +217,19 @@ describe('app files transport', () => {
       expect(captured).toBeNull()
     })
 
-    /**
-     * `.svg`/`.html`/`.js` were absent from the type map, so they uploaded as
-     * `application/octet-stream` — past the server's type check, stored, and
-     * then served un-renderable behind nosniff, under a `✓`. Naming the real
-     * type is what makes the shared refusal see them.
-     */
     it.each([
       ['logo.svg', 'image/svg+xml'],
       ['page.html', 'text/html'],
       ['app.js', 'text/javascript'],
-    ])('refuses %s before opening a socket', async (name, mime) => {
+    ])('uploads %s with its real downloadable media type', async (name, mime) => {
       const local = join(workdir, name)
       writeFileSync(local, 'x')
-      captured = null
-      const err = await uploadAppFile(baseUrl, 'tok', APP, local, name).catch((e) => e)
-      expect(err).toBeInstanceOf(ApiError)
-      expect(err.code).toBe('active_content')
-      expect(err.message).toContain(mime)
-      // Nothing was sent, so nothing is stored under a misleading type.
-      expect(captured).toBeNull()
+      reply = { status: 200, body: JSON.stringify({ key: `apps/${APP}/${name}`, name }) }
+      await uploadAppFile(baseUrl, 'tok', APP, local, name)
+      const parsed = await new Response(new Uint8Array(captured!.body), {
+        headers: { 'content-type': captured!.contentType! },
+      }).formData()
+      expect((parsed.get('file') as File).type).toBe(mime)
     })
 
     it('sends a file at exactly the part size in ONE request', async () => {
@@ -359,11 +355,12 @@ describe('app files chunked upload', () => {
     failPart?: number
     failComplete?: boolean
     failInit?: boolean
+    flakyInit?: boolean
     /** Fail this part with this status, but only on its FIRST attempt. */
     flakyPart?: { partNumber: number; status: number }
   }
 
-  const SERVER_PART_SIZE = 8 * 1024 * 1024
+  const SERVER_PART_SIZE = UPLOAD_PART_BYTES
 
   beforeAll(async () => {
     workdir = mkdtempSync(join(tmpdir(), 'deepspace-app-files-mpu-'))
@@ -391,7 +388,8 @@ describe('app files chunked upload', () => {
           const flaky = behaviour.flakyPart
           if (flaky?.partNumber === partNumber) {
             const already = seen.filter(
-              (s) => s.url.includes('/multipart/part') && s.url.includes(`partNumber=${partNumber}`),
+              (s) =>
+                s.url.includes('/multipart/part') && s.url.includes(`partNumber=${partNumber}`),
             ).length
             // `seen` already includes this attempt, so 1 means first try.
             if (already <= 1) return json(flaky.status, { error: 'flaky', code: 'server_error' })
@@ -405,11 +403,20 @@ describe('app files chunked upload', () => {
         }
         if (url.includes('/multipart')) {
           if (req.method === 'DELETE') return json(200, { success: true, aborted: true })
+          const initAttempts = seen.filter(
+            (request) =>
+              request.method === 'POST' &&
+              new URL(request.url, 'http://x').pathname.endsWith('/multipart'),
+          ).length
+          if (behaviour.flakyInit && initAttempts === 1) {
+            return json(503, { error: 'temporary', code: 'server_error' })
+          }
           return behaviour.failInit
             ? json(413, { error: 'That file is 1.5 GiB; the limit is 1.0 GiB per file.' })
             : json(200, {
                 uploadId: 'up-9',
                 uploadKey: params.get('key') ?? 'generated.mp4',
+                reservationId: 'reservation-cli-9',
                 partSize: behaviour.partSize,
               })
         }
@@ -457,17 +464,20 @@ describe('app files chunked upload', () => {
 
     // Init declares the total before a byte moves, and keeps the key nested.
     expect(seen[0].url).toBe(`/api/app-files/${APP}/multipart?key=video/big.mp4`)
-    expect(JSON.parse(seen[0].body.toString())).toEqual({
+    const initBody = JSON.parse(seen[0].body.toString()) as Record<string, unknown>
+    expect(initBody).toMatchObject({
       name: 'big.mp4',
       mimeType: 'video/mp4',
       size: contents.length,
     })
+    expect(initBody.requestId).toEqual(expect.any(String))
 
     const parts = seen.slice(1, 1 + expectedParts)
     parts.forEach((part, index) => {
       const params = new URL(part.url, 'http://x').searchParams
       expect(params.get('uploadKey')).toBe('video/big.mp4')
       expect(params.get('uploadId')).toBe('up-9')
+      expect(params.get('reservationId')).toBe('reservation-cli-9')
       expect(Number(params.get('partNumber'))).toBe(index + 1)
       // Length-delimited, never chunked: the server requires a Content-Length
       // and a stream body would arrive without one.
@@ -483,12 +493,13 @@ describe('app files chunked upload', () => {
     })
   })
 
-  it('chunks at the size the SERVER advertised, not the local constant', async () => {
+  it('refuses a server response that disagrees with the fixed layout', async () => {
     behaviour.partSize = 5 * 1024 * 1024
-    const { path, contents } = bigFile('server-size.mp4')
-    const result = await uploadAppFile(baseUrl, 'tok', APP, path, 'server-size.mp4')
-    expect(result.parts).toBe(Math.ceil(contents.length / behaviour.partSize))
-    expect(seen[1].body.length).toBe(behaviour.partSize)
+    const { path } = bigFile('server-size.mp4')
+    const error = await uploadAppFile(baseUrl, 'tok', APP, path, 'server-size.mp4').catch((e) => e)
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error.code).toBe('invalid_response')
+    expect(seen.filter((request) => request.url.includes('/multipart/part'))).toHaveLength(0)
   })
 
   it('aborts the session when a part fails, and raises the part’s error', async () => {
@@ -529,6 +540,22 @@ describe('app files chunked upload', () => {
     expect(err.message).toContain('the limit is 1.0 GiB per file')
     // No parts, and nothing to abort — the session was never created.
     expect(seen).toHaveLength(1)
+  })
+
+  it('retries a transient init with the same request id', async () => {
+    behaviour.flakyInit = true
+    const { path } = bigFile('retry-init.mp4')
+    await uploadAppFile(baseUrl, 'tok', APP, path, 'retry-init.mp4')
+    const inits = seen.filter(
+      (request) =>
+        request.method === 'POST' &&
+        new URL(request.url, 'http://x').pathname.endsWith('/multipart'),
+    )
+    expect(inits).toHaveLength(2)
+    const requestIds = inits.map(
+      (request) => (JSON.parse(request.body.toString()) as { requestId: string }).requestId,
+    )
+    expect(new Set(requestIds).size).toBe(1)
   })
 
   it('reports progress after each part', async () => {
@@ -573,9 +600,8 @@ describe('app files chunked upload', () => {
     expect(seen.at(-1)).toMatchObject({ method: 'DELETE' })
   })
 
-  it('refuses an unusable part size instead of looping forever', async () => {
-    // planUploadParts advances by partSize; a zero would never terminate.
-    for (const partSize of [0, -1]) {
+  it('refuses every non-canonical part size', async () => {
+    for (const partSize of [0, -1, 5 * 1024 * 1024]) {
       seen = []
       behaviour = { partSize }
       const { path } = bigFile(`bad-part-size-${partSize}.mp4`)

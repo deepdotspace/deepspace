@@ -16,10 +16,8 @@ import { pipeline } from 'node:stream/promises'
 import { randomUUID } from 'node:crypto'
 import { ApiError } from './api'
 import {
-  DANGEROUS_MIME_TYPES,
   MAX_APP_FILE_BYTES,
   UPLOAD_PART_BYTES,
-  activeContentMessage,
   describeFilesFailure,
   encodeKeyPath,
   formatBytes,
@@ -41,18 +39,12 @@ export interface AppFileEntry {
  * `application/octet-stream`, which stores and serves fine — the type only
  * decides the Content-Type a browser later sees.
  *
- * The active-content extensions are listed for the opposite reason: leaving
- * them out did NOT make them safe, it made them silent. `.svg` fell through to
- * `application/octet-stream`, sailed past the server's type check, and was
- * stored — then served un-renderable behind `nosniff`, under a `✓`. Naming the
- * real type is what lets the shared refusal below see them.
+ * Active-content extensions are named accurately too. The files service stores
+ * them as ordinary data and forces them to download rather than execute in the
+ * app's origin.
  *
- * `.xml` is deliberately NOT mapped. The upload handler's refused set includes
- * `application/xml`, so declaring the real type would start refusing
- * sitemap.xml and RSS feeds — files that are neither executable nor what that
- * rule is aimed at. Leaving it unmapped keeps them working exactly as they
- * always have; widening the server's set is a separate decision, not a side
- * effect of fixing the CLI's type map.
+ * `.xml` is deliberately not inferred because the extension covers many data
+ * formats; callers that care about its exact media type can use the HTTP API.
  */
 const CONTENT_TYPES: Record<string, string> = {
   '.avif': 'image/avif',
@@ -231,10 +223,7 @@ export async function uploadAppFile(
   if (size > MAX_APP_FILE_BYTES) {
     throw new ApiError(oversizeMessage(size), 0, 'too_large', path)
   }
-const declaredType = contentTypeFor(localPath)
-  if (DANGEROUS_MIME_TYPES.has(declaredType)) {
-    throw new ApiError(activeContentMessage(declaredType), 0, 'active_content', path)
-  }
+  const declaredType = contentTypeFor(localPath)
   if (size > UPLOAD_PART_BYTES) {
     return uploadInParts(baseUrl, token, appId, localPath, key, size, onProgress)
   }
@@ -252,6 +241,7 @@ const declaredType = contentTypeFor(localPath)
 interface MultipartSession {
   uploadId: string
   uploadKey: string
+  reservationId: string
   partSize: number
 }
 
@@ -268,10 +258,9 @@ function isRetryable(err: unknown): boolean {
 /**
  * The chunked path: init, parts, complete — and abort if anything fails.
  *
- * The part size comes from the server's reply, never from the local constant.
- * R2 requires every non-final part to be exactly one size, so the side that
- * knows R2's rules is the side that picks it — which also means it must be
- * validated before it is looped on, or a zero would never terminate.
+ * The server reply must agree with the SDK's fixed part layout. Refusing a
+ * mismatch prevents a mixed-version client from uploading bytes the server
+ * will reject at completion.
  */
 async function uploadInParts(
   baseUrl: string,
@@ -284,25 +273,45 @@ async function uploadInParts(
 ): Promise<UploadResult> {
   const contentType = contentTypeFor(localPath)
   const initPath = filesPath(appId, `/multipart?key=${encodeKeyPath(key)}`)
-  const session = await readJson<MultipartSession>(
-    await request(baseUrl, token, initPath, {
+  const requestId = randomUUID()
+  const initBody = JSON.stringify({
+    requestId,
+    name: basename(localPath),
+    mimeType: contentType,
+    size,
+  })
+  const sendInit = (): Promise<MultipartSession> =>
+    request(baseUrl, token, initPath, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: basename(localPath), mimeType: contentType, size }),
-    }),
-    initPath,
-  )
+      body: initBody,
+    }).then((response) => readJson<MultipartSession>(response, initPath))
+  let session: MultipartSession
+  try {
+    session = await sendInit()
+  } catch (error) {
+    if (!isRetryable(error)) throw error
+    session = await sendInit()
+  }
 
-  const query = `uploadKey=${encodeKeyPath(session.uploadKey)}&uploadId=${encodeURIComponent(session.uploadId)}`
-  if (!Number.isSafeInteger(session.partSize) || session.partSize < 1) {
+  const query =
+    `uploadKey=${encodeKeyPath(session.uploadKey)}` +
+    `&uploadId=${encodeURIComponent(session.uploadId)}` +
+    `&reservationId=${encodeURIComponent(session.reservationId)}`
+  if (
+    !session.uploadId ||
+    !session.uploadKey ||
+    !session.reservationId ||
+    session.partSize !== UPLOAD_PART_BYTES
+  ) {
     throw new ApiError(
-      `The platform advertised an unusable part size (${session.partSize}).`,
+      `The platform returned an unusable part size or multipart session (${session.partSize}).`,
       0,
       'invalid_response',
       initPath,
     )
   }
-  const plan = planUploadParts(size, session.partSize)
+  const plan = planUploadParts(size)
   const file = await openAsBlob(localPath, { type: contentType })
   const uploaded: Array<{ partNumber: number; etag: string }> = []
   try {

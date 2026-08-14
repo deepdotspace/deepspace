@@ -45,7 +45,6 @@ import {
   MAX_UPLOAD_PARTS,
   MAX_UPLOAD_REQUEST_BYTES,
   UPLOAD_PART_BYTES,
-  activeContentMessage,
   encodeKeyPath,
   formatBytes,
   oversizeMessage,
@@ -54,6 +53,20 @@ import {
   storageLimitForTier,
   storageQuotaMessage,
 } from '../../shared/app-files'
+import {
+  activateMultipartReservation,
+  admitStorage,
+  markQuotaDirty,
+  multipartMarkerKey,
+  quotaUnavailable,
+  readMultipartReservation,
+  refreshMultipartReservation,
+  releaseQuotaMarker,
+  storageUsage,
+} from './r2-storage-quota'
+import type { MultipartQuotaReservation, StorageAdmission } from './r2-storage-quota'
+
+export type { StorageAdmission } from './r2-storage-quota'
 
 // The limits this handler enforces, re-exported so workers and their tests
 // cite the constants rather than copies of the numbers — two copies of one
@@ -74,7 +87,12 @@ export {
 const CORS_HEADERS = { 'Access-Control-Allow-Origin': '*' } as const
 
 /** Every refusal in this file, in one shape. */
-function fail(status: number, error: string, code?: string, extra?: Record<string, unknown>): Response {
+function fail(
+  status: number,
+  error: string,
+  code?: string,
+  extra?: Record<string, unknown>,
+): Response {
   return Response.json(
     { error, ...(code ? { code } : {}), ...extra },
     { status, headers: CORS_HEADERS },
@@ -91,7 +109,7 @@ export interface ScopeContext {
 }
 
 export type PrefixResult =
-  | { prefix: string; error?: undefined }
+  | { prefix: string; excludedPrefixes?: readonly string[]; error?: undefined }
   | { prefix?: undefined; error: string }
 
 export interface ScopedR2Config {
@@ -113,33 +131,12 @@ export interface ScopedR2Config {
  * mount. The handler is the enforcer; the mount only knows whose limit
  * applies.
  */
-export interface StorageAdmission {
-  /** This app's own prefix — the one the incoming write lands under. */
-  prefix: string
-  /**
-   * Resolve the owner's limit in bytes. `null` means the lookup failed;
-   * writes then fail closed (503) rather than admitting unmetered storage.
-   */
-  limitBytes: () => Promise<number | null>
-  /**
-   * The OTHER app prefixes this owner's storage spans, if any.
-   *
-   * The limit is per ACCOUNT, not per app: an owner's allocation is the total
-   * across everything they own, so admission has to see the siblings too. `[]`
-   * for an owner with one app, which is the common case and costs exactly what
-   * it did when this was a per-app limit.
-   *
-   * Returning `null` means the owner's apps could not be enumerated. Like a
-   * failed limit lookup that fails the write closed rather than admitting a
-   * write against an allocation we cannot measure.
-   */
-  siblingPrefixes?: () => Promise<string[] | null>
-}
-
 export interface ScopedR2Auth {
   userId: string | null
   /** Absent = no quota on this mount (e.g. an app's own bucket). */
   storage?: StorageAdmission
+  /** Account-wide quota details are private to an authorized owner surface. */
+  includeStorageUsage?: boolean
 }
 
 export type ScopedR2Handler = (
@@ -161,7 +158,7 @@ export type ScopedR2Handler = (
  * legacy parameter and use RFC 5987 `filename*` with percent-encoding for
  * the canonical, UTF-8-safe form that modern browsers prefer.
  */
-function contentDisposition(originalName: string): string {
+function contentDisposition(originalName: string, disposition: 'inline' | 'attachment'): string {
   // The legacy `filename=` value must be ASCII as well as header-safe; Fetch
   // implementations may reject raw Unicode header bytes. `filename*` carries
   // the exact UTF-8 name for modern clients.
@@ -172,7 +169,7 @@ function contentDisposition(originalName: string): string {
     /[!'()*]/g,
     (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
   )
-  return `inline; filename="${safe}"; filename*=UTF-8''${encoded}`
+  return `${disposition}; filename="${safe}"; filename*=UTF-8''${encoded}`
 }
 
 /**
@@ -255,127 +252,13 @@ function declaredLength(request: Request, what: string): number | Response {
  * authenticated context (userId, widgetId, appName), so ensuring the
  * requested key starts with the prefix prevents cross-scope access.
  */
-function isKeyWithinPrefix(key: string, prefix: string): boolean {
-  return key.startsWith(prefix)
-}
-
-// ============================================================================
-// Storage quota
-// ============================================================================
-
-/** Total stored bytes under a prefix. The bucket itself is the usage ledger —
- *  no counter to drift, at the cost of one list sweep per admission. */
-async function prefixUsage(bucket: R2Bucket, prefix: string): Promise<number> {
-  let total = 0
-  let cursor: string | undefined
-  do {
-    const page = await bucket.list({ prefix, cursor, limit: 1000 })
-    for (const object of page.objects) total += object.size
-    cursor = page.truncated ? page.cursor : undefined
-  } while (cursor !== undefined)
-  return total
-}
-
-/**
- * Stored bytes across the WHOLE account — this app plus every sibling.
- *
- * Prefixes are swept concurrently, so wall-clock is the slowest single app
- * rather than the sum. Each app's own pagination is still sequential, which is
- * what actually bounds this.
- */
-async function allocationUsage(
-  bucket: R2Bucket,
-  storage: StorageAdmission,
-): Promise<number | null> {
-  const siblings = storage.siblingPrefixes ? await storage.siblingPrefixes() : []
-  if (siblings === null) return null
-  const prefixes = [storage.prefix, ...siblings.filter((p) => p !== storage.prefix)]
-  const totals = await Promise.all(prefixes.map((prefix) => prefixUsage(bucket, prefix)))
-  return totals.reduce((sum, bytes) => sum + bytes, 0)
-}
-
-/**
- * Admit an incoming write against the allocation's storage limit.
- *
- * `replacesKey` names the object an upsert overwrites, so its current size is
- * released before the incoming size is charged — replacing a file in a full
- * allocation must not be refused for the bytes it frees.
- *
- * Two concurrent writes can each pass this check and land together past the
- * limit: the handler keeps no session state, so admission is a read. That
- * overshoot is bounded by one in-flight write per racer and self-corrects —
- * every later write is refused until the allocation is back under its limit.
- * The repo store pays a Durable Object for exactness; this surface does not.
- */
-async function admitStorage(
-  bucket: R2Bucket,
-  storage: StorageAdmission | undefined,
-  incomingBytes: number,
-  replacesKey: string | null,
-): Promise<Response | null> {
-  if (!storage) return null
-  const limit = await storage.limitBytes()
-  if (limit === null) {
-    return fail(
-      503,
-      'The storage limit for this app could not be verified; nothing was uploaded. Retry shortly.',
-      'storage_limit_unavailable',
-    )
-  }
-  const stored = await allocationUsage(bucket, storage)
-  if (stored === null) {
-    return fail(
-      503,
-      'The storage already used by this account could not be measured; nothing was uploaded. Retry shortly.',
-      'storage_limit_unavailable',
-    )
-  }
-  const replaced = replacesKey === null ? 0 : ((await bucket.head(replacesKey))?.size ?? 0)
-  const used = stored - replaced
-  if (used + incomingBytes <= limit) return null
-  return fail(409, storageQuotaMessage(incomingBytes, used, limit), 'storage_quota_exceeded', {
-    usedBytes: used,
-    limitBytes: limit,
-  })
-}
-
-/**
- * Re-admit a multipart upload against the object R2 actually assembled.
- *
- * Init admits the DECLARED total, which is client-supplied; this is where the
- * real size is knowable, so an object that put the allocation over its limit
- * is deleted rather than left in it — the same shape as the ceiling re-check.
- * A limit lookup that fails HERE keeps the object: init already admitted the
- * declared size against a real limit, and destroying a completed upload over
- * a billing blip would punish an honest client for the platform's outage.
- */
-async function admitAssembledObject(
-  bucket: R2Bucket,
-  storage: StorageAdmission | undefined,
+function isKeyWithinScope(
   key: string,
-  objectBytes: number,
-): Promise<Response | null> {
-  if (!storage) return null
-  const limit = await storage.limitBytes()
-  if (limit === null) {
-    console.error('[files:quota] limit unavailable at complete; keeping', key)
-    return null
-  }
-  const stored = await allocationUsage(bucket, storage)
-  if (stored === null) {
-    console.error('[files:quota] account usage unmeasurable at complete; keeping', key)
-    return null
-  }
-  if (stored <= limit) return null
-  await bucket.delete(key).catch(() => undefined)
-  return fail(
-    409,
-    `${storageQuotaMessage(objectBytes, stored - objectBytes, limit)} The assembled upload was not kept.`,
-    'storage_quota_exceeded',
-    { usedBytes: stored - objectBytes, limitBytes: limit },
-  )
+  prefix: string,
+  excludedPrefixes: readonly string[],
+): boolean {
+  return key.startsWith(prefix) && !excludedPrefixes.some((excluded) => key.startsWith(excluded))
 }
-
 /**
  * Anchor a caller-supplied key under the resolved prefix.
  *
@@ -385,11 +268,18 @@ async function admitAssembledObject(
  * inert, because the key it must be resumed with is rebuilt from the caller's
  * own authenticated prefix.
  */
-function anchorKey(raw: string, prefix: string): { key: string } | Response {
+function anchorKey(
+  raw: string,
+  prefix: string,
+  excludedPrefixes: readonly string[],
+): { key: string } | Response {
   const safe = sanitizeSubpath(raw)
   if (safe === null) return fail(400, 'Invalid key: traversal not allowed', 'invalid_key')
   if (!safe) return fail(400, 'Invalid key: empty', 'invalid_key')
-  return { key: `${prefix}${safe}` }
+  const key = `${prefix}${safe}`
+  return isKeyWithinScope(key, prefix, excludedPrefixes)
+    ? { key }
+    : fail(403, 'Access denied: key belongs to a private scope', 'forbidden')
 }
 
 /**
@@ -418,16 +308,13 @@ export function isFilesVerbPath(method: string, subpath: string): boolean {
 // The refused set lives in shared/app-files.ts so the CLI and the browser
 // hook check the same list before sending; this handler stays the enforcer.
 /**
- * Settle the stored content type, or refuse it.
- *
- * Done at the source (upload / multipart init) so dangerous content-types
- * never enter R2 — the download handler is then free to trust stored metadata.
+ * Normalize the stored media type. Active content is valid downloadable data;
+ * the download boundary forces it to an attachment so it cannot execute in
+ * the app's origin.
  */
-function resolveMimeType(raw: string): { mimeType: string } | Response {
+function resolveMimeType(raw: string): string {
   const mimeType = raw.split(';')[0].trim().toLowerCase() || 'application/octet-stream'
-  return DANGEROUS_MIME_TYPES.has(mimeType)
-    ? fail(415, activeContentMessage(mimeType), 'active_content')
-    : { mimeType }
+  return mimeType
 }
 
 /**
@@ -474,7 +361,11 @@ function multipartFailure(error: unknown): Response {
     default: {
       const message = error instanceof Error ? error.message : String(error)
       console.error('[files:multipart] R2 error:', message)
-      return fail(503, 'The files service could not complete that upload. Retry shortly.', 'r2_error')
+      return fail(
+        503,
+        'The files service could not complete that upload. Retry shortly.',
+        'r2_error',
+      )
     }
   }
 }
@@ -536,6 +427,7 @@ export function createScopedR2Handler(config: ScopedR2Config): ScopedR2Handler {
     }
 
     const prefix: string = result.prefix
+    const excludedPrefixes = result.excludedPrefixes ?? []
 
     // ── Upload: one request, or a chunked session ───────────────────────
     if (isFilesVerbPath(request.method, subpath)) {
@@ -546,24 +438,24 @@ export function createScopedR2Handler(config: ScopedR2Config): ScopedR2Handler {
         return fail(401, 'Authentication required', 'unauthorized')
       }
       return subpath === 'upload'
-        ? handleUpload(request, url, bucket, prefix, auth, scope)
-        : handleMultipart(request, url, bucket, prefix, auth, scope, subpath)
+        ? handleUpload(request, url, bucket, prefix, excludedPrefixes, auth, scope)
+        : handleMultipart(request, url, bucket, prefix, excludedPrefixes, auth, scope, subpath)
     }
 
     // ── List ────────────────────────────────────────────────────────────
     if (!subpath && request.method === 'GET') {
-      return handleList(bucket, prefix, url, scope, auth)
+      return handleList(bucket, prefix, excludedPrefixes, url, scope, auth)
     }
 
     // ── Download ────────────────────────────────────────────────────────
     if (subpath && request.method === 'GET') {
-      if (!isKeyWithinPrefix(subpath, prefix)) {
+      if (!isKeyWithinScope(subpath, prefix, excludedPrefixes)) {
         return Response.json(
           { error: 'Access denied: key outside scope' },
           { status: 403, headers: CORS_HEADERS },
         )
       }
-      return handleDownload(bucket, subpath, scope)
+      return handleDownload(request, bucket, subpath, scope)
     }
 
     // ── Delete ──────────────────────────────────────────────────────────
@@ -574,7 +466,7 @@ export function createScopedR2Handler(config: ScopedR2Config): ScopedR2Handler {
           { status: 401, headers: CORS_HEADERS },
         )
       }
-      if (!isKeyWithinPrefix(subpath, prefix)) {
+      if (!isKeyWithinScope(subpath, prefix, excludedPrefixes)) {
         return Response.json(
           { error: 'Access denied: key outside scope' },
           { status: 403, headers: CORS_HEADERS },
@@ -586,7 +478,12 @@ export function createScopedR2Handler(config: ScopedR2Config): ScopedR2Handler {
       // idempotent DELETE into a 404 would break them. `deleted` carries the
       // fact; the CLI is where it becomes a visible refusal.
       const existed = (await bucket.head(subpath)) !== null
-      if (existed) await bucket.delete(subpath)
+      if (existed) {
+        await bucket.delete(subpath)
+        // The high-water summary never decrements speculatively. Marking it
+        // reclaimable lets the next would-be refusal repair immediately.
+        await markQuotaDirty(bucket, auth.storage)
+      }
       return Response.json(
         { success: true, deleted: existed ? subpath : null, existed },
         { headers: CORS_HEADERS },
@@ -606,13 +503,16 @@ async function handleUpload(
   url: URL,
   bucket: R2Bucket,
   prefix: string,
+  excludedPrefixes: readonly string[],
   auth: ScopedR2Auth,
   scope: string,
 ): Promise<Response> {
   try {
     // Before anything reads the body.
-    const declared = overRequestBound(Number(request.headers.get('content-length')), 8 * 1024)
-    if (declared) return declared
+    const declaredBytes = declaredLength(request, 'File uploads')
+    if (declaredBytes instanceof Response) return declaredBytes
+    const tooLargeRequest = overRequestBound(declaredBytes, 8 * 1024)
+    if (tooLargeRequest) return tooLargeRequest
 
     const contentType = request.headers.get('content-type') || ''
     let fileData: ArrayBuffer
@@ -642,21 +542,45 @@ async function handleUpload(
       rawMimeType = body.mimeType || 'application/octet-stream'
     }
 
-    const mime = resolveMimeType(rawMimeType)
-    if (mime instanceof Response) return mime
+    const mimeType = resolveMimeType(rawMimeType)
 
-    const located = locateUpload(url, prefix, fileName)
+    const located = locateUpload(url, prefix, excludedPrefixes, fileName)
     if (located instanceof Response) return located
 
     // Only an explicit `?key=` can replace something; generated keys are fresh.
     const replacesKey = url.searchParams.get('key') === null ? null : located.key
-    const overQuota = await admitStorage(bucket, auth.storage, fileData.byteLength, replacesKey)
-    if (overQuota) return overQuota
+    const replaced = replacesKey === null ? null : await bucket.head(replacesKey)
+    const replacedBytes = replaced?.size ?? 0
+    const admission = await admitStorage(bucket, auth.storage, fileData.byteLength, replacedBytes)
+    if (admission instanceof Response) return admission
 
-    await bucket.put(located.key, fileData, {
-      httpMetadata: { contentType: mime.mimeType },
-      customMetadata: fileMetadata(fileName, auth.userId),
-    })
+    try {
+      const written = await bucket.put(located.key, fileData, {
+        // Replacement credit is valid only while the exact object that earned
+        // it still exists. A concurrent delete or overwrite loses this CAS and
+        // retries from a fresh head instead of landing uncounted bytes.
+        ...(replaced ? { onlyIf: { etagMatches: replaced.etag } } : {}),
+        httpMetadata: { contentType: mimeType },
+        customMetadata: fileMetadata(fileName, auth.userId),
+      })
+      if (!written) {
+        await releaseQuotaMarker(bucket, auth.storage, admission.markerKey, true)
+        return fail(
+          409,
+          'The file changed while this upload was being admitted. Retry the upload.',
+          'write_conflict',
+        )
+      }
+    } catch (error) {
+      await releaseQuotaMarker(bucket, auth.storage, admission.markerKey, true)
+      throw error
+    }
+    await releaseQuotaMarker(
+      bucket,
+      auth.storage,
+      admission.markerKey,
+      admission.markerKey !== null || fileData.byteLength < replacedBytes,
+    )
     return storedFileJson(located.key, fileName, url, scope)
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Upload failed'
@@ -676,19 +600,31 @@ async function handleUpload(
 function locateUpload(
   url: URL,
   prefix: string,
+  excludedPrefixes: readonly string[],
   fileName: string,
+  generatedId?: string,
 ): { key: string; subkey: string } | Response {
   const requested = url.searchParams.get('key')
   const subkey =
-    requested ?? `${Date.now()}-${Math.random().toString(36).slice(2, 11)}-${fileName}`
-  const anchored = anchorKey(subkey, prefix)
+    requested ??
+    (generatedId
+      ? `${generatedId}-${fileName}`
+      : `${Date.now()}-${Math.random().toString(36).slice(2, 11)}-${fileName}`)
+  const anchored = anchorKey(subkey, prefix, excludedPrefixes)
   return anchored instanceof Response ? anchored : { key: anchored.key, subkey }
 }
 
-function fileMetadata(fileName: string, userId: string | null): Record<string, string> {
+function fileMetadata(
+  fileName: string,
+  userId: string | null,
+  reservationId?: string,
+  declaredBytes?: number,
+): Record<string, string> {
   return {
     originalName: fileName,
     ...(userId ? { uploadedBy: userId } : {}),
+    ...(reservationId ? { reservationId } : {}),
+    ...(declaredBytes === undefined ? {} : { declaredBytes: String(declaredBytes) }),
     uploadedAt: new Date().toISOString(),
   }
 }
@@ -733,18 +669,85 @@ async function readControlJson(request: Request): Promise<Record<string, unknown
     : fail(400, 'Body must be a JSON object', 'bad_request')
 }
 
+const REQUEST_ID_RE = /^[A-Za-z0-9_-]{16,80}$/
+
+interface MultipartSessionRef {
+  key: string
+  uploadKey: string
+  uploadId: string
+  reservationId: string
+}
+
 /** Resolve the session a part/complete/abort call names. */
 function resolveSession(
   url: URL,
   prefix: string,
-): { key: string; uploadId: string } | Response {
+  excludedPrefixes: readonly string[],
+): MultipartSessionRef | Response {
   const uploadKey = url.searchParams.get('uploadKey')
   const uploadId = url.searchParams.get('uploadId')
-  if (!uploadKey || !uploadId) {
-    return fail(400, 'uploadKey and uploadId are required', 'bad_request')
+  const reservationId = url.searchParams.get('reservationId')
+  if (!uploadKey || !uploadId || !reservationId) {
+    return fail(400, 'uploadKey, uploadId, and reservationId are required', 'bad_request')
   }
-  const anchored = anchorKey(uploadKey, prefix)
-  return anchored instanceof Response ? anchored : { key: anchored.key, uploadId }
+  if (!REQUEST_ID_RE.test(reservationId)) {
+    return fail(400, 'reservationId is invalid', 'bad_request')
+  }
+  const anchored = anchorKey(uploadKey, prefix, excludedPrefixes)
+  return anchored instanceof Response
+    ? anchored
+    : { key: anchored.key, uploadKey, uploadId, reservationId }
+}
+
+function reservationMatches(
+  reservation: MultipartQuotaReservation,
+  session: MultipartSessionRef,
+): boolean {
+  return (
+    reservation.admitted &&
+    reservation.uploadId === session.uploadId &&
+    reservation.objectKey === session.key &&
+    reservation.uploadKey === session.uploadKey
+  )
+}
+
+function multipartSessionJson(
+  uploadId: string,
+  uploadKey: string,
+  reservationId: string,
+): Response {
+  return Response.json(
+    {
+      uploadId,
+      uploadKey,
+      reservationId,
+      partSize: UPLOAD_PART_BYTES,
+      maxParts: MAX_UPLOAD_PARTS,
+      maxBytes: MAX_APP_FILE_BYTES,
+    },
+    { headers: CORS_HEADERS },
+  )
+}
+
+function multipartPartCount(declaredBytes: number): number {
+  return Math.ceil(declaredBytes / UPLOAD_PART_BYTES)
+}
+
+function expectedMultipartPartBytes(declaredBytes: number, partNumber: number): number | null {
+  const partCount = multipartPartCount(declaredBytes)
+  if (partNumber < 1 || partNumber > partCount) return null
+  return partNumber === partCount
+    ? declaredBytes - (partCount - 1) * UPLOAD_PART_BYTES
+    : UPLOAD_PART_BYTES
+}
+
+function multipartLayoutError(declaredBytes: number): Response {
+  return fail(
+    400,
+    `This upload must use ${multipartPartCount(declaredBytes)} sequential part(s) at the advertised ${formatBytes(UPLOAD_PART_BYTES)} size, except for the final remainder.`,
+    'bad_part_layout',
+    { partSize: UPLOAD_PART_BYTES, partCount: multipartPartCount(declaredBytes) },
+  )
 }
 
 /**
@@ -779,7 +782,8 @@ async function streamPart(
     pumped,
   ])
   if (uploaded.status === 'rejected' || drained.status === 'rejected') {
-    const reason = uploaded.status === 'rejected' ? uploaded.reason : (drained as PromiseRejectedResult).reason
+    const reason =
+      uploaded.status === 'rejected' ? uploaded.reason : (drained as PromiseRejectedResult).reason
     return { ok: false, lengthMismatch: observedBytes !== expectedBytes, error: reason }
   }
   return { ok: true, part: uploaded.value }
@@ -790,18 +794,21 @@ async function handleMultipart(
   url: URL,
   bucket: R2Bucket,
   prefix: string,
+  excludedPrefixes: readonly string[],
   auth: ScopedR2Auth,
   scope: string,
   subpath: string,
 ): Promise<Response> {
   if (subpath === 'multipart' && request.method === 'POST') {
-    return multipartInit(request, url, bucket, prefix, auth)
+    return multipartInit(request, url, bucket, prefix, excludedPrefixes, auth)
   }
-  if (subpath === 'multipart/part') return multipartPart(request, url, bucket, prefix)
+  if (subpath === 'multipart/part') {
+    return multipartPart(request, url, bucket, prefix, excludedPrefixes, auth)
+  }
   if (subpath === 'multipart/complete') {
-    return multipartComplete(request, url, bucket, prefix, auth, scope)
+    return multipartComplete(request, url, bucket, prefix, excludedPrefixes, auth, scope)
   }
-  return multipartAbort(url, bucket, prefix)
+  return multipartAbort(url, bucket, prefix, excludedPrefixes, auth)
 }
 
 /**
@@ -818,54 +825,147 @@ async function multipartInit(
   url: URL,
   bucket: R2Bucket,
   prefix: string,
+  excludedPrefixes: readonly string[],
   auth: ScopedR2Auth,
 ): Promise<Response> {
   const body = await readControlJson(request)
   if (body instanceof Response) return body
 
   const size = body.size
-  if (!Number.isSafeInteger(size) || (size as number) < 0) {
-    return fail(400, 'size must be a non-negative integer number of bytes', 'bad_request')
+  if (!Number.isSafeInteger(size) || (size as number) <= 0) {
+    return fail(400, 'size must be a positive integer number of bytes', 'bad_request')
   }
   const tooBig = overCeiling(size as number)
   if (tooBig) return tooBig
 
   const name = typeof body.name === 'string' ? body.name.trim() : ''
   if (!name) return fail(400, 'name is required', 'bad_request')
+  const requestId = typeof body.requestId === 'string' ? body.requestId : ''
+  if (!REQUEST_ID_RE.test(requestId)) {
+    return fail(
+      400,
+      'requestId must be 16–80 URL-safe characters and must be reused when retrying init.',
+      'bad_request',
+    )
+  }
 
-  const mime = resolveMimeType(typeof body.mimeType === 'string' ? body.mimeType : '')
-  if (mime instanceof Response) return mime
+  const mimeType = resolveMimeType(typeof body.mimeType === 'string' ? body.mimeType : '')
 
-  const located = locateUpload(url, prefix, name)
+  // A caller-generated request id makes the server-generated key stable across
+  // an init retry whose first response was lost.
+  const located = locateUpload(url, prefix, excludedPrefixes, name, requestId)
   if (located instanceof Response) return located
 
-  // Admit the declared total before a byte moves — a client that cannot fit
-  // must learn it now, not 52 parts later. `complete` re-admits the real size.
-  const replacesKey = url.searchParams.get('key') === null ? null : located.key
-  const overQuota = await admitStorage(bucket, auth.storage, size as number, replacesKey)
-  if (overQuota) return overQuota
+  // A completed request id is terminal. Reusing it could make a failed
+  // completion of a new R2 session look like the old object's successful
+  // completion, stranding the new parts without their reservation.
+  const completed = await bucket.head(located.key)
+  if (completed?.customMetadata?.reservationId === requestId) {
+    return fail(
+      409,
+      'requestId already completed an upload; start the new upload with a fresh requestId.',
+      'request_id_completed',
+    )
+  }
+
+  const existing = await readMultipartReservation(bucket, auth.storage, requestId)
+  if (existing === 'invalid') {
+    return quotaUnavailable('This upload reservation could not be read. Retry shortly.')
+  }
+  if (existing) {
+    const sameRequest =
+      existing.objectKey === located.key &&
+      existing.uploadKey === located.subkey &&
+      existing.declaredBytes === size
+    return sameRequest && existing.admitted
+      ? multipartSessionJson(existing.uploadId, existing.uploadKey, requestId)
+      : sameRequest
+        ? quotaUnavailable('This upload is still being initialized. Retry shortly.')
+        : fail(
+            409,
+            'requestId already belongs to a different multipart upload.',
+            'request_id_conflict',
+          )
+  }
 
   let upload: R2MultipartUpload
   try {
     upload = await bucket.createMultipartUpload(located.key, {
-      httpMetadata: { contentType: mime.mimeType },
-      customMetadata: fileMetadata(name, auth.userId),
+      httpMetadata: { contentType: mimeType },
+      customMetadata: fileMetadata(name, auth.userId, requestId, size as number),
     })
   } catch (error) {
     return multipartFailure(error)
   }
-  return Response.json(
-    {
-      uploadId: upload.uploadId,
-      // Echoed back on every later call. Relative to the app, exactly like
-      // `?key=`, so the mount that anchors keys anchors this one too.
-      uploadKey: located.subkey,
-      partSize: UPLOAD_PART_BYTES,
-      maxParts: MAX_UPLOAD_PARTS,
-      maxBytes: MAX_APP_FILE_BYTES,
-    },
-    { headers: CORS_HEADERS },
-  )
+
+  const marker = auth.storage
+    ? {
+        key: multipartMarkerKey(auth.storage, requestId),
+        body: JSON.stringify({
+          version: 1,
+          reservationId: requestId,
+          uploadId: upload.uploadId,
+          objectKey: located.key,
+          uploadKey: located.subkey,
+          admitted: false,
+          declaredBytes: size,
+        }),
+        metadata: {
+          quotaKind: 'multipart',
+          active: 'false',
+        },
+      }
+    : undefined
+  // Small multipart calls remain part of the plain HTTP contract. Charge at
+  // least one R2 minimum part so one-byte sessions cannot create an unbounded
+  // number of week-long uploads inside a byte quota.
+  const reservedBytes = Math.max(size as number, 5 * 1024 * 1024)
+  const admission = await admitStorage(bucket, auth.storage, reservedBytes, 0, marker)
+  if (admission instanceof Response) {
+    await upload.abort().catch(() => undefined)
+    if (admission.status === 409 && auth.storage) {
+      const winner = await readMultipartReservation(bucket, auth.storage, requestId)
+      if (
+        winner &&
+        winner !== 'invalid' &&
+        winner.objectKey === located.key &&
+        winner.uploadKey === located.subkey &&
+        winner.declaredBytes === size &&
+        winner.admitted
+      ) {
+        return multipartSessionJson(winner.uploadId, winner.uploadKey, requestId)
+      }
+    }
+    return admission
+  }
+  if (auth.storage && !(await activateMultipartReservation(bucket, auth.storage, requestId))) {
+    await upload.abort().catch(() => undefined)
+    await releaseQuotaMarker(bucket, auth.storage, admission.markerKey, true)
+    return quotaUnavailable('This upload reservation could not be finalized. Retry shortly.')
+  }
+  return multipartSessionJson(upload.uploadId, located.subkey, requestId)
+}
+
+async function abandonMultipart(
+  bucket: R2Bucket,
+  session: MultipartSessionRef,
+  auth: ScopedR2Auth,
+  reservation: MultipartQuotaReservation | null,
+): Promise<'aborted' | 'absent' | 'failed'> {
+  let result: 'aborted' | 'absent' = 'aborted'
+  try {
+    await bucket.resumeMultipartUpload(session.key, session.uploadId).abort()
+  } catch (error) {
+    if (r2ErrorCode(error) !== 10024) {
+      console.error('[files:multipart] abort:', error instanceof Error ? error.message : error)
+      return 'failed'
+    }
+    result = 'absent'
+  }
+  if (reservation) {
+    if (!(await releaseQuotaMarker(bucket, auth.storage, reservation.key, true))) return 'failed'
+  }
+  return result
 }
 
 /** Send one part. The body is streamed; it is never held whole. */
@@ -874,10 +974,10 @@ async function multipartPart(
   url: URL,
   bucket: R2Bucket,
   prefix: string,
+  excludedPrefixes: readonly string[],
+  auth: ScopedR2Auth,
 ): Promise<Response> {
   const refuse = async (response: Response): Promise<Response> => {
-    // Nothing past a refusal reads the upload, so say so rather than leaving
-    // the runtime to tear the connection down mid-body.
     await request.body?.cancel().catch(() => undefined)
     return response
   }
@@ -894,13 +994,63 @@ async function multipartPart(
     )
   }
 
-  const session = resolveSession(url, prefix)
+  const session = resolveSession(url, prefix, excludedPrefixes)
   if (session instanceof Response) return refuse(session)
   if (!request.body) return fail(400, 'A part body is required', 'bad_request')
+
+  const reservation = await readMultipartReservation(bucket, auth.storage, session.reservationId)
+  if (reservation === 'invalid') {
+    return refuse(quotaUnavailable('This upload reservation could not be read. Retry shortly.'))
+  }
+  if (auth.storage && reservation && !reservationMatches(reservation, session)) {
+    return refuse(
+      fail(
+        404,
+        'That upload does not exist — it was completed, abandoned, or expired. Start a new one.',
+        'unknown_upload',
+      ),
+    )
+  }
+  if (auth.storage && !reservation) {
+    return refuse(
+      fail(
+        404,
+        'That upload does not exist — it was completed, abandoned, or expired. Start a new one.',
+        'unknown_upload',
+      ),
+    )
+  }
+
+  if (reservation) {
+    const expectedBytes = expectedMultipartPartBytes(reservation.declaredBytes, partNumber)
+    if (expectedBytes === null || declaredBytes !== expectedBytes) {
+      return refuse(multipartLayoutError(reservation.declaredBytes))
+    }
+  }
+
+  // Refresh the session lease before R2 accepts the stream. The declared total
+  // determines every valid part number and length, so no per-part ledger is
+  // needed: retries are identical by construction.
+  const refreshed = await refreshMultipartReservation(
+    bucket,
+    auth.storage,
+    session.reservationId,
+    session.uploadId,
+    session.key,
+  )
+  if (auth.storage && (refreshed === null || refreshed === 'invalid')) {
+    return refuse(quotaUnavailable('This upload reservation is missing or invalid.'))
+  }
+  if (refreshed === 'busy') {
+    return refuse(quotaUnavailable('This upload reservation is busy. Retry the part shortly.'))
+  }
 
   const upload = bucket.resumeMultipartUpload(session.key, session.uploadId)
   const stored = await streamPart(upload, partNumber, request.body, declaredBytes)
   if (!stored.ok) {
+    if (r2ErrorCode(stored.error) === 10024 && reservation) {
+      await releaseQuotaMarker(bucket, auth.storage, reservation.key, true)
+    }
     return stored.lengthMismatch
       ? fail(
           400,
@@ -915,26 +1065,105 @@ async function multipartPart(
   )
 }
 
+async function completedReservationObject(
+  bucket: R2Bucket,
+  session: MultipartSessionRef,
+): Promise<R2Object | null> {
+  const object = await bucket.head(session.key)
+  return object?.customMetadata?.reservationId === session.reservationId ? object : null
+}
+
+async function finishCompletedMultipart(
+  bucket: R2Bucket,
+  session: MultipartSessionRef,
+  reservation: MultipartQuotaReservation | null,
+  object: R2Object,
+  auth: ScopedR2Auth,
+  url: URL,
+  scope: string,
+): Promise<Response> {
+  const declaredMetadata = Number(object.customMetadata?.declaredBytes)
+  const declaredBytes =
+    reservation?.declaredBytes ??
+    (Number.isSafeInteger(declaredMetadata) && declaredMetadata >= 0
+      ? declaredMetadata
+      : MAX_APP_FILE_BYTES)
+  const refusal =
+    overCeiling(object.size) ??
+    (object.size > declaredBytes
+      ? fail(
+          400,
+          `The assembled upload exceeded its declared ${declaredBytes}-byte size and was not kept.`,
+          'declared_size_exceeded',
+        )
+      : null)
+  if (refusal) {
+    let remaining: R2Object | null
+    try {
+      const current = await bucket.head(session.key)
+      if (current?.etag === object.etag) await bucket.delete(session.key)
+      remaining = await bucket.head(session.key)
+    } catch (error) {
+      console.error('[files:multipart] invalid object cleanup:', error)
+      return quotaUnavailable('The invalid assembled file could not be removed. Retry completion.')
+    }
+    if (remaining?.etag === object.etag) {
+      return quotaUnavailable('The invalid assembled file could not be removed. Retry completion.')
+    }
+    if (reservation) {
+      const cleaned = await releaseQuotaMarker(bucket, auth.storage, reservation.key, true)
+      if (!cleaned) return quotaUnavailable('The upload was removed, but cleanup must be retried.')
+    }
+    return refusal
+  }
+  if (reservation) {
+    const cleaned = await releaseQuotaMarker(bucket, auth.storage, reservation.key, true)
+    if (!cleaned) {
+      return quotaUnavailable('The file was stored, but its reservation cleanup must be retried.')
+    }
+  }
+  const name = object.customMetadata?.originalName ?? session.uploadKey.split('/').pop() ?? 'file'
+  return storedFileJson(session.key, name, url, scope)
+}
+
 /**
- * Assemble the parts.
- *
- * The ceiling is checked a second time here, against the object R2 actually
- * built. The total declared at init is client-supplied and the handler keeps
- * no session state, so this is the only place the real size is knowable — an
- * over-ceiling object is deleted rather than left in the customer's allocation.
+ * Assemble the parts. Completion is idempotent: if R2 committed the object but
+ * the response or marker cleanup was interrupted, a retry recognizes the
+ * reservation id stored on the object and finishes cleanup.
  */
 async function multipartComplete(
   request: Request,
   url: URL,
   bucket: R2Bucket,
   prefix: string,
+  excludedPrefixes: readonly string[],
   auth: ScopedR2Auth,
   scope: string,
 ): Promise<Response> {
   const body = await readControlJson(request)
   if (body instanceof Response) return body
-  const session = resolveSession(url, prefix)
+  const session = resolveSession(url, prefix, excludedPrefixes)
   if (session instanceof Response) return session
+
+  const reservation = await readMultipartReservation(bucket, auth.storage, session.reservationId)
+  if (reservation === 'invalid') {
+    return quotaUnavailable('This upload reservation could not be read. Retry shortly.')
+  }
+  if (auth.storage && reservation && !reservationMatches(reservation, session)) {
+    return fail(
+      404,
+      'That upload does not exist — it was completed, abandoned, or expired. Start a new one.',
+      'unknown_upload',
+    )
+  }
+  if (auth.storage && !reservation) {
+    const completed = await completedReservationObject(bucket, session)
+    if (completed) {
+      return finishCompletedMultipart(bucket, session, null, completed, auth, url, scope)
+    }
+    await abandonMultipart(bucket, session, auth, null)
+    return quotaUnavailable('This upload reservation is missing or does not match.')
+  }
 
   const raw = body.parts
   if (!Array.isArray(raw) || raw.length === 0) {
@@ -943,11 +1172,25 @@ async function multipartComplete(
   if (raw.length > MAX_UPLOAD_PARTS) {
     return fail(400, `An upload may have at most ${MAX_UPLOAD_PARTS} parts`, 'bad_request')
   }
+  if (reservation && raw.length !== multipartPartCount(reservation.declaredBytes)) {
+    return multipartLayoutError(reservation.declaredBytes)
+  }
   const parts: R2UploadedPart[] = []
   for (let index = 0; index < raw.length; index++) {
     const { partNumber, etag } = (raw[index] ?? {}) as Record<string, unknown>
-    if (!Number.isSafeInteger(partNumber) || (partNumber as number) < 1) {
-      return fail(400, `parts[${index}].partNumber must be a positive integer`, 'bad_request')
+    if (
+      !Number.isSafeInteger(partNumber) ||
+      (partNumber as number) < 1 ||
+      (partNumber as number) > MAX_UPLOAD_PARTS
+    ) {
+      return fail(
+        400,
+        `parts[${index}].partNumber must be a whole number from 1 to ${MAX_UPLOAD_PARTS}`,
+        'bad_request',
+      )
+    }
+    if (reservation && partNumber !== index + 1) {
+      return multipartLayoutError(reservation.declaredBytes)
     }
     if (typeof etag !== 'string' || !etag) {
       return fail(400, `parts[${index}].etag must be the string uploadPart returned`, 'bad_request')
@@ -959,18 +1202,17 @@ async function multipartComplete(
   try {
     object = await bucket.resumeMultipartUpload(session.key, session.uploadId).complete(parts)
   } catch (error) {
+    const completed = await completedReservationObject(bucket, session)
+    if (completed) {
+      return finishCompletedMultipart(bucket, session, reservation, completed, auth, url, scope)
+    }
+    if (r2ErrorCode(error) === 10024 && reservation) {
+      await releaseQuotaMarker(bucket, auth.storage, reservation.key, true)
+    }
     return multipartFailure(error)
   }
 
-  const tooBig = overCeiling(object.size)
-  if (tooBig) {
-    await bucket.delete(session.key).catch(() => undefined)
-    return tooBig
-  }
-  const overQuota = await admitAssembledObject(bucket, auth.storage, session.key, object.size)
-  if (overQuota) return overQuota
-  const name = object.customMetadata?.originalName ?? session.key.split('/').pop() ?? 'file'
-  return storedFileJson(session.key, name, url, scope)
+  return finishCompletedMultipart(bucket, session, reservation, object, auth, url, scope)
 }
 
 /**
@@ -981,37 +1223,74 @@ async function multipartComplete(
  * already in that state; one it cannot reach is reaped within 7 days anyway
  * (uncompleted uploads expire). There is no action a caller would take on a
  * failed abort that differs from what it does on a successful one — both
- * clients call this on the failure path and then re-raise the REAL error — so
- * reporting the failure would only mask the upload error that caused it. The
- * failure is logged rather than returned.
+ * clients call this on the failure path and then re-raise the real error.
+ * `NoSuchUpload` is already the desired postcondition and still releases the
+ * quota marker.
  */
-async function multipartAbort(url: URL, bucket: R2Bucket, prefix: string): Promise<Response> {
-  const session = resolveSession(url, prefix)
+async function multipartAbort(
+  url: URL,
+  bucket: R2Bucket,
+  prefix: string,
+  excludedPrefixes: readonly string[],
+  auth: ScopedR2Auth,
+): Promise<Response> {
+  const session = resolveSession(url, prefix, excludedPrefixes)
   if (session instanceof Response) return session
-  try {
-    await bucket.resumeMultipartUpload(session.key, session.uploadId).abort()
-  } catch (error) {
-    console.error('[files:multipart] abort:', error instanceof Error ? error.message : error)
-    // The session holds nothing of the caller's either way, which is the
-    // postcondition — but say that nothing was released rather than claim an
-    // action that did not happen.
+  const reservation = await readMultipartReservation(bucket, auth.storage, session.reservationId)
+  if (reservation === 'invalid') {
     return Response.json({ success: true, aborted: false }, { headers: CORS_HEADERS })
   }
-  return Response.json({ success: true, aborted: true }, { headers: CORS_HEADERS })
+  if (auth.storage && reservation && !reservationMatches(reservation, session)) {
+    return Response.json({ success: true, aborted: false }, { headers: CORS_HEADERS })
+  }
+  const result = await abandonMultipart(bucket, session, auth, reservation || null)
+  return Response.json({ success: true, aborted: result === 'aborted' }, { headers: CORS_HEADERS })
 }
 
 async function handleList(
   bucket: R2Bucket,
   prefix: string,
+  excludedPrefixes: readonly string[],
   url: URL,
   scope: string,
   auth: ScopedR2Auth,
 ): Promise<Response> {
   const userPrefix = url.searchParams.get('prefix') || ''
   const listPrefix = `${prefix}${userPrefix}`
-  const limit = parseInt(url.searchParams.get('limit') || '100', 10)
+  const requestedLimit = Number(url.searchParams.get('limit') ?? 100)
+  const limit = Number.isSafeInteger(requestedLimit)
+    ? Math.min(1000, Math.max(1, requestedLimit))
+    : 100
+  if (excludedPrefixes.some((excluded) => listPrefix.startsWith(excluded))) {
+    return Response.json({ files: [], truncated: false }, { headers: CORS_HEADERS })
+  }
+
   const listed = await bucket.list({ prefix: listPrefix, limit })
-  const files = listed.objects.map((obj) => {
+  const visible = listed.objects.filter((object) =>
+    isKeyWithinScope(object.key, prefix, excludedPrefixes),
+  )
+  const seen = new Set(visible.map((object) => object.key))
+  let truncated = listed.truncated
+  // If a private subtree occupied the first page, jump past it instead of
+  // walking private keys or hiding public keys that sort after it.
+  for (const excluded of excludedPrefixes.filter((candidate) => candidate.startsWith(listPrefix))) {
+    if (visible.length >= limit) break
+    const excludedEnd = `${excluded}\u{10ffff}`
+    const lastListedKey = listed.objects.at(-1)?.key
+    const after = await bucket.list({
+      prefix: listPrefix,
+      startAfter: lastListedKey && lastListedKey > excludedEnd ? lastListedKey : excludedEnd,
+      limit: limit - visible.length,
+    })
+    for (const object of after.objects) {
+      if (!seen.has(object.key) && isKeyWithinScope(object.key, prefix, excludedPrefixes)) {
+        seen.add(object.key)
+        visible.push(object)
+      }
+    }
+    truncated = after.truncated
+  }
+  const files = visible.slice(0, limit).map((obj) => {
     const fileUrl = new URL(`/api/files/${encodeKeyPath(obj.key)}`, url.origin)
     fileUrl.searchParams.set('scope', scope)
     return {
@@ -1022,23 +1301,23 @@ async function handleList(
       ...obj.customMetadata,
     }
   })
-  // A quota nobody can see is a trap: where a limit governs this mount, a
-  // listing carries the allocation's whole usage against it. Usage is always
-  // computable; the limit is omitted when its lookup fails (reads stay up).
+  // Account totals belong only on the explicitly authorized owner surface.
+  // Public app listings do no registry, billing, or quota-repair work.
   let storage: { usedBytes: number; limitBytes?: number } | undefined
-  if (auth.storage) {
-    const usedBytes = await allocationUsage(bucket, auth.storage)
+  if (auth.storage && auth.includeStorageUsage) {
+    const usedBytes = await storageUsage(bucket, auth.storage)
     if (usedBytes !== null) storage = { usedBytes }
     const limitBytes = await auth.storage.limitBytes()
     if (storage && limitBytes !== null) storage.limitBytes = limitBytes
   }
   return Response.json(
-    { files, truncated: listed.truncated, ...(storage ? { storage } : {}) },
+    { files, truncated, ...(storage ? { storage } : {}) },
     { headers: CORS_HEADERS },
   )
 }
 
 async function handleDownload(
+  request: Request,
   bucket: R2Bucket,
   key: string,
   scope: 'self' | 'app',
@@ -1048,15 +1327,24 @@ async function handleDownload(
     return Response.json({ error: 'File not found' }, { status: 404, headers: CORS_HEADERS })
   }
   const headers = new Headers()
-  headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream')
+  const storedType = resolveMimeType(object.httpMetadata?.contentType ?? '')
+  const mustDownload = DANGEROUS_MIME_TYPES.has(storedType)
+  headers.set('Content-Type', mustDownload ? 'application/octet-stream' : storedType)
   headers.set('X-Content-Type-Options', 'nosniff')
+  headers.set('ETag', object.httpEtag)
   headers.set(
     'Cache-Control',
-    scope === 'app' ? 'public, max-age=31536000, immutable' : 'private, no-store',
+    scope === 'self' ? 'private, no-store' : 'public, max-age=0, must-revalidate',
   )
   headers.set('Access-Control-Allow-Origin', '*')
-  if (object.customMetadata?.originalName) {
-    headers.set('Content-Disposition', contentDisposition(object.customMetadata.originalName))
+  const originalName = object.customMetadata?.originalName ?? key.split('/').pop() ?? 'download'
+  headers.set(
+    'Content-Disposition',
+    contentDisposition(originalName, mustDownload ? 'attachment' : 'inline'),
+  )
+  if (mustDownload) headers.set('Content-Security-Policy', "sandbox; default-src 'none'")
+  if (scope === 'app' && request.headers.get('if-none-match') === object.httpEtag) {
+    return new Response(null, { status: 304, headers })
   }
   return new Response(object.body, { headers })
 }

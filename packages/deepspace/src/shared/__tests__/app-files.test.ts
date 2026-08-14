@@ -24,9 +24,9 @@ const HTML_413 =
 
 describe('describeFilesFailure', () => {
   it('passes through the app’s own JSON refusal', () => {
-    expect(describeFilesFailure(415, JSON.stringify({ error: 'Unsupported media type: text/html' }))).toBe(
-      'Unsupported media type: text/html',
-    )
+    expect(
+      describeFilesFailure(415, JSON.stringify({ error: 'Unsupported media type: text/html' })),
+    ).toBe('Unsupported media type: text/html')
   })
 
   it('turns an edge HTML 413 into a named size limit', () => {
@@ -105,33 +105,42 @@ describe('upload limits', () => {
 
 describe('planUploadParts', () => {
   it('numbers parts from 1 and covers the file exactly once', () => {
-    const parts = planUploadParts(4500, 1000)
+    const total = UPLOAD_PART_BYTES * 4 + 500
+    const parts = planUploadParts(total)
     expect(parts.map((p) => p.partNumber)).toEqual([1, 2, 3, 4, 5])
-    expect(parts[0]).toEqual({ partNumber: 1, start: 0, end: 1000 })
-    expect(parts.at(-1)).toEqual({ partNumber: 5, start: 4000, end: 4500 })
+    expect(parts[0]).toEqual({ partNumber: 1, start: 0, end: UPLOAD_PART_BYTES })
+    expect(parts.at(-1)).toEqual({
+      partNumber: 5,
+      start: UPLOAD_PART_BYTES * 4,
+      end: total,
+    })
     // No gaps, no overlap.
     parts.forEach((part, index) => {
       if (index > 0) expect(part.start).toBe(parts[index - 1].end)
     })
   })
 
-  it('makes every part but the last exactly one size — R2 requires it', () => {
-    const parts = planUploadParts(4500, 1000)
-    for (const part of parts.slice(0, -1)) expect(part.end - part.start).toBe(1000)
-    expect(parts.at(-1)!.end - parts.at(-1)!.start).toBeLessThanOrEqual(1000)
+  it('uses the one fixed server layout', () => {
+    const parts = planUploadParts(UPLOAD_PART_BYTES * 4 + 500)
+    for (const part of parts.slice(0, -1)) {
+      expect(part.end - part.start).toBe(UPLOAD_PART_BYTES)
+    }
+    expect(parts.at(-1)!.end - parts.at(-1)!.start).toBe(500)
   })
 
   it('plans one whole part when the file divides evenly', () => {
-    expect(planUploadParts(2000, 1000)).toHaveLength(2)
+    expect(planUploadParts(UPLOAD_PART_BYTES * 2)).toHaveLength(2)
   })
 
   it('plans nothing for an empty file', () => {
-    expect(planUploadParts(0, 1000)).toEqual([])
+    expect(planUploadParts(0)).toEqual([])
   })
 
   it('stays within the server’s part budget at the ceiling', () => {
-    expect(planUploadParts(MAX_APP_FILE_BYTES, UPLOAD_PART_BYTES).length).toBeLessThanOrEqual(
-      MAX_UPLOAD_PARTS,
+    const parts = planUploadParts(MAX_APP_FILE_BYTES)
+    expect(parts).toHaveLength(MAX_UPLOAD_PARTS)
+    expect(parts.at(-1)!.end - parts.at(-1)!.start).toBe(
+      MAX_APP_FILE_BYTES - (MAX_UPLOAD_PARTS - 1) * UPLOAD_PART_BYTES,
     )
   })
 })

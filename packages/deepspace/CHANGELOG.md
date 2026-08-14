@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.20.0
+
+### Minor Changes
+
+- Harden and simplify app-file storage with race-safe quota summaries, fixed-layout recoverable multipart reservations, strict public/private scope isolation, bounded request bodies, and safe downloadable HTML/SVG/JavaScript attachments. Quota-enabled custom handlers must now provide a coordination key.
+
 ## 0.19.5
 
 ### Patch Changes

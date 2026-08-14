@@ -57,13 +57,9 @@ export const UPLOAD_PART_BYTES = 20 * 1024 * 1024
 /**
  * The highest part number the server accepts.
  *
- * The handler holds no per-session state, so this — not the declared total —
- * is what bounds an in-flight upload. It is computed against
- * {@link UPLOAD_PART_BYTES}, which is why the server refuses a part larger
- * than that even though a whole small file may be 25 MiB: admitting 25 MiB
- * parts would make the real in-flight bound 52 × 25 MiB = 1300 MiB while the
- * advertised ceiling stayed 1 GiB. With both numbers agreeing, a session's
- * worst case is 52 × 20 MiB = 1040 MiB — the ceiling plus one part.
+ * The server derives the only valid part number and byte length from the
+ * declared total and {@link UPLOAD_PART_BYTES}. The maximum part count is
+ * therefore the exact number needed to reach the file ceiling.
  *
  * R2 allows 10,000 parts, so this is far inside what the API permits.
  */
@@ -94,13 +90,13 @@ export interface UploadPart {
  * of non-final parts. Both chunking clients plan with this, so "which bytes
  * are part N" is answered in one place.
  */
-export function planUploadParts(totalBytes: number, partSize: number): UploadPart[] {
+export function planUploadParts(totalBytes: number): UploadPart[] {
   const parts: UploadPart[] = []
-  for (let start = 0; start < totalBytes; start += partSize) {
+  for (let start = 0; start < totalBytes; start += UPLOAD_PART_BYTES) {
     parts.push({
       partNumber: parts.length + 1,
       start,
-      end: Math.min(start + partSize, totalBytes),
+      end: Math.min(start + UPLOAD_PART_BYTES, totalBytes),
     })
   }
   return parts
@@ -177,16 +173,7 @@ export function storageQuotaMessage(
  */
 export const MAX_DEPLOY_ASSET_FILE_BYTES = 25 * 1024 * 1024
 
-/**
- * MIME types a browser executes as active web content in the app's origin.
- * Accepting these from end users would allow stored XSS — a victim loading the
- * file URL runs the uploader's HTML/JS/SVG in the app origin and can exfiltrate
- * the app JWT (see client/auth/token.ts).
- *
- * The upload handler is the enforcer; every client checks the same set so the
- * refusal is named before the bytes are sent, and so no caller can quietly
- * relabel one of these as `application/octet-stream` to get it stored.
- */
+/** MIME types that must download rather than render in the app's origin. */
 export const DANGEROUS_MIME_TYPES = new Set<string>([
   'text/html',
   'application/xhtml+xml',
@@ -198,18 +185,6 @@ export const DANGEROUS_MIME_TYPES = new Set<string>([
   'application/ecmascript',
   'text/ecmascript',
 ])
-
-/** The one sentence for a refused-type upload. */
-export function activeContentMessage(mimeType: string): string {
-  // No "rename it to get past this" — the check exists because the bytes are
-  // dangerous in this origin, and a rename changes only the label.
-  return (
-    `${mimeType} is not accepted: the files API serves your app's own origin, so stored ` +
-    `HTML/SVG/JavaScript would execute there with your users' sessions. Ship it as a build ` +
-    `asset under \`public/\` instead, where it is served as part of your app rather than as ` +
-    `user-uploaded content.`
-  )
-}
 
 export function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GiB`

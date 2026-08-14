@@ -99,11 +99,7 @@ export interface UseR2FilesReturn {
    * parts — nothing to opt into, and nothing held in memory beyond one part.
    * Pass `onProgress` to follow a large one.
    */
-  upload: (
-    file: File | Blob,
-    name?: string,
-    options?: UploadOptions,
-  ) => Promise<R2UploadResult>
+  upload: (file: File | Blob, name?: string, options?: UploadOptions) => Promise<R2UploadResult>
   /**
    * Upload raw base64 data.
    *
@@ -201,6 +197,7 @@ function resolveFile(fileOrKey: R2FileInfo | string): { key: string; name: strin
 interface MultipartSession {
   uploadId: string
   uploadKey: string
+  reservationId: string
   partSize: number
 }
 
@@ -214,10 +211,9 @@ interface MultipartSession {
  * because R2 sizes non-final parts uniformly and a half-uploaded object must be
  * abandonable in one call.
  *
- * The server names the key and the part size. Nothing here invents either — a
- * client that picked its own key could write over a sibling file, and one that
- * picked its own part size could assemble an upload R2 refuses — but what the
- * server says is validated before it is looped on.
+ * The server names the key and confirms the fixed part size. A mismatched
+ * reply means the client and server speak different protocol versions, so it
+ * is refused before any content moves.
  */
 async function uploadInParts(
   file: File | Blob,
@@ -228,24 +224,45 @@ async function uploadInParts(
 ): Promise<R2UploadResult> {
   const headers = await authHeaders()
   const json = { ...headers, 'Content-Type': 'application/json' }
-  const initResponse = await fetch(`/api/files/multipart?${scopeParams}`, {
-    method: 'POST',
-    headers: json,
-    body: JSON.stringify({ name, mimeType: file.type || 'application/octet-stream', size: file.size }),
+  const requestId = crypto.randomUUID()
+  const initBody = JSON.stringify({
+    requestId,
+    name,
+    mimeType: file.type || 'application/octet-stream',
+    size: file.size,
   })
+  const sendInit = (): Promise<Response> =>
+    fetch(`/api/files/multipart?${scopeParams}`, {
+      method: 'POST',
+      headers: json,
+      body: initBody,
+    })
+  let initResponse = await sendInit().catch(() => null)
+  if (!initResponse || initResponse.status === 429 || initResponse.status >= 500) {
+    initResponse = await sendInit().catch(() => null)
+  }
+  if (!initResponse) {
+    return { success: false, error: 'The files service could not be reached.' }
+  }
   if (!initResponse.ok) return await readUploadResult(initResponse)
   const session = (await initResponse.json()) as MultipartSession
-  if (!Number.isSafeInteger(session.partSize) || session.partSize < 1) {
+  if (
+    !session.uploadId ||
+    !session.uploadKey ||
+    !session.reservationId ||
+    session.partSize !== UPLOAD_PART_BYTES
+  ) {
     return {
       success: false,
-      error: `The files service advertised an unusable part size (${session.partSize}).`,
+      error: `The files service returned an unusable part size or multipart session (${session.partSize}).`,
     }
   }
 
   const query =
     `${scopeParams}&uploadKey=${encodeKeyPath(session.uploadKey)}` +
-    `&uploadId=${encodeURIComponent(session.uploadId)}`
-  const plan = planUploadParts(file.size, session.partSize)
+    `&uploadId=${encodeURIComponent(session.uploadId)}` +
+    `&reservationId=${encodeURIComponent(session.reservationId)}`
+  const plan = planUploadParts(file.size)
   const parts: Array<{ partNumber: number; etag: string }> = []
   let assembled = false
   try {
@@ -316,11 +333,7 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
   }, [])
 
   const upload = useCallback(
-    async (
-      file: File | Blob,
-      name?: string,
-      options?: UploadOptions,
-    ): Promise<R2UploadResult> => {
+    async (file: File | Blob, name?: string, options?: UploadOptions): Promise<R2UploadResult> => {
       setIsUploading(true)
       try {
         const tooBig = oversize(file.size)
@@ -360,10 +373,7 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
         // are a third larger than the server accepts — a check that green-lights
         // uploads the server then always 413s. Measured decoded, compared
         // against the decoded budget the request bound actually leaves.
-        const tooBig = oversize(
-          Math.floor((base64Data.length * 3) / 4),
-          MAX_BASE64_UPLOAD_BYTES,
-        )
+        const tooBig = oversize(Math.floor((base64Data.length * 3) / 4), MAX_BASE64_UPLOAD_BYTES)
         if (tooBig) return tooBig
         const headers = await authHeaders()
         const response = await fetch(`/api/files/upload?${scopeParams}`, {

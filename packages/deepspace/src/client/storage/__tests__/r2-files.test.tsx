@@ -186,6 +186,7 @@ describe('useR2Files chunked upload', () => {
       failPart?: number
       failComplete?: boolean
       failInit?: boolean
+      flakyInit?: boolean
       /** Fail this part with this status, but only on its FIRST attempt. */
       flakyPart?: { partNumber: number; status: number }
     } = {},
@@ -205,7 +206,8 @@ describe('useR2Files chunked upload', () => {
           const flaky = options.flakyPart
           if (flaky?.partNumber === partNumber) {
             const already = calls.filter(
-              (c) => c.url.includes('/multipart/part') && c.url.includes(`partNumber=${partNumber}`),
+              (c) =>
+                c.url.includes('/multipart/part') && c.url.includes(`partNumber=${partNumber}`),
             ).length
             // `calls` already includes this attempt, so 1 means first try.
             if (already <= 1) return Response.json({ error: 'flaky' }, { status: flaky.status })
@@ -219,9 +221,22 @@ describe('useR2Files chunked upload', () => {
         }
         if (url.includes('/multipart')) {
           if (init?.method === 'DELETE') return Response.json({ success: true, aborted: true })
+          const initAttempts = calls.filter(
+            (call) =>
+              call.method === 'POST' &&
+              new URL(call.url, 'https://x').pathname.endsWith('/multipart'),
+          ).length
+          if (options.flakyInit && initAttempts === 1) {
+            return Response.json({ error: 'temporary' }, { status: 503 })
+          }
           return options.failInit
             ? Response.json({ error: 'That file is too big' }, { status: 413 })
-            : Response.json({ uploadId: 'up-1', uploadKey: 'gen/big.mp4', partSize })
+            : Response.json({
+                uploadId: 'up-1',
+                uploadKey: 'gen/big.mp4',
+                reservationId: 'reservation-browser-1',
+                partSize,
+              })
         }
         return Response.json({ success: true, key: 'single' })
       }),
@@ -247,17 +262,20 @@ describe('useR2Files chunked upload', () => {
     ])
 
     // Init declares the total up front, so the server can refuse before bytes.
-    expect(JSON.parse(calls[0].body as string)).toEqual({
+    const initBody = JSON.parse(calls[0].body as string) as Record<string, unknown>
+    expect(initBody).toMatchObject({
       name: 'big.mp4',
       mimeType: 'video/mp4',
       size: UPLOAD_PART_BYTES * 2 + 500,
     })
+    expect(initBody.requestId).toEqual(expect.any(String))
 
     // Every part carries the session the server named, never a client guess.
     for (const call of calls.slice(1, 4)) {
       const params = new URL(call.url, 'https://x').searchParams
       expect(params.get('uploadKey')).toBe('gen/big.mp4')
       expect(params.get('uploadId')).toBe('up-1')
+      expect(params.get('reservationId')).toBe('reservation-browser-1')
       expect(params.get('scope')).toBe('self')
     }
 
@@ -277,17 +295,16 @@ describe('useR2Files chunked upload', () => {
     })
   })
 
-  it('chunks at the size the SERVER advertised, not the local constant', async () => {
-    const serverPartSize = 6 * 1024 * 1024
-    const calls = stubServer({ partSize: serverPartSize })
+  it('refuses a server response that disagrees with the fixed layout', async () => {
+    const calls = stubServer({ partSize: 6 * 1024 * 1024 })
     const file = fakeFile(UPLOAD_PART_BYTES + 1)
+    let result: R2UploadResult | null = null
     await act(async () => {
-      await files!.upload(file.blob, 'big.mp4')
+      result = await files!.upload(file.blob, 'big.mp4')
     })
-    expect(file.slices[0]).toEqual({ start: 0, end: serverPartSize })
-    expect(calls.filter((c) => c.url.includes('/multipart/part'))).toHaveLength(
-      Math.ceil((UPLOAD_PART_BYTES + 1) / serverPartSize),
-    )
+    expect(result).toMatchObject({ success: false })
+    expect(file.slices).toEqual([])
+    expect(calls.filter((c) => c.url.includes('/multipart/part'))).toHaveLength(0)
   })
 
   it('aborts the session when a part fails, and reports the failure', async () => {
@@ -332,6 +349,22 @@ describe('useR2Files chunked upload', () => {
     })
     expect(result).toMatchObject({ success: false, error: 'That file is too big' })
     expect(calls).toHaveLength(1)
+  })
+
+  it('retries a transient init with the same request id', async () => {
+    const calls = stubServer({ flakyInit: true })
+    await act(async () => {
+      await files!.upload(fakeFile(UPLOAD_PART_BYTES + 1).blob, 'big.mp4')
+    })
+    const inits = calls.filter(
+      (call) =>
+        call.method === 'POST' && new URL(call.url, 'https://x').pathname.endsWith('/multipart'),
+    )
+    expect(inits).toHaveLength(2)
+    const requestIds = inits.map(
+      (call) => (JSON.parse(call.body as string) as { requestId: string }).requestId,
+    )
+    expect(new Set(requestIds).size).toBe(1)
   })
 
   it('reports progress after each part', async () => {
@@ -380,9 +413,8 @@ describe('useR2Files chunked upload', () => {
     expect(calls.at(-1)).toMatchObject({ method: 'DELETE' })
   })
 
-  it('refuses an unusable part size instead of looping forever', async () => {
-    // planUploadParts advances by partSize; a zero would never terminate.
-    for (const partSize of [0, -1]) {
+  it('refuses every non-canonical part size', async () => {
+    for (const partSize of [0, -1, 5 * 1024 * 1024]) {
       const calls = stubServer({ partSize })
       let result: R2UploadResult | null = null
       await act(async () => {
