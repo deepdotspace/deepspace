@@ -245,6 +245,17 @@ export function registerDocumentationStaticRoutes<
       status = 404
     }
     if (status === 404) {
+      // Markdown requests come from agents; the styled 404 page is noise to them.
+      if (pathname.endsWith('.md')) {
+        return secureDocumentationResponse(
+          new Response(
+            `No documentation page at ${pathname}. See ${publicBasePath}/llms.txt for every published page.\n`,
+            { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8' } },
+          ),
+          404,
+          pathname,
+        )
+      }
       const url = new URL(c.req.url)
       url.pathname = `${assetBasePath}/404.html`
       response = await fetchDocumentationAsset(c.env, c.req.raw, url, assetBasePath)

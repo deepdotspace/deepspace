@@ -5,6 +5,7 @@ import {
 } from './assistant'
 import { DOCUMENTATION_MANIFEST_VERSION } from '../types'
 import { canonicalNativeDocumentationRequestPath } from '../resource-path'
+import { createSlugger, slugify } from '../text'
 
 export interface DocumentationPublishedManifest {
   sourceHash: string
@@ -129,7 +130,7 @@ export async function readDocumentationPublishedPage(
   assetBasePath = '/_documentation',
 ): Promise<DocumentationPublishedPage | null> {
   const route = normalizeDocumentationRoute(requestedRoute.split('#', 1)[0] ?? '/')
-  const firstChunk = corpus.find((chunk) => chunk.route === route)
+  const firstChunk = corpus.find((chunk) => (chunk.route.split('#', 1)[0] ?? '') === route)
   if (!firstChunk) return null
 
   const pathname = route === '/' ? `${assetBasePath}/index.md` : `${assetBasePath}${route}.md`
@@ -138,6 +139,42 @@ export async function readDocumentationPublishedPage(
   const markdown = await response.text()
   if (markdown.length > 500_000) throw new Error('Documentation page exceeds 500000 characters')
   return { route, title: firstChunk.title, markdown }
+}
+
+/**
+ * Cut one heading's section out of a page's Markdown, addressed by the same
+ * slugs the compiler stamps on rendered heading anchors. The section runs from
+ * the matched heading up to the next heading of equal or higher level.
+ */
+export function documentationPageSection(markdown: string, fragment: string): string | null {
+  const target = slugify(fragment)
+  if (!target) return null
+  const slug = createSlugger()
+  const lines = markdown.split('\n')
+  let fence: string | null = null
+  let start = -1
+  let startDepth = 0
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index] ?? ''
+    const fenceMarker = line.match(/^ {0,3}(`{3,}|~{3,})/)?.[1]
+    if (fenceMarker && !fence) {
+      fence = fenceMarker
+      continue
+    }
+    if (fence) {
+      if (fenceMarker?.startsWith(fence)) fence = null
+      continue
+    }
+    const heading = line.match(/^ {0,3}(#{1,6})\s+(.+)$/)
+    if (!heading) continue
+    const depth = (heading[1] ?? '').length
+    if (start !== -1 && depth <= startDepth) return lines.slice(start, index).join('\n').trim()
+    if (start === -1 && slug(heading[2] ?? '') === target) {
+      start = index
+      startDepth = depth
+    }
+  }
+  return start === -1 ? null : lines.slice(start).join('\n').trim()
 }
 
 function parseAssistantPolicy(value: unknown): DocumentationPublishedManifest['assistant'] | null {

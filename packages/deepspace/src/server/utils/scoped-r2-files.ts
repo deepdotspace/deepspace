@@ -259,6 +259,19 @@ function isKeyWithinScope(
 ): boolean {
   return key.startsWith(prefix) && !excludedPrefixes.some((excluded) => key.startsWith(excluded))
 }
+
+/**
+ * The key a caller can address within its own scope: the stored key minus the
+ * resolved prefix. Clients never learn the prefix (it is derived from their
+ * authenticated context), so every response that names an absolute key also
+ * carries this spelling — the one that works with `list(prefix)` filters and
+ * `?key=` upserts. The inverse of {@link anchorKey}, and the only place the
+ * slice happens.
+ */
+function scopeRelativeKey(key: string, prefix: string): string {
+  return key.slice(prefix.length)
+}
+
 /**
  * Anchor a caller-supplied key under the resolved prefix.
  *
@@ -581,7 +594,7 @@ async function handleUpload(
       admission.markerKey,
       admission.markerKey !== null || fileData.byteLength < replacedBytes,
     )
-    return storedFileJson(located.key, fileName, url, scope)
+    return storedFileJson(located.key, prefix, fileName, url, scope)
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Upload failed'
     console.error('[handleUpload] Error:', msg, err instanceof Error ? err.stack : '')
@@ -630,11 +643,23 @@ function fileMetadata(
 }
 
 /** The one success shape for a stored file, whichever path stored it. */
-function storedFileJson(key: string, name: string, url: URL, scope: string): Response {
+function storedFileJson(
+  key: string,
+  prefix: string,
+  name: string,
+  url: URL,
+  scope: string,
+): Response {
   const fileUrl = new URL(`/api/files/${encodeKeyPath(key)}`, url.origin)
   fileUrl.searchParams.set('scope', scope)
   return Response.json(
-    { success: true, key, url: fileUrl.toString(), name },
+    {
+      success: true,
+      key,
+      relativeKey: scopeRelativeKey(key, prefix),
+      url: fileUrl.toString(),
+      name,
+    },
     { headers: CORS_HEADERS },
   )
 }
@@ -1081,6 +1106,7 @@ async function finishCompletedMultipart(
   auth: ScopedR2Auth,
   url: URL,
   scope: string,
+  prefix: string,
 ): Promise<Response> {
   const declaredMetadata = Number(object.customMetadata?.declaredBytes)
   const declaredBytes =
@@ -1123,7 +1149,7 @@ async function finishCompletedMultipart(
     }
   }
   const name = object.customMetadata?.originalName ?? session.uploadKey.split('/').pop() ?? 'file'
-  return storedFileJson(session.key, name, url, scope)
+  return storedFileJson(session.key, prefix, name, url, scope)
 }
 
 /**
@@ -1159,7 +1185,7 @@ async function multipartComplete(
   if (auth.storage && !reservation) {
     const completed = await completedReservationObject(bucket, session)
     if (completed) {
-      return finishCompletedMultipart(bucket, session, null, completed, auth, url, scope)
+      return finishCompletedMultipart(bucket, session, null, completed, auth, url, scope, prefix)
     }
     await abandonMultipart(bucket, session, auth, null)
     return quotaUnavailable('This upload reservation is missing or does not match.')
@@ -1204,7 +1230,16 @@ async function multipartComplete(
   } catch (error) {
     const completed = await completedReservationObject(bucket, session)
     if (completed) {
-      return finishCompletedMultipart(bucket, session, reservation, completed, auth, url, scope)
+      return finishCompletedMultipart(
+        bucket,
+        session,
+        reservation,
+        completed,
+        auth,
+        url,
+        scope,
+        prefix,
+      )
     }
     if (r2ErrorCode(error) === 10024 && reservation) {
       await releaseQuotaMarker(bucket, auth.storage, reservation.key, true)
@@ -1212,7 +1247,7 @@ async function multipartComplete(
     return multipartFailure(error)
   }
 
-  return finishCompletedMultipart(bucket, session, reservation, object, auth, url, scope)
+  return finishCompletedMultipart(bucket, session, reservation, object, auth, url, scope, prefix)
 }
 
 /**
@@ -1261,40 +1296,69 @@ async function handleList(
   const limit = Number.isSafeInteger(requestedLimit)
     ? Math.min(1000, Math.max(1, requestedLimit))
     : 100
+  const requestCursor = url.searchParams.get('cursor')
   if (excludedPrefixes.some((excluded) => listPrefix.startsWith(excluded))) {
     return Response.json({ files: [], truncated: false }, { headers: CORS_HEADERS })
   }
 
-  const listed = await bucket.list({ prefix: listPrefix, limit })
+  // The default workers-types entry intentionally models the oldest runtime,
+  // while every DeepSpace worker uses a post-2022 compatibility date where R2
+  // honors `include`. Keep that compatibility boundary local to these calls.
+  const withMetadata = (options: R2ListOptions) =>
+    ({ ...options, include: ['customMetadata'] }) as R2ListOptions & {
+      include: ['customMetadata']
+    }
+  const listed = await bucket.list(
+    withMetadata({
+      prefix: listPrefix,
+      limit,
+      ...(requestCursor ? { cursor: requestCursor } : {}),
+    }),
+  )
   const visible = listed.objects.filter((object) =>
     isKeyWithinScope(object.key, prefix, excludedPrefixes),
   )
   const seen = new Set(visible.map((object) => object.key))
-  let truncated = listed.truncated
+  // The frontier is whichever list call the response's truncation state
+  // comes from — the initial page, or the last jump past an excluded
+  // subtree below.
+  let frontier: R2Objects = listed
   // If a private subtree occupied the first page, jump past it instead of
-  // walking private keys or hiding public keys that sort after it.
-  for (const excluded of excludedPrefixes.filter((candidate) => candidate.startsWith(listPrefix))) {
-    if (visible.length >= limit) break
+  // walking private keys or hiding public keys that sort after it. Only a
+  // truncated listing has anything left to jump to: from an exhausted page the
+  // jump would rewind to keys earlier cursor pages already returned.
+  // The frontier advances across iterations: a second excluded subtree must
+  // jump from where the previous jump ended, not from the original page's
+  // tail — restarting from the stale tail would rewind startAfter and
+  // re-return keys an earlier jump already delivered.
+  let frontierKey = listed.objects.at(-1)?.key
+  for (const excluded of excludedPrefixes
+    .filter((candidate) => candidate.startsWith(listPrefix))
+    .sort()) {
+    if (!frontier.truncated || visible.length >= limit) break
     const excludedEnd = `${excluded}\u{10ffff}`
-    const lastListedKey = listed.objects.at(-1)?.key
-    const after = await bucket.list({
-      prefix: listPrefix,
-      startAfter: lastListedKey && lastListedKey > excludedEnd ? lastListedKey : excludedEnd,
-      limit: limit - visible.length,
-    })
+    const after = await bucket.list(
+      withMetadata({
+        prefix: listPrefix,
+        startAfter: frontierKey && frontierKey > excludedEnd ? frontierKey : excludedEnd,
+        limit: limit - visible.length,
+      }),
+    )
     for (const object of after.objects) {
       if (!seen.has(object.key) && isKeyWithinScope(object.key, prefix, excludedPrefixes)) {
         seen.add(object.key)
         visible.push(object)
       }
     }
-    truncated = after.truncated
+    frontierKey = after.objects.at(-1)?.key ?? frontierKey
+    frontier = after
   }
   const files = visible.slice(0, limit).map((obj) => {
     const fileUrl = new URL(`/api/files/${encodeKeyPath(obj.key)}`, url.origin)
     fileUrl.searchParams.set('scope', scope)
     return {
       key: obj.key,
+      relativeKey: scopeRelativeKey(obj.key, prefix),
       size: obj.size,
       uploaded: obj.uploaded.toISOString(),
       url: fileUrl.toString(),
@@ -1310,8 +1374,15 @@ async function handleList(
     const limitBytes = await auth.storage.limitBytes()
     if (storage && limitBytes !== null) storage.limitBytes = limitBytes
   }
+  // The cursor rides with `truncated`: it continues the frontier list call,
+  // so `?cursor=` resumes exactly there.
   return Response.json(
-    { files, truncated, ...(storage ? { storage } : {}) },
+    {
+      files,
+      truncated: frontier.truncated,
+      ...(frontier.truncated ? { cursor: frontier.cursor } : {}),
+      ...(storage ? { storage } : {}),
+    },
     { headers: CORS_HEADERS },
   )
 }

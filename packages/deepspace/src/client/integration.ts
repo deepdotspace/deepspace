@@ -11,6 +11,7 @@
  */
 
 import { getAuthToken } from './auth/token'
+import { normalizeApiError, type ApiErrorIssue } from '../shared/api-error'
 
 const ENDPOINT_PREFIX = '/api/integrations'
 const DEFAULT_TIMEOUT_MS = 120_000
@@ -19,8 +20,15 @@ const ENDPOINT_RE = /^[a-z0-9][a-z0-9._~-]*(?:\/[a-z0-9][a-z0-9._~-]*)*$/i
 interface IntegrationResponse<T = unknown> {
   success: boolean
   data?: T
+  /** Human-readable error, safe to render directly. */
   error?: string
-  issues?: Array<{ path?: string[]; message: string; code?: string }>
+  /** Machine slug (e.g. 'insufficient_credits') for branching — never render it. */
+  code?: string
+  /** HTTP status of the failed response; 0 when no response arrived (timeout, abort, network). */
+  status?: number
+  /** Structured fields the server sent alongside the error (e.g. `availableCredits`). */
+  details?: Record<string, unknown>
+  issues?: ApiErrorIssue[]
 }
 
 interface RequestOptions {
@@ -54,7 +62,7 @@ async function request<T>(
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
   if (options?.signal?.aborted) {
-    return { success: false, error: 'Request cancelled' }
+    return { success: false, error: 'Request cancelled', status: 0 }
   }
 
   const headers: Record<string, string> = {
@@ -91,18 +99,14 @@ async function request<T>(
     try {
       payload = (await res.json()) as Record<string, unknown>
     } catch {
-      return { success: false, error: `Request failed (${res.status})` }
+      return { success: false, error: `Request failed (${res.status})`, status: res.status }
     }
 
     if (!res.ok || payload.success === false) {
-      return {
-        success: false,
-        error:
-          (payload.error as string) ??
-          (payload.message as string) ??
-          `Request failed (${res.status})`,
-        ...(payload.issues ? { issues: payload.issues as IntegrationResponse['issues'] } : {}),
-      }
+      // The api-worker's envelope is { error: <machine slug>, message: <human>,
+      // ...details } — normalize so `error` is always the human text and the
+      // slug rides on `code` for branching.
+      return { success: false, ...normalizeApiError(res.status, payload) }
     }
 
     // Normalize response — handle both { success, data } and { success, ...rest }
@@ -117,11 +121,13 @@ async function request<T>(
       return {
         success: false,
         error: timedOut ? `Request timed out after ${timeoutMs}ms` : 'Request cancelled',
+        status: 0,
       }
     }
     return {
       success: false,
       error: err instanceof Error ? err.message : 'Request failed',
+      status: 0,
     }
   } finally {
     clearTimeout(timeout)

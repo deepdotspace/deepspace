@@ -95,7 +95,10 @@ export default defineConfig([
     external: [/^node:.*/],
   },
   {
-    entry: { testing: 'src/testing/index.ts' },
+    // `testing` carries the Playwright fixture; `testing/mcp` is the
+    // dependency-free MCP wire client, a separate entry so importing it
+    // never loads @playwright/test.
+    entry: { testing: 'src/testing/index.ts', 'testing-mcp': 'src/testing/mcp.ts' },
     format: ['esm'],
     dts: true,
     sourcemap: true,

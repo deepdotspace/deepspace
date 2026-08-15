@@ -15,7 +15,7 @@ import {
   type DocumentationNavigationItem,
   type DocumentationOpenApiConfig,
 } from './types'
-import { RAW_CONFIG_KEYS, openapiItemSchema, rawConfigSchema } from './config/schema'
+import { RAW_CONFIG_KEYS, THEME_CONFIG_KEYS, openapiItemSchema, rawConfigSchema } from './config/schema'
 import {
   humanize,
   isWithin,
@@ -106,8 +106,20 @@ export function loadDocumentationConfig(appDir: string): LoadedDocumentationConf
         })
       }
     }
+    const rawTheme = (input as Record<string, unknown>).theme
+    if (rawTheme && typeof rawTheme === 'object' && !Array.isArray(rawTheme)) {
+      for (const key of Object.keys(rawTheme)) {
+        if (!THEME_CONFIG_KEYS.has(key)) {
+          warnings.push({
+            code: 'unsupported_config_key',
+            message: `Unsupported theme configuration key 'theme.${key}' was ignored`,
+            file: configPath,
+          })
+        }
+      }
+    }
   }
-  const themeInput = typeof data.theme === 'string' ? { preset: data.theme } : data.theme
+  const themeInput = typeof data.theme === 'string' ? {} : data.theme
   if (typeof data.theme === 'string') {
     warnings.push({
       code: 'mintlify_theme_normalized',
@@ -167,7 +179,7 @@ export function loadDocumentationConfig(appDir: string): LoadedDocumentationConf
       logoHref: logo?.href,
       favicon: themeInput.favicon ?? data.favicon,
       defaultMode: data.appearance?.default ?? themeInput.defaultMode,
-      strictMode: data.appearance?.strict,
+      strictMode: themeInput.strictMode ?? data.appearance?.strict,
     },
     navigation: navigation as DocumentationNavigationItem[] | undefined,
     links: data.links.length > 0 ? data.links : navbarLinks,

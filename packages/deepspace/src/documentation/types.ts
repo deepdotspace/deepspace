@@ -1,3 +1,6 @@
+import type { z } from 'zod'
+import type { themeObjectSchema } from './config/schema'
+
 export const DOCUMENTATION_CONFIG_FILE = 'documentation.json'
 export const DOCUMENTATION_MANIFEST_VERSION = 2
 
@@ -25,11 +28,22 @@ export interface DocumentationFontConfig {
   format?: string
 }
 
-export interface DocumentationThemeConfig {
-  preset?: string
-  accent?: string
-  accentDark?: string
-  background?: string
+/**
+ * The `theme` object as authored in documentation.json — exactly the keys
+ * the config schema accepts under `theme.*`, derived from that schema so
+ * the two can never drift. Everything else (fonts, background decoration,
+ * styling, logo href) is configured through the Mintlify-style top-level
+ * keys and only exists on the resolved theme.
+ */
+export type DocumentationThemeConfig = z.infer<typeof themeObjectSchema>
+
+/**
+ * The fully resolved theme after config loading merges `theme.*` with the
+ * Mintlify top-level keys (`colors`, `logo`, `favicon`, `appearance`,
+ * `background`, `fonts`, `styling`). This is what the template and runtime
+ * consume; it is an output shape, never accepted as `theme.*` input.
+ */
+export interface ResolvedDocumentationTheme extends DocumentationThemeConfig {
   backgroundDark?: string
   backgroundDecoration?: 'none' | 'gradient' | 'grid'
   bodyFont?: DocumentationFontConfig
@@ -37,12 +51,7 @@ export interface DocumentationThemeConfig {
   monoFont?: DocumentationFontConfig
   codeBlockMode?: 'dark' | 'system'
   eyebrowStyle?: 'section' | 'breadcrumbs' | 'none'
-  logo?: string
-  logoDark?: string
   logoHref?: string
-  favicon?: string
-  defaultMode?: 'light' | 'dark' | 'system'
-  strictMode?: boolean
 }
 
 export interface DocumentationLinkConfig {
@@ -113,7 +122,7 @@ export interface DocumentationConfig {
   url?: string
   /** Explicit custom hostnames that mount this documentation at `/`. */
   domains: string[]
-  theme: DocumentationThemeConfig
+  theme: ResolvedDocumentationTheme
   navigation?: DocumentationNavigationItem[]
   links: DocumentationLinkConfig[]
   footer: DocumentationLinkConfig[]
@@ -243,6 +252,8 @@ export interface DocumentationBuildManifest {
   version: typeof DOCUMENTATION_MANIFEST_VERSION
   sourceHash: string
   outputHash: string
+  /** Version of the `deepspace` package that compiled this output. */
+  sdkVersion: string
   name: string
   pageCount: number
   /** Authored pages plus configured redirect entry points. */

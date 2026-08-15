@@ -20,7 +20,8 @@
 // recurring plan.
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { getAuthToken } from '../auth/token'
+import { authedJson } from '../authed-json'
+import { apiErrorCode } from '../../shared/api-error'
 
 interface ChargeRedirectOpts {
   /** Defaults to window.location.href. */
@@ -94,7 +95,14 @@ interface UseCheckoutReturn {
   // Action surface
   chargeOnce: (opts: ChargeOnceOpts) => Promise<ChargeOnceResult>
   isLoading: boolean
+  /** Human-readable text of the last failure, safe to render. */
   error: string | null
+  /**
+   * Machine slug of the last failure (e.g. 'owner_connect_not_ready') for
+   * branching — never render it. Null when there is no error or the
+   * failure carried no slug (e.g. a network drop).
+   */
+  errorCode: string | null
 
   // Read surface
   purchases: Purchase[]
@@ -106,28 +114,11 @@ interface UseCheckoutReturn {
   refresh: () => Promise<void>
 }
 
-async function authedJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = await getAuthToken()
-  const res = await fetch(path, {
-    ...init,
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...init?.headers,
-    },
-  })
-  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
-  if (!res.ok) {
-    throw new Error((data.error as string) ?? `Request failed (${res.status})`)
-  }
-  return data as T
-}
-
 export function useCheckout(opts?: UseCheckoutOpts): UseCheckoutReturn {
   const [purchases, setPurchases] = useState<Purchase[]>([])
   const [isLoading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [errorCode, setErrorCode] = useState<string | null>(null)
 
   // No productId param on the fetch — the hook caches the full list and the
   // per-product question is answered in-memory. Cheaper than refetching on
@@ -141,8 +132,10 @@ export function useCheckout(opts?: UseCheckoutOpts): UseCheckoutReturn {
       )
       setPurchases(r.purchases ?? [])
       setError(null)
+      setErrorCode(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load purchases')
+      setErrorCode(apiErrorCode(e))
     } finally {
       setLoading(false)
     }
@@ -158,6 +151,7 @@ export function useCheckout(opts?: UseCheckoutOpts): UseCheckoutReturn {
       // fetch lifecycle (initial + refresh), not the chargeOnce redirect.
       // Mirrors the v1 semantics callers already depend on.
       setError(null)
+      setErrorCode(null)
 
       // Build the request body by mode. In product mode we deliberately
       // omit amount/name from the wire — the server resolves them from the
@@ -194,6 +188,7 @@ export function useCheckout(opts?: UseCheckoutOpts): UseCheckoutReturn {
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'Failed to start checkout'
         setError(msg)
+        setErrorCode(apiErrorCode(e))
         throw e
       }
     },
@@ -217,6 +212,7 @@ export function useCheckout(opts?: UseCheckoutOpts): UseCheckoutReturn {
     chargeOnce,
     isLoading,
     error,
+    errorCode,
     purchases,
     owned,
     ownsProduct,

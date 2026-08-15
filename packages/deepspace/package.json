@@ -1,6 +1,6 @@
 {
   "name": "deepspace",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "engines": {
     "node": ">=22.15.0 <23 || >=24 <25 || >=26 <27"
   },
@@ -32,6 +32,10 @@
     "./testing": {
       "types": "./dist/testing.d.ts",
       "import": "./dist/testing.js"
+    },
+    "./testing/mcp": {
+      "types": "./dist/testing-mcp.d.ts",
+      "import": "./dist/testing-mcp.js"
     },
     "./documentation": {
       "types": "./dist/documentation.d.ts",

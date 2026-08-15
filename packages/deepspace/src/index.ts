@@ -28,6 +28,11 @@ export * from './client/ai-stream'
 export * from './client/status'
 export * from './client/subscriptions'
 export * from './client/charges'
+// The typed error the billing hooks throw for a platform refusal — human
+// `message` for rendering, machine `code` (e.g. 'owner_connect_not_ready')
+// for branching. The normalizer behind it stays internal.
+export { PlatformApiError } from './shared/api-error'
+export type { NormalizedApiError, ApiErrorIssue } from './shared/api-error'
 // Opt-in client-side error reporter. Only the reporter API is public; the
 // shared wire contract (marker, caps, normalizer) stays internal — just the
 // report type is re-exported for callers of `reportClientError`.

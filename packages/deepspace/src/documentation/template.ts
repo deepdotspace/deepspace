@@ -4,7 +4,7 @@ import type {
   DocumentationPage,
   DocumentationRuntimeData,
   DocumentationRuntimeRouteDocument,
-  DocumentationThemeConfig,
+  ResolvedDocumentationTheme,
 } from './types'
 import {
   DOCUMENTATION_BUNDLED_BODY_FONT,
@@ -56,7 +56,7 @@ export function renderPage(options: DocumentationPageRenderOptions, assets: {
   const favicon = theme.favicon ?? documentationPublicPath(options.basePath, '/assets/favicon.svg')
 
   return `<!doctype html>
-<html lang="en" data-theme-mode="${defaultMode}" data-theme-strict="${theme.strictMode ? 'true' : 'false'}" data-code-mode="${theme.codeBlockMode ?? 'dark'}" data-background-decoration="${theme.backgroundDecoration ?? 'none'}" data-eyebrow-style="${theme.eyebrowStyle ?? 'section'}">
+<html lang="en" data-theme-mode="${defaultMode}" data-theme-strict="${theme.strictMode ? 'true' : 'false'}" data-code-mode="${theme.codeBlockMode ?? 'dark'}" data-density="${theme.density ?? 'comfortable'}" data-background-decoration="${theme.backgroundDecoration ?? 'none'}" data-eyebrow-style="${theme.eyebrowStyle ?? 'section'}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -106,7 +106,7 @@ function renderFontPreloads(fonts: DocumentationResolvedFont[]): string {
     .join('\n  ')
 }
 
-export function documentationAccent(theme: DocumentationThemeConfig): string {
+export function documentationAccent(theme: ResolvedDocumentationTheme): string {
   return validCssColor(theme.accent) ? theme.accent : '#635bff'
 }
 
@@ -114,7 +114,7 @@ export function documentationAccent(theme: DocumentationThemeConfig): string {
  * Default mark, themed from the configured accent so a site that sets no favicon
  * still gets a tab icon that matches its own palette.
  */
-export function renderDocumentationFavicon(theme: DocumentationThemeConfig): string {
+export function renderDocumentationFavicon(theme: ResolvedDocumentationTheme): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><path d="M16 2.5c.5 7.7 5.8 13 13.5 13.5-7.7.5-13 5.8-13.5 13.5C15.5 21.8 10.2 16.5 2.5 16 10.2 15.5 15.5 10.2 16 2.5Z" fill="${escapeHtml(documentationAccent(theme))}"/></svg>\n`
 }
 
@@ -206,13 +206,13 @@ export function renderRedirect(to: string, basePath = '/docs'): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="robots" content="noindex"><meta http-equiv="refresh" content="0;url=${safe}"><link rel="canonical" href="${safe}"><title>Redirecting…</title></head><body><p>Redirecting to <a href="${safe}">${safe}</a>.</p></body></html>`
 }
 
-function publicTheme(theme: DocumentationThemeConfig, basePath: string): DocumentationThemeConfig {
+function publicTheme(theme: ResolvedDocumentationTheme, basePath: string): ResolvedDocumentationTheme {
   const publicAsset = (value: string | undefined): string | undefined => {
     if (!value) return value
     const logical = value.startsWith('/_documentation/') ? value.slice('/_documentation'.length) : value
     return logical.startsWith('/media/') ? documentationPublicPath(basePath, logical) : logical
   }
-  const publicFont = (font: DocumentationThemeConfig['bodyFont']): DocumentationThemeConfig['bodyFont'] =>
+  const publicFont = (font: ResolvedDocumentationTheme['bodyFont']): ResolvedDocumentationTheme['bodyFont'] =>
     font ? { ...font, source: publicAsset(font.source) } : font
   return {
     ...theme,

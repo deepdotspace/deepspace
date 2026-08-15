@@ -58,4 +58,31 @@ describe('undeploy partial failure', () => {
       },
     })
   })
+
+  it('preserves a terminal server error code', async () => {
+    const appId = 'app_01HZXYABCDEFGHJKMNPQRSTVWX'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json(
+          { error: 'Only the app owner can do this.', code: 'not_app_owner' },
+          { status: 403 },
+        ),
+      ),
+    )
+    const lines: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
+
+    const command = undeploy as unknown as {
+      run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+    }
+    await command.run({ args: { name: appId, json: true } })
+
+    expect(process.exitCode).toBe(1)
+    expect(JSON.parse(lines[0])).toMatchObject({
+      ok: false,
+      code: 'not_app_owner',
+      error: 'Only the app owner can do this.',
+    })
+  })
 })

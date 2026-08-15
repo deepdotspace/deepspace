@@ -1,7 +1,7 @@
 import * as p from '@clack/prompts'
 import { errorCode } from '../../lib/cli-errors'
 import { defineDeepspaceCommand, Refusal } from '../../lib/command'
-import type { CliAction } from '../../lib/output'
+import { executableAction, type CliAction } from '../../lib/output'
 import { runGit } from '../../lib/git/process'
 import {
   currentBranch,
@@ -62,7 +62,7 @@ export function pullAfterLandAction(
 ): CliAction | null {
   if (currentBranch(primaryDir) !== intoBranch) return null
   if (resolveCommit(primaryDir, 'HEAD') === landedOid) return null
-  return { cwd: primaryDir, argv: ['deepspace', 'pull'] }
+  return executableAction({ cwd: primaryDir, argv: ['deepspace', 'pull'] })
 }
 
 export interface LandArgs {
@@ -406,6 +406,10 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
     }
     spinner?.stop(`Landed ${id} into ${intoBranch} at ${landedOid.slice(0, 10)}.`)
     const primaryDir = primaryAppDir(appDir)
+    // Pin the continuation while this CLI entry still exists. A successful
+    // cleanup can remove the managed worktree containing the npx-installed
+    // entry before the shared output runtime sees the action.
+    const action = pullAfterLandAction(primaryDir, intoBranch, landedOid)
     const cleanup = keepWorktree
       ? null
       : cleanupWorkspaceLocal(appDir, id, intoBranch, { expectedBranchOid: landedOid })
@@ -442,7 +446,6 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
         { actionRequired: true, action, extra: data },
       )
     }
-    const action = pullAfterLandAction(primaryDir, intoBranch, landedOid)
     return { data, ...(action ? { action } : {}) }
   },
 })

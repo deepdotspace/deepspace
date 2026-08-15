@@ -21,6 +21,7 @@
 import { BaseRoom, type UserAttachment } from './base-room'
 import { nextCronFire, validateTask, type CronTask } from './cron-schedule'
 import { MSG } from '../../shared/protocol/constants'
+import { serverBuild } from '../../shared/protocol/messages'
 import { ROLES } from '../../shared/roles'
 
 // ============================================================================
@@ -180,44 +181,108 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
     message: { type: string; [key: string]: unknown },
   ): Promise<void> {
     this.ensureInitialized()
-    const { type, payload } = message as { type: string; payload: Record<string, unknown> }
+    // Default `payload` so a payload-less frame reaches the typed reject
+    // paths below instead of throwing into BaseRoom's catch-all logger.
+    const { type, payload = {} } = message as { type: string; payload?: Record<string, unknown> }
 
     if (CRON_WRITE_TYPES.has(type) && !(user as CronAttachment).canWrite) {
-      this.sendTo(ws, {
-        type: MSG.ERROR,
-        payload: { error: 'Write access denied: viewer role cannot modify cron tasks' },
+      const error = 'Write access denied: viewer role cannot modify cron tasks'
+      this.sendTo(ws, { type: MSG.ERROR, payload: { error } })
+      this.ackMutation(ws, payload.requestId, {
+        ok: false,
+        taskName: payload.taskName as string | undefined,
+        reason: 'read_only',
+        error,
       })
       return
     }
 
+    try {
+      await this.dispatchMessage(ws, type, payload)
+    } catch (error) {
+      // A mid-operation throw (storage, alarm scheduling, broadcast) must
+      // still settle the caller's receipt — an unacked requestId would leave
+      // the client's mutation promise pending until unmount.
+      try {
+        this.ackMutation(ws, payload.requestId, {
+          ok: false,
+          taskName: payload.taskName as string | undefined,
+          reason: 'failed',
+          error: error instanceof Error ? error.message : String(error),
+        })
+      } catch {
+        // Socket already dead — the client's onclose drains its pendings.
+      }
+      throw error
+    }
+  }
+
+  private async dispatchMessage(
+    ws: WebSocket,
+    type: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
     switch (type) {
       case MSG.CRON_TRIGGER: {
         const taskName = payload.taskName as string
         if (!taskName) {
-          this.sendTo(ws, { type: MSG.ERROR, payload: { error: 'Missing taskName' } })
+          const error = 'Missing taskName'
+          this.sendTo(ws, { type: MSG.ERROR, payload: { error } })
+          this.ackMutation(ws, payload.requestId, { ok: false, reason: 'failed', error })
           return
         }
-        if (!(await this.executeTask(taskName))) {
-          this.sendTo(ws, {
-            type: MSG.ERROR,
-            payload: { error: `Unknown cron task: ${taskName}` },
+        const execution = await this.executeTask(taskName)
+        if (!execution) {
+          const error = `Unknown cron task: ${taskName}`
+          this.sendTo(ws, { type: MSG.ERROR, payload: { error } })
+          this.ackMutation(ws, payload.requestId, {
+            ok: false,
+            taskName,
+            reason: 'unknown_task',
+            error,
           })
+          break
         }
+        this.ackMutation(
+          ws,
+          payload.requestId,
+          execution.success
+            ? { ok: true, taskName }
+            : { ok: false, taskName, reason: 'failed', error: execution.error },
+        )
         break
       }
 
-      case MSG.CRON_PAUSE: {
-        const taskName = payload.taskName as string
-        this.sql.exec(`UPDATE cron_tasks SET paused = 1 WHERE name = ?`, taskName)
-        this.broadcastStatus()
-        break
-      }
-
+      case MSG.CRON_PAUSE:
       case MSG.CRON_RESUME: {
         const taskName = payload.taskName as string
-        this.sql.exec(`UPDATE cron_tasks SET paused = 0 WHERE name = ?`, taskName)
-        this.scheduleNextAlarm()
+        if (!taskName) {
+          const error = 'Missing taskName'
+          this.sendTo(ws, { type: MSG.ERROR, payload: { error } })
+          this.ackMutation(ws, payload.requestId, { ok: false, reason: 'failed', error })
+          return
+        }
+        // Same rejection contract as CRON_TRIGGER: a name the scheduler does
+        // not know must never ack ok — the UPDATE below would match zero rows
+        // and the receipt would report a state flip that never happened.
+        const known =
+          this.sql.exec(`SELECT name FROM cron_tasks WHERE name = ?`, taskName).toArray().length > 0
+        if (!known) {
+          const error = `Unknown cron task: ${taskName}`
+          this.sendTo(ws, { type: MSG.ERROR, payload: { error } })
+          this.ackMutation(ws, payload.requestId, {
+            ok: false,
+            taskName,
+            reason: 'unknown_task',
+            error,
+          })
+          break
+        }
+        const paused = type === MSG.CRON_PAUSE
+        this.sql.exec(`UPDATE cron_tasks SET paused = ? WHERE name = ?`, paused ? 1 : 0, taskName)
+        if (!paused) this.scheduleNextAlarm()
         this.broadcastStatus()
+        this.ackMutation(ws, payload.requestId, { ok: true, taskName })
         break
       }
 
@@ -275,7 +340,7 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
   // Task Execution
   // ==========================================================================
 
-  private async executeTask(taskName: string): Promise<boolean> {
+  private async executeTask(taskName: string): Promise<CronExecution | null> {
     // Resolve the configured task before invoking application code. A manual
     // trigger must not turn an arbitrary caller-provided name into a reported
     // successful execution.
@@ -284,7 +349,7 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
       .toArray()[0] as
       | { interval_minutes: number | null; schedule: string | null; timezone: string | null }
       | undefined
-    if (!taskRow) return false
+    if (!taskRow) return null
 
     const startedAt = new Date().toISOString()
     const start = Date.now()
@@ -331,7 +396,7 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
 
     // Broadcast update to monitors
     this.broadcastStatus()
-    return true
+    return { taskName, startedAt, completedAt, success, durationMs, error }
   }
 
   // ==========================================================================
@@ -424,6 +489,35 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
         recentHistory: this.getRecentHistory(10),
       },
     })
+  }
+
+  /**
+   * Receipt for a mutation frame, addressed only to its sender. Receipts
+   * are opt-in by correlation id: frames without a `requestId` keep the
+   * fire-and-forget contract, so the (untyped) `requestId` from the wire
+   * is the single gate here rather than a check at every call site.
+   * Frames go through the shared `serverBuild` constructors so the wire
+   * shape is enforced by the protocol types, not re-spelled here.
+   */
+  private ackMutation(
+    ws: WebSocket,
+    requestId: unknown,
+    result:
+      | { ok: true; taskName: string }
+      | {
+          ok: false
+          taskName?: string
+          reason: 'read_only' | 'unknown_task' | 'failed'
+          error?: string
+        },
+  ): void {
+    if (typeof requestId !== 'string') return
+    this.sendTo(
+      ws,
+      result.ok
+        ? serverBuild.cronAckSuccess(requestId, result.taskName)
+        : serverBuild.cronAckFailure(requestId, result.reason, result.error, result.taskName),
+    )
   }
 
   // ==========================================================================

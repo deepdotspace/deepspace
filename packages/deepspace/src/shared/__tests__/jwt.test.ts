@@ -12,7 +12,7 @@ describe('decodeJwtPayload', () => {
     expect(() => atob(token.split('.')[1])).toThrow()
     expect(decodeJwtPayload<{ sub: string; name: string; exp: number }>(token)).toEqual({
       sub: 'u',
-      name: '\u00be',
+      name: '¾',
       exp: 2000000000,
     })
   })

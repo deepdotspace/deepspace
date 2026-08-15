@@ -2,7 +2,8 @@
 // /_deepspace proxy, which signs with the app identity token.
 
 import { useCallback, useEffect, useState } from 'react'
-import { getAuthToken } from '../auth/token'
+import { authedJson } from '../authed-json'
+import { apiErrorCode } from '../../shared/api-error'
 import { isEntitled, type PlanInfo, type SubscriptionStatus } from '../../shared/subscription'
 
 // Re-export for SDK consumers — these are public types the hook is generic over.
@@ -47,7 +48,14 @@ interface UseSubscriptionReturn {
   cancelAtPeriodEnd: boolean
   trialEndsAt: number | null
   isLoading: boolean
+  /** Human-readable text of the last load failure, safe to render. */
   error: string | null
+  /**
+   * Machine slug of the last load failure (e.g. 'owner_connect_not_ready')
+   * for branching — never render it. Null when there is no error or the
+   * failure carried no slug (e.g. a network drop).
+   */
+  errorCode: string | null
   /**
    * Returns true only when `tier === slug` AND the subscription is currently
    * entitled (status ∈ {active, trialing}). A `past_due` / `canceled` /
@@ -67,24 +75,6 @@ interface UseSubscriptionReturn {
   refresh: () => Promise<void>
 }
 
-async function authedJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = await getAuthToken()
-  const res = await fetch(path, {
-    ...init,
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...init?.headers,
-    },
-  })
-  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
-  if (!res.ok) {
-    throw new Error((data.error as string) ?? `Request failed (${res.status})`)
-  }
-  return data as T
-}
-
 export function useSubscription(): UseSubscriptionReturn {
   const [state, setState] = useState<SubscriptionState>({
     tier: 'free',
@@ -97,6 +87,7 @@ export function useSubscription(): UseSubscriptionReturn {
   })
   const [isLoading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [errorCode, setErrorCode] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -112,8 +103,10 @@ export function useSubscription(): UseSubscriptionReturn {
         plans: r.plans ?? [],
       })
       setError(null)
+      setErrorCode(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load subscription')
+      setErrorCode(apiErrorCode(e))
     } finally {
       setLoading(false)
     }
@@ -186,6 +179,7 @@ export function useSubscription(): UseSubscriptionReturn {
     trialEndsAt: state.trialEndsAt,
     isLoading,
     error,
+    errorCode,
     hasTier,
     isAtLeast,
     plans: state.plans,

@@ -60,8 +60,68 @@ describe('integration client routing', () => {
 
     await expect(
       integration.get('openai/models', undefined, { signal: controller.signal }),
-    ).resolves.toEqual({ success: false, error: 'Request cancelled' })
+    ).resolves.toEqual({ success: false, error: 'Request cancelled', status: 0 })
     expect(mockedToken).not.toHaveBeenCalled()
     expect(fetchSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('integration client error normalization', () => {
+  it('separates the human message, machine code, status, and details of a 402', async () => {
+    mockedToken.mockResolvedValue('secret-token')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json(
+          {
+            success: false,
+            error: 'insufficient_credits',
+            message: 'Insufficient credits.',
+            availableCredits: 12,
+            requiredCredits: 130,
+          },
+          { status: 402 },
+        ),
+      ),
+    )
+
+    await expect(integration.post('openai/chat-completion', {})).resolves.toEqual({
+      success: false,
+      error: 'Insufficient credits.',
+      code: 'insufficient_credits',
+      status: 402,
+      details: { availableCredits: 12, requiredCredits: 130 },
+    })
+  })
+
+  it('humanizes a bare-slug error body instead of rendering the slug', async () => {
+    mockedToken.mockResolvedValue('secret-token')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ error: 'owner_connect_not_ready' }, { status: 409 })),
+    )
+
+    const result = await integration.post('some/endpoint', {})
+    expect(result.success).toBe(false)
+    expect(result.code).toBe('owner_connect_not_ready')
+    expect(result.status).toBe(409)
+    expect(result.error).not.toBe('owner_connect_not_ready')
+    expect(result.error).toMatch(/payment/i)
+  })
+
+  it('reports a transport failure with status 0 and a human error', async () => {
+    mockedToken.mockResolvedValue(null)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('fetch failed')
+      }),
+    )
+
+    await expect(integration.get('openai/models')).resolves.toEqual({
+      success: false,
+      error: 'fetch failed',
+      status: 0,
+    })
   })
 })

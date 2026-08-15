@@ -41,4 +41,8 @@ Use the DeepSpace cloud repo as the default version control; no external Git
 host is required. Start parallel work with
 `npx deepspace workspace new -t "<task>"`, commit normally, then run
 `npx deepspace workspace sync` and `npx deepspace workspace land`. The `space`
-Git remote is installed by the first DeepSpace push/pull/deploy command.
+Git remote is installed by the first DeepSpace push/pull/deploy command. With
+that default DeepSpace source, deploy requires a clean commit. After an
+explicit GitHub source claim, deploy instead ships the current checkout,
+including dirty or unpushed bytes, and records no commit lineage for that
+release; use ordinary Git to decide what should be committed and pushed.

@@ -1,6 +1,6 @@
 import { searchDocumentationCorpus, type DocumentationCorpusChunk } from '../assistant'
 import { documentationPublicPath } from '../../routing'
-import { readDocumentationPublishedPage } from '../published-corpus'
+import { documentationPageSection, readDocumentationPublishedPage } from '../published-corpus'
 import {
   mcpError,
   objectValue,
@@ -31,7 +31,7 @@ export const DOCUMENTATION_TOOLS = [
     },
     outputSchema: {
       type: 'object',
-      properties: { results: { type: 'array' } },
+      properties: { notice: { type: 'string' }, results: { type: 'array' } },
       required: ['results'],
     },
     annotations: {
@@ -44,11 +44,14 @@ export const DOCUMENTATION_TOOLS = [
   {
     name: 'documentation_read',
     title: 'Read documentation page',
-    description: 'Read one complete published documentation page as Markdown.',
+    description:
+      'Read one published documentation page as Markdown. The route may omit the leading slash, ' +
+      'and a #fragment (as returned by documentation_search) narrows the result to that heading ' +
+      'section; an unknown fragment returns the whole page with a notice.',
     inputSchema: {
       type: 'object',
       properties: {
-        route: { type: 'string', minLength: 1, maxLength: 500, pattern: '^/' },
+        route: { type: 'string', minLength: 1, maxLength: 500 },
       },
       required: ['route'],
       additionalProperties: false,
@@ -56,6 +59,7 @@ export const DOCUMENTATION_TOOLS = [
     outputSchema: {
       type: 'object',
       properties: {
+        notice: { type: 'string' },
         route: { type: 'string' },
         title: { type: 'string' },
         url: { type: 'string' },
@@ -97,20 +101,31 @@ export async function callDocumentationTool<Env extends DocumentationMcpToolEnv>
     ) {
       return mcpError(request.id, -32602, 'Invalid documentation_search arguments')
     }
-    const value = {
-      results: searchDocumentationCorpus(corpus, query, Number(limit)).map((result) => ({
-        ...result,
-        url: new URL(documentationPublicPath(basePath, result.route), origin).toString(),
-      })),
-    }
-    return toolResult(request.id, value)
+    const results = searchDocumentationCorpus(corpus, query, Number(limit)).map((result) => ({
+      ...result,
+      url: new URL(documentationPublicPath(basePath, result.route), origin).toString(),
+    }))
+    // Scores are raw term-frequency weights with no cross-query meaning (an
+    // absent topic has been observed scoring 90), so the honest weak-match
+    // signal is the best hit failing to contain every query term.
+    return toolResult(request.id, {
+      ...(results[0]?.termCoverage === 1
+        ? {}
+        : {
+            notice:
+              'No section matches every search term — the topic may be absent or spread across sections.',
+          }),
+      results,
+    })
   }
 
   if (name === 'documentation_read') {
     const route = typeof args.route === 'string' ? args.route.trim() : ''
-    if (!route.startsWith('/') || route.length > 500) {
+    if (!route || route.length > 500) {
       return mcpError(request.id, -32602, 'Invalid documentation_read arguments')
     }
+    const hash = route.indexOf('#')
+    const fragment = hash === -1 ? '' : route.slice(hash + 1)
     try {
       const page = await readDocumentationPublishedPage(
         env,
@@ -120,8 +135,13 @@ export async function callDocumentationTool<Env extends DocumentationMcpToolEnv>
         assetBasePath,
       )
       if (!page) return toolError(request.id, `No published documentation page exists at ${route}`)
+      const section = fragment ? documentationPageSection(page.markdown, fragment) : null
       return toolResult(request.id, {
+        ...(fragment && section === null
+          ? { notice: `The fragment #${fragment} was not found; returning the whole page.` }
+          : {}),
         ...page,
+        ...(section === null ? {} : { markdown: section }),
         url: new URL(documentationPublicPath(basePath, page.route), origin).toString(),
       })
     } catch (error) {

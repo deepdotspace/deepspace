@@ -2,6 +2,7 @@ import * as p from '@clack/prompts'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { normalizeApiError } from '../../../shared/api-error'
 import { PLATFORM_URLS } from '../../env'
 import { createSpinner } from '../../lib/spinner'
 
@@ -107,7 +108,7 @@ async function cancelChangedPlans(appName: string, token: string, changes: PlanC
           error?: string
         }
         if (!response.ok || !body.success) {
-          lastError = body.error ?? `HTTP ${response.status}`
+          lastError = normalizeApiError(response.status, body).error
           spinner.stop(`Cancel failed for ${change.slug}: ${lastError}`)
           stopped = true
           break
@@ -178,7 +179,7 @@ export async function syncSubscriptionPlans(
     if (!response.ok || !body.ok) {
       spinner.stop('Plan sync skipped')
       p.log.warn(
-        `Plan sync failed: ${body.error ?? `HTTP ${response.status}`}${body.hint ? ` — ${body.hint}` : ''}`,
+        `Plan sync failed: ${normalizeApiError(response.status, body).error}${body.hint ? ` — ${body.hint}` : ''}`,
       )
       return
     }
@@ -249,7 +250,7 @@ export async function syncOneTimeProducts(
     }
     spinner?.stop('Product sync skipped')
     p.log.warn(
-      `Product sync failed: ${body.error ?? `HTTP ${response.status}`}${body.details ? ` — ${JSON.stringify(body.details)}` : ''}`,
+      `Product sync failed: ${normalizeApiError(response.status, body).error}${body.details ? ` — ${JSON.stringify(body.details)}` : ''}`,
     )
   } catch (error) {
     spinner?.stop('Product sync skipped')

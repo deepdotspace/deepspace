@@ -575,6 +575,27 @@ describe('postWithRetry', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it('bounds every attempt: a hung request aborts at timeoutMs and the retry succeeds', async () => {
+    // The mock hangs forever but honors the abort signal — exactly what a
+    // stalled deploy service looks like to undici.
+    fetchMock
+      .mockImplementationOnce(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () => reject(init.signal?.reason))
+          }),
+      )
+      .mockResolvedValueOnce(new Response('ok', { status: 200 }))
+
+    const res = await postWithRetry(URL, makeInit, { timeoutMs: 25 })
+    expect(res.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    // Every attempt carries a bound — no unbounded fetch leaves this helper.
+    for (const call of fetchMock.mock.calls) {
+      expect((call[1] as RequestInit).signal).toBeInstanceOf(AbortSignal)
+    }
+  })
+
   it('retries a thrown fetch (the EPIPE case) and rebuilds the body each attempt', async () => {
     vi.useFakeTimers()
     const initSpy = vi.fn(() => ({ method: 'POST', body: 'x' }) as RequestInit)

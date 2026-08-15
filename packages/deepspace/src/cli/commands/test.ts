@@ -11,6 +11,9 @@
  *   deepspace test run all          # everything
  *   deepspace test run <file>       # run specific test file
  *
+ * `--grep <pattern>`, `--project <name>`, and `--headed` forward to
+ * `playwright test` on the Playwright suites.
+ *
  * Port is `--port` > $DEEPSPACE_PORT > a stable linked-worktree port > 5173.
  * In any linked checkout the worktree's own default is used
  * so tests hit the worktree's server, not the main repo's. The chosen port is
@@ -35,7 +38,7 @@ import { findAppDir, findChildApps } from '../lib/app-context'
 import { resolveWorktreePort } from '../lib/launch-config'
 import { PLATFORM_URLS } from '../env'
 import { writeDevVars } from '../lib/dev-vars'
-import { decodeJwtPayload } from '../jwt'
+import { decodeJwtPayload } from '../../shared/jwt'
 import { ensureInstallReady } from '../lib/install-status'
 import { ensurePlaywright } from '../lib/playwright'
 import { preflightNodeVersion, preflightWindowsWorkerd } from '../lib/preflight'
@@ -54,7 +57,19 @@ import { noAppDirMessage } from './dev'
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 export const PLAYWRIGHT_OUTPUT_DIR = '.deepspace/test-results'
 
-export function playwrightTestArgs(testFiles: string[]): string[] {
+/** Flags forwarded verbatim to `playwright test`. Declared as real options
+ *  (not a `--` passthrough) because the command runtime refuses undeclared
+ *  flags. */
+export interface PlaywrightForwardedFlags {
+  grep?: string
+  project?: string
+  headed?: boolean
+}
+
+export function playwrightTestArgs(
+  testFiles: string[],
+  flags: PlaywrightForwardedFlags = {},
+): string[] {
   return [
     'playwright',
     'test',
@@ -62,6 +77,9 @@ export function playwrightTestArgs(testFiles: string[]): string[] {
     'tests/playwright.config.ts',
     '--output',
     PLAYWRIGHT_OUTPUT_DIR,
+    ...(flags.grep ? ['--grep', flags.grep] : []),
+    ...(flags.project ? ['--project', flags.project] : []),
+    ...(flags.headed ? ['--headed'] : []),
     ...testFiles,
   ]
 }
@@ -83,6 +101,21 @@ export default defineDeepspaceCommand({
       description: `Port for vite/webServer (default ${DEFAULT_PORT}, or $DEEPSPACE_PORT)`,
       required: false,
     },
+    grep: {
+      type: 'string',
+      description: 'Only run Playwright tests matching this pattern (forwarded to --grep)',
+      required: false,
+    },
+    project: {
+      type: 'string',
+      description: 'Playwright project to run (forwarded to --project)',
+      required: false,
+    },
+    headed: {
+      type: 'boolean',
+      description: 'Run Playwright browsers headed (forwarded to --headed)',
+      default: false,
+    },
     env: {
       type: 'string',
       alias: 'e',
@@ -99,6 +132,11 @@ export default defineDeepspaceCommand({
     const suite = (args.suite as string | undefined) ?? 'default'
     const wranglerEnv =
       typeof args.env === 'string' && args.env.trim() ? args.env.trim() : undefined
+    const forwarded: PlaywrightForwardedFlags = {
+      grep: typeof args.grep === 'string' && args.grep ? args.grep : undefined,
+      project: typeof args.project === 'string' && args.project ? args.project : undefined,
+      headed: Boolean(args.headed),
+    }
 
     // Resolve the app root by walking up from cwd, matching `deepspace dev start`.
     const start = resolve('.')
@@ -177,20 +215,23 @@ export default defineDeepspaceCommand({
 
     switch (suite) {
       case 'smoke':
-        exitCode = runPlaywright(appDir, ['tests/smoke.spec.ts'], port, wranglerEnv)
+        exitCode = runPlaywright(appDir, ['tests/smoke.spec.ts'], port, wranglerEnv, forwarded)
         break
       case 'api':
-        exitCode = runPlaywright(appDir, ['tests/api.spec.ts'], port, wranglerEnv)
+        exitCode = runPlaywright(appDir, ['tests/api.spec.ts'], port, wranglerEnv, forwarded)
         break
       case 'e2e':
-        exitCode = runPlaywright(appDir, [], port, wranglerEnv)
+        exitCode = runPlaywright(appDir, [], port, wranglerEnv, forwarded)
         break
       case 'unit':
+        if (forwarded.grep || forwarded.project || forwarded.headed) {
+          console.error('note: --grep/--project/--headed apply to Playwright suites and are ignored by `unit`')
+        }
         exitCode = runVitest(appDir)
         break
       case 'all':
         exitCode = runVitest(appDir)
-        if (exitCode === 0) exitCode = runPlaywright(appDir, [], port, wranglerEnv)
+        if (exitCode === 0) exitCode = runPlaywright(appDir, [], port, wranglerEnv, forwarded)
         break
       case 'default':
         exitCode = runPlaywright(
@@ -198,11 +239,12 @@ export default defineDeepspaceCommand({
           ['tests/smoke.spec.ts', 'tests/api.spec.ts'],
           port,
           wranglerEnv,
+          forwarded,
         )
         break
       default:
         if (suite.endsWith('.spec.ts')) {
-          exitCode = runPlaywright(appDir, [suite], port, wranglerEnv)
+          exitCode = runPlaywright(appDir, [suite], port, wranglerEnv, forwarded)
         } else {
           throw new Refusal(
             `Unknown test suite: ${suite}\nAvailable: smoke, api, e2e, unit, all`,
@@ -227,7 +269,8 @@ function runPlaywright(
   appDir: string,
   testFiles: string[],
   port: number,
-  wranglerEnv?: string,
+  wranglerEnv: string | undefined,
+  flags: PlaywrightForwardedFlags,
 ): number {
   let wranglerConfig: PreparedWranglerEnvConfig
   try {
@@ -237,7 +280,7 @@ function runPlaywright(
     return 1
   }
   try {
-    const result = spawnSync('npx', playwrightTestArgs(testFiles), {
+    const result = spawnSync('npx', playwrightTestArgs(testFiles, flags), {
       cwd: appDir,
       stdio: 'inherit',
       env: wranglerViteEnv(process.env, wranglerConfig, {

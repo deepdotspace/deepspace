@@ -9,7 +9,7 @@
  */
 
 import { PLATFORM_URLS } from '../env'
-import { decodeJwtPayload } from '../jwt'
+import { decodeJwtPayload } from '../../shared/jwt'
 import { apiFetch } from './api'
 
 const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api

@@ -1,5 +1,12 @@
 # create-deepspace
 
+## 0.21.0
+
+### Patch Changes
+
+- Brandable AuthOverlay (title/description/logo props, `--ds-auth-backdrop` var), an in-page signed-out fallback for the scaffold's protected routes, Modal long-string wrapping, integration-test catalog error/retry states, and a token-styled cron log page.
+- Fix agent-reported workspace continuations, file metadata and generated file-manager behavior, collaborator recovery guidance, documentation theme strict mode, and source-mode guidance.
+
 ## 0.20.0
 
 ## 0.19.5

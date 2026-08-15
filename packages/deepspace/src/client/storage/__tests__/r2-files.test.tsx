@@ -3,7 +3,12 @@
 import { act, type ReactElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { useR2Files, type R2UploadResult, type UseR2FilesReturn } from '../useR2Files'
+import {
+  useR2Files,
+  type R2FileInfo,
+  type R2UploadResult,
+  type UseR2FilesReturn,
+} from '../useR2Files'
 import {
   MAX_APP_FILE_BYTES,
   MAX_BASE64_UPLOAD_BYTES,
@@ -66,6 +71,108 @@ describe('useR2Files URL paths', () => {
       method: 'DELETE',
       headers: { Authorization: 'Bearer test-token' },
     })
+  })
+
+  it('sends a caller-named key so the chosen prefix can list the file back', async () => {
+    const urls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        urls.push(String(input))
+        return Response.json({ success: true, key: 'apps/a/users/u/showcase/report.csv' })
+      }),
+    )
+    await act(async () => {
+      await files!.upload(new Blob(['a,b\n']), 'report.csv', { key: 'showcase/report.csv' })
+      await files!.uploadBase64('QQ==', 'report.csv', 'text/csv', { key: 'showcase/report.csv' })
+      await files!.upload(new Blob(['a,b\n']), 'report.csv')
+    })
+    expect(urls).toHaveLength(3)
+    expect(urls[0]).toContain('/api/files/upload')
+    expect(urls[0]).toContain('key=showcase%2Freport.csv')
+    expect(urls[1]).toContain('key=showcase%2Freport.csv')
+    // Without the option no key param is sent — the server generates the key.
+    expect(urls[2]).not.toContain('key=')
+  })
+})
+
+describe('useR2Files list', () => {
+  it('passes prefix, limit, and cursor through to the query', async () => {
+    const urls: string[] = []
+    const listed: R2FileInfo = { key: 'showcase/report.csv', size: 5, uploaded: 'now', url: '/u' }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        urls.push(String(input))
+        return Response.json({ files: [listed], truncated: false })
+      }),
+    )
+    await expect(files!.list('showcase', { limit: 5, cursor: 'cursor-1' })).resolves.toEqual([
+      listed,
+    ])
+    const params = new URL(urls[0], 'https://x').searchParams
+    expect(urls[0]).toContain('/api/files?')
+    expect(params.get('scope')).toBe('self')
+    expect(params.get('prefix')).toBe('showcase')
+    expect(params.get('limit')).toBe('5')
+    expect(params.get('cursor')).toBe('cursor-1')
+  })
+
+  it('listPage surfaces the continuation state list flattens away', async () => {
+    const urls: string[] = []
+    // The server names the key both ways; the relative one is what a client
+    // can hand back to list('showcase') or upload(..., { key }).
+    const listed: R2FileInfo = {
+      key: 'apps/a/users/u/showcase/report.csv',
+      relativeKey: 'showcase/report.csv',
+      size: 5,
+      uploaded: 'now',
+      url: '/u',
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        urls.push(String(input))
+        return new URL(String(input), 'https://x').searchParams.get('cursor')
+          ? Response.json({ files: [], truncated: false })
+          : Response.json({ files: [listed], truncated: true, cursor: 'cursor-1' })
+      }),
+    )
+    const page = await files!.listPage('showcase', { limit: 1 })
+    expect(page).toEqual({ files: [listed], cursor: 'cursor-1', truncated: true })
+    const rest = await files!.listPage('showcase', { limit: 1, cursor: page.cursor })
+    expect(rest).toEqual({ files: [], cursor: undefined, truncated: false })
+    expect(new URL(urls[1], 'https://x').searchParams.get('cursor')).toBe('cursor-1')
+  })
+
+  it('reads an older server without cursor or truncated as a complete page', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ files: [] })),
+    )
+    await expect(files!.listPage()).resolves.toEqual({
+      files: [],
+      cursor: undefined,
+      truncated: false,
+    })
+  })
+
+  it('rejects on an auth failure instead of reading it as an empty account', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ error: 'Valid authentication required' }, { status: 401 })),
+    )
+    await expect(files!.list()).rejects.toThrow('Valid authentication required')
+  })
+
+  it('lets a transport failure propagate rather than resolving []', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch')
+      }),
+    )
+    await expect(files!.list()).rejects.toThrow('Failed to fetch')
   })
 })
 
@@ -293,6 +400,25 @@ describe('useR2Files chunked upload', () => {
         { partNumber: 3, etag: 'etag-3' },
       ],
     })
+  })
+
+  it('carries the caller-named key on init, and only on init', async () => {
+    const calls = stubServer()
+    let result: R2UploadResult | null = null
+    await act(async () => {
+      result = await files!.upload(fakeFile(UPLOAD_PART_BYTES + 1).blob, 'report.csv', {
+        key: 'showcase/report.csv',
+      })
+    })
+    expect(result).toMatchObject({ success: true })
+    const [init, ...rest] = calls
+    expect(init.url).toContain('/api/files/multipart?')
+    expect(init.url).toContain('key=showcase%2Freport.csv')
+    // Parts and complete address the session's uploadKey, not the caller's name.
+    expect(rest.length).toBeGreaterThan(0)
+    for (const call of rest) {
+      expect(new URL(call.url, 'https://x').searchParams.get('key')).toBeNull()
+    }
   })
 
   it('refuses a server response that disagrees with the fixed layout', async () => {

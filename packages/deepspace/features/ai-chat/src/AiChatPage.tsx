@@ -82,6 +82,9 @@ export default function AiChatPage() {
   const [dragging, setDragging] = useState(false)
   const [creatingChat, setCreatingChat] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+  // Delete/rename failures live apart from createError: its Retry re-runs
+  // create, which is the wrong offer after a failed delete or rename.
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const chatCardRef = useRef<HTMLDivElement>(null)
 
@@ -193,6 +196,7 @@ export default function AiChatPage() {
     // any in-flight stream when activeChatId flips id→null, so the orphan
     // assistant write we'd otherwise produce on cascade-delete is prevented
     // by F1 (abort on id→null) — not by ordering this call before the fetch.
+    setActionError(null)
     try {
       const token = await getAuthToken()
       const headers: Record<string, string> = {}
@@ -202,11 +206,12 @@ export default function AiChatPage() {
       setActiveChatId((cur) => (cur === id ? null : cur))
     } catch (err) {
       console.error('[ai-chat-page] delete failed:', err)
-      setCreateError(err instanceof Error ? `Couldn't delete chat: ${err.message}` : "Couldn't delete chat")
+      setActionError(err instanceof Error ? `Couldn't delete chat: ${err.message}` : "Couldn't delete chat")
     }
   }, [])
 
   const handleRename = useCallback(async (id: string, title: string) => {
+    setActionError(null)
     try {
       const token = await getAuthToken()
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -219,6 +224,7 @@ export default function AiChatPage() {
       if (!res.ok) throw new Error(`rename failed: ${res.status}`)
     } catch (err) {
       console.error('[ai-chat-page] rename failed:', err)
+      setActionError(err instanceof Error ? `Couldn't rename chat: ${err.message}` : "Couldn't rename chat")
     }
   }, [])
 
@@ -303,26 +309,17 @@ export default function AiChatPage() {
                     onHistory={() => setHistoryOpen(true)}
                   />
                   {createError && (
-                    <div role="alert" className="mx-4 mb-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-[13px] text-destructive">
-                      <div className="flex items-start gap-2">
-                        <span className="flex-1 leading-relaxed">{createError}</span>
-                        <button
-                          type="button"
-                          onClick={() => { void handleNew() }}
-                          className="rounded-md border border-destructive/30 px-2 py-0.5 text-[12px] font-medium hover:bg-destructive/10"
-                        >
-                          Retry
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setCreateError(null)}
-                          aria-label="Dismiss"
-                          className="rounded-md px-1 text-[14px] leading-none hover:bg-destructive/10"
-                        >
-                          ×
-                        </button>
-                      </div>
-                    </div>
+                    <ErrorBanner
+                      message={createError}
+                      onRetry={() => { void handleNew() }}
+                      onDismiss={() => setCreateError(null)}
+                    />
+                  )}
+                  {actionError && (
+                    <ErrorBanner
+                      message={actionError}
+                      onDismiss={() => setActionError(null)}
+                    />
                   )}
                 </>
               }
@@ -354,6 +351,44 @@ export default function AiChatPage() {
         open={chatOpen}
         onClick={() => setChatOpen((o) => !o)}
       />
+    </div>
+  )
+}
+
+// ============================================================================
+// Error banner — dismissible destructive strip under the header. Retry is
+// opt-in so a failed delete/rename never offers an unrelated create action.
+// ============================================================================
+
+function ErrorBanner({
+  message, onRetry, onDismiss,
+}: {
+  message: string
+  onRetry?: () => void
+  onDismiss: () => void
+}) {
+  return (
+    <div role="alert" className="mx-4 mb-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-[13px] text-destructive">
+      <div className="flex items-start gap-2">
+        <span className="flex-1 leading-relaxed">{message}</span>
+        {onRetry && (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="rounded-md border border-destructive/30 px-2 py-0.5 text-[12px] font-medium hover:bg-destructive/10"
+          >
+            Retry
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onDismiss}
+          aria-label="Dismiss"
+          className="rounded-md px-1 text-[14px] leading-none hover:bg-destructive/10"
+        >
+          ×
+        </button>
+      </div>
     </div>
   )
 }

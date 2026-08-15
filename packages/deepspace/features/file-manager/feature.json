@@ -18,7 +18,8 @@
   "instructions": [],
   "patterns": [
     "useR2Files() for upload, list, download, delete",
+    "list() throws on failure (page renders the error with a retry); listPage() returns { files, cursor, truncated }; entries carry relativeKey",
     "Drag-and-drop file upload zone",
-    "Inline image preview with getUrl()"
+    "Authenticated inline image preview with readFile()"
   ]
 }

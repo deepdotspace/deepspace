@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { TestAccount } from '../../../testing/accounts'
 
 const mocks = vi.hoisted(() => ({
   ensureToken: vi.fn(async () => 'token'),
@@ -8,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   deleteRemoteTestAccount: vi.fn(async () => {}),
   createRemoteTestAccount: vi.fn(),
   syncTestAccountStore: vi.fn(),
-  loadAllTestAccounts: vi.fn(() => []),
+  loadAllTestAccounts: vi.fn((): TestAccount[] => []),
   removeTestAccounts: vi.fn(),
   upsertTestAccount: vi.fn(),
   confirm: vi.fn(async () => true),
@@ -38,8 +39,18 @@ vi.mock('@clack/prompts', () => ({
 
 import testAccounts from '../test-accounts'
 
-const clear = (testAccounts as unknown as { subCommands: Record<string, unknown> }).subCommands
-  .clear as { run: (ctx: { args: Record<string, unknown> }) => Promise<unknown> }
+type RunnableCommand = { run: (ctx: { args: Record<string, unknown> }) => Promise<unknown> }
+const subCommands = (testAccounts as unknown as { subCommands: Record<string, RunnableCommand> })
+  .subCommands
+const clear = subCommands.clear
+const list = subCommands.list
+const create = subCommands.create
+
+function captureLog(): string[] {
+  const lines: string[] = []
+  vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
+  return lines
+}
 
 const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY')
 
@@ -58,6 +69,11 @@ afterEach(() => {
   mocks.deleteRemoteTestAccount.mockClear()
   mocks.confirm.mockClear()
   mocks.logError.mockClear()
+  // mockReset restores the original implementation passed to vi.fn().
+  mocks.syncTestAccountStore.mockReset()
+  mocks.loadAllTestAccounts.mockReset()
+  mocks.createRemoteTestAccount.mockReset()
+  mocks.upsertTestAccount.mockClear()
 })
 
 describe('test accounts clear confirmation gate', () => {
@@ -77,8 +93,7 @@ describe('test accounts clear confirmation gate', () => {
 
   it('still refuses under --json even on a TTY', async () => {
     Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true })
-    const lines: string[] = []
-    vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
+    const lines = captureLog()
 
     await clear.run({ args: { json: true, yes: false } })
 
@@ -86,5 +101,112 @@ describe('test accounts clear confirmation gate', () => {
     expect(JSON.parse(lines[0])).toMatchObject({ ok: false, code: 'confirmation_required' })
     expect(mocks.confirm).not.toHaveBeenCalled()
     expect(mocks.deleteRemoteTestAccount).not.toHaveBeenCalled()
+  })
+})
+
+describe('test accounts list local-record merge', () => {
+  beforeEach(() => {
+    mocks.syncTestAccountStore.mockResolvedValue({
+      accounts: [
+        { id: 'ta_1', email: 'alpha@deepspace.test', userId: 'u_1', label: 'e2e', createdAt: 0 },
+        { id: 'ta_2', email: 'ghost@deepspace.test', userId: 'u_2', label: null, createdAt: 1 },
+      ],
+      removed: 0,
+    })
+    // Only alpha has a local record — ghost is remote-only.
+    mocks.loadAllTestAccounts.mockReturnValue([
+      { id: 'ta_1', email: 'alpha@deepspace.test', password: 'Secret123!', name: 'Alpha' },
+    ])
+  })
+
+  it('prints the selector and masks the password unless --reveal', async () => {
+    const lines = captureLog()
+
+    await list.run({ args: { json: false, usable: false, reveal: false } })
+
+    const output = lines.join('\n')
+    expect(output).toContain('Selector: Alpha')
+    expect(output).toContain('Password: (saved locally)')
+    expect(output).not.toContain('Secret123!')
+    expect(output).toContain('Selector: (none)')
+    expect(output).toContain('not usable by the users() fixture')
+  })
+
+  it('prints the raw password with --reveal', async () => {
+    const lines = captureLog()
+
+    await list.run({ args: { json: false, usable: false, reveal: true } })
+
+    expect(lines.join('\n')).toContain('Password: Secret123!')
+  })
+
+  it('emits name and usableByFixture in --json, password left as is', async () => {
+    const lines = captureLog()
+
+    await list.run({ args: { json: true, usable: false, reveal: false } })
+
+    const envelope = JSON.parse(lines[0]) as {
+      ok: boolean
+      accounts: Array<Record<string, unknown>>
+    }
+    expect(envelope.ok).toBe(true)
+    expect(envelope.accounts[0]).toMatchObject({
+      email: 'alpha@deepspace.test',
+      name: 'Alpha',
+      password: 'Secret123!',
+      usableByFixture: true,
+    })
+    expect(envelope.accounts[1]).toMatchObject({
+      email: 'ghost@deepspace.test',
+      name: null,
+      password: null,
+      usableByFixture: false,
+    })
+  })
+
+  it('--usable drops rows without a locally saved password', async () => {
+    const lines = captureLog()
+
+    await list.run({ args: { json: true, usable: true, reveal: false } })
+
+    const envelope = JSON.parse(lines[0]) as { accounts: Array<{ email: string }>; count: number }
+    expect(envelope.accounts.map((a) => a.email)).toEqual(['alpha@deepspace.test'])
+    expect(envelope.count).toBe(1)
+  })
+})
+
+describe('test accounts create selector default', () => {
+  beforeEach(() => {
+    mocks.createRemoteTestAccount.mockResolvedValue({
+      id: 'ta_9',
+      email: 'bot@deepspace.test',
+      userId: 'u_9',
+      label: null,
+      createdAt: 42,
+    })
+  })
+
+  it('defaults --name to the email local-part so the account stays selectable', async () => {
+    const lines = captureLog()
+
+    await create.run({ args: { json: true, email: 'bot@deepspace.test', password: 'Password1!' } })
+
+    expect(mocks.createRemoteTestAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'bot' }),
+    )
+    expect(mocks.upsertTestAccount).toHaveBeenCalledWith(expect.objectContaining({ name: 'bot' }))
+    expect(JSON.parse(lines[0])).toMatchObject({ ok: true, name: 'bot' })
+  })
+
+  it('keeps an explicit --name', async () => {
+    captureLog()
+
+    await create.run({
+      args: { json: true, email: 'bot@deepspace.test', password: 'Password1!', name: 'Bot Prime' },
+    })
+
+    expect(mocks.upsertTestAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Bot Prime' }),
+    )
   })
 })

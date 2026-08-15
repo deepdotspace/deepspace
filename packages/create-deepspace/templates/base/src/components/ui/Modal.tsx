@@ -82,8 +82,10 @@ interface ModalTitleProps {
 }
 
 function ModalTitle({ children, className = '' }: ModalTitleProps): JSX.Element {
+  // min-w-0 + truncate: long unbroken strings (filenames, URLs) ellipsize
+  // instead of stretching the dialog.
   return (
-    <DTitle className={className}>
+    <DTitle className={cn('min-w-0 truncate', className)}>
       {children}
     </DTitle>
   )
@@ -119,9 +121,10 @@ function ModalBody({ children, className = '' }: ModalBodyProps): JSX.Element {
   // px-1 -mx-1 leaves room for focus rings on inputs (which extend 1px
   // outside their box) without shrinking the visual content area —
   // the negative margin compensates for the padding so children still
-  // align with Header / Footer.
+  // align with Header / Footer. break-words keeps long unbroken strings
+  // (filenames, URLs) from forcing horizontal overflow.
   return (
-    <div className={cn('flex-1 overflow-y-auto -mx-1 px-1 py-4', className)}>
+    <div className={cn('flex-1 overflow-y-auto -mx-1 px-1 py-4 break-words', className)}>
       {children}
     </div>
   )

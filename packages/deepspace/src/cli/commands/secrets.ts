@@ -21,7 +21,7 @@
 import { defineCommand } from 'citty'
 import { readFileSync } from 'node:fs'
 import { ensureToken } from '../auth'
-import { decodeJwtPayload } from '../jwt'
+import { decodeJwtPayload } from '../../shared/jwt'
 import { PLATFORM_URLS } from '../env'
 import { findAppDir } from '../lib/app-context'
 import { writeDevVars } from '../lib/dev-vars'

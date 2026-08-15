@@ -144,9 +144,12 @@ describe('native documentation route facade', () => {
     expect((await app.request('https://app.test/docs/guides/missing', undefined, env)).status).toBe(
       404,
     )
-    expect(
-      (await app.request('https://app.test/docs/guides/missing.md', undefined, env)).status,
-    ).toBe(404)
+    const markdownMiss = await app.request('https://app.test/docs/guides/missing.md', undefined, env)
+    expect(markdownMiss.status).toBe(404)
+    expect(markdownMiss.headers.get('Content-Type')).toBe('text/plain; charset=utf-8')
+    expect(await markdownMiss.text()).toBe(
+      'No documentation page at /docs/guides/missing.md. See /docs/llms.txt for every published page.\n',
+    )
     expect(
       (await app.request('https://app.test/docs/guides/missing.json', undefined, env)).status,
     ).toBe(404)
@@ -169,8 +172,8 @@ describe('native documentation route facade', () => {
       '/_documentation/old-guide/',
       '/_documentation/manifest.json',
       '/_documentation/404.html',
+      // The Markdown miss answers in plain text without touching 404.html.
       '/_documentation/manifest.json',
-      '/_documentation/404.html',
       '/_documentation/manifest.json',
       '/_documentation/404.html',
     ])

@@ -12,6 +12,10 @@
  *
  * See `docs/guides/multi-user-tests.md` for usage and pre-creation
  * instructions.
+ *
+ * The MCP wire-test client is deliberately NOT re-exported here: it lives at
+ * `deepspace/testing/mcp` (`./mcp.ts`) so it can be imported without pulling
+ * in `@playwright/test`.
  */
 
 export { test, expect } from './fixtures'
@@ -28,6 +32,5 @@ export {
   ensureStorageState,
   newSignedInContext,
   getStatePathForEmail,
-  readCachedState,
 } from './storage-state'
 export type { EnsureStorageStateOptions } from './storage-state'

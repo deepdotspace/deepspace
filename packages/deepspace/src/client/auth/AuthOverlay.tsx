@@ -4,6 +4,8 @@
  * Primary: OAuth (GitHub, Google).
  * Secondary: Email/password sign-in (for test accounts created via CLI/API).
  * Styled with shadcn semantic tokens so it themes along with the host app.
+ * Hosts can brand the card via `title` / `description` / `logo` and re-tint
+ * the backdrop by defining `--ds-auth-backdrop` (defaults to black/55).
  */
 
 import React, { useState } from 'react'
@@ -15,11 +17,20 @@ interface AuthOverlayProps {
   onClose?: () => void
   /** Which OAuth providers to show. Defaults to both. */
   providers?: Array<'github' | 'google'>
+  /** Card heading. Defaults to "Sign in to DeepSpace". */
+  title?: string
+  /** Line under the heading. Defaults to "Sync your data across devices". */
+  description?: string
+  /** Optional brand mark rendered above the heading. Defaults to none (the current look). */
+  logo?: React.ReactNode
 }
 
 export function AuthOverlay({
   onClose,
   providers = ['github', 'google'],
+  title = 'Sign in to DeepSpace',
+  description = 'Sync your data across devices',
+  logo,
 }: AuthOverlayProps = {}): React.ReactElement | null {
   const { isLoaded, isSignedIn } = useAuth()
   const [showEmailForm, setShowEmailForm] = useState(false)
@@ -68,7 +79,7 @@ export function AuthOverlay({
       <div
         data-testid="auth-overlay"
         onClick={onClose ? (e) => { if (e.target === e.currentTarget) onClose() } : undefined}
-        className="fixed inset-0 z-[99999] flex items-center justify-center bg-black/55 backdrop-blur-2xl"
+        className="fixed inset-0 z-[99999] flex items-center justify-center bg-[var(--ds-auth-backdrop,#0000008c)] backdrop-blur-2xl"
         style={{
           opacity: 0,
           animation: 'ds-auth-overlay-in 0.4s ease forwards',
@@ -92,12 +103,14 @@ export function AuthOverlay({
             </button>
           )}
 
+          {logo && <div className="mb-4 flex justify-center">{logo}</div>}
+
           <h2 className="mb-2 text-[22px] font-bold leading-snug text-foreground">
-            Sign in to DeepSpace
+            {title}
           </h2>
 
           <p className="mb-6 text-sm leading-snug text-muted-foreground">
-            Sync your data across devices
+            {description}
           </p>
 
           {/* OAuth buttons */}

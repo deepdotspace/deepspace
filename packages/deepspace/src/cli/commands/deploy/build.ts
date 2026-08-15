@@ -118,6 +118,7 @@ export async function buildDeployBundle(options: {
     p.log.warn(formatSchemaLintFindings(lintFindings).join('\n'))
   }
 
+  const buildStarted = Date.now()
   spinner.start('Building...')
   let preparedWranglerConfig: PreparedWranglerEnvConfig | undefined
   try {
@@ -146,7 +147,7 @@ export async function buildDeployBundle(options: {
   } finally {
     preparedWranglerConfig?.cleanup()
   }
-  spinner.stop('Built')
+  spinner.stop(`Built (${Math.round((Date.now() - buildStarted) / 1000)}s)`)
 
   const deployConfigPath = join(appDir, '.wrangler', 'deploy', 'config.json')
   if (!existsSync(deployConfigPath)) {

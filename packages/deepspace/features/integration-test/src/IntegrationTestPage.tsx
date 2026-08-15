@@ -6,11 +6,12 @@
  *
  * data-testid attributes for Playwright:
  *   integration-endpoint, integration-submit, integration-result,
- *   integration-error, integration-loading, integration-catalog
+ *   integration-error, integration-loading, integration-catalog,
+ *   integration-catalog-error
  */
 
-import { useState, useEffect, useMemo } from 'react'
-import { integration } from 'deepspace'
+import { useState, useMemo } from 'react'
+import { integration, useAsyncResource } from 'deepspace'
 import type { IntegrationResponse } from 'deepspace'
 import { useAuth } from 'deepspace'
 
@@ -234,7 +235,6 @@ function FieldInput({
 
 export default function IntegrationTestPage() {
   const { isSignedIn } = useAuth()
-  const [catalog, setCatalog] = useState<Catalog | null>(null)
   const [endpoint, setEndpoint] = useState('openai/chat-completion')
   const [formValues, setFormValues] = useState<Record<string, unknown>>({})
   const [rawMode, setRawMode] = useState(false)
@@ -243,15 +243,19 @@ export default function IntegrationTestPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Fetch catalog on mount
-  useEffect(() => {
-    integration.get<{ integrations?: Catalog } & Catalog>('').then((res) => {
-      if (res.success && res.data) {
-        const { integrations, ...rest } = res.data
-        setCatalog(integrations ?? (rest as Catalog))
-      }
-    })
-  }, [])
+  // Fetch catalog on mount — explicit loading/error/retry states, same
+  // pattern as the scaffold's api-status page.
+  const catalogResource = useAsyncResource<Catalog>(
+    async (signal) => {
+      const res = await integration.get<{ integrations?: Catalog } & Catalog>('', undefined, { signal })
+      if (!res.success || !res.data) throw new Error(res.error ?? 'Empty catalog response')
+      const { integrations, ...rest } = res.data
+      return integrations ?? (rest as Catalog)
+    },
+    [],
+    { retry: 1, retryDelayMs: 500 },
+  )
+  const catalog = catalogResource.data
 
   // Find current endpoint's catalog entry
   const currentEntry = useMemo(() => {
@@ -297,29 +301,45 @@ export default function IntegrationTestPage() {
         {/* Catalog */}
         <div data-testid="integration-catalog" className="md:col-span-1 space-y-3 max-h-[70vh] overflow-y-auto">
           {catalog ? (
-            Object.entries(catalog).sort(([a], [b]) => a.localeCompare(b)).map(([name, endpoints]) => (
-              <div key={name}>
-                <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">{name}</div>
-                <div className="space-y-0.5">
-                  {endpoints.map((ep) => (
-                    <button
-                      key={ep.endpoint}
-                      onClick={() => selectEndpoint(name, ep.endpoint)}
-                      className={`block w-full text-left px-2 py-1 rounded text-sm transition-colors ${
-                        endpoint === `${name}/${ep.endpoint}`
-                          ? 'bg-primary/20 text-primary'
-                          : 'text-foreground hover:bg-secondary'
-                      }`}
-                    >
-                      {ep.endpoint}
-                      <span className="ml-1 text-xs text-muted-foreground">
-                        {ep.billing.model === 'per_request' ? `$${ep.billing.baseCost}` : ep.billing.model}
-                      </span>
-                    </button>
-                  ))}
+            Object.keys(catalog).length === 0 ? (
+              <div className="text-sm text-muted-foreground">No integrations available.</div>
+            ) : (
+              Object.entries(catalog).sort(([a], [b]) => a.localeCompare(b)).map(([name, endpoints]) => (
+                <div key={name}>
+                  <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">{name}</div>
+                  <div className="space-y-0.5">
+                    {endpoints.map((ep) => (
+                      <button
+                        key={ep.endpoint}
+                        onClick={() => selectEndpoint(name, ep.endpoint)}
+                        className={`block w-full text-left px-2 py-1 rounded text-sm transition-colors ${
+                          endpoint === `${name}/${ep.endpoint}`
+                            ? 'bg-primary/20 text-primary'
+                            : 'text-foreground hover:bg-secondary'
+                        }`}
+                      >
+                        {ep.endpoint}
+                        <span className="ml-1 text-xs text-muted-foreground">
+                          {ep.billing.model === 'per_request' ? `$${ep.billing.baseCost}` : ep.billing.model}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
+              ))
+            )
+          ) : catalogResource.status === 'error' ? (
+            <div data-testid="integration-catalog-error" className="space-y-3">
+              <div className="rounded-lg bg-destructive/10 border border-destructive/20 px-4 py-3 text-sm text-destructive">
+                Could not load catalog: {catalogResource.error}
               </div>
-            ))
+              <button
+                onClick={catalogResource.reload}
+                className="rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+              >
+                Retry
+              </button>
+            </div>
           ) : (
             <div className="text-sm text-muted-foreground">Loading catalog...</div>
           )}

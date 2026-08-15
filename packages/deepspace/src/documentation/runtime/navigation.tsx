@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { version as sdkVersion } from '../../../package.json'
 import type { DocumentationNavigationNode, DocumentationRuntimeData } from '../types'
 import { documentationPublicPath } from '../routing'
 import { documentationSubject } from '../text'
@@ -94,7 +95,7 @@ export function DesktopSidebar({ data }: { data: DocumentationRuntimeData }): Re
             ))}
           </nav>
         )}
-        <span>Built on DeepSpace</span>
+        <span>{`Built with deepspace ${sdkVersion}`}</span>
       </div>
     </aside>
   )

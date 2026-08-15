@@ -51,16 +51,20 @@ export const openapiItemSchema = z.union([
   }),
 ])
 
-const themeObjectSchema = z.object({
-  preset: z.string().trim().min(1).optional(),
+export const themeObjectSchema = z.object({
   accent: z.string().trim().optional(),
   accentDark: z.string().trim().optional(),
   background: z.string().trim().optional(),
+  density: z.enum(['comfortable', 'compact']).optional(),
   logo: z.string().trim().optional(),
   logoDark: z.string().trim().optional(),
   favicon: z.string().trim().optional(),
   defaultMode: z.enum(['light', 'dark', 'system']).optional(),
+  strictMode: z.boolean().optional(),
 })
+
+/** Derived from the schema so the unknown-key sweep can never drift from it. */
+export const THEME_CONFIG_KEYS = new Set(Object.keys(themeObjectSchema.shape))
 
 const fontSpecSchema = z.union([
   z

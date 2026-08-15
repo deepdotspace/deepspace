@@ -68,7 +68,9 @@ const create = defineDeepspaceCommand({
     await ensureToken()
     const email = args.email as string
     const password = args.password as string
-    const name = args.name as string | undefined
+    // An unnamed account can never be selected via `users(['Name'])`, so
+    // default the selector to the email local-part instead of leaving it unset.
+    const name = (args.name as string | undefined) ?? email.split('@')[0]
     const label = args.label as string | undefined
 
     let account: RemoteTestAccount
@@ -96,6 +98,7 @@ const create = defineDeepspaceCommand({
       console.log(`Created test account:`)
       console.log(`  ID:       ${account.id}`)
       console.log(`  Email:    ${account.email}`)
+      console.log(`  Selector: ${name}`)
       console.log(`  Password: ${password}`)
       console.log(`  UserID:   ${account.userId}`)
       if (account.label) console.log(`  Label:    ${account.label}`)
@@ -106,6 +109,7 @@ const create = defineDeepspaceCommand({
       data: {
         id: account.id,
         email: account.email,
+        name,
         // The password is already echoed on the human path and stored 0600 in
         // ACCOUNTS_PATH — withholding it from --json would only force scripts
         // to parse the file themselves.
@@ -124,6 +128,18 @@ const list = defineDeepspaceCommand({
     name: 'list',
     description: 'List your test accounts',
   },
+  args: {
+    usable: {
+      type: 'boolean',
+      description: 'Only accounts with locally saved credentials (usable by the users() fixture)',
+      default: false,
+    },
+    reveal: {
+      type: 'boolean',
+      description: 'Print locally saved passwords instead of masking them',
+      default: false,
+    },
+  },
   async run({ args }) {
     await ensureToken()
 
@@ -134,45 +150,56 @@ const list = defineDeepspaceCommand({
       throw new Refusal(`Failed: ${(err as Error).message}`, 'test_accounts_list_failed')
     }
 
-    // Merge with local credentials (passwords are only stored locally)
-    const local = loadAllTestAccounts()
-    const localByEmail = new Map(local.map((a) => [a.email, a]))
+    // Merge the local record: selector name + password never leave this
+    // machine, and the users() fixture can only drive accounts whose
+    // password is stored here.
+    const localByEmail = new Map(loadAllTestAccounts().map((a) => [a.email, a]))
+    const accounts = remote
+      .map((a) => {
+        const stored = localByEmail.get(a.email)
+        return {
+          id: a.id,
+          email: a.email,
+          userId: a.userId,
+          label: a.label,
+          createdAt: a.createdAt,
+          name: stored?.name ?? null,
+          password: stored?.password ?? null,
+          usableByFixture: Boolean(stored?.password),
+        }
+      })
+      .filter((a) => !args.usable || a.usableByFixture)
 
-    if (remote.length === 0) {
+    if (accounts.length === 0) {
       if (!args.json) {
         console.log(
-          'No test accounts. Create one with: deepspace test accounts create --email <email> --password <password>',
+          remote.length > 0
+            ? `No test accounts with locally saved credentials (${remote.length} remote-only). Recreate them with: deepspace test accounts create --email <email> --password <password>`
+            : 'No test accounts. Create one with: deepspace test accounts create --email <email> --password <password>',
         )
       }
       return { data: { accounts: [], count: 0, limit: 10 } }
     }
 
     if (!args.json) {
-      console.log(`Test accounts (${remote.length}/10):\n`)
-      for (const a of remote) {
-        const stored = localByEmail.get(a.email)
+      console.log(`Test accounts (${remote.length}/10${args.usable ? ', usable only' : ''}):\n`)
+      for (const a of accounts) {
         const date = new Date(a.createdAt).toLocaleDateString()
         console.log(`  ${a.email}${a.label ? ` (${a.label})` : ''}`)
         console.log(`    ID: ${a.id}  UserID: ${a.userId}  Created: ${date}`)
-        if (stored?.password) {
-          console.log(`    Password: ${stored.password}`)
+        console.log(`    Selector: ${a.name ?? '(none)'}`)
+        if (a.usableByFixture) {
+          console.log(`    Password: ${args.reveal ? a.password : '(saved locally)'}`)
         } else {
-          console.log(`    Password: (not saved locally)`)
+          console.log(`    Password: (not saved locally — not usable by the users() fixture)`)
         }
       }
     }
 
     return {
       data: {
-        accounts: remote.map((a) => ({
-          id: a.id,
-          email: a.email,
-          userId: a.userId,
-          label: a.label,
-          createdAt: a.createdAt,
-          password: localByEmail.get(a.email)?.password ?? null,
-        })),
-        count: remote.length,
+        accounts,
+        count: accounts.length,
         limit: 10,
       },
     }

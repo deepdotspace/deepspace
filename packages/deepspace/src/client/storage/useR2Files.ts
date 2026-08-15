@@ -46,6 +46,12 @@ import {
 export interface R2UploadResult {
   success: boolean
   key?: string
+  /**
+   * `key` minus the scope prefix — the spelling that works with `list(prefix)`
+   * filters and `upload(..., { key })` upserts, which never see the prefix.
+   * Older servers omit it.
+   */
+  relativeKey?: string
   url?: string
   name?: string
   error?: string
@@ -77,6 +83,8 @@ async function readUploadResult(response: Response): Promise<R2UploadResult> {
 
 export interface R2FileInfo {
   key: string
+  /** `key` minus the scope prefix (see {@link R2UploadResult.relativeKey}). Older servers omit it. */
+  relativeKey?: string
   size: number
   uploaded: string
   url: string
@@ -84,11 +92,31 @@ export interface R2FileInfo {
   uploadedBy?: string
 }
 
+/** One page of a listing: the entries plus the continuation state. */
+export interface R2FileListPage {
+  files: R2FileInfo[]
+  /**
+   * Opaque continuation token — pass it back as `cursor` to fetch the next
+   * page. Present only while `truncated`; older servers never send one.
+   */
+  cursor?: string
+  /** Whether entries exist past this page. */
+  truncated: boolean
+}
+
 /** Told after each part lands, so a long upload can drive a progress bar. */
 export type UploadProgress = (sent: number, total: number) => void
 
 export interface UploadOptions {
   onProgress?: UploadProgress
+  /**
+   * Exact key for the file within the scope (slashes allowed), so
+   * `upload(file, 'report.csv', { key: 'showcase/report.csv' })` is found by
+   * `list('showcase')` and uploading to the same key again replaces the file.
+   * Without it the server generates a unique key per upload — a location no
+   * prefix you choose can address. `name` stays display metadata either way.
+   */
+  key?: string
 }
 
 export interface UseR2FilesReturn {
@@ -109,7 +137,12 @@ export interface UseR2FilesReturn {
    * `MAX_BASE64_UPLOAD_BYTES` (~18.75 MiB decoded), not the full 25 MiB. Send a
    * Blob through `upload` for anything larger; it chunks.
    */
-  uploadBase64: (base64Data: string, name: string, mimeType?: string) => Promise<R2UploadResult>
+  uploadBase64: (
+    base64Data: string,
+    name: string,
+    mimeType?: string,
+    options?: Pick<UploadOptions, 'key'>,
+  ) => Promise<R2UploadResult>
   /**
    * Delete a file. Accepts an R2FileInfo from `list()` or a raw key string.
    *
@@ -121,8 +154,34 @@ export interface UseR2FilesReturn {
    * ```
    */
   deleteFile: (fileOrKey: R2FileInfo | string) => Promise<{ success: boolean; error?: string }>
-  /** List files, optionally filtered by a sub-prefix within the scope. */
-  list: (prefix?: string) => Promise<R2FileInfo[]>
+  /**
+   * List files, optionally filtered by a sub-prefix within the scope.
+   * `limit` caps how many entries come back; `cursor` continues from an
+   * earlier page (use `listPage` to obtain one).
+   *
+   * Throws on a failed response — "not authorized" is an error, not an
+   * empty account.
+   */
+  list: (prefix?: string, options?: { limit?: number; cursor?: string }) => Promise<R2FileInfo[]>
+  /**
+   * Like `list`, but returns the page envelope `list` flattens away:
+   * `truncated` says whether more entries exist, and `cursor` (present only
+   * while `truncated`) feeds the next call to fetch them.
+   *
+   * @example
+   * ```tsx
+   * let cursor: string | undefined
+   * do {
+   *   const page = await listPage('showcase', { cursor })
+   *   render(page.files)
+   *   cursor = page.cursor
+   * } while (cursor)
+   * ```
+   */
+  listPage: (
+    prefix?: string,
+    options?: { limit?: number; cursor?: string },
+  ) => Promise<R2FileListPage>
   /**
    * Download a file. Accepts an R2FileInfo from `list()` or a raw key string.
    * Uses an authenticated fetch and triggers a browser download via blob URL.
@@ -194,6 +253,13 @@ function resolveFile(fileOrKey: R2FileInfo | string): { key: string; name: strin
   return { key: fileOrKey.key, name: fileOrKey.originalName }
 }
 
+/** Append the caller-named upsert key, on whichever upload shape carries it. */
+function withUploadKey(params: string, key: string | undefined): string {
+  if (!key) return params
+  const pair = `key=${encodeURIComponent(key)}`
+  return params ? `${params}&${pair}` : pair
+}
+
 interface MultipartSession {
   uploadId: string
   uploadKey: string
@@ -218,6 +284,7 @@ interface MultipartSession {
 async function uploadInParts(
   file: File | Blob,
   name: string,
+  key: string | undefined,
   scopeParams: string,
   authHeaders: () => Promise<Record<string, string>>,
   onProgress?: UploadProgress,
@@ -231,8 +298,10 @@ async function uploadInParts(
     mimeType: file.type || 'application/octet-stream',
     size: file.size,
   })
+  // The caller-named key matters only at init: the server anchors it there
+  // and answers with the session's `uploadKey`, which is what parts carry.
   const sendInit = (): Promise<Response> =>
-    fetch(`/api/files/multipart?${scopeParams}`, {
+    fetch(`/api/files/multipart?${withUploadKey(scopeParams, key)}`, {
       method: 'POST',
       headers: json,
       body: initBody,
@@ -340,18 +409,28 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
         if (tooBig) return tooBig
         const fileName = name ?? (file instanceof File ? file.name : 'upload')
         if (file.size > UPLOAD_PART_BYTES) {
-          return await uploadInParts(file, fileName, scopeParams, authHeaders, options?.onProgress)
+          return await uploadInParts(
+            file,
+            fileName,
+            options?.key,
+            scopeParams,
+            authHeaders,
+            options?.onProgress,
+          )
         }
         const headers = await authHeaders()
         const formData = new FormData()
         formData.append('file', file)
         if (name) formData.append('name', name)
 
-        const response = await fetch(`/api/files/upload?${scopeParams}`, {
-          method: 'POST',
-          headers,
-          body: formData,
-        })
+        const response = await fetch(
+          `/api/files/upload?${withUploadKey(scopeParams, options?.key)}`,
+          {
+            method: 'POST',
+            headers,
+            body: formData,
+          },
+        )
         options?.onProgress?.(file.size, file.size)
         return await readUploadResult(response)
       } catch (err) {
@@ -364,7 +443,12 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
   )
 
   const uploadBase64 = useCallback(
-    async (base64Data: string, name: string, mimeType?: string): Promise<R2UploadResult> => {
+    async (
+      base64Data: string,
+      name: string,
+      mimeType?: string,
+      options?: Pick<UploadOptions, 'key'>,
+    ): Promise<R2UploadResult> => {
       setIsUploading(true)
       try {
         // The REQUEST is the encoded string, and that is what has to fit:
@@ -376,11 +460,14 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
         const tooBig = oversize(Math.floor((base64Data.length * 3) / 4), MAX_BASE64_UPLOAD_BYTES)
         if (tooBig) return tooBig
         const headers = await authHeaders()
-        const response = await fetch(`/api/files/upload?${scopeParams}`, {
-          method: 'POST',
-          headers: { ...headers, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ data: base64Data, name, mimeType }),
-        })
+        const response = await fetch(
+          `/api/files/upload?${withUploadKey(scopeParams, options?.key)}`,
+          {
+            method: 'POST',
+            headers: { ...headers, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ data: base64Data, name, mimeType }),
+          },
+        )
         return await readUploadResult(response)
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : 'Upload failed' }
@@ -391,12 +478,19 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
     [scopeParams, authHeaders],
   )
 
+  const getUrl = useCallback(
+    (fileOrKey: R2FileInfo | string): string => {
+      const { key } = resolveFile(fileOrKey)
+      return `/api/files/${encodeKeyPath(key)}?${scopeParams}`
+    },
+    [scopeParams],
+  )
+
   const deleteFile = useCallback(
     async (fileOrKey: R2FileInfo | string): Promise<{ success: boolean; error?: string }> => {
-      const { key } = resolveFile(fileOrKey)
       try {
         const headers = await authHeaders()
-        const response = await fetch(`/api/files/${encodeKeyPath(key)}?${scopeParams}`, {
+        const response = await fetch(getUrl(fileOrKey), {
           method: 'DELETE',
           headers,
         })
@@ -405,23 +499,45 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
         return { success: false, error: err instanceof Error ? err.message : 'Delete failed' }
       }
     },
+    [getUrl, authHeaders],
+  )
+
+  const listPage = useCallback(
+    async (
+      prefix?: string,
+      options?: { limit?: number; cursor?: string },
+    ): Promise<R2FileListPage> => {
+      const headers = await authHeaders()
+      const params = new URLSearchParams(scopeParams)
+      if (prefix) params.set('prefix', prefix)
+      if (options?.limit !== undefined) params.set('limit', String(options.limit))
+      if (options?.cursor) params.set('cursor', options.cursor)
+      const response = await fetch(`/api/files?${params.toString()}`, { headers })
+      // A failure throws instead of flattening to [] — an expired session or
+      // unreachable service used to read as "no files", which callers then
+      // rendered as an empty account.
+      if (!response.ok) {
+        throw new Error(describeFilesFailure(response.status, await response.text()))
+      }
+      const result = (await response.json()) as {
+        files?: R2FileInfo[]
+        cursor?: string
+        truncated?: boolean
+      }
+      // Older servers omit cursor/truncated; both read as "nothing more".
+      return {
+        files: result.files || [],
+        cursor: result.cursor,
+        truncated: result.truncated ?? false,
+      }
+    },
     [scopeParams, authHeaders],
   )
 
   const list = useCallback(
-    async (prefix?: string): Promise<R2FileInfo[]> => {
-      try {
-        const headers = await authHeaders()
-        const params = new URLSearchParams(scopeParams)
-        if (prefix) params.set('prefix', prefix)
-        const response = await fetch(`/api/files?${params.toString()}`, { headers })
-        const result = (await response.json()) as { files: R2FileInfo[] }
-        return result.files || []
-      } catch {
-        return []
-      }
-    },
-    [scopeParams, authHeaders],
+    async (prefix?: string, options?: { limit?: number; cursor?: string }): Promise<R2FileInfo[]> =>
+      (await listPage(prefix, options)).files,
+    [listPage],
   )
 
   const downloadFile = useCallback(
@@ -432,11 +548,10 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
       const { key, name: infoName } = resolveFile(fileOrKey)
       try {
         const headers = await authHeaders()
-        const response = await fetch(`/api/files/${encodeKeyPath(key)}?${scopeParams}`, { headers })
+        const response = await fetch(getUrl(key), { headers })
 
         if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as { error?: string } | null
-          return { success: false, error: body?.error ?? `Download failed (${response.status})` }
+          return { success: false, error: describeFilesFailure(response.status, await response.text()) }
         }
 
         // Derive a display name: explicit arg > R2FileInfo.originalName > Content-Disposition > last key segment
@@ -463,30 +578,30 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
         return { success: false, error: err instanceof Error ? err.message : 'Download failed' }
       }
     },
-    [scopeParams, authHeaders],
+    [getUrl, authHeaders],
   )
 
   const readFile = useCallback(
     async (fileOrKey: R2FileInfo | string): Promise<Response> => {
-      const { key } = resolveFile(fileOrKey)
       const headers = await authHeaders()
-      const response = await fetch(`/api/files/${encodeKeyPath(key)}?${scopeParams}`, { headers })
+      const response = await fetch(getUrl(fileOrKey), { headers })
       if (!response.ok) {
-        const body = await response.text().catch(() => '')
-        throw new Error(`Failed to read file (${response.status}): ${body}`)
+        throw new Error(describeFilesFailure(response.status, await response.text()))
       }
       return response
     },
-    [scopeParams, authHeaders],
+    [getUrl, authHeaders],
   )
 
-  const getUrl = useCallback(
-    (fileOrKey: R2FileInfo | string): string => {
-      const { key } = resolveFile(fileOrKey)
-      return `/api/files/${encodeKeyPath(key)}?${scopeParams}`
-    },
-    [scopeParams],
-  )
-
-  return { upload, uploadBase64, deleteFile, downloadFile, readFile, list, getUrl, isUploading }
+  return {
+    upload,
+    uploadBase64,
+    deleteFile,
+    downloadFile,
+    readFile,
+    list,
+    listPage,
+    getUrl,
+    isUploading,
+  }
 }

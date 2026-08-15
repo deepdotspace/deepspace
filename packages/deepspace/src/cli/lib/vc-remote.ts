@@ -8,7 +8,7 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { DEEPSPACE_ENV, PLATFORM_URLS, type DeepSpaceEnvironment } from '../env'
-import { decodeJwtPayload } from '../jwt'
+import { decodeJwtPayload } from '../../shared/jwt'
 import { shQuote } from './cli-format'
 import { runGit } from './git/process'
 

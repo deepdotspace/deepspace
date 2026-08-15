@@ -9,7 +9,7 @@
  * subsequent runs.
  *
  * Cache layout:
- *   ~/.deepspace/playwright-states/<sha256(email)>.json
+ *   ~/.deepspace/playwright-states/<sha256(authScope, appOrigin, email)>.json
  *
  * Validity: a cached file is reused if Playwright successfully loads it
  * AND the resulting context produces a non-anonymous session on the
@@ -18,18 +18,37 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { Browser, BrowserContext } from '@playwright/test'
+import { request, type Browser, type BrowserContext } from '@playwright/test'
+import { decodeJwtPayload } from '../shared/jwt'
+import { currentTestAccountScope } from './accounts'
 
 const STATES_DIR = join(homedir(), '.deepspace', 'playwright-states')
 
-/** Default freshness window — re-sign-in if the cache is older than this. */
-const DEFAULT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
+/**
+ * Validation/sign-in per state path, in flight or settled. Memoizing the
+ * promise — rather than flagging a Set after the await — makes concurrent
+ * callers for the same account share one probe/sign-in instead of racing
+ * duplicate sign-ins into the rate limit. A rejected attempt is evicted so
+ * a later call can retry.
+ */
+const stateValidations = new Map<string, Promise<string>>()
 
-function statePathForEmail(email: string): string {
-  const hash = createHash('sha256').update(email.trim().toLowerCase()).digest('hex').slice(0, 24)
+interface StorageStateAccount {
+  email: string
+  password: string
+  /** Remote user id, when the local registry knows it. */
+  userId?: string
+}
+
+/** Where the cache for `email` against `baseURL`'s origin lives. */
+export function getStatePathForEmail(email: string, baseURL: string): string {
+  // Keyed by auth scope + app origin + email: one email signed into two
+  // apps (or two auth environments) must never serve the wrong session.
+  const key = `${currentTestAccountScope()}\n${new URL(baseURL).origin}\n${email.trim().toLowerCase()}`
+  const hash = createHash('sha256').update(key).digest('hex').slice(0, 24)
   return join(STATES_DIR, `${hash}.json`)
 }
 
@@ -37,12 +56,45 @@ function ensureStatesDir() {
   if (!existsSync(STATES_DIR)) mkdirSync(STATES_DIR, { recursive: true })
 }
 
-/** Returns true if a cache file exists and is younger than `maxAgeMs`. */
-function isCacheFresh(path: string, maxAgeMs: number): boolean {
-  if (!existsSync(path)) return false
+/**
+ * Does a token minted from a cached session belong to `account`? `sub` is
+ * authoritative when the registry knows the remote user id; the `email`
+ * claim covers states recorded before the id was known.
+ */
+export function tokenClaimsMatchAccount(
+  claims: Record<string, unknown>,
+  account: { email: string; userId?: string },
+): boolean {
+  if (account.userId && claims.sub === account.userId) return true
+  return (
+    typeof claims.email === 'string' &&
+    claims.email.trim().toLowerCase() === account.email.trim().toLowerCase()
+  )
+}
+
+/**
+ * Live-validate a cached state: load it into a request context and ask the
+ * app to mint a token. Only a token for this account counts — a transport
+ * failure, an anonymous session, or another user's session all report
+ * false, so the caller signs in fresh (where a real outage surfaces as an
+ * actionable sign-in error instead of silent reuse of a dead session).
+ */
+async function probeStoredSession(
+  path: string,
+  baseURL: string,
+  account: { email: string; userId?: string },
+): Promise<boolean> {
   try {
-    const age = Date.now() - statSync(path).mtimeMs
-    return age < maxAgeMs
+    const ctx = await request.newContext({ storageState: path, baseURL })
+    try {
+      const res = await ctx.post('/api/auth/token')
+      if (!res.ok()) return false
+      const { token } = (await res.json()) as { token?: unknown }
+      if (typeof token !== 'string') return false
+      return tokenClaimsMatchAccount(decodeJwtPayload(token), account)
+    } finally {
+      await ctx.dispose()
+    }
   } catch {
     return false
   }
@@ -86,7 +138,7 @@ async function signInAndSaveState(
           message: typeof error?.message === 'string' ? error.message : null,
         }
       },
-      account,
+      { email: account.email, password: account.password },
     )
     if (!result.ok) throw new Error(formatSignInFailure(account.email, result))
     await ctx.storageState({ path: outPath })
@@ -114,30 +166,43 @@ export function formatSignInFailure(email: string, failure: SignInFailure): stri
 }
 
 export interface EnsureStorageStateOptions {
-  /** Max age of a cached state file before we re-sign-in. Default 7 days. */
-  maxAgeMs?: number
-  /** Force a fresh sign-in even if the cache is fresh. */
+  /** Force a fresh sign-in even if a cached state validates. */
   force?: boolean
 }
 
 /**
- * Ensure a Playwright `storageState` file exists for `account` and
- * return its path. Signs in once if the cache is missing, stale, or
- * `force: true`.
+ * Ensure a validated Playwright `storageState` file exists for `account`
+ * and return its path. A cached file is probed against the app before
+ * reuse (once per worker process); a missing, expired, or wrong-account
+ * state triggers one fresh sign-in that overwrites it.
  */
 export async function ensureStorageState(
   browser: Browser,
-  account: { email: string; password: string },
+  account: StorageStateAccount,
   baseURL: string,
   options: EnsureStorageStateOptions = {},
 ): Promise<string> {
-  const path = statePathForEmail(account.email)
-  const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS
+  const path = getStatePathForEmail(account.email, baseURL)
+  if (options.force) stateValidations.delete(path)
+  let pending = stateValidations.get(path)
+  if (!pending) {
+    pending = validateOrSignIn(browser, account, baseURL, path, options.force === true)
+    stateValidations.set(path, pending)
+    pending.catch(() => stateValidations.delete(path))
+  }
+  return pending
+}
 
-  if (!options.force && isCacheFresh(path, maxAgeMs)) {
+async function validateOrSignIn(
+  browser: Browser,
+  account: StorageStateAccount,
+  baseURL: string,
+  path: string,
+  force: boolean,
+): Promise<string> {
+  if (!force && existsSync(path) && (await probeStoredSession(path, baseURL, account))) {
     return path
   }
-
   return signInAndSaveState(browser, account, baseURL, path)
 }
 
@@ -148,26 +213,10 @@ export async function ensureStorageState(
  */
 export async function newSignedInContext(
   browser: Browser,
-  account: { email: string; password: string },
+  account: StorageStateAccount,
   baseURL: string,
   options: EnsureStorageStateOptions = {},
 ): Promise<BrowserContext> {
   const statePath = await ensureStorageState(browser, account, baseURL, options)
   return browser.newContext({ storageState: statePath, baseURL })
-}
-
-/** Read a cached storageState file (mostly for debugging). */
-export function readCachedState(email: string): unknown | null {
-  const path = statePathForEmail(email)
-  if (!existsSync(path)) return null
-  try {
-    return JSON.parse(readFileSync(path, 'utf-8'))
-  } catch {
-    return null
-  }
-}
-
-/** Where the cache for `email` lives. Useful for diagnostics. */
-export function getStatePathForEmail(email: string): string {
-  return statePathForEmail(email)
 }

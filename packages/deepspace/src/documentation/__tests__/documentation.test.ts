@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import sdkPackage from '../../../package.json'
 import { buildDocumentation } from '../build'
 import { validateDocumentation } from '../graph'
 import { parseMarkdown } from '../markdown'
@@ -42,6 +43,7 @@ describe('DeepSpace documentation compiler', () => {
     const result = buildDocumentation({ appDir })
 
     expect(result.manifest.pageCount).toBe(2)
+    expect(result.manifest.sdkVersion).toBe(sdkPackage.version)
     expect(result.manifest.assistant.access).toBe('public')
     expect(result.manifest.mcp.access).toBe('public')
     expect(result.manifest.routes).toContain('/old-guide')
@@ -81,6 +83,7 @@ describe('DeepSpace documentation compiler', () => {
     expect(home).not.toContain('aria-controls="deepspace-documentation-assistant"')
     expect(home).toContain('id="deepspace-documentation-root"')
     expect(home).toContain('id="deepspace-documentation-data"')
+    expect(home).toContain(`Built with deepspace ${sdkPackage.version}`)
     expect(home).toContain('aria-label="Test Documentation home"')
     expect(home).not.toContain('Test Documentation documentation')
     expect(home).toContain('src="/docs/assets/documentation-custom-runtime.js"')
@@ -202,6 +205,54 @@ describe('DeepSpace documentation compiler', () => {
     expect(home.indexOf('href="/docs/assets/documentation.css"')).toBeLessThan(
       home.indexOf('--documentation-font-body:Inter'),
     )
+  })
+
+  it('themes reading density through one data attribute and token block', () => {
+    const compact = buildDocumentation({
+      appDir: fixture({ theme: { density: 'compact' } }, { 'index.md': '# Dense' }),
+    })
+    expect(compact.graph.config.theme.density).toBe('compact')
+    expect(readFileSync(join(compact.outputDir, 'index.html'), 'utf8')).toContain(
+      'data-density="compact"',
+    )
+    const css = readFileSync(join(compact.outputDir, 'assets', 'documentation.css'), 'utf8')
+    expect(css).toContain('--documentation-font-size: 17px')
+    expect(css).toContain('--documentation-line-height: 1.65')
+    expect(css).toContain('--documentation-content-width: 720px')
+    expect(css).toContain('--documentation-reader-pad: 62px 52px 96px')
+    expect(css).toContain(':root[data-density="compact"]')
+    expect(css).toContain('--documentation-sidebar-width: 264px')
+    expect(css).toContain('font-size: var(--documentation-font-size)')
+    expect(css).toContain('minmax(0, var(--documentation-content-width))')
+    expect(css).toContain('padding: var(--documentation-reader-pad)')
+
+    const comfortable = buildDocumentation({
+      appDir: fixture({}, { 'index.md': '# Roomy' }),
+    })
+    expect(comfortable.graph.config.theme.density).toBeUndefined()
+    expect(readFileSync(join(comfortable.outputDir, 'index.html'), 'utf8')).toContain(
+      'data-density="comfortable"',
+    )
+
+    expect(() =>
+      validateDocumentation(fixture({ theme: { density: 'cozy' } }, { 'index.md': '# Cozy' })),
+    ).toThrowError(DocumentationError)
+  })
+
+  it('honors native strict mode before the legacy appearance fallback', () => {
+    const appDir = fixture(
+      {
+        theme: { strictMode: true },
+        appearance: { strict: false },
+      },
+      { 'index.md': '# Strict theme' },
+    )
+
+    const result = buildDocumentation({ appDir })
+    expect(result.graph.config.theme.strictMode).toBe(true)
+    const home = readFileSync(join(result.outputDir, 'index.html'), 'utf8')
+    expect(home).toContain('data-theme-strict="true"')
+    expect(home).not.toContain('aria-label="Theme preference"')
   })
 
   it('self-hosts variable body and monospace fonts with preload hints', () => {
@@ -841,12 +892,13 @@ describe('DeepSpace documentation compiler', () => {
 
     const result = validateDocumentation(appDir)
     expect(result.graph.config.theme).toMatchObject({
-      preset: 'palm',
       accent: '#0A2540',
       logo: '/media/logo/light.svg',
       logoDark: '/media/logo/dark.svg',
       favicon: '/media/favicon.ico',
     })
+    // The Mintlify theme string maps onto the native surface; nothing survives it.
+    expect(result.graph.config.theme).not.toHaveProperty('preset')
     expect(result.graph.config.links.map((link) => link.label)).toEqual(['GitHub', 'Start'])
     expect(result.graph.config.footer).toEqual([
       { label: 'Github', href: 'https://github.com/example' },
@@ -868,6 +920,14 @@ describe('DeepSpace documentation compiler', () => {
       expect.objectContaining({
         code: 'unsupported_config_key',
         message: expect.stringContaining('topbarCtaButton'),
+      }),
+    )
+
+    const typoTheme = fixture({ theme: { densty: 'compact' } }, { 'index.md': '# Home' })
+    expect(validateDocumentation(typoTheme).warnings).toContainEqual(
+      expect.objectContaining({
+        code: 'unsupported_config_key',
+        message: expect.stringContaining("'theme.densty'"),
       }),
     )
 

@@ -28,11 +28,14 @@ Cloudflare Workers via `npx deepspace deploy`.
 The app's **cloud repo** on the DeepSpace platform is the default version
 control; no external account is needed. The first DeepSpace push/pull/deploy
 command installs its Git remote as `space`. **Don't set up GitHub (or another
-git host) unless the developer explicitly asks.** Commit before you deploy
-(`deploy` records the commit it ships and refuses a dirty worktree). For
-parallel work: `workspace new -t "<task>"` → commit → `workspace sync` →
-`workspace land`. Use `status`, `activity`, `releases`, and `rollback` to
-recover context and inspect what is live.
+git host) unless the developer explicitly asks.** With the default DeepSpace
+source, commit before you deploy: the release records that commit and refuses
+a dirty worktree. After an explicit GitHub source claim, deploy instead ships
+the current checkout, including dirty or unpushed bytes, and records no commit
+lineage for that release; use ordinary Git to decide what should be committed
+and pushed. For parallel DeepSpace-source work: `workspace new -t "<task>"` →
+commit → `workspace sync` → `workspace land`. Use `status`, `activity`,
+`releases`, and `rollback` to recover context and inspect what is live.
 
 ## Project commands
 

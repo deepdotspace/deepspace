@@ -40,7 +40,7 @@ import {
 } from '../lib/launch-config'
 import { PLATFORM_URLS } from '../env'
 import { writeDevVars } from '../lib/dev-vars'
-import { decodeJwtPayload } from '../jwt'
+import { decodeJwtPayload } from '../../shared/jwt'
 import { ensureInstallReady } from '../lib/install-status'
 import { preflightNodeVersion, preflightWindowsWorkerd } from '../lib/preflight'
 import { removeMacosJunk } from '../lib/macos-junk'
@@ -273,11 +273,17 @@ export default defineDeepspaceCommand({
     const url = `http://${host === DEFAULT_DEV_HOST ? 'localhost' : host}:${port}`
     say('Starting dev server...\n')
 
-    const vite = spawn('npx', ['vite', '--port', String(port), '--strictPort', '--host', host], {
-      cwd: appDir,
-      stdio: 'inherit',
-      env: wranglerViteEnv(process.env, wranglerConfig, { DEEPSPACE_PORT: String(port) }),
-    })
+    // --clearScreen false: vite would otherwise wipe the CLI's own preflight
+    // output (secrets summary, port choice) the moment it boots.
+    const vite = spawn(
+      'npx',
+      ['vite', '--port', String(port), '--strictPort', '--host', host, '--clearScreen', 'false'],
+      {
+        cwd: appDir,
+        stdio: 'inherit',
+        env: wranglerViteEnv(process.env, wranglerConfig, { DEEPSPACE_PORT: String(port) }),
+      },
+    )
     // The readiness envelope. `--json` used to emit nothing until the server
     // had already exited, which is the one moment a caller waiting to drive it
     // cannot use. Printed the instant the port answers; the runtime's exit

@@ -15,7 +15,7 @@
 
 import { ensureToken } from '../auth'
 import { DASHBOARD_URL } from '../env'
-import { decodeJwtPayload } from '../jwt'
+import { decodeJwtPayload } from '../../shared/jwt'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 
 interface JwtPayload {

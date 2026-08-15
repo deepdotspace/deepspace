@@ -230,6 +230,176 @@ describe('CronRoom message handlers', () => {
       type: MSG.ERROR,
       payload: { error: 'Unknown cron task: not-configured' },
     })
+    // No requestId on the frame → receipts stay opt-in; no CRON_ACK.
+    expect(room.sent.some((m) => m.type === MSG.CRON_ACK)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Mutation receipts — a trigger/pause/resume carrying a requestId gets a
+// CRON_ACK addressed to its sender once the mutation lands. Triggers run to
+// completion inline, so the ok receipt doubles as the completion record.
+// ---------------------------------------------------------------------------
+
+describe('CronRoom mutation receipts', () => {
+  function setup(): { room: TestCronRoom; db: Database.Database } {
+    const db = new Database(':memory:')
+    const { state } = makeState(db)
+    const room = new TestCronRoom(state, {}, { tasks: [{ name: 'heartbeat', intervalMinutes: 1 }] })
+    room.init()
+    return { room, db }
+  }
+
+  it('CRON_TRIGGER with a requestId acks ok:true with the execution receipt', async () => {
+    const { room } = setup()
+
+    await room.dispatch({
+      type: MSG.CRON_TRIGGER,
+      payload: { taskName: 'heartbeat', requestId: 'req-1' },
+    })
+
+    expect(room.executed).toEqual(['heartbeat'])
+    expect(room.sent).toContainEqual({
+      type: MSG.CRON_ACK,
+      payload: {
+        requestId: 'req-1',
+        taskName: 'heartbeat',
+        ok: true,
+      },
+    })
+  })
+
+  it('a mid-operation throw still settles the receipt ok:false', async () => {
+    const { room } = setup()
+    // Simulate a DO-level failure on the last step of CRON_PAUSE
+    // (broadcastStatus → broadcast). BaseRoom's webSocketMessage swallows
+    // onMessage throws without closing the socket, so without the ack-on-
+    // throw chokepoint the caller's receipt promise would never settle.
+    ;(room as unknown as { broadcast(m: ServerMessage): void }).broadcast = () => {
+      throw new Error('storage exploded')
+    }
+
+    await expect(
+      room.dispatch({
+        type: MSG.CRON_PAUSE,
+        payload: { taskName: 'heartbeat', requestId: 'req-throw' },
+      }),
+    ).rejects.toThrow('storage exploded')
+
+    expect(room.sent).toContainEqual({
+      type: MSG.CRON_ACK,
+      payload: {
+        requestId: 'req-throw',
+        taskName: 'heartbeat',
+        ok: false,
+        reason: 'failed',
+        error: 'storage exploded',
+      },
+    })
+  })
+
+  it('CRON_TRIGGER for an unknown task acks ok:false unknown_task alongside the ERROR frame', async () => {
+    const { room } = setup()
+
+    await room.dispatch({
+      type: MSG.CRON_TRIGGER,
+      payload: { taskName: 'not-configured', requestId: 'req-2' },
+    })
+
+    expect(room.sent).toContainEqual({
+      type: MSG.CRON_ACK,
+      payload: {
+        requestId: 'req-2',
+        taskName: 'not-configured',
+        ok: false,
+        reason: 'unknown_task',
+        error: 'Unknown cron task: not-configured',
+      },
+    })
+    // The untyped ERROR channel stays for listeners that predate receipts.
+    expect(room.sent).toContainEqual({
+      type: MSG.ERROR,
+      payload: { error: 'Unknown cron task: not-configured' },
+    })
+  })
+
+  it('a throwing task acks ok:false failed with the task error', async () => {
+    const db = new Database(':memory:')
+    const { state } = makeState(db)
+    class FailingCronRoom extends TestCronRoom {
+      protected onTask(): void {
+        throw new Error('task exploded')
+      }
+    }
+    const room = new FailingCronRoom(state, {}, { tasks: [{ name: 'heartbeat', intervalMinutes: 1 }] })
+    room.init()
+
+    await room.dispatch({
+      type: MSG.CRON_TRIGGER,
+      payload: { taskName: 'heartbeat', requestId: 'req-3' },
+    })
+
+    expect(room.sent).toContainEqual({
+      type: MSG.CRON_ACK,
+      payload: {
+        requestId: 'req-3',
+        taskName: 'heartbeat',
+        ok: false,
+        reason: 'failed',
+        error: 'task exploded',
+      },
+    })
+  })
+
+  it('CRON_PAUSE with a requestId acks ok:true after the state flip', async () => {
+    const { room, db } = setup()
+
+    await room.dispatch({
+      type: MSG.CRON_PAUSE,
+      payload: { taskName: 'heartbeat', requestId: 'req-4' },
+    })
+
+    expect(room.pausedState(db, 'heartbeat')).toBe(1)
+    expect(room.sent).toContainEqual({
+      type: MSG.CRON_ACK,
+      payload: { requestId: 'req-4', taskName: 'heartbeat', ok: true },
+    })
+  })
+
+  it('CRON_PAUSE for an unknown task acks ok:false unknown_task and flips nothing', async () => {
+    const { room, db } = setup()
+
+    await room.dispatch({
+      type: MSG.CRON_PAUSE,
+      payload: { taskName: 'not-configured', requestId: 'req-5' },
+    })
+
+    expect(room.sent).toContainEqual({
+      type: MSG.CRON_ACK,
+      payload: {
+        requestId: 'req-5',
+        taskName: 'not-configured',
+        ok: false,
+        reason: 'unknown_task',
+        error: 'Unknown cron task: not-configured',
+      },
+    })
+    // The configured task is untouched and no CRON_STATUS broadcast went out.
+    expect(room.pausedState(db, 'heartbeat')).toBe(0)
+    expect(room.broadcasts).toHaveLength(0)
+  })
+
+  it('CRON_PAUSE without a taskName acks ok:false failed instead of ok:true', async () => {
+    const { room, db } = setup()
+
+    await room.dispatch({ type: MSG.CRON_PAUSE, payload: { requestId: 'req-6' } })
+
+    expect(room.sent).toContainEqual({
+      type: MSG.CRON_ACK,
+      payload: { requestId: 'req-6', ok: false, reason: 'failed', error: 'Missing taskName' },
+    })
+    expect(room.pausedState(db, 'heartbeat')).toBe(0)
+    expect(room.broadcasts).toHaveLength(0)
   })
 })
 

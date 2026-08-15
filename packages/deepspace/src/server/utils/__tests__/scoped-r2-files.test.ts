@@ -141,3 +141,198 @@ describe('a request that declares no length', () => {
     expect(await res.json()).toMatchObject({ code: 'bad_request' })
   })
 })
+
+describe('file listing metadata', () => {
+  it('requests custom metadata on every page and returns the original name', async () => {
+    type MetadataListOptions = R2ListOptions & { include?: string[] }
+    const calls: MetadataListOptions[] = []
+    const privateKey = `${PREFIX}private/hidden.txt`
+    const publicKey = `${PREFIX}visible/generated-key.txt`
+    const listedBucket = {
+      async list(options: MetadataListOptions = {}) {
+        calls.push(options)
+        const includeMetadata = options.include?.includes('customMetadata')
+        const object = (key: string, originalName: string) => ({
+          key,
+          size: 12,
+          uploaded: new Date('2026-08-14T00:00:00Z'),
+          ...(includeMetadata ? { customMetadata: { originalName } } : {}),
+        })
+        return calls.length === 1
+          ? { objects: [object(privateKey, 'hidden.txt')], truncated: true }
+          : { objects: [object(publicKey, 'report.txt')], truncated: false }
+      },
+    } as unknown as R2Bucket
+    const listHandler = createScopedR2Handler({
+      resolvePrefix: () => ({ prefix: PREFIX, excludedPrefixes: [`${PREFIX}private/`] }),
+    })
+    const url = new URL('https://app.example/api/files?scope=app')
+    const response = await listHandler(new Request(url), url, listedBucket, { userId: 'user-1' })
+    const body = (await response.json()) as {
+      files: Array<{ key: string; originalName?: string }>
+    }
+
+    expect(calls).toHaveLength(2)
+    expect(calls.every((options) => options.include?.includes('customMetadata'))).toBe(true)
+    expect(body.files).toHaveLength(1)
+    expect(body.files[0]).toMatchObject({ key: publicKey, originalName: 'report.txt' })
+  })
+})
+
+describe('file listing pagination', () => {
+  const listedObject = (key: string) => ({
+    key,
+    size: 12,
+    uploaded: new Date('2026-08-14T00:00:00Z'),
+  })
+  async function listBody(
+    listHandler: ReturnType<typeof createScopedR2Handler>,
+    listBucket: R2Bucket,
+    query: string,
+  ) {
+    const url = new URL(`https://app.example/api/files?scope=app${query}`)
+    const response = await listHandler(new Request(url), url, listBucket, { userId: 'user-1' })
+    return (await response.json()) as {
+      files: Array<{ key: string; relativeKey?: string }>
+      truncated: boolean
+      cursor?: string
+    }
+  }
+
+  it("carries R2's cursor while truncated, and ?cursor= resumes exactly there", async () => {
+    const calls: R2ListOptions[] = []
+    const pagedBucket = {
+      async list(options: R2ListOptions = {}) {
+        calls.push(options)
+        return options.cursor === 'cursor-1'
+          ? { objects: [listedObject(`${PREFIX}b.txt`)], truncated: false }
+          : { objects: [listedObject(`${PREFIX}a.txt`)], truncated: true, cursor: 'cursor-1' }
+      },
+    } as unknown as R2Bucket
+    const listHandler = createScopedR2Handler({ resolvePrefix: () => ({ prefix: PREFIX }) })
+
+    const first = await listBody(listHandler, pagedBucket, '&limit=1')
+    expect(first).toMatchObject({ truncated: true, cursor: 'cursor-1' })
+    // Entries carry the key both ways: absolute for downloads, relative for
+    // same-scope calls (list prefixes, `?key=` upserts) that never see the prefix.
+    expect(first.files).toEqual([
+      expect.objectContaining({ key: `${PREFIX}a.txt`, relativeKey: 'a.txt' }),
+    ])
+
+    const second = await listBody(listHandler, pagedBucket, '&limit=1&cursor=cursor-1')
+    expect(calls.at(-1)).toMatchObject({ cursor: 'cursor-1' })
+    expect(second.files).toEqual([
+      expect.objectContaining({ key: `${PREFIX}b.txt`, relativeKey: 'b.txt' }),
+    ])
+    expect(second.truncated).toBe(false)
+    expect('cursor' in second).toBe(false)
+  })
+
+  it("reports the exclusion jump's continuation, not the page it jumped from", async () => {
+    // The private subtree occupied the first page, so the handler jumps past
+    // it. The jump is itself truncated — the caller must resume from the
+    // JUMP's cursor; the pre-jump cursor would walk back into private keys.
+    const jumpBucket = {
+      async list(options: R2ListOptions = {}) {
+        return options.startAfter
+          ? {
+              objects: [listedObject(`${PREFIX}visible/b.txt`)],
+              truncated: true,
+              cursor: 'after-1',
+            }
+          : {
+              objects: [listedObject(`${PREFIX}private/a.txt`)],
+              truncated: true,
+              cursor: 'first-1',
+            }
+      },
+    } as unknown as R2Bucket
+    const listHandler = createScopedR2Handler({
+      resolvePrefix: () => ({ prefix: PREFIX, excludedPrefixes: [`${PREFIX}private/`] }),
+    })
+    const body = await listBody(listHandler, jumpBucket, '')
+    expect(body.files).toEqual([
+      expect.objectContaining({ key: `${PREFIX}visible/b.txt`, relativeKey: 'visible/b.txt' }),
+    ])
+    expect(body).toMatchObject({ truncated: true, cursor: 'after-1' })
+  })
+
+  it('does not rewind an exhausted continuation into the exclusion jump', async () => {
+    // A later page can end (truncated: false) with fewer visible keys than the
+    // limit. Jumping past the private subtree from there would re-list keys
+    // earlier pages already returned — the jump exists only for truncated pages.
+    const calls: R2ListOptions[] = []
+    const exhaustedBucket = {
+      async list(options: R2ListOptions = {}) {
+        calls.push(options)
+        return { objects: [], truncated: false }
+      },
+    } as unknown as R2Bucket
+    const listHandler = createScopedR2Handler({
+      resolvePrefix: () => ({ prefix: PREFIX, excludedPrefixes: [`${PREFIX}private/`] }),
+    })
+    const body = await listBody(listHandler, exhaustedBucket, '&cursor=cursor-2')
+    expect(calls).toEqual([expect.objectContaining({ cursor: 'cursor-2' })])
+    expect(body).toMatchObject({ files: [], truncated: false })
+    expect('cursor' in body).toBe(false)
+  })
+
+  it('advances the jump frontier across multiple excluded subtrees', async () => {
+    // With two private subtrees, the second jump must resume from where the
+    // first jump ended — restarting from the original page's tail would set
+    // startAfter to the second subtree's boundary, which can sort BEFORE the
+    // first jump's coverage and re-return keys it already delivered.
+    const calls: R2ListOptions[] = []
+    const firstJumpTail = `${PREFIX}z-visible/k1.txt`
+    const bucket = {
+      async list(options: R2ListOptions = {}) {
+        calls.push(options)
+        if (calls.length === 1)
+          return {
+            objects: [listedObject(`${PREFIX}a-private/a.txt`)],
+            truncated: true,
+            cursor: 'first',
+          }
+        if (calls.length === 2)
+          return { objects: [listedObject(firstJumpTail)], truncated: true, cursor: 'jump-1' }
+        return { objects: [], truncated: false }
+      },
+    } as unknown as R2Bucket
+    const listHandler = createScopedR2Handler({
+      resolvePrefix: () => ({
+        prefix: PREFIX,
+        excludedPrefixes: [`${PREFIX}a-private/`, `${PREFIX}b-private/`],
+      }),
+    })
+    const body = await listBody(listHandler, bucket, '&limit=10')
+    expect(calls).toHaveLength(3)
+    expect(calls[2].startAfter).toBe(firstJumpTail)
+    expect(body.files).toEqual([expect.objectContaining({ key: firstJumpTail })])
+  })
+})
+
+describe('stored-file responses', () => {
+  it('name the key both absolutely and relative to the scope', async () => {
+    const stored = {
+      head: async () => null,
+      put: async () => ({ etag: 'etag-1' }),
+    } as unknown as R2Bucket
+    const url = new URL('https://app.example/api/files/upload?scope=app&key=showcase/report.csv')
+    const body = JSON.stringify({ data: 'QQ==', name: 'report.csv' })
+    const request = new Request(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': String(new TextEncoder().encode(body).byteLength),
+      },
+      body,
+    })
+    const response = await handler(request, url, stored, { userId: 'user-1' })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      success: true,
+      key: `${PREFIX}showcase/report.csv`,
+      relativeKey: 'showcase/report.csv',
+    })
+  })
+})

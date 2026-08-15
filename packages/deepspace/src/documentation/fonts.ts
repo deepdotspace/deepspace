@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { documentationPublicPath } from './routing'
-import type { DocumentationFontConfig, DocumentationThemeConfig } from './types'
+import type { DocumentationFontConfig, ResolvedDocumentationTheme } from './types'
 
 export interface DocumentationBundledFont {
   family: string
@@ -46,7 +46,7 @@ export interface DocumentationResolvedFont {
  * themselves (system-installed or a custom stylesheet); it contributes no face.
  */
 export function resolveDocumentationFonts(
-  theme: DocumentationThemeConfig,
+  theme: ResolvedDocumentationTheme,
   basePath: string,
 ): DocumentationResolvedFont[] {
   const resolved: DocumentationResolvedFont[] = []

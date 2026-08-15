@@ -1,6 +1,6 @@
 export const DOCUMENTATION_CONTENT_CSS = String.raw`
 .documentation-main { min-width: 0; margin-left: var(--documentation-sidebar-width); margin-right: 0; transition: margin-right .24s ease; }
-.documentation-reader-grid { display: grid; grid-template-columns: minmax(0, 720px) 250px; justify-content: center; gap: 70px; width: 100%; padding: 62px 52px 96px; }
+.documentation-reader-grid { display: grid; grid-template-columns: minmax(0, var(--documentation-content-width)) 250px; justify-content: center; gap: 70px; width: 100%; padding: var(--documentation-reader-pad); }
 .documentation-reader-column { display: flex; min-width: 0; min-height: calc(100vh - var(--documentation-header-height) - 158px); flex-direction: column; }
 .documentation-article { display: flex; min-width: 0; flex: 1; flex-direction: column; }
 .documentation-breadcrumbs { display: none; align-items: center; gap: 5px; margin-bottom: 24px; color: var(--documentation-muted); font-size: 13px; }

@@ -36,6 +36,16 @@ describe('documentation assistant corpus', () => {
     })
   })
 
+  it('reports full term coverage only when a result contains every query term', () => {
+    expect(searchDocumentationCorpus(corpus, 'quickstart install')[0]).toMatchObject({
+      route: '/quickstart',
+      termCoverage: 1,
+    })
+    expect(searchDocumentationCorpus(corpus, 'install kubernetes')[0]).toMatchObject({
+      termCoverage: 0.5,
+    })
+  })
+
   it('ignores conversational filler and normalizes build and documentation terms', () => {
     expect(searchDocumentationCorpus(corpus, 'What command builds the documentation?')[0]).toMatchObject({
       route: '/',

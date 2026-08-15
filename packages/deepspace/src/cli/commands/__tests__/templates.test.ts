@@ -160,6 +160,9 @@ describe('assembled templates', () => {
         const agentGuide = readFileSync(join(app, 'AGENTS.md'), 'utf-8')
         expect(agentGuide).toContain('npx deepspace auth login')
         expect(agentGuide).toContain('npx deepspace dev start')
+        expect(agentGuide).toMatch(/default DeepSpace\s+source/)
+        expect(agentGuide).toMatch(/explicit GitHub source claim/)
+        expect(agentGuide).toContain('dirty or unpushed bytes')
         expect(readFileSync(join(app, 'CLAUDE.md'), 'utf-8').trim()).toBe(
           'See [AGENTS.md](./AGENTS.md).',
         )
@@ -169,6 +172,38 @@ describe('assembled templates', () => {
 })
 
 describe('installable feature UI quality', () => {
+  it('keeps the file manager safe and aligned with the scaffold UI contract', () => {
+    const source = readFileSync(
+      join(FEATURES_DIR, 'file-manager', 'src', 'FileManagerPage.tsx'),
+      'utf-8',
+    )
+    const manifest = JSON.parse(
+      readFileSync(join(FEATURES_DIR, 'file-manager', 'feature.json'), 'utf-8'),
+    ) as { patterns: string[] }
+
+    expect(source).not.toMatch(/\b(?:window\.)?(?:alert|confirm|prompt)\s*\(/)
+    expect(source).not.toContain('animate-spin')
+    expect(source).not.toMatch(/title="(?:Download|Delete|Preview)"/)
+    expect(source).not.toContain('getUrl')
+    for (const localPrimitive of ['Button', 'ConfirmModal', 'EmptyState', 'Modal', 'useToast']) {
+      expect(source).toContain(localPrimitive)
+    }
+    for (const visibleOutcome of [
+      'File uploaded',
+      'Could not upload',
+      'Could not download',
+      'File deleted',
+      'Could not delete',
+      'Could not preview',
+    ]) {
+      expect(source).toContain(visibleOutcome)
+    }
+    expect(source).toContain("from 'lucide-react'")
+    expect(source).toContain('await readFile(file)')
+    expect(source).toContain('URL.createObjectURL')
+    expect(manifest.patterns).toContain('Authenticated inline image preview with readFile()')
+  })
+
   it('keeps the items reference feature aligned with the scaffold UI contract', () => {
     const source = readFileSync(join(FEATURES_DIR, 'items', 'src', 'ItemsPage.tsx'), 'utf-8')
 

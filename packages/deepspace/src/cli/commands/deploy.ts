@@ -5,7 +5,7 @@ import { defineCommand } from 'citty'
 import { resolve } from 'node:path'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
-import { decodeJwtPayload } from '../jwt'
+import { decodeJwtPayload } from '../../shared/jwt'
 import { mintAppId, readAppId, writeAppId } from '../lib/app-identity'
 import { ensureInstallReady } from '../lib/install-status'
 import type { CliAction } from '../lib/output'
@@ -209,6 +209,7 @@ export default defineCommand({
     })
 
     let serving: ReleaseWait = 'unverifiable'
+    const edgeWaitStarted = Date.now()
     if (body.url) {
       spinner.message('Waiting for the edge to serve this release...')
       serving = await waitForLiveRelease(body.url, body.releaseStamp, 90_000)
@@ -245,7 +246,9 @@ export default defineCommand({
       }
     }
 
-    spinner.stop('Deployed!')
+    spinner.stop(
+      `Deployed! (edge confirmed in ${Math.round((Date.now() - edgeWaitStarted) / 1000)}s)`,
+    )
     // Verified from HERE: ten independent connections agreed. Other regions
     // may still be rolling over — see lib/edge-propagation.ts.
     p.log.success(`Live at: ${body.url}`)

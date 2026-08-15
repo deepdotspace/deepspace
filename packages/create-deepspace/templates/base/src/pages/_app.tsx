@@ -8,7 +8,7 @@
  * The auth + realtime data layer lives one level down, in (app)/_layout.tsx.
  * Any page that needs `useAuth`, `useQuery`, `useMutations`, etc. must live
  * under src/pages/(app)/ (or (app)/(protected)/ to also require sign-in).
- * See the deepspace skill's references/auth.md § "Mixed (default)".
+ * See https://docs.deep.space/guides/authentication § "Mixed (default)".
  *
  * ToastProvider is local UI state (src/components/ui), not a network surface,
  * so it's safe to mount here for every page.

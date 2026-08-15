@@ -38,7 +38,8 @@
   "patterns": [
     "useMimeTypeDetection() → { detectMimeType, getFileCategory, getExtension, canPreview }",
     "useFilePreview({ url, fileName, mimeType }) → { category, canPreview, textContent, csvData, codeEditorKit, xlsxData, ... }",
-    "useR2Files() → { upload, downloadFile, readFile, deleteFile, list, getUrl, isUploading }",
+    "useR2Files() → { upload, downloadFile, readFile, deleteFile, list, listPage, getUrl, isUploading }",
+    "list() throws on failure (render the error); listPage() returns { files, cursor, truncated } for pagination; entries carry relativeKey",
     "File metadata stored in collection, binary stored in R2",
     "Dynamic imports: PDF.js for PDF, CodeMirror for code, PapaParse for CSV, docx-preview for DOCX, ExcelJS for XLSX"
   ]

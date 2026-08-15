@@ -31,9 +31,11 @@ const DEPLOY_SERVICE_LIMIT_HINT =
  */
 const REQUIRED_ASSET_TRANSPORT = 'content-addressed-v1'
 
-/** Parallel asset uploads. Enough to saturate a normal uplink without
- *  making a failure ambiguous across many in-flight requests. */
-const UPLOAD_CONCURRENCY = 4
+/** Parallel asset uploads. Small files pay a full round trip each, so the
+ *  pool width — not bandwidth — dominates a many-file first deploy (474
+ *  files at width 4 measured ~3 minutes; the bytes were 22 MiB). The asset
+ *  PUT route applies no server-side rate limit. */
+const UPLOAD_CONCURRENCY = 16
 
 export interface DeployCommitResponse {
   success?: boolean
@@ -170,16 +172,23 @@ export async function deployBuiltBundle(options: {
     return form
   }
 
-  const postCommit = async (): Promise<Response> =>
-    postWithRetry(
+  // The commit does real provisioning work server-side, so its bound is
+  // generous — but it exists, and a timed-out attempt retries once rather
+  // than three times: a re-POST records another release, so hammering a
+  // slow service multiplies ledger rows for one intent.
+  let commitStarted = Date.now()
+  const postCommit = async (): Promise<Response> => {
+    commitStarted = Date.now()
+    return postWithRetry(
       `${deployUrl}/api/deploy/${appId}`,
       () => ({
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: makeForm(),
       }),
-      { retryServerErrors: false },
+      { retryServerErrors: false, attempts: 2, timeoutMs: 240_000 },
     )
+  }
 
   let response: Response
   try {
@@ -237,6 +246,8 @@ export async function deployBuiltBundle(options: {
       body.code,
     )
   }
+
+  p.log.info(`Platform commit: ${Math.round((Date.now() - commitStarted) / 1000)}s`)
 
   if (body.onBehalfOfOwner) {
     // The owner's id is the only identity on the wire here, and a collaborator
@@ -404,8 +415,12 @@ export async function uploadDeployAssets(options: {
     }
   }
 
+  const uploadStarted = Date.now()
   try {
     await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, missing.length) }, worker))
+    p.log.info(
+      `Uploaded ${total} file(s) in ${Math.round((Date.now() - uploadStarted) / 1000)}s`,
+    )
   } catch (error: unknown) {
     spinner.stop('Deploy failed')
     if (error instanceof AssetUploadError) {
@@ -474,13 +489,17 @@ export async function postWithRetry(
   {
     attempts = 4,
     retryServerErrors = true,
-  }: { attempts?: number; retryServerErrors?: boolean } = {},
+    timeoutMs = 60_000,
+  }: { attempts?: number; retryServerErrors?: boolean; timeoutMs?: number } = {},
 ): Promise<Response> {
   let lastResponse: Response | undefined
   let lastError: unknown
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const response = await fetch(url, makeInit())
+      // Every attempt is bounded: a hung service must surface as a fast,
+      // retryable failure, never a silent multi-minute stall (undici's
+      // default header timeout is ~5 minutes per attempt).
+      const response = await fetch(url, { ...makeInit(), signal: AbortSignal.timeout(timeoutMs) })
       const transient =
         retryServerErrors &&
         (response.status >= 500 || response.status === 408 || response.status === 429)

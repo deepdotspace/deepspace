@@ -22,15 +22,23 @@ import * as p from '@clack/prompts'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { cliAction, Refusal, type CommandResult } from '../lib/command'
+import { normalizeApiError } from '../../shared/api-error'
 
 const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
 const DEFAULT_TIMEOUT_MS = 120_000
 
 interface EndpointInfo {
   endpoint: string
+  /** Optional as version-skew tolerance: an older server may not send it,
+   *  and the render paths guard on it. */
+  description?: string
+  /** Present (true) only on endpoints that answer with a requiresOAuth
+   *  payload until the user connects the provider. */
+  requiresOAuth?: boolean
   billing: { model: string; baseCost: number; currency: string }
   inputSchema: Record<string, unknown> | null
   example: Record<string, unknown> | null
+  outputSchema?: Record<string, unknown> | null
 }
 
 interface Catalog {
@@ -205,10 +213,15 @@ export async function runList(args: ListArgs): Promise<CommandResult> {
           a.endpoint.localeCompare(b.endpoint),
         )
         const widest = Math.max(...endpoints.map((e) => e.endpoint.length))
+        // Two lines per endpoint: key + billing + [oauth] flag, then the
+        // description indented below — so the flag is never buried past the
+        // terminal width by a long description.
         for (const ep of endpoints) {
           const pad = ep.endpoint.padEnd(widest)
           const cost = formatCurrency(ep.billing.baseCost, ep.billing.currency)
-          console.log(`  ${pad}  ${ep.billing.model.padEnd(12)} ${cost}`)
+          const oauth = ep.requiresOAuth ? ' [oauth]' : ''
+          console.log(`  ${pad}  ${ep.billing.model.padEnd(12)} ${cost}${oauth}`)
+          if (ep.description) console.log(`    ${ep.description}`)
         }
         console.log()
       }
@@ -245,9 +258,15 @@ export async function runInfo(args: InfoArgs): Promise<CommandResult> {
 
   if (!args.json) {
     console.log(`${integration}/${endpoint}`)
+    if (info.description) console.log(`  ${info.description}`)
     console.log(
       `  billing: ${formatCurrency(info.billing.baseCost, info.billing.currency)} ${billingUnit(info.billing.model)}`,
     )
+    if (info.requiresOAuth) {
+      console.log(
+        '  Requires OAuth: without a connected account, a call succeeds with data { requiresOAuth: true, authUrl } — open the authUrl, then retry.',
+      )
+    }
     console.log()
     console.log('Input schema:')
     console.log(
@@ -256,6 +275,11 @@ export async function runInfo(args: InfoArgs): Promise<CommandResult> {
     console.log()
     console.log('Example body:')
     console.log(info.example ? JSON.stringify(info.example, null, 2) : '  (no example available)')
+    if (info.outputSchema) {
+      console.log()
+      console.log('Output schema:')
+      console.log(JSON.stringify(info.outputSchema, null, 2))
+    }
   }
 
   return { data: info as unknown as Record<string, unknown> }
@@ -364,24 +388,30 @@ export async function runInvoke(args: InvokeArgs): Promise<CommandResult> {
     return { data: payload }
   }
 
-  // Error path. The issue list is part of the message (the human line must
-  // carry every fact --json does) and rides along in the envelope via `extra`.
-  const errMsg = (payload.error as string) ?? `Request failed (${res.status})`
+  // Error path. The api-worker's envelope is { error: <machine slug>, message:
+  // <human>, ...details } — normalize it once so the human line carries the
+  // message (or a humanized slug), never the raw slug. The issue list is part
+  // of the message (the human line must carry every fact --json does) and
+  // rides along in the envelope via `extra`.
+  const norm = normalizeApiError(res.status, payload)
   // No `✗` prefix: the runtime renders the failure marker, and it would read
   // as `■ ✗ …` (and land in the `--json` `error` string) if we kept ours.
-  const lines = [`${integration}/${endpoint} (${res.status}, ${elapsed}ms): ${errMsg}`]
-  if (Array.isArray(payload.issues)) {
-    for (const issue of payload.issues as Array<{ path?: string[]; message: string }>) {
+  const lines = [`${integration}/${endpoint} (${res.status}, ${elapsed}ms): ${norm.error}`]
+  if (norm.issues) {
+    for (const issue of norm.issues) {
       const path = issue.path?.length ? issue.path.join('.') : '(root)'
       lines.push(`  - ${path}: ${issue.message}`)
     }
   }
-  // Prefer the server's own slug so an agent branches on the same code the API
-  // returns; fall back to a stable generic one.
-  const code = typeof payload.code === 'string' ? payload.code : 'integration_call_failed'
-  // `error` would only restate the message the runtime already renders.
+  // The server's own slug (the envelope's `error` field) so an agent branches
+  // on the same code the API returns; fall back to a stable generic one.
+  const code = norm.code ?? 'integration_call_failed'
+  // `error`/`message` would only restate the code + human line the runtime
+  // already renders.
   const rest = { ...payload }
   delete rest.error
+  delete rest.message
+  delete rest.code
   throw new Refusal(lines.join('\n'), code, {
     ...(res.status === 401 ? { action: cliAction('deepspace', 'auth', 'login') } : {}),
     extra: rest,

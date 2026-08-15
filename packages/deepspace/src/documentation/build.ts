@@ -1,6 +1,7 @@
 import { buildSync } from 'esbuild'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { version as sdkPackageVersion } from '../../package.json'
 import {
   createAssistantChunks,
   createSearchEntries,
@@ -140,6 +141,7 @@ export function buildDocumentation(options: BuildDocumentationOptions): Document
     version: DOCUMENTATION_MANIFEST_VERSION,
     sourceHash: validation.graph.sourceHash,
     outputHash,
+    sdkVersion: sdkPackageVersion,
     name: validation.graph.config.name,
     pageCount: validation.graph.pages.length,
     routes: [

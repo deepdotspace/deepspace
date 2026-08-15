@@ -1,11 +1,13 @@
 /**
  * DO-backed AI chat surface.
  *
- * The parent owns chat lifecycle. Pass `chatId={null}` to create on first send
- * and update the parent from `onChatCreated`.
+ * Pass `chatId={null}` to create a chat on first send. The panel keeps the
+ * created id itself; `onChatCreated` merely notifies, and a parent-passed
+ * `chatId` — including a change back to null for "new chat" — always wins.
  */
 
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -46,11 +48,11 @@ type RenderMessage = {
 }
 
 export type ChatPanelProps = {
-  /** Active chat. `null` creates one on first send. */
+  /** Active chat. `null` creates one on first send and the panel keeps it — a never-passed `chatId` means one chat per mount; remount with `key` for a new one. */
   chatId: string | null
   /** Current user id; scopes the messages query as defense in depth. */
   userId: string
-  /** Required in practice when `chatId` is null so the parent tracks the new chat. */
+  /** Notified with the id when the panel creates a chat on first send. */
   onChatCreated?: (chatId: string) => void
   /** Models shown in the picker. */
   models?: ModelOption[]
@@ -108,15 +110,36 @@ export function ChatPanel({
 
   const groupedModels = useMemo(() => groupModelsByProvider(models), [models])
   const selectedModel = models.find((model) => model.id === modelId)
+
+  // Uncontrolled fallback: with `chatId={null}` the panel keeps the chat it
+  // auto-creates on first send, so the overlay, the messages query, and later
+  // sends all target that chat. Any prop change — including back to null,
+  // which means "new chat" — takes precedence and clears it.
+  const [ownChatId, setOwnChatId] = useState<string | null>(null)
+  const [seenChatId, setSeenChatId] = useState(chatId)
+  if (seenChatId !== chatId) {
+    setSeenChatId(chatId)
+    setOwnChatId(null)
+  }
+  const activeChatId = chatId ?? ownChatId
+
+  const handleChatCreated = useCallback(
+    (id: string) => {
+      setOwnChatId(id)
+      onChatCreated?.(id)
+    },
+    [onChatCreated],
+  )
+
   const { send, stop, retry, isLoading, error, inFlight } = useStreamingChat({
-    chatId,
+    chatId: activeChatId,
     modelId,
-    onChatCreated,
+    onChatCreated: handleChatCreated,
   })
 
   const queryWhere = useMemo(
-    () => ({ chatId: chatId ?? '__none__', userId }),
-    [chatId, userId],
+    () => ({ chatId: activeChatId ?? '__none__', userId }),
+    [activeChatId, userId],
   )
   const { records } = useQuery<AiMessageData>('ai-messages', {
     where: queryWhere,
@@ -138,12 +161,12 @@ export function ChatPanel({
   )
   const messages = useMemo<RenderMessage[]>(() => {
     const overlay = inFlight.filter((message) => {
-      if (message.forChatId !== chatId) return false
+      if (message.forChatId !== activeChatId) return false
       if (persistedIds.has(message.id)) return false
       return !message.serverId || !persistedIds.has(message.serverId)
     })
     return [...persisted, ...overlay]
-  }, [chatId, inFlight, persisted, persistedIds])
+  }, [activeChatId, inFlight, persisted, persistedIds])
 
   useEffect(() => {
     const element = scrollRef.current

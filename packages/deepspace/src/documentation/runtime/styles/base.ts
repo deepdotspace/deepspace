@@ -39,6 +39,10 @@ export const DOCUMENTATION_BASE_CSS = String.raw`
   --documentation-glass-bg: color-mix(in srgb, var(--documentation-surface-raised) 86%, transparent);
   --documentation-glass-border: color-mix(in srgb, var(--documentation-border-strong) 90%, var(--documentation-accent));
   --documentation-glass-highlight: rgba(255, 255, 255, .6);
+  --documentation-font-size: 17px;
+  --documentation-line-height: 1.65;
+  --documentation-content-width: 720px;
+  --documentation-reader-pad: 62px 52px 96px;
   --documentation-header-height: 66px;
   --documentation-sidebar-width: 292px;
   --documentation-assistant-width: 420px;
@@ -75,9 +79,20 @@ export const DOCUMENTATION_BASE_CSS = String.raw`
   color-scheme: dark;
 }
 
+/* theme.density, stamped by the template as data-density. Compact reworks the
+ * whole reading measure through the tokens alone so no layout rule forks. */
+:root[data-density="compact"] {
+  --documentation-font-size: 15px;
+  --documentation-line-height: 1.6;
+  --documentation-content-width: 680px;
+  --documentation-reader-pad: 44px 44px 80px;
+  --documentation-header-height: 58px;
+  --documentation-sidebar-width: 264px;
+}
+
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; scroll-padding-top: 96px; scrollbar-gutter: stable; }
-body { margin: 0; background: var(--documentation-brand-bg); color: var(--documentation-text); font-family: var(--documentation-font-body); font-size: 17px; line-height: 1.65; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+body { margin: 0; background: var(--documentation-brand-bg); color: var(--documentation-text); font-family: var(--documentation-font-body); font-size: var(--documentation-font-size); line-height: var(--documentation-line-height); text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
 :root[data-background-decoration="gradient"] body { background-image: radial-gradient(circle at 58% 7%, color-mix(in srgb, var(--documentation-accent) 7%, transparent), transparent 32%); background-attachment: fixed; }
 :root[data-background-decoration="grid"] body { background-image: linear-gradient(color-mix(in srgb, var(--documentation-border) 26%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in srgb, var(--documentation-border) 26%, transparent) 1px, transparent 1px); background-attachment: fixed; background-size: 32px 32px; }
 body:has(.documentation-modal-layer), body:has(.documentation-mobile-nav) { overflow: hidden; }

@@ -18,6 +18,8 @@ export interface DocumentationSearchResult {
   heading?: string
   excerpt: string
   score: number
+  /** Fraction of the query's terms this result contains; 1 covers them all. */
+  termCoverage: number
 }
 
 const MAX_CHUNKS = 10_000
@@ -156,6 +158,7 @@ export function searchDocumentationCorpus(
         ...(chunk.heading ? { heading: chunk.heading } : {}),
         excerpt: excerpt(chunk.text, terms),
         score,
+        termCoverage: matchedTerms / terms.length,
       }
     })
     .filter((result) => result.score > 0)

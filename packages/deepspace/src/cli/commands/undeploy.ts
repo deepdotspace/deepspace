@@ -27,7 +27,8 @@ export default defineDeepspaceCommand({
   args: {
     name: {
       type: 'positional',
-      description: 'App id or subdomain name to undeploy (reads DEEPSPACE_APP_ID from wrangler.toml if omitted)',
+      description:
+        'App id or subdomain name to undeploy (reads DEEPSPACE_APP_ID from wrangler.toml if omitted)',
       required: false,
     },
     env: {
@@ -99,7 +100,10 @@ export default defineDeepspaceCommand({
           },
         )
       }
-      throw new Refusal(body.error ?? `Undeploy error (${res.status})`, 'undeploy_failed')
+      throw new Refusal(
+        body.error ?? `Undeploy error (${res.status})`,
+        body.code ?? 'undeploy_failed',
+      )
     }
 
     s?.stop('Removed')

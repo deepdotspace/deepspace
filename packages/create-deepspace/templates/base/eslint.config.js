@@ -21,7 +21,9 @@ export default [
   // silent unless there's a real Rules of Hooks violation.
   // `**/._*` covers macOS AppleDouble metadata files, which are binary and
   // otherwise hard-fail the lint with "Parsing error: Invalid character".
-  { ignores: ['dist/**', 'node_modules/**', '.wrangler/**', '.vite/**', 'src/router.ts', '**/._*'] },
+  // `.deepspace/**` holds Playwright artifacts (test-results, playwright-report)
+  // that the test runner rotates while a lint may be scanning them.
+  { ignores: ['dist/**', 'node_modules/**', '.wrangler/**', '.vite/**', '.deepspace/**', 'src/router.ts', '**/._*'] },
   {
     files: ['**/*.{ts,tsx}'],
     languageOptions: {

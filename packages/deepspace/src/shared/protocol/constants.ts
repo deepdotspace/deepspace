@@ -71,6 +71,9 @@ export const MSG = {
   CRON_PAUSE: 'cron.pause',
   CRON_RESUME: 'cron.resume',
   CRON_STATUS: 'cron.status',
+  // Per-mutation receipt, sent only to the socket whose trigger/pause/
+  // resume carried a `requestId` — frames without one stay fire-and-forget.
+  CRON_ACK: 'cron.ack',
 
   // ---- JobRoom ---------------------------------------------------------
   // Background-job queue with durable, alarm-driven execution. See

@@ -27,7 +27,7 @@ export { useYjsRoom, type UseYjsRoomResult } from './hooks/useYjsRoom'
 
 // Room-specific hooks
 export { useCanvas, type UseCanvasResult, type CanvasShapeClient, type ViewportClient } from './hooks/useCanvas'
-export { useCronMonitor, type UseCronMonitorResult, type CronTaskState, type CronHistoryEntry } from './hooks/useCronMonitor'
+export { useCronMonitor, type UseCronMonitorResult, type CronTaskState, type CronHistoryEntry, type CronMutationResult } from './hooks/useCronMonitor'
 export { useJobs, type UseJobsResult, type JobView, type JobStatusView } from './hooks/useJobs'
 export { usePresenceRoom, type UsePresenceRoomResult, type PresencePeerClient } from './hooks/usePresenceRoom'
 
@@ -36,7 +36,7 @@ export { type ConnectionStatus, toConnectionStatus } from './connection-status'
 
 // File uploads (R2)
 export { useR2Files } from './useR2Files'
-export type { R2FileInfo, R2UploadResult, UseR2FilesReturn, R2Scope } from './useR2Files'
+export type { R2FileInfo, R2FileListPage, R2UploadResult, UseR2FilesReturn, R2Scope } from './useR2Files'
 export { isImageFile, formatFileSize } from './file-attachment-utils'
 export type { FileAttachment } from './file-attachment-utils'
 
@@ -58,11 +58,28 @@ export type {
 
 // Yjs protocol (advanced)
 export {
-  MSG_SYNC, MSG_AWARENESS, MSG_SYNC_STEP1, MSG_SYNC_STEP2, MSG_SYNC_UPDATE,
-  createEncoder, toUint8Array, writeVarUint, writeVarUint8Array,
-  createDecoder, readVarUint, readVarUint8Array, hasContent,
-  encodeSyncStep1, encodeSyncStep2, encodeUpdate, handleSyncMessage,
+  MSG_SYNC,
+  MSG_AWARENESS,
+  MSG_SYNC_STEP1,
+  MSG_SYNC_STEP2,
+  MSG_SYNC_UPDATE,
+  createEncoder,
+  toUint8Array,
+  writeVarUint,
+  writeVarUint8Array,
+  createDecoder,
+  readVarUint,
+  readVarUint8Array,
+  hasContent,
+  encodeSyncStep1,
+  encodeSyncStep2,
+  encodeUpdate,
+  handleSyncMessage,
   type SyncResult,
-  Awareness, encodeAwarenessMessage, handleAwarenessMessage, getMessageType,
-  type AwarenessState, type AwarenessStates,
+  Awareness,
+  encodeAwarenessMessage,
+  handleAwarenessMessage,
+  getMessageType,
+  type AwarenessState,
+  type AwarenessStates,
 } from '../../shared/protocol/yjs'

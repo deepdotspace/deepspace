@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 
 import { PLATFORM_URLS } from './env'
-import { decodeJwtPayload } from './jwt'
+import { decodeJwtPayload } from '../shared/jwt'
 import { exchangeSession } from './session'
 import { registerAuthRefresh } from './lib/api'
 import { cliAction, Refusal } from './lib/command'

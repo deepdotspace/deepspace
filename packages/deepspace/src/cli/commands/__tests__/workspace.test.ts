@@ -40,8 +40,13 @@ import {
 import { cleanFailedFreshAttachDir, finishedWorkspaceMessage } from '../workspace/attach'
 import { overlapsWith, workspaceSyncRelation } from '../workspace/analysis'
 import { withWorkspaceOverlaps } from '../workspace/list'
-import { dropRemoteTolerant, isWorkspaceTipPublished, workspaceUnsyncedRefusal } from '../workspace/drop'
+import {
+  dropRemoteTolerant,
+  isWorkspaceTipPublished,
+  workspaceUnsyncedRefusal,
+} from '../workspace/drop'
 import { ApiError } from '../../lib/api'
+import { executableAction } from '../../lib/output'
 
 // Real-git suite: every test shells out to git in scratch repos (~2s solo)
 // and blows the default 5s wall under parallel vitest workers — the drifting
@@ -358,6 +363,7 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
     git(repo, ['init', '-q', '-b', 'main'])
     git(repo, ['config', 'user.email', 't@t'])
     git(repo, ['config', 'user.name', 't'])
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n')
     writeFileSync(join(repo, 'f.txt'), 'x\n')
     git(repo, ['add', '-A'])
     git(repo, ['commit', '-q', '-m', 'init'])
@@ -394,6 +400,25 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
       argv: ['deepspace', 'pull'],
     })
     expect(pullAfterLandAction(main, 'main', head)).toBeNull()
+  })
+
+  it('pins the pull action before cleanup removes the CLI that emitted it', () => {
+    const main = initRepoWithCommit()
+    const workspaceDir = addWorktree(main)
+    const packageDir = join(workspaceDir, 'node_modules', 'deepspace')
+    const entry = join(packageDir, 'dist', 'cli.js')
+    mkdirSync(join(packageDir, 'dist'), { recursive: true })
+    writeFileSync(join(packageDir, 'package.json'), JSON.stringify({ name: 'deepspace' }))
+    writeFileSync(entry, '#!/usr/bin/env node\n')
+    vi.spyOn(process, 'argv', 'get').mockReturnValue(['node', entry])
+
+    const action = pullAfterLandAction(main, 'main', 'a'.repeat(40))
+    expect(action?.argv).toEqual([process.execPath, realpathSync(entry), 'pull'])
+
+    const cleanup = cleanupWorkspaceLocal(main, ID, 'main')
+    expect(cleanup.error).toBeUndefined()
+    expect(existsSync(entry)).toBe(false)
+    expect(action && executableAction(action)).toEqual(action)
   })
 
   it('retains the branch when it advances after the caller approved an older tip', () => {

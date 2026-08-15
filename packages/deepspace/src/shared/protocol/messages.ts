@@ -154,9 +154,11 @@ export type ClientMessage =
   | BaseMessage<typeof MSG.CANVAS_UNDO, EmptyPayload>
   | BaseMessage<typeof MSG.CANVAS_REDO, EmptyPayload>
   // ---- Cron -------------------------------------------------------------
-  | BaseMessage<typeof MSG.CRON_TRIGGER, { taskName: string }>
-  | BaseMessage<typeof MSG.CRON_PAUSE, { taskName: string }>
-  | BaseMessage<typeof MSG.CRON_RESUME, { taskName: string }>
+  // Optional `requestId` opts the mutation into a `CRON_ACK` receipt;
+  // frames without one keep the fire-and-forget contract.
+  | BaseMessage<typeof MSG.CRON_TRIGGER, { taskName: string; requestId?: string }>
+  | BaseMessage<typeof MSG.CRON_PAUSE, { taskName: string; requestId?: string }>
+  | BaseMessage<typeof MSG.CRON_RESUME, { taskName: string; requestId?: string }>
   // ---- Jobs -------------------------------------------------------------
   // `JOB_ENQUEUE` uses requestId/JOB_UPDATE-ack so the caller learns the
   // newly-assigned jobId.
@@ -267,6 +269,24 @@ export type ServerMessage =
   | BaseMessage<typeof MSG.CRON_TASKS, { tasks: unknown }>
   | BaseMessage<typeof MSG.CRON_HISTORY, { history: unknown }>
   | BaseMessage<typeof MSG.CRON_STATUS, { tasks: unknown; recentHistory: unknown }>
+  // `CRON_ACK` is the per-mutation receipt for a trigger/pause/resume that
+  // carried a `requestId`. Triggers execute synchronously in the DO before
+  // the ack is sent, so an ok trigger receipt means the run completed
+  // (execution detail rides the history broadcasts). Failures carry a
+  // machine-readable `reason` so clients never parse error strings —
+  // `read_only` covers the role-downgrade race the client-side gate
+  // cannot see.
+  | BaseMessage<
+      typeof MSG.CRON_ACK,
+      | { requestId: string; taskName: string; ok: true }
+      | {
+          requestId: string
+          taskName?: string
+          ok: false
+          reason: 'read_only' | 'unknown_task' | 'failed'
+          error?: string
+        }
+    >
   // ---- Jobs -------------------------------------------------------------
   // `JOB_UPDATE` is the single push channel — same payload shape carries
   // initial-snapshot, enqueue, progress, success, failure, cancel, and
@@ -370,12 +390,12 @@ export const clientBuild = {
   canvasUndo: () => ({ type: MSG.CANVAS_UNDO, payload: EMPTY }) as const,
   canvasRedo: () => ({ type: MSG.CANVAS_REDO, payload: EMPTY }) as const,
   // Cron
-  cronTrigger: (taskName: string) =>
-    ({ type: MSG.CRON_TRIGGER, payload: { taskName } }) as const,
-  cronPause: (taskName: string) =>
-    ({ type: MSG.CRON_PAUSE, payload: { taskName } }) as const,
-  cronResume: (taskName: string) =>
-    ({ type: MSG.CRON_RESUME, payload: { taskName } }) as const,
+  cronTrigger: (taskName: string, requestId?: string) =>
+    ({ type: MSG.CRON_TRIGGER, payload: { taskName, requestId } }) as const,
+  cronPause: (taskName: string, requestId?: string) =>
+    ({ type: MSG.CRON_PAUSE, payload: { taskName, requestId } }) as const,
+  cronResume: (taskName: string, requestId?: string) =>
+    ({ type: MSG.CRON_RESUME, payload: { taskName, requestId } }) as const,
   // Jobs
   jobEnqueue: (
     requestId: string,
@@ -477,6 +497,21 @@ export const serverBuild = {
     ({ type: MSG.CRON_HISTORY, payload: { history } }) as const,
   cronStatus: (tasks: unknown, recentHistory: unknown) =>
     ({ type: MSG.CRON_STATUS, payload: { tasks, recentHistory } }) as const,
+  cronAckSuccess: (requestId: string, taskName: string) =>
+    ({
+      type: MSG.CRON_ACK,
+      payload: { requestId, taskName, ok: true as const },
+    }) as const,
+  cronAckFailure: (
+    requestId: string,
+    reason: 'read_only' | 'unknown_task' | 'failed',
+    error?: string,
+    taskName?: string,
+  ) =>
+    ({
+      type: MSG.CRON_ACK,
+      payload: { requestId, taskName, ok: false as const, reason, error },
+    }) as const,
   // Jobs
   jobSnapshot: (jobs: unknown[]) =>
     ({ type: MSG.JOB_UPDATE, payload: { kind: 'snapshot' as const, jobs } }) as const,
