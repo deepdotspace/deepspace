@@ -1,6 +1,5 @@
 import { execFileSync } from 'node:child_process'
 import {
-  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -12,6 +11,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
+import { gitFixture } from '../../../__tests__/git-fixture'
 import {
   APP_MIGRATIONS_MANIFEST,
   applyAppMigrationPlan,
@@ -67,13 +67,7 @@ afterEach(() => {
 
 /** A git checkout holding `files`, since the planner walks tracked paths. */
 function makeRepo(files: Record<string, string>): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'ds-app-migrations-')))
-  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir })
-  for (const [path, contents] of Object.entries(files)) {
-    mkdirSync(dirname(join(dir, path)), { recursive: true })
-    writeFileSync(join(dir, path), contents)
-  }
-  execFileSync('git', ['add', '-A'], { cwd: dir })
+  const dir = gitFixture({ files, add: true })
   repo = dir
   return dir
 }

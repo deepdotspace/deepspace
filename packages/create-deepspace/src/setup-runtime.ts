@@ -55,12 +55,48 @@ export async function completeProjectSetup(
 ): Promise<void> {
   await installAgentSkill(project.appDir, progress)
   installDependencies(project.appDir)
-  // A newly initialized repo must not become visible to Codex/Claude worktree
-  // creation until its package-manager lockfile exists. Committing before a
-  // detached install finished left every fresh scaffold dirty and made an
-  // immediate native worktree start from an incomplete initial commit.
-  commitInitialScaffold(project.appDir, project.initializedGit)
-  printNextSteps(project)
+  // The app id is SERVER-MINTED under the user's login: the just-installed
+  // CLI's `app init` asks the platform for an id registered to the caller and
+  // stamps it into wrangler.toml + the client constants. Without a login the
+  // scaffold stays usable but carries no identity until `app init` succeeds.
+  // The initial commit is `app init`'s job (invoked just below):
+  // identity must exist before anything is committed,
+  // and init commits only a repo whose HEAD is still unborn — so an existing
+  // repo (e.g. GitHub-sourced) is never committed into, and a logged-out
+  // scaffold stays uncommitted until login + `app init` heal it. Running
+  // after the install keeps the lockfile in that first commit.
+  const identityRegistered = registerAppIdentity(project.appDir, progress)
+  printNextSteps(project, identityRegistered)
+}
+
+/**
+ * Run the freshly-installed CLI's authed `deepspace app init` — the ONLY
+ * place app ids come from (server-authoritative minting). Soft-fails: an
+ * offline or logged-out scaffold prints the recovery pair (`auth login`, `app init`)
+ * instead of stranding a finished install, and `app init` later heals the
+ * remaining `__APP_ID__` placeholders itself.
+ */
+function registerAppIdentity(appDir: string, progress: Progress): boolean {
+  progress.start('Registering app identity')
+  const cli = join(appDir, 'node_modules', '.bin', 'deepspace')
+  const result = spawn.sync(cli, ['app', 'init'], {
+    cwd: appDir,
+    stdio: 'pipe',
+    encoding: 'utf-8',
+    timeout: 120_000,
+  })
+  if (!result.error && result.status === 0) {
+    progress.stop('App identity registered')
+    return true
+  }
+  progress.stop('App identity not registered yet')
+  const detail = (result.stderr || result.stdout || result.error?.message || '').trim()
+  if (detail) p.log.warn(detail.split('\n').slice(-3).join('\n'))
+  p.log.warn(
+    'Your app has no id yet, so no initial commit was made. Run `npx deepspace auth login`, ' +
+      'then `npx deepspace app init` in the app dir, then commit.',
+  )
+  return false
 }
 
 async function installAgentSkill(appDir: string, progress: Progress): Promise<void> {
@@ -164,82 +200,6 @@ function lstatExists(path: string): boolean {
   }
 }
 
-/** Fallback identity for a machine with no effective Git author/committer. */
-export const SCAFFOLD_GIT_IDENTITY = { name: 'DeepSpace', email: 'scaffold@deep.space' }
-
-function git(appDir: string, args: string[], label: string): void {
-  const result = spawn.sync('git', args, { cwd: appDir, stdio: 'pipe' })
-  if (result.error || result.status !== 0) {
-    throw new Error(
-      result.error
-        ? `${label} failed to start: ${result.error.message}`
-        : `${label} exited with code ${result.status}`,
-    )
-  }
-}
-
-function gitSucceeds(appDir: string, args: string[]): boolean {
-  const result = spawn.sync('git', args, { cwd: appDir, stdio: 'ignore' })
-  return !result.error && result.status === 0
-}
-
-function gitOutput(appDir: string, args: string[]): string | null {
-  const result = spawn.sync('git', args, { cwd: appDir, encoding: 'utf-8' })
-  if (result.error || result.status !== 0) return null
-  return String(result.stdout).trim()
-}
-
-function effectiveGitIdentity(appDir: string, kind: 'AUTHOR' | 'COMMITTER') {
-  const value = gitOutput(appDir, ['var', `GIT_${kind}_IDENT`])
-  const match = value?.match(/^(.*) <([^<>]+)> \d+ [+-]\d+$/)
-  return match ? { name: match[1], email: match[2] } : null
-}
-
-export function commitInitialScaffold(appDir: string, initializedGit: boolean): void {
-  if (!initializedGit) return
-
-  // Preserve the developer's effective identity. A fresh container still gets
-  // a repository-local fallback so its next required deploy commit works.
-  const hasConfiguredName = gitSucceeds(appDir, ['config', '--get', 'user.name'])
-  const hasConfiguredEmail = gitSucceeds(appDir, ['config', '--get', 'user.email'])
-  const author = effectiveGitIdentity(appDir, 'AUTHOR')
-  const committer = effectiveGitIdentity(appDir, 'COMMITTER')
-  const hasExplicitIdentityInput = Boolean(
-    hasConfiguredName ||
-    hasConfiguredEmail ||
-    process.env.GIT_AUTHOR_NAME ||
-    process.env.GIT_AUTHOR_EMAIL ||
-    process.env.GIT_COMMITTER_NAME ||
-    process.env.GIT_COMMITTER_EMAIL ||
-    process.env.EMAIL,
-  )
-  const stableEffectiveIdentity =
-    hasExplicitIdentityInput &&
-    author &&
-    committer &&
-    author.name === committer.name &&
-    author.email === committer.email
-      ? author
-      : null
-
-  if (!hasConfiguredName) {
-    git(
-      appDir,
-      ['config', 'user.name', stableEffectiveIdentity?.name ?? SCAFFOLD_GIT_IDENTITY.name],
-      'git config user.name',
-    )
-  }
-  if (!hasConfiguredEmail) {
-    git(
-      appDir,
-      ['config', 'user.email', stableEffectiveIdentity?.email ?? SCAFFOLD_GIT_IDENTITY.email],
-      'git config user.email',
-    )
-  }
-  git(appDir, ['add', '-A'], 'git add')
-  git(appDir, ['commit', '-m', 'Initial DeepSpace scaffold', '--no-verify'], 'git commit')
-}
-
 function installDependencies(appDir: string): void {
   const sentinelDirectory = join(appDir, '.deepspace')
   mkdirSync(sentinelDirectory, { recursive: true })
@@ -264,11 +224,12 @@ function installDependencies(appDir: string): void {
   }
 }
 
-function printNextSteps(project: PreparedProject): void {
+function printNextSteps(project: PreparedProject, identityRegistered: boolean): void {
   p.note(
     [
       ...(project.isInPlace ? [] : [`cd ${project.appName}`]),
       'npx deepspace auth login',
+      ...(identityRegistered ? [] : ['npx deepspace app init']),
       'npx deepspace dev start',
       '',
       'Deploy:',

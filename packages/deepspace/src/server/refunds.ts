@@ -10,7 +10,7 @@ import type { ApiWorkerEnv } from './utils/proxies'
 import { appendAppIdentity } from './utils/app-identity'
 
 interface StarterAppEnv extends ApiWorkerEnv {
-  /** Absent until the app's first deploy registers it — see appendAppIdentity. */
+  /** Absent until the app's first deploy injects it — see appendAppIdentity. */
   APP_IDENTITY_TOKEN?: string
   /** Immutable app id — the identity the platform verifies (HMAC input). */
   DEEPSPACE_APP_ID: string

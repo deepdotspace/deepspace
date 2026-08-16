@@ -21,18 +21,15 @@ import {
   writeLaunchConfigIfMissing,
 } from '../lib/launch-config'
 
+import { gitFixture } from './git-fixture'
+
 const git = (cwd: string, args: string[]): string =>
   execFileSync('git', args, { cwd, encoding: 'utf-8' })
 
-function initGitRepo(prefix: string): string {
-  const repo = mkdtempSync(join(tmpdir(), prefix))
-  git(repo, ['init', '--quiet', '--initial-branch=main'])
-  git(repo, ['config', 'user.name', 'DeepSpace Test'])
-  git(repo, ['config', 'user.email', 'test@deep.space'])
-  writeFileSync(join(repo, 'tracked.txt'), 'initial\n')
-  git(repo, ['add', 'tracked.txt'])
-  git(repo, ['commit', '--quiet', '-m', 'initial'])
-  return repo
+// Every caller wants the same one-commit repo, so the six git spawns the
+// old inline version paid per call now happen once per process.
+function initGitRepo(_prefix: string): string {
+  return gitFixture({ files: { 'tracked.txt': 'initial\n' }, commit: true })
 }
 
 function addClaudeWorktree(owner: string, name: string): string {

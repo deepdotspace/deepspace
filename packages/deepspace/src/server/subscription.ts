@@ -24,13 +24,16 @@ export interface SubscriptionRead {
 }
 
 interface StarterAppEnv extends ApiWorkerEnv {
-  /** Absent until the app's first deploy registers it — see appendAppIdentity. */
+  /** Absent until the app's first deploy injects it — see appendAppIdentity. */
   APP_IDENTITY_TOKEN?: string
   /** Immutable app id — the identity the platform verifies (HMAC input). */
   DEEPSPACE_APP_ID: string
 }
 
-function appIdentityHeaders(c: Context<{ Bindings: StarterAppEnv }>, extra?: Record<string, string>): Headers {
+function appIdentityHeaders(
+  c: Context<{ Bindings: StarterAppEnv }>,
+  extra?: Record<string, string>,
+): Headers {
   const h = new Headers(extra ?? {})
   appendAppIdentity(h, c.env)
   // The api-worker's auth middleware only honors `Authorization: Bearer <jwt>`.
@@ -187,10 +190,7 @@ export async function cancelSubscription(
   })
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string }
-    throw new CancelSubscriptionError(
-      body.error ?? `cancel failed (${res.status})`,
-      res.status,
-    )
+    throw new CancelSubscriptionError(body.error ?? `cancel failed (${res.status})`, res.status)
   }
   return (await res.json()) as CancelSubscriptionResult
 }

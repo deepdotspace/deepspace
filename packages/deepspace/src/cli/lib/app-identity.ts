@@ -4,15 +4,16 @@
  * Every app carries an immutable id in wrangler.toml:
  *
  *   [vars]
- *   DEEPSPACE_APP_ID = "app_01JG8QK…"      # minted at scaffold/init
+ *   DEEPSPACE_APP_ID = "app_01JG8QK…"      # server-minted at `app init`
  *
  *   [env.staging.vars]
  *   DEEPSPACE_APP_ID = "app_01JG8QM…"      # each env is its own app
  *
  * The wrangler `name` field is just the subdomain label the next deploy
- * claims; identity is the id. Minting is local (a ULID — 80 random bits
- * need no server round-trip to be unique); registration happens at first
- * deploy.
+ * claims; identity is the id. Ids are minted by the deploy worker's
+ * authenticated `POST /api/apps/mint` — registered to the caller the moment
+ * they exist — so this module only reads and writes them; it never invents
+ * one.
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
@@ -21,41 +22,9 @@ import { parse as parseToml } from 'smol-toml'
 import { InputError } from './cli-errors'
 
 // Single source: the shared registry client owns the id shape. Import-then-
-// re-export (not a bare `export from`) because line ~151 uses it locally too.
+// re-export (not a bare `export from`) because readAppId uses it locally too.
 import { APP_ID_RE } from '../../server/utils/registry-client'
 export { APP_ID_RE }
-
-const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
-
-/** A 26-char ULID (48-bit ms timestamp + 80 random bits, Crockford base32) —
- *  the id shape shared by app ids (`app_…`) and workspace ids (`ws_…`). */
-export function mintUlid(now = Date.now()): string {
-  let ts = ''
-  let t = now
-  for (let i = 0; i < 10; i++) {
-    ts = CROCKFORD[t % 32] + ts
-    t = Math.floor(t / 32)
-  }
-  const rand = new Uint8Array(10)
-  crypto.getRandomValues(rand)
-  let rs = ''
-  let acc = 0
-  let bits = 0
-  for (const byte of rand) {
-    acc = (acc << 8) | byte
-    bits += 8
-    while (bits >= 5) {
-      bits -= 5
-      rs += CROCKFORD[(acc >> bits) & 31]
-    }
-  }
-  return `${ts}${rs}`.slice(0, 26)
-}
-
-/** Mint a fresh app id: `app_` + 26-char ULID. */
-export function mintAppId(now = Date.now()): string {
-  return `app_${mintUlid(now)}`
-}
 
 export interface WranglerIdentityConfig {
   name?: unknown
@@ -130,4 +99,33 @@ export function writeAppId(
     src = src.trimEnd() + `\n\n${header}\n${line}\n`
   }
   writeFileSync(wranglerPath, src)
+}
+
+/** The identity placeholder the scaffolder leaves in template-owned files. */
+const APP_ID_PLACEHOLDER = '__APP_ID__'
+
+/**
+ * Stamp the app id into the ONE template source file that bakes it into the
+ * client bundle: `src/constants.ts`, whose SCOPE_ID must match the worker's
+ * `app:${DEEPSPACE_APP_ID}` room name. Replaces the scaffold placeholder —
+ * and, when forking with `--new-id`, the previous id, which would otherwise
+ * keep scoping client data to the ORIGINAL app. Deliberately not a tree-wide
+ * substitution: any other occurrence of the placeholder or the old id is
+ * user-owned text the CLI must not rewrite (wrangler.toml has its own single
+ * writer, {@link writeAppId}). Returns true when the file changed.
+ */
+export function stampAppIdInSources(
+  cwd: string,
+  appId: string,
+  previousAppId?: string | null,
+): boolean {
+  const constantsPath = join(resolve(cwd), 'src', 'constants.ts')
+  if (!existsSync(constantsPath)) return false
+  const needles = [APP_ID_PLACEHOLDER, ...(previousAppId ? [previousAppId] : [])]
+  const content = readFileSync(constantsPath, 'utf-8')
+  let next = content
+  for (const needle of needles) next = next.replaceAll(needle, appId)
+  if (next === content) return false
+  writeFileSync(constantsPath, next)
+  return true
 }

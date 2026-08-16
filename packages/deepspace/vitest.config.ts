@@ -16,5 +16,11 @@ export default defineConfig({
     include: ['src/**/__tests__/**/*.test.{ts,tsx}', 'features/**/__tests__/**/*.test.{ts,tsx}'],
     environment: 'node',
     maxWorkers: 4,
+    // The CLI suites are process-spawning integration tests (real git against
+    // real repos). Their per-test P99 under a full `pnpm check` legitimately
+    // exceeds vitest's 5s default — measured: three >5s timeouts across two
+    // forced gate runs, unchanged by worker caps — so the budget matches the
+    // workload class, same as deploy-worker's config and for the same reason.
+    testTimeout: 20_000,
   },
 })

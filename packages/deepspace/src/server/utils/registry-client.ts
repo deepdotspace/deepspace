@@ -23,6 +23,40 @@ export const STRICT_APP_ID_RE = APP_ID_RE
 /** Internal physical locators survive identity migration and are not public ids. */
 export const RESOURCE_ID_RE = /^(app_[0-9A-HJKMNP-TV-Z]{26}|[a-z0-9][a-z0-9_-]{0,63})$/
 
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
+
+/** A 26-char ULID (48-bit ms timestamp + 80 random bits, Crockford base32) —
+ *  the id shape shared by app ids (`app_…`) and workspace ids (`ws_…`). */
+export function mintUlid(now = Date.now()): string {
+  let ts = ''
+  let t = now
+  for (let i = 0; i < 10; i++) {
+    ts = CROCKFORD[t % 32] + ts
+    t = Math.floor(t / 32)
+  }
+  const rand = new Uint8Array(10)
+  crypto.getRandomValues(rand)
+  let rs = ''
+  let acc = 0
+  let bits = 0
+  for (const byte of rand) {
+    acc = (acc << 8) | byte
+    bits += 8
+    while (bits >= 5) {
+      bits -= 5
+      rs += CROCKFORD[(acc >> bits) & 31]
+    }
+  }
+  return `${ts}${rs}`.slice(0, 26)
+}
+
+/** Mint a fresh app id: `app_` + 26-char ULID. App ids are minted ONLY by the
+ *  deploy worker's authenticated `POST /api/apps/mint`, which registers the id
+ *  to its caller in the same step — an id with no owner never exists. */
+export function mintAppId(now = Date.now()): string {
+  return `app_${mintUlid(now)}`
+}
+
 export class RegistryClientError extends Error {
   constructor(
     message: string,

@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { decodeJwtPayload } from '../../shared/jwt'
-import { mintAppId, readAppId, writeAppId } from '../lib/app-identity'
+import { readAppId } from '../lib/app-identity'
 import { ensureInstallReady } from '../lib/install-status'
 import type { CliAction } from '../lib/output'
 import { preflightNodeVersion } from '../lib/preflight'
@@ -125,15 +125,17 @@ export default defineCommand({
       )
     }
     const appName = nameResult.name
-    let appId = readAppId(appDir, envName)
+    const appId = readAppId(appDir, envName)
     p.log.info(envName ? `App: ${appName}  (env: ${envName})` : `App: ${appName}`)
 
     const { token, ownerId } = await authenticate(appDir, output)
 
     if (!appId) {
-      appId = mintAppId()
-      writeAppId(appDir, appId, { wranglerEnv: envName })
-      p.log.info(`Minted app id ${appId} — commit wrangler.toml.`)
+      return output.die(
+        `No app id in wrangler.toml${envName ? ` for [env.${envName}]` : ''}. Run ` +
+          `\`deepspace app init${envName ? ` --env ${envName}` : ''}\` to register this app, then re-deploy.`,
+        'app_not_initialized',
+      )
     }
     p.log.info(`Id: ${appId}`)
 

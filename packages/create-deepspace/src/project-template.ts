@@ -32,7 +32,6 @@ export interface PreparedProject {
   appDir: string
   appName: string
   isInPlace: boolean
-  initializedGit: boolean
 }
 
 export interface Progress {
@@ -117,8 +116,7 @@ export function prepareProject(
       : `Copying ${input.template} template`,
   )
   mkdirSync(target.appDir, { recursive: true })
-  const appId = mintAppId()
-  const preserved = copyTemplate(input.template, target.appDir, target.appName, appId)
+  const preserved = copyTemplate(input.template, target.appDir, target.appName)
   writeGitignoreIfMissing(target.appDir)
   progress.stop('Template ready')
   for (const message of preserved) p.log.info(message)
@@ -134,10 +132,10 @@ export function prepareProject(
   )
   if (!input.local) progress.stop('Project configured')
 
-  const initializedGit = initializeGit(target.appDir)
+  initializeGit(target.appDir)
   writeLaunchJson(target.appDir, target.appName)
 
-  return { ...target, initializedGit }
+  return target
 }
 
 function readTemplateMeta(name: string): TemplateMeta | null {
@@ -147,7 +145,7 @@ function readTemplateMeta(name: string): TemplateMeta | null {
   return { ...metadata, name }
 }
 
-function resolveTarget(requestedAppName: string): Omit<PreparedProject, 'initializedGit'> {
+function resolveTarget(requestedAppName: string): PreparedProject {
   const cwd = process.cwd()
   const cwdName = basename(cwd)
   const explicitInPlace = requestedAppName === '.'
@@ -220,7 +218,7 @@ function resolveTarget(requestedAppName: string): Omit<PreparedProject, 'initial
   return { appName, appDir, isInPlace }
 }
 
-function copyTemplate(template: string, appDir: string, appName: string, appId: string): string[] {
+function copyTemplate(template: string, appDir: string, appName: string): string[] {
   const stagingDirectory = mkdtempSync(join(tmpdir(), 'deepspace-template-'))
   const preserved: string[] = []
 
@@ -228,9 +226,10 @@ function copyTemplate(template: string, appDir: string, appName: string, appId: 
     assembleTemplate(template, stagingDirectory)
     // Substitute only template-owned bytes. In-place targets may contain
     // README/docs/agent files whose literal placeholder text belongs to the
-    // user and must survive the merge unchanged.
+    // user and must survive the merge unchanged. `__APP_ID__` deliberately
+    // survives this pass: the id is server-minted by the authed
+    // `deepspace app init` step at the end of setup, which stamps it.
     replaceInDir(stagingDirectory, '__APP_NAME__', appName)
-    replaceInDir(stagingDirectory, '__APP_ID__', appId)
     for (const entry of readdirSync(stagingDirectory)) {
       const source = join(stagingDirectory, entry)
       const destination = join(appDir, entry)
@@ -329,6 +328,8 @@ function packLocal(monorepoRoot: string, appDir: string): string {
   return tarballPath
 }
 
+/** Create the repo when the target isn't one (and isn't inside one); the
+ *  initial commit is made by the CLI's `app init` once identity exists. */
 function initializeGit(appDir: string): boolean {
   if (existsSync(join(appDir, '.git'))) return false
   const insideParent = spawn.sync('git', ['rev-parse', '--is-inside-work-tree'], {
@@ -447,30 +448,4 @@ function replaceInDir(directory: string, search: string, replacement: string): v
       writeFileSync(path, content.replaceAll(search, replacement))
     }
   }
-}
-
-/** `app_` + 26-char ULID (48-bit ms timestamp + 80 random bits, Crockford). */
-function mintAppId(now = Date.now()): string {
-  const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
-  let timestamp = ''
-  let remainingTime = now
-  for (let i = 0; i < 10; i++) {
-    timestamp = alphabet[remainingTime % 32] + timestamp
-    remainingTime = Math.floor(remainingTime / 32)
-  }
-
-  const random = new Uint8Array(10)
-  crypto.getRandomValues(random)
-  let randomString = ''
-  let accumulator = 0
-  let bits = 0
-  for (const byte of random) {
-    accumulator = (accumulator << 8) | byte
-    bits += 8
-    while (bits >= 5) {
-      bits -= 5
-      randomString += alphabet[(accumulator >> bits) & 31]
-    }
-  }
-  return `app_${timestamp}${randomString}`.slice(0, 30)
 }

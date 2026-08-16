@@ -5,6 +5,8 @@ export {
   RESOURCE_ID_RE,
   STRICT_APP_ID_RE,
   callRegistry,
+  mintAppId,
+  mintUlid,
   REGISTRY_INSTANCE,
   RegistryClientError,
   registryErrorJson,

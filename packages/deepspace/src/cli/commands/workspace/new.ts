@@ -1,7 +1,7 @@
 import * as p from '@clack/prompts'
 import { isAbsolute, resolve } from 'node:path'
 import { findAppDir } from '../../lib/app-context'
-import { mintUlid } from '../../lib/app-identity'
+import { mintUlid } from '../../../server/utils/registry-client'
 import { defineDeepspaceCommand, Refusal } from '../../lib/command'
 import { resolveCommit } from '../../lib/git/repository'
 import { workspaceBranchName } from '../../lib/workspace-id'

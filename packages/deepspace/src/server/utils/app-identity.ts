@@ -15,7 +15,7 @@
 export interface AppIdentityEnv {
   /** The app's immutable id (wrangler.toml [vars] DEEPSPACE_APP_ID). */
   DEEPSPACE_APP_ID: string
-  /** Absent until the app's first deploy registers it. */
+  /** Absent until the app's first deploy injects it. */
   APP_IDENTITY_TOKEN?: string
 }
 

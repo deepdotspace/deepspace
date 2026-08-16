@@ -142,7 +142,9 @@ export async function syncDeployRepository(options: {
       p.log.warn(
         `Skipping cloud-repo push — the branch tracks secret file(s): ${secretFiles.join(', ')}. ` +
           `Untrack with \`git rm --cached ${secretFiles[0]}\` (add to .gitignore), re-commit, then ` +
-          `\`deepspace push\`. Deploy continues; this release's source isn't recoverable until then.`,
+          `\`deepspace push\`. Without the push this deploy carries no source lineage: if the live ` +
+          `release has one, the server refuses it as stale (--ignore-stale replaces it anyway), and ` +
+          `this release's source isn't recoverable until the push works.`,
       )
     } else {
       const pushResult = await pushWithTransientRetry(() =>

@@ -1,5 +1,15 @@
 # deepspace
 
+## 0.22.0
+
+### Minor Changes
+
+- App ids are now server-minted and owned from birth: `deepspace app init` (logged in) asks the platform for an id that is registered to your account the moment it exists, the scaffolder runs `app init` as its final step, and `deepspace deploy` refuses an app with no id instead of minting one locally. The platform no longer registers unknown ids on first deploy (previews included), push, or secrets write (`app_not_registered`) — so nobody can claim an app id out of your wrangler.toml before you do. The initial scaffold commit moved with the identity: `app init` commits a still-unborn scaffold repo, so a logged-out scaffold stays uncommitted until login + `app init` heal it.
+
+### Patch Changes
+
+- The tracked-secret-files deploy warning no longer promises the deploy will continue: without the skipped push the release carries no source lineage, and the server refuses it as stale when the live release has one (`--ignore-stale` overrides). The server's `stale_base` message now lists the secret-file skip among its causes.
+
 ## 0.21.0
 
 ### Minor Changes

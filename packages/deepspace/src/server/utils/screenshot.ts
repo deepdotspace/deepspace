@@ -22,7 +22,7 @@ import { appendAppIdentity } from './app-identity'
 export interface ScreenshotEnv extends PlatformWorkerEnv {
   /** Immutable app id — the identity the platform verifies (HMAC input). */
   DEEPSPACE_APP_ID: string
-  /** Absent until the app's first deploy registers it — see appendAppIdentity. */
+  /** Absent until the app's first deploy injects it — see appendAppIdentity. */
   APP_IDENTITY_TOKEN?: string
 }
 
