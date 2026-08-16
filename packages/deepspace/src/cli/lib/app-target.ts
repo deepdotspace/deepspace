@@ -220,9 +220,9 @@ export async function warnIfPhantomApp(
     if (!apps.some((app) => app.appId === appId)) {
       process.stderr.write(
         `warning: ${appId} is not among your apps. If it exists and you have access ` +
-          `(collaborator/admin), the server will use it; if it doesn't exist, this will ` +
-          `register it as a NEW app under your account — check the id if that's not what ` +
-          `you meant (a subdomain name also works with -a).\n`,
+          `(collaborator/admin), the server will use it; if it doesn't exist, the command ` +
+          `will be refused (app_not_registered — ids are registered at \`deepspace app ` +
+          `init\`). Check the id (a subdomain name also works with -a).\n`,
       )
     }
   } catch {

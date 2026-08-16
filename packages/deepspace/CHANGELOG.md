@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.22.1
+
+### Patch Changes
+
+- Unregistered or foreign app ids now get real recovery paths instead of dead ends: `app init` verifies registration (and ownership) before answering "already initialized" and names `app init --new-id` when that is the remedy; `deploy` and `push` refuse up front with the same guidance instead of raw git errors; secrets errors carry the server's machine code; the deploy refusal ships an executable action; the scaffolder's failure guidance no longer assumes the not-signed-in case.
+
 ## 0.22.0
 
 ### Minor Changes

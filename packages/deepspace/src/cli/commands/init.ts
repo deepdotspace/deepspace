@@ -17,8 +17,9 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
-import { apiFetch } from '../lib/api'
+import { ApiError, apiFetch } from '../lib/api'
 import { findAppDir } from '../lib/app-context'
+import { getAppSource } from '../lib/source-api'
 import { readAppId, stampAppIdInSources, writeAppId } from '../lib/app-identity'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import { runGit } from '../lib/git/process'
@@ -85,6 +86,37 @@ export default defineDeepspaceCommand({
     const envName = (args.env as string) || undefined
     const existing = readAppId(appDir, envName)
     if (existing && !args['new-id']) {
+      // "Already initialized" must mean REGISTERED, not merely id-shaped: an
+      // older SDK's scaffold minted a valid-looking id locally that no server
+      // ever registered, and early-returning on it made every recovery path a
+      // dead loop (deploy/push/secrets refuse app_not_registered, init said
+      // "already initialized"). Verify with the server before claiming done.
+      const token = await ensureToken()
+      let state
+      try {
+        state = await getAppSource(DEPLOY_URL, token, existing)
+      } catch (error) {
+        if (error instanceof ApiError && error.code === 'forbidden') {
+          // The id exists but belongs to someone else (e.g. a cloned repo).
+          throw new Refusal(
+            `wrangler.toml carries ${existing}, which is registered to another user. ` +
+              'Run `deepspace app init --new-id` to fork this repo as your own app ' +
+              '(new data and secrets; the original is untouched).',
+            'not_app_owner',
+          )
+        }
+        throw error
+      }
+      if (!state.registered) {
+        throw new Refusal(
+          `wrangler.toml carries ${existing}, but that id was never registered — it was ` +
+            `minted locally by an older SDK. Ids are server-minted at registration now, and an ` +
+            `existing unregistered id cannot be claimed. Run \`deepspace app init --new-id\` to ` +
+            `register this repo as a fresh app (new data and secrets; nothing to migrate — the ` +
+            `old id never had server-side state).`,
+          'app_not_registered',
+        )
+      }
       if (!args.json) {
         console.log(`Already initialized: ${existing}${envName ? ` (env: ${envName})` : ''}`)
         console.log(`App dir: ${appDir}`)

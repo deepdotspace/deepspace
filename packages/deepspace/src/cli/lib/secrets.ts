@@ -120,9 +120,13 @@ export async function secretsApi<T>(
     // (via cli-errors) for the full error. `apiPath` is kept for debugging.
     const err = new Error(body.error ?? `Secrets request failed (${res.status})`) as Error & {
       status?: number
+      code?: string
       apiPath?: string
     }
     err.status = res.status
+    // Preserve the server's machine code (e.g. app_not_registered) so the
+    // shared renderer and --json envelope expose it instead of a bare slug.
+    err.code = (body as { code?: string }).code
     err.apiPath = path
     throw err
   }

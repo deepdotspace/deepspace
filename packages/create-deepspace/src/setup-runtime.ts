@@ -93,8 +93,9 @@ function registerAppIdentity(appDir: string, progress: Progress): boolean {
   const detail = (result.stderr || result.stdout || result.error?.message || '').trim()
   if (detail) p.log.warn(detail.split('\n').slice(-3).join('\n'))
   p.log.warn(
-    'Your app has no id yet, so no initial commit was made. Run `npx deepspace auth login`, ' +
-      'then `npx deepspace app init` in the app dir, then commit.',
+    'Your app has no id yet, so no initial commit was made. Fix the error above ' +
+      '(`npx deepspace auth login` if you are not signed in), then run ' +
+      '`npx deepspace app init` in the app dir — it also creates the initial commit.',
   )
   return false
 }

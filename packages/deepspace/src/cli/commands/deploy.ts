@@ -135,6 +135,13 @@ export default defineCommand({
         `No app id in wrangler.toml${envName ? ` for [env.${envName}]` : ''}. Run ` +
           `\`deepspace app init${envName ? ` --env ${envName}` : ''}\` to register this app, then re-deploy.`,
         'app_not_initialized',
+        {
+          action: {
+            cwd: appDir,
+            argv: ['deepspace', 'app', 'init', ...(envName ? ['--env', envName] : [])],
+          },
+          actionRequired: true,
+        },
       )
     }
     p.log.info(`Id: ${appId}`)
@@ -149,6 +156,18 @@ export default defineCommand({
       output,
     })
     const sourceState = await getAppSource(DEPLOY_URL, token, appId)
+    if (!sourceState.registered) {
+      // Refuse HERE, before any build or push: without this, the failure
+      // surfaces later as a raw git 404 from the repo transport (git discards
+      // response bodies), which reads as infra breakage instead of the
+      // registration gap it is.
+      output.die(
+        `${appId} is not registered. If this repo's id came from an older SDK's scaffold, run ` +
+          `\`deepspace app init --new-id\` to register it as a fresh app; a brand-new app dir ` +
+          `registers with \`deepspace app init\`.`,
+        'app_not_registered',
+      )
+    }
 
     const repositoryPreflight = preflightDeployRepository({
       appDir,

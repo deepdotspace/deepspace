@@ -13,6 +13,7 @@ import push, { forcePushOrphansWork, workspaceBranchPushRefusal } from '../push'
 import * as appContext from '../../lib/app-context'
 import * as authModule from '../../auth'
 import * as appTargetModule from '../../lib/app-target'
+import * as sourceApiModule from '../../lib/source-api'
 import * as vcPushModule from '../../lib/vc-push'
 import * as vcRemoteModule from '../../lib/vc-remote'
 
@@ -88,6 +89,12 @@ describe('workspaceBranchPushRefusal', () => {
     vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
     vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(appId)
     vi.spyOn(appTargetModule, 'warnIfPhantomApp').mockResolvedValue()
+    vi.spyOn(sourceApiModule, 'getAppSource').mockResolvedValue({
+      appId,
+      source: { provider: 'deepspace' },
+      revision: 1,
+      registered: true,
+    })
 
     const { output, exits } = await runPushJson({ app: 'selected-app', branch: WS_BRANCH }, repo)
     expect(output).toMatchObject({
@@ -113,6 +120,12 @@ describe('push recovery target', () => {
     vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
     vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(appId)
     vi.spyOn(appTargetModule, 'warnIfPhantomApp').mockResolvedValue()
+    vi.spyOn(sourceApiModule, 'getAppSource').mockResolvedValue({
+      appId,
+      source: { provider: 'deepspace' },
+      revision: 1,
+      registered: true,
+    })
     vi.spyOn(vcRemoteModule, 'ensureSpaceRemote').mockReturnValue('https://example.invalid/repo')
     vi.spyOn(vcPushModule, 'pushToSpace').mockReturnValue({
       status: 'non_fast_forward',
@@ -144,6 +157,12 @@ describe('push recovery target', () => {
     vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
     vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(appId)
     vi.spyOn(appTargetModule, 'warnIfPhantomApp').mockResolvedValue()
+    vi.spyOn(sourceApiModule, 'getAppSource').mockResolvedValue({
+      appId,
+      source: { provider: 'deepspace' },
+      revision: 1,
+      registered: true,
+    })
     vi.spyOn(vcRemoteModule, 'ensureSpaceRemote').mockReturnValue('https://example.invalid/repo')
     vi.spyOn(vcRemoteModule, 'runGitRemote')
       .mockImplementationOnce(() => {
@@ -178,6 +197,12 @@ describe('push recovery target', () => {
     vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
     vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(appId)
     vi.spyOn(appTargetModule, 'warnIfPhantomApp').mockResolvedValue()
+    vi.spyOn(sourceApiModule, 'getAppSource').mockResolvedValue({
+      appId,
+      source: { provider: 'deepspace' },
+      revision: 1,
+      registered: true,
+    })
     vi.spyOn(vcRemoteModule, 'ensureSpaceRemote').mockReturnValue('https://example.invalid/repo')
     vi.spyOn(vcPushModule, 'pushToSpace').mockReturnValue({
       status: 'non_fast_forward',

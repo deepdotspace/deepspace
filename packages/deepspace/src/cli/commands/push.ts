@@ -19,6 +19,8 @@
 
 import * as p from '@clack/prompts'
 import { ensureToken } from '../auth'
+import { ApiError } from '../lib/api'
+import { getAppSource } from '../lib/source-api'
 import { findAppDir } from '../lib/app-context'
 import { resolveAppTarget, warnIfPhantomApp, assertAppTargetResolvable } from '../lib/app-target'
 import {
@@ -251,6 +253,31 @@ export default defineDeepspaceCommand({
       }
 
       const { token, appId } = await resolveTarget()
+      // Refuse an unregistered or foreign id before git runs: the repo
+      // transport errors that would otherwise surface discard the server's
+      // JSON body and read as missing repositories or internal URLs instead
+      // of the registration/ownership gap they are.
+      let sourceState
+      try {
+        sourceState = await getAppSource(deployBaseUrl(), token, appId)
+      } catch (error) {
+        if (error instanceof ApiError && error.code === 'forbidden') {
+          throw new Refusal(
+            `${appId} is registered to another user. Run \`deepspace app init --new-id\` to ` +
+              'fork this repo as your own app (new data and secrets; the original is untouched).',
+            'not_app_owner',
+          )
+        }
+        throw error
+      }
+      if (!sourceState.registered) {
+        throw new Refusal(
+          `${appId} is not registered. If this repo's id came from an older SDK's scaffold, ` +
+            'run `deepspace app init --new-id` to register it as a fresh app; a brand-new ' +
+            'app dir registers with `deepspace app init`.',
+          'app_not_registered',
+        )
+      }
       const pullRecoveryCwd = selectedBranchCheckout(appDir, branch) ?? appDir
       ensureSpaceRemote(appDir, appId)
 
