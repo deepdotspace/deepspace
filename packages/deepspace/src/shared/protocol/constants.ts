@@ -125,3 +125,19 @@ export const ROLE_ANONYMOUS = 'viewer'
 export const ROLE_DEFAULT = 'member'
 /** Admin role */
 export const ROLE_ADMIN = 'admin'
+
+// ---------------------------------------------------------------------------
+// Error strings that cross a room boundary and are matched by the caller
+// ---------------------------------------------------------------------------
+
+/**
+ * Reported when a record id resolves to nothing.
+ *
+ * This crosses the DO boundary as a response body and callers branch on it,
+ * so it is a contract rather than prose. `getChat` in particular treats it as
+ * "no such chat" and returns null — the same answer it gives for a chat owned
+ * by someone else, which is what stops chat ids being enumerable. If a room
+ * reworded this independently, a miss would start throwing while a cross-user
+ * hit kept returning null, and that difference is an existence oracle.
+ */
+export const RECORD_NOT_FOUND = 'Record not found'

@@ -7,8 +7,11 @@ const mocks = vi.hoisted(() => ({
     { id: 'ta_1', email: 'bot@deepspace.test', userId: 'u_1', label: null, createdAt: 0 },
   ]),
   deleteRemoteTestAccount: vi.fn(async () => {}),
+  recoverRemoteTestAccount: vi.fn(),
   createRemoteTestAccount: vi.fn(),
   syncTestAccountStore: vi.fn(),
+  // Annotated, not inferred: `() => []` types the mock's return as `never[]`,
+  // so any `mockReturnValue` with a real account in it fails to compile.
   loadAllTestAccounts: vi.fn((): TestAccount[] => []),
   removeTestAccounts: vi.fn(),
   upsertTestAccount: vi.fn(),
@@ -20,6 +23,7 @@ vi.mock('../../auth', () => ({ ensureToken: mocks.ensureToken }))
 vi.mock('../../lib/test-account-service', () => ({
   fetchRemoteTestAccounts: mocks.fetchRemoteTestAccounts,
   deleteRemoteTestAccount: mocks.deleteRemoteTestAccount,
+  recoverRemoteTestAccount: mocks.recoverRemoteTestAccount,
   createRemoteTestAccount: mocks.createRemoteTestAccount,
   syncTestAccountStore: mocks.syncTestAccountStore,
 }))
@@ -45,6 +49,7 @@ const subCommands = (testAccounts as unknown as { subCommands: Record<string, Ru
 const clear = subCommands.clear
 const list = subCommands.list
 const create = subCommands.create
+const recover = subCommands.recover
 
 function captureLog(): string[] {
   const lines: string[] = []
@@ -101,6 +106,43 @@ describe('test accounts clear confirmation gate', () => {
     expect(JSON.parse(lines[0])).toMatchObject({ ok: false, code: 'confirmation_required' })
     expect(mocks.confirm).not.toHaveBeenCalled()
     expect(mocks.deleteRemoteTestAccount).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * `recover` rotates a credential; the platform hands back no display name.
+ * Writing `email.split('@')[0]` as one invented a name the app never renders —
+ * and the shipped collab spec compared the page against exactly that field.
+ */
+describe('test accounts recover display names', () => {
+  const remote = { id: 'ta_1', email: 'collab-a@deepspace.test', userId: 'u_1', label: null, createdAt: 0 }
+
+  beforeEach(() => {
+    mocks.upsertTestAccount.mockClear()
+    mocks.fetchRemoteTestAccounts.mockResolvedValue([remote])
+    mocks.recoverRemoteTestAccount.mockResolvedValue({ ...remote, password: 'rotated' })
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+
+  it('keeps the display name this machine already knows', async () => {
+    mocks.loadAllTestAccounts.mockReturnValue([
+      { id: 'ta_1', email: remote.email, password: 'old', name: 'Collab A' },
+    ])
+
+    await recover.run({ args: { email: remote.email, json: true } })
+
+    expect(mocks.upsertTestAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ email: remote.email, password: 'rotated', name: 'Collab A' }),
+    )
+  })
+
+  it('stores no display name at all when it does not know one', async () => {
+    mocks.loadAllTestAccounts.mockReturnValue([])
+
+    await recover.run({ args: { all: true, json: true } })
+
+    expect(mocks.upsertTestAccount).toHaveBeenCalledTimes(1)
+    expect(mocks.upsertTestAccount.mock.calls[0][0]).not.toHaveProperty('name')
   })
 })
 

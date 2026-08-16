@@ -36,6 +36,28 @@ describe('resolveAppNameForEnv', () => {
     if (!r.ok) expect(r.reason).toMatch(/no \[env\.staging\] block/)
   })
 
+  it('codes a missing env block as missing_env_block, not invalid_app_name', () => {
+    // `code` is the stable machine contract (docs sell it as such), so it has
+    // to be true: nothing about a *name* is invalid here — the block is absent.
+    const r = resolveAppNameForEnv({ name: 'hopkins' }, 'staging')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.code).toBe('missing_env_block')
+  })
+
+  it('leaves name failures uncoded so callers keep emitting invalid_app_name', () => {
+    // These two really are about the name; only the missing-block case moved.
+    const noName = resolveAppNameForEnv({ name: 'hopkins', env: { staging: {} } }, 'staging')
+    expect(noName.ok).toBe(false)
+    if (!noName.ok) expect(noName.code).toBeUndefined()
+
+    const collides = resolveAppNameForEnv(
+      { name: 'hopkins', env: { staging: { name: 'hopkins' } } },
+      'staging',
+    )
+    expect(collides.ok).toBe(false)
+    if (!collides.ok) expect(collides.code).toBeUndefined()
+  })
+
   it('fails when the env block is present but has no name', () => {
     // Empty env block means the user intended an environment but forgot
     // the name. We don't fall back to the top-level name because that

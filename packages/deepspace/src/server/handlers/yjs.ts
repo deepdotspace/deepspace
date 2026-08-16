@@ -3,6 +3,7 @@
  */
 
 import * as Y from 'yjs'
+import { resolveCollection } from './subscriptions'
 import type { ConnectionAttachment } from '../../shared/protocol/types'
 import type {
   YjsDocKey,
@@ -10,7 +11,12 @@ import type {
   YjsLeavePayload,
   YjsSubscription,
 } from '../../shared/types'
-import { MSG_YJS_SYNC, MSG_YJS_AWARENESS, MSG } from '../../shared/protocol/constants'
+import {
+  MSG_YJS_SYNC,
+  MSG_YJS_AWARENESS,
+  MSG,
+  RECORD_NOT_FOUND,
+} from '../../shared/protocol/constants'
 import {
   MSG_SYNC_STEP1,
   MSG_SYNC_STEP2,
@@ -34,7 +40,9 @@ import {
 import { getRecord } from './records'
 
 /** Parse a Yjs doc key (collection:recordId:fieldName). recordId may contain colons. */
-function parseYjsDocKey(docKey: YjsDocKey): { collection: string; recordId: string; fieldName: string } | null {
+function parseYjsDocKey(
+  docKey: YjsDocKey,
+): { collection: string; recordId: string; fieldName: string } | null {
   const firstColon = docKey.indexOf(':')
   const lastColon = docKey.lastIndexOf(':')
   if (firstColon === -1 || lastColon === -1 || firstColon === lastColon) return null
@@ -59,9 +67,7 @@ function hasYjsSubscription(attachment: ConnectionAttachment, target: YjsSubscri
 // ============================================================================
 
 /** Collections that bypass schema checks (permissive access) */
-export const SYSTEM_COLLECTIONS = new Set([
-  'canvas-settings',
-])
+export const SYSTEM_COLLECTIONS = new Set(['canvas-settings'])
 
 /**
  * Schemas for system collections.
@@ -100,10 +106,7 @@ export function getYjsDocKey(collection: string, recordId: string, fieldName: st
  * Get or create a Y.Doc for a record field.
  * Loads from database if exists, creates new if not.
  */
-export function getOrCreateYjsDoc(
-  ctx: YjsContext,
-  docKey: YjsDocKey
-): Y.Doc {
+export function getOrCreateYjsDoc(ctx: YjsContext, docKey: YjsDocKey): Y.Doc {
   // Return cached doc if available
   let doc = ctx.yjsDocs.get(docKey)
   if (doc) return doc
@@ -112,10 +115,9 @@ export function getOrCreateYjsDoc(
   doc = new Y.Doc()
 
   // Try to load from database
-  const row = ctx.sql.exec(
-    `SELECT state FROM yjs_docs WHERE doc_key = ?`,
-    docKey
-  ).toArray()[0] as { state: ArrayBuffer } | undefined
+  const row = ctx.sql.exec(`SELECT state FROM yjs_docs WHERE doc_key = ?`, docKey).toArray()[0] as
+    | { state: ArrayBuffer }
+    | undefined
 
   if (row?.state) {
     try {
@@ -167,7 +169,11 @@ export function saveYjsDoc(sql: SqlStorage, docKey: YjsDocKey, doc: Y.Doc): void
   sql.exec(
     `INSERT INTO yjs_docs (doc_key, state, updated_at) VALUES (?, ?, ?)
      ON CONFLICT(doc_key) DO UPDATE SET state = ?, updated_at = ?`,
-    docKey, state, now, state, now
+    docKey,
+    state,
+    now,
+    state,
+    now,
   )
 }
 
@@ -179,7 +185,7 @@ export function handleYjsJoin(
   ctx: YjsContext,
   ws: WebSocket,
   attachment: ConnectionAttachment,
-  payload: YjsJoinPayload
+  payload: YjsJoinPayload,
 ): void {
   const { collection, recordId, fieldName } = payload
   const isSystem = SYSTEM_COLLECTIONS.has(collection)
@@ -196,7 +202,10 @@ export function handleYjsJoin(
         const tbl = collectionTableName(collection)
         ctx.sql.exec(
           `INSERT OR IGNORE INTO "${tbl}" (_row_id, _created_by, _created_at, _updated_at) VALUES (?, ?, ?, ?)`,
-          recordId, attachment.userId, now, now
+          recordId,
+          attachment.userId,
+          now,
+          now,
         )
       }
       record = getRecord(ctx.sql, collection, recordId, schema)
@@ -204,11 +213,19 @@ export function handleYjsJoin(
   } else {
     // Regular collections: require schema and record
     if (!schema) {
-      ctx.send(ws, { type: MSG.ERROR, payload: { error: `Schema not registered for collection: ${collection}` } })
+      const resolution = resolveCollection(ctx, collection)
+      ctx.send(ws, {
+        type: MSG.ERROR,
+        payload: {
+          error: resolution.ok
+            ? `Schema not registered for collection: ${collection}`
+            : resolution.error,
+        },
+      })
       return
     }
     if (!record) {
-      ctx.send(ws, { type: MSG.ERROR, payload: { error: 'Record not found' } })
+      ctx.send(ws, { type: MSG.ERROR, payload: { error: RECORD_NOT_FOUND } })
       return
     }
     const permCtx = ctx.getPermissionContext()
@@ -248,7 +265,10 @@ export function handleYjsJoin(
     ctx.sendBinary(ws, toUint8Array(encoder2))
   }
 
-  ctx.send(ws, { type: MSG.YJS_JOIN, payload: { collection, recordId, fieldName, canWrite: hasWriteAccess } })
+  ctx.send(ws, {
+    type: MSG.YJS_JOIN,
+    payload: { collection, recordId, fieldName, canWrite: hasWriteAccess },
+  })
 }
 
 /**
@@ -258,7 +278,7 @@ export function handleYjsLeave(
   ctx: YjsContext,
   ws: WebSocket,
   attachment: ConnectionAttachment,
-  payload: YjsLeavePayload
+  payload: YjsLeavePayload,
 ): void {
   const { collection, recordId, fieldName } = payload
   const docKey = getYjsDocKey(collection, recordId, fieldName)
@@ -270,8 +290,8 @@ export function handleYjsLeave(
   }
 
   // Remove from subscriptions
-  attachment.yjsSubscriptions = attachment.yjsSubscriptions.filter(s =>
-    !(s.collection === collection && s.recordId === recordId && s.fieldName === fieldName)
+  attachment.yjsSubscriptions = attachment.yjsSubscriptions.filter(
+    (s) => !(s.collection === collection && s.recordId === recordId && s.fieldName === fieldName),
   )
   ws.serializeAttachment(attachment)
   unloadYjsDocIfUnused(ctx, docKey, ws)
@@ -288,7 +308,7 @@ export function handleYjsBinaryMessage(
   ctx: YjsContext,
   ws: WebSocket,
   attachment: ConnectionAttachment,
-  data: Uint8Array
+  data: Uint8Array,
 ): void {
   const decoder = createDecoder(data)
   const messageType = readVarUint(decoder)
@@ -314,7 +334,9 @@ export function handleYjsBinaryMessage(
           attachment.awarenessClientIds[docKey] = readVarUint(pd)
           ws.serializeAttachment(attachment)
         }
-      } catch { /* best-effort */ }
+      } catch {
+        /* best-effort */
+      }
     }
 
     broadcastAwareness(ctx, docKey, payload, ws)
@@ -364,7 +386,16 @@ export function handleYjsBinaryMessage(
         if (!syncSchema) return
         const record = getRecord(ctx.sql, collection, recordId, syncSchema)
         if (!record) return
-        if (!canUpdate(syncSchema, attachment.role, { ...record, recordId }, attachment.userId, ctx.getPermissionContext())) return
+        if (
+          !canUpdate(
+            syncSchema,
+            attachment.role,
+            { ...record, recordId },
+            attachment.userId,
+            ctx.getPermissionContext(),
+          )
+        )
+          return
       }
 
       const update = readVarUint8Array(decoder)
@@ -382,7 +413,7 @@ export function broadcastYjsUpdate(
   ctx: YjsContext,
   docKey: YjsDocKey,
   update: Uint8Array,
-  excludeWs: WebSocket | null
+  excludeWs: WebSocket | null,
 ): void {
   const parsed = parseYjsDocKey(docKey)
   if (!parsed) return
@@ -416,7 +447,7 @@ export function broadcastAwareness(
   ctx: YjsContext,
   docKey: YjsDocKey,
   payload: Uint8Array,
-  excludeWs: WebSocket | null
+  excludeWs: WebSocket | null,
 ): void {
   const parsed = parseYjsDocKey(docKey)
   if (!parsed) return
@@ -448,10 +479,7 @@ export function broadcastAwareness(
  * show the disconnected user's cursor. This constructs a null-state
  * awareness update and broadcasts it to remaining subscribers.
  */
-export function broadcastAwarenessRemoval(
-  ctx: YjsContext,
-  attachment: ConnectionAttachment,
-): void {
+export function broadcastAwarenessRemoval(ctx: YjsContext, attachment: ConnectionAttachment): void {
   if (!attachment.awarenessClientIds) return
 
   for (const sub of attachment.yjsSubscriptions) {
@@ -469,7 +497,7 @@ function broadcastAwarenessClientRemoval(
   const payloadEncoder = createEncoder()
   writeVarUint(payloadEncoder, 1)
   writeVarUint(payloadEncoder, clientId)
-  writeVarUint(payloadEncoder, 0xFFFFFF) // high clock to override any prior state
+  writeVarUint(payloadEncoder, 0xffffff) // high clock to override any prior state
   writeVarUint8Array(payloadEncoder, new TextEncoder().encode('null'))
   const removalPayload = toUint8Array(payloadEncoder)
   broadcastAwareness(ctx, docKey, removalPayload, null)

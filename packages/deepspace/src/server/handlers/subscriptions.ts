@@ -26,10 +26,63 @@ export interface SubscriptionContext {
   sql: SqlStorage
   schemaRegistry: SchemaRegistry
   state: DurableObjectState // Needed to get all connected WebSockets
+  /**
+   * The scope this room was addressed by — `app:{appId}`, `chat:{channelId}`,
+   * `conv:{convId}`, `workspace:default`, … Records are sharded across rooms
+   * by scope, so the scope is what names the room in an unknown-collection
+   * failure. Undefined only for rooms addressed by a unique id rather than a
+   * name (`idFromName` populates `DurableObjectId.name`).
+   */
+  scopeId?: string
   getPermissionContext(): PermissionContext
   /** Typed against `ServerMessage` so outbound broadcasts are
    *  compile-checked against the wire contract. */
   send(ws: WebSocket, message: ServerMessage): void
+}
+
+/**
+ * Outcome of resolving a collection name against the room's schema set.
+ * `schema` is undefined only for a system collection registered without
+ * columns, which the query path serves from system columns alone.
+ */
+export type CollectionResolution =
+  | { ok: true; schema: CollectionSchema | undefined; isSystem: boolean }
+  | { ok: false; error: string }
+
+/**
+ * Resolve a collection name against the collections this room actually knows.
+ *
+ * The single place that decides whether a room can serve a collection at all.
+ * Records are sharded across Durable Object rooms by scope, so asking a room
+ * for a collection it was never given is a routing mistake, not an empty
+ * result — the failure names the collection, the room, and what that room
+ * does serve so the caller can fix the scope instead of debugging silence.
+ *
+ * The `Schema not registered for collection: <name>` prefix is load-bearing:
+ * the scaffolded Yjs route probes for an optional `documents` collection with
+ * `startsWith` on it. Extend the message, never reword the prefix.
+ */
+export function resolveCollection(
+  ctx: SubscriptionContext,
+  collection: string,
+): CollectionResolution {
+  const isSystem = SYSTEM_COLLECTIONS.has(collection)
+  const schema = ctx.schemaRegistry.get(collection)
+
+  if (!schema && !isSystem) {
+    const known = ctx.schemaRegistry.names().sort().join(', ') || '(none)'
+    const room = ctx.scopeId ? `Room '${ctx.scopeId}'` : 'This room'
+    return {
+      ok: false,
+      error:
+        `Schema not registered for collection: ${collection} — ` +
+        `${room} serves only: ${known}. Records are sharded by scope, so ` +
+        `address the room that owns '${collection}', or add it to the ` +
+        `schemas this room is constructed with.`,
+    }
+  }
+
+  return { ok: true, schema, isSystem }
 }
 
 /**
@@ -81,19 +134,29 @@ export function executeQuery(
   userRole: string,
   skipUserRbac: boolean = false,
 ): RecordResult[] {
-  const isSystem = SYSTEM_COLLECTIONS.has(query.collection)
-  const schema = ctx.schemaRegistry.get(query.collection)
+  const resolved = resolveCollection(ctx, query.collection)
 
-  if (!schema && !isSystem) {
-    return []
-  }
+  // Row-returning callers (WS subscribe, the debug query view) contract on an
+  // array, so an unknown collection degrades to "no rows" here. The surfaces
+  // that report success/failure to a caller — the `records.*` tools and the
+  // record write/read operations — reject it at `resolveCollection` first, so
+  // no tool call reaches this line with a collection the room does not know.
+  if (!resolved.ok) return []
 
-  if (!schema) {
+  if (!resolved.schema) {
     // System collection without schema — query the c_* table directly
     return executeSystemQuery(ctx, query)
   }
 
-  return executeTableQuery(ctx, query, schema, userId, userRole, isSystem, skipUserRbac)
+  return executeTableQuery(
+    ctx,
+    query,
+    resolved.schema,
+    userId,
+    userRole,
+    resolved.isSystem,
+    skipUserRbac,
+  )
 }
 
 /**

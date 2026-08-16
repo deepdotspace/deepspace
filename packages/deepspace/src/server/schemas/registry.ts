@@ -375,14 +375,29 @@ export function checkUnclaimedOwnerTransition(
 // System-Managed Columns (users collection)
 // ============================================================================
 
-/** Names of columns managed by the system (registerUser), not client mutations. */
+/**
+ * Columns the system *assigns* — from the identity provider at registration,
+ * or from an admin action. A caller who sends one of these has chosen a value
+ * and means it, so a record write that would change one is refused loudly
+ * rather than silently dropped.
+ */
+export const SYSTEM_ASSIGNED_COLUMNS = new Set(['email', 'name', 'imageUrl', 'role'])
+
+/**
+ * Columns the system *maintains* on its own schedule, without telling anyone.
+ * `registerUser` bumps `lastSeenAt` on every WS connect and `handleUserUpdate`
+ * rewrites it on every 60s presence heartbeat; neither broadcasts, so every
+ * client's copy goes stale silently and there is no heal path short of a
+ * refetch. Read-modify-write echo (`put(id, { ...rec.data, field })`) is the
+ * SDK's own house style, so refusing these would refuse writes over a value the
+ * caller never chose and cannot keep current. They are preserved silently.
+ */
+export const SYSTEM_MAINTAINED_COLUMNS = new Set(['createdAt', 'lastSeenAt'])
+
+/** Every `users` column owned by the system rather than by record writes. */
 export const SYSTEM_MANAGED_COLUMNS = new Set([
-  'email',
-  'name',
-  'imageUrl',
-  'role',
-  'createdAt',
-  'lastSeenAt',
+  ...SYSTEM_ASSIGNED_COLUMNS,
+  ...SYSTEM_MAINTAINED_COLUMNS,
 ])
 
 /** Standard user columns. Apps spread these into their users schema. */

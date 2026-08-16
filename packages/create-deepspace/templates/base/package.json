@@ -5,15 +5,6 @@
     "node": ">=22.15.0 <23 || >=24 <25 || >=26 <27"
   },
   "type": "module",
-  "files": [
-    "src/",
-    "worker.ts",
-    "wrangler.toml",
-    "index.html",
-    "vite.config.ts",
-    "postcss.config.js",
-    "tsconfig.json"
-  ],
   "allowScripts": {
     "esbuild": true,
     "workerd": true

@@ -90,10 +90,14 @@ export interface RoomUser {
 
 export type RoomConnectionState = 'connecting' | 'connected' | 'disconnected'
 
-/** A server-rejected optimistic write. */
+/** A rejected optimistic write. */
 export interface WriteError {
-  /** RBAC denial or data validation/other rejection. */
-  kind: 'permission' | 'validation'
+  /**
+   * `permission` — RBAC denial; `validation` — data validation/other server
+   * rejection; `not_ready` — rejected client-side because the room could not
+   * accept writes yet (gate the control on `ready` from `useMutations()`).
+   */
+  kind: 'permission' | 'validation' | 'not_ready'
   /** Short human-readable summary, safe to show end users. */
   title: string
   /** Longer human-readable explanation; may be empty. */
@@ -112,8 +116,9 @@ export interface RecordProviderProps {
   /** Auth token provider for WS connections. */
   getAuthToken?: () => Promise<string | null>
   /**
-   * Receives server-rejected optimistic writes. Wire this to app UI so users
-   * see denied or invalid changes. Defaults to a deduplicated console error.
+   * Receives every rejected write — denied or invalid by the server, and
+   * attempted before the room was ready. Wire this to app UI so users see
+   * changes that didn't land. Defaults to a deduplicated console error.
    */
   onWriteError?: (error: WriteError) => void
 }

@@ -1,20 +1,26 @@
 /**
  * Chat history helpers — wrap RecordRoom's tools API for ai-chats / ai-messages.
  *
- * Trust model: every helper sends `X-App-Action: 'true'`, which bypasses
- * RecordRoom's per-record RBAC. The worker is the trust boundary, not
- * RecordRoom. Callers MUST verify ownership before invoking write helpers
- * (`updateChat`, `appendMessage`, `deleteChatCascade`); the worker's
- * `/api/ai/chat`, `PATCH /api/ai/chats/:id`, and `DELETE /api/ai/chats/:id`
- * routes do this via a `getChat()` precheck that 404s when the row is
- * missing or owned by another user. Read helpers (`getChat`, `loadMessages`)
- * filter by `chatId` against userBound rows, so cross-user reads return
- * empty — but new consumers should still consider an explicit ownership
- * check before exposing data.
+ * Trust model: every helper here runs through `executeToolAsApp`, which sends
+ * `X-App-Action: 'true'` and therefore **bypasses RecordRoom's per-record
+ * RBAC entirely**. The `userId` argument these helpers take is the identity
+ * they act *as* — it is NOT an authorization boundary, and RecordRoom will
+ * not check it. The worker is the only trust boundary.
+ *
+ * `getChat` is that boundary for this module: it compares the stored
+ * `userId` against the caller and returns null on a mismatch, so the
+ * worker's `/api/ai/chat`, `PATCH /api/ai/chats/:id`, and
+ * `DELETE /api/ai/chats/:id` routes 404 when a row is missing *or* owned by
+ * someone else. Every write helper (`updateChat`, `appendMessage`,
+ * `deleteChatCascade`) is reachable only behind that precheck; a new caller
+ * that skips it is writing across users, so route new consumers through
+ * `getChat` first.
  *
  * The tools API returns records as `{ recordId, data, createdAt, updatedAt }`
  * envelopes; helpers below flatten them into ChatRow / ChatMessageRow.
  */
+
+import { RECORD_NOT_FOUND } from '../../shared/protocol/constants'
 
 export type ChatRow = {
   recordId: string
@@ -63,7 +69,7 @@ type MessageColumns = {
 
 type ToolResponse<T> = { success: boolean; data?: T; error?: string }
 
-async function executeTool<T>(
+async function executeToolAsApp<T>(
   stub: DurableObjectStub,
   userId: string,
   tool: string,
@@ -110,19 +116,35 @@ function toMessageRow(env: RecordEnvelope<MessageColumns>): ChatMessageRow {
   }
 }
 
+/**
+ * Fetch a chat the caller owns, or null.
+ *
+ * This is the module's authorization boundary. `records.get` runs with
+ * `X-App-Action`, so RecordRoom applies no per-record RBAC and will happily
+ * return another user's row — the ownership comparison below is the only
+ * thing standing between a caller and someone else's chat. A miss and a
+ * cross-user hit deliberately look identical to the caller (both null, both
+ * 404 at the route) so chat ids stay unenumerable.
+ */
 export async function getChat(
   stub: DurableObjectStub,
   chatId: string,
   userId: string,
 ): Promise<ChatRow | null> {
   try {
-    const result = await executeTool<{ record: RecordEnvelope<ChatColumns> }>(stub, userId, 'records.get', {
+    const result = await executeToolAsApp<{ record: RecordEnvelope<ChatColumns> }>(stub, userId, 'records.get', {
       collection: 'ai-chats',
       recordId: chatId,
     })
-    return result.record ? toChatRow(result.record) : null
+    if (!result.record) return null
+    const chat = toChatRow(result.record)
+    return chat.userId === userId ? chat : null
   } catch (err) {
-    if (err instanceof Error && err.message.includes('Record not found')) return null
+    // Shared constant, not a loose string: a miss and a cross-user hit must
+    // keep producing the same null. If a room reworded this on its own, a
+    // miss would throw while a foreign chat still returned null, and that
+    // asymmetry is exactly the existence oracle the ownership check removes.
+    if (err instanceof Error && err.message.includes(RECORD_NOT_FOUND)) return null
     throw err
   }
 }
@@ -135,7 +157,7 @@ export async function createChat(
   const data: Record<string, unknown> = { userId }
   if (opts.title !== undefined) data.title = opts.title
   if (opts.model !== undefined) data.model = opts.model
-  const result = await executeTool<{ record: RecordEnvelope<ChatColumns> }>(stub, userId, 'records.create', {
+  const result = await executeToolAsApp<{ record: RecordEnvelope<ChatColumns> }>(stub, userId, 'records.create', {
     collection: 'ai-chats',
     data,
   })
@@ -148,7 +170,7 @@ export async function updateChat(
   userId: string,
   patch: Partial<Pick<ChatRow, 'title' | 'model' | 'compactedSummary' | 'compactedThroughId'>>,
 ): Promise<void> {
-  await executeTool(stub, userId, 'records.update', {
+  await executeToolAsApp(stub, userId, 'records.update', {
     collection: 'ai-chats',
     recordId: chatId,
     data: patch,
@@ -160,7 +182,7 @@ export async function deleteChatCascade(
   chatId: string,
   userId: string,
 ): Promise<void> {
-  const list = await executeTool<{ records: Array<RecordEnvelope<MessageColumns>> }>(stub, userId, 'records.query', {
+  const list = await executeToolAsApp<{ records: Array<RecordEnvelope<MessageColumns>> }>(stub, userId, 'records.query', {
     collection: 'ai-messages',
     where: { chatId },
   })
@@ -168,7 +190,7 @@ export async function deleteChatCascade(
   const errors: unknown[] = []
   for (const env of list.records) {
     try {
-      await executeTool(stub, userId, 'records.delete', {
+      await executeToolAsApp(stub, userId, 'records.delete', {
         collection: 'ai-messages',
         recordId: env.recordId,
       })
@@ -180,7 +202,7 @@ export async function deleteChatCascade(
   // Always attempt the chat row delete so the row disappears from listings,
   // even if some message rows got orphaned.
   try {
-    await executeTool(stub, userId, 'records.delete', {
+    await executeToolAsApp(stub, userId, 'records.delete', {
       collection: 'ai-chats',
       recordId: chatId,
     })
@@ -205,7 +227,7 @@ export async function loadMessages(
   // Filter by userId in addition to chatId — defense in depth against any
   // future change that lets a row land in this collection without going
   // through the worker (which already verifies chat ownership).
-  const result = await executeTool<{ records: Array<RecordEnvelope<MessageColumns>> }>(stub, userId, 'records.query', {
+  const result = await executeToolAsApp<{ records: Array<RecordEnvelope<MessageColumns>> }>(stub, userId, 'records.query', {
     collection: 'ai-messages',
     where: { chatId, userId },
     orderBy: 'createdAt',
@@ -232,7 +254,7 @@ export async function appendMessage(
     content: msg.content,
   }
   if (msg.parts !== undefined) data.parts = msg.parts
-  await executeTool(stub, msg.userId, 'records.create', {
+  await executeToolAsApp(stub, msg.userId, 'records.create', {
     collection: 'ai-messages',
     recordId: msg.id,
     data,

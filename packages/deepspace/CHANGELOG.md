@@ -1,5 +1,19 @@
 # deepspace
 
+## 0.23.0
+
+### Minor Changes
+
+- Fix the six top findings from the five-app AX audit: enforce chat ownership in `getChat` (a signed-in user could rename, delete, or write another user's AI chat), make failed writes observable instead of silently succeeding (system-managed column updates, queries against a collection the room does not carry, and writes attempted before the room is ready — now a `not_ready` `WriteError`), key the Playwright storage-state cache by origin and validate the session before reuse (raising `TestSignInError` rather than returning a signed-out context), resolve the browser bundle's app id from the wrangler config being built so `deploy --env` cannot ship a bundle wired to another environment, add `deepspace test accounts recover` so pool accounts created on another machine are usable, and ship a scaffold whose `collab.spec.ts` passes on a fresh app.
+
+  **Upgrading — apps scaffolded on 0.21.0–0.22.1.** Those scaffolds baked a literal app id into `src/constants.ts` and carry no `deepspace/build` wiring. They keep working untouched: plain `deploy` passes (the new bundle guard refuses only a FOREIGN id), and already-deployed apps are unaffected. What changes: `deploy --env <name>` is now **refused** (`app_id_env_mismatch`) instead of silently shipping that environment's worker against production's rooms — the refusal lists the three file edits that adopt the build-time id (`vite.config.ts` → `deepspaceBuild()`, `vitest.config.ts` → `appIdDefine()` if present, `src/constants.ts` → `__DEEPSPACE_APP_ID__`); there is deliberately no automatic migration for these app-owned files. Relatedly, `app init` no longer stamps ids into source files at all — wrangler.toml is the id's only home, and the client resolves it at build time. (The unknown-collection suffix below applies to the `resolveCollection` paths — subscription queries, record tools, and Yjs collection checks.)
+
+  **Upgrading.** Two signatures changed: `getStatePathForEmail` and `readCachedState` from `deepspace/testing` now take `(email, baseURL)`, since the cache is keyed by origin as well as account. `WriteError.kind` gains `'not_ready'`, which only breaks an exhaustive `switch` over the union.
+
+  **Two changes reach code the SDK cannot upgrade for you**, because worker routes are vendored into your repo at scaffold time. First, the unknown-collection error text gained a suffix naming the room and the collections it serves; it now reads `Schema not registered for collection: <name> — Room '<scope>' serves only: …`. The shipped template and the data-boundary migration guide both match it with `startsWith`, so supported code is unaffected, but a vendored route comparing with `===` stops matching and falls through to its error branch — in `getDocumentForAccess` that is a 403 on every Yjs document room. Change any such comparison to `startsWith`. Second, `records.query` against a collection the room does not carry now returns `{ success: false }` instead of `{ success: true, records: [] }`; since `executeTool` throws on `!success`, a cron handler or server action querying an optional collection now fails its job rather than seeing an empty list. Guard those call sites, or register the collection in the room.
+
+  **Scope of the system-column refusal.** It covers the `users` columns you can mean to set — `email`, `name`, `imageUrl` and `role`. The server-maintained timestamps `createdAt` and `lastSeenAt` are still preserved silently: the server rewrites `lastSeenAt` on every connect and every presence heartbeat without broadcasting, so a whole-record echo carries a stale value the caller never chose and has no way to refresh. Sending any system column at its current stored value still succeeds, and `null`, `''` and omitting the field are treated as the one stored state they are.
+
 ## 0.22.1
 
 ### Patch Changes

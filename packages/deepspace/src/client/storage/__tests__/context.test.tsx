@@ -15,7 +15,10 @@ import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react'
 import { RecordProvider, __resetDevWarningsForTests } from '../context'
 import { RecordScope } from '../RecordScope'
+import { RecordRoomNotReadyError } from '../errors'
+import { useMutations } from '../hooks/useMutations'
 import type { WriteError } from '../types'
+import type { CollectionSchema } from '../../../shared/types'
 ;(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
 // ── Mocks ────────────────────────────────────────────────────────────────
@@ -89,6 +92,18 @@ afterEach(async () => {
   vi.restoreAllMocks()
 })
 
+const tasksSchema: CollectionSchema = {
+  name: 'tasks',
+  columns: [{ name: 'title', storage: 'text', interpretation: 'text' }],
+  permissions: {},
+}
+
+let mutations: ReturnType<typeof useMutations<{ title: string }>> | null = null
+function MutationProbe(): null {
+  mutations = useMutations<{ title: string }>('tasks')
+  return null
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 describe('RecordProvider onWriteError wiring', () => {
@@ -136,6 +151,81 @@ describe('RecordProvider onWriteError wiring', () => {
 
     sockets.all[0].listeners.onPermissionError?.('Denied', 'different detail')
     expect(errorSpy).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('not-ready writes reach onWriteError', () => {
+  /**
+   * The hole this pins: a mutation fired before the room accepts writes fails
+   * entirely client-side (no socket involved), so before the fix it reached
+   * `onWriteError` — the documented surface for write failures — never.
+   */
+  it('a write attempted before the room is ready reaches the provider prop', async () => {
+    const spy = vi.fn<(e: WriteError) => void>()
+    mutations = null
+    await render(
+      <RecordProvider allowAnonymous onWriteError={spy}>
+        <RecordScope roomId="app:test" schemas={[tasksSchema]}>
+          <MutationProbe />
+        </RecordScope>
+      </RecordProvider>,
+    )
+    expect(mutations!.ready).toBe(false)
+
+    // Still rejects: callers that await keep their existing contract.
+    await expect(mutations!.create({ title: 'too soon' })).rejects.toBeInstanceOf(
+      RecordRoomNotReadyError,
+    )
+
+    expect(spy).toHaveBeenCalledTimes(1)
+    const error = spy.mock.calls[0][0]
+    expect(error.kind).toBe('not_ready')
+    expect(error.detail).toContain('tasks')
+    expect(error.detail).toContain('ready')
+  })
+
+  it('every mutation entry point dispatches, including the confirmed variants', async () => {
+    const spy = vi.fn<(e: WriteError) => void>()
+    mutations = null
+    await render(
+      <RecordProvider allowAnonymous onWriteError={spy}>
+        <RecordScope roomId="app:test" schemas={[tasksSchema]}>
+          <MutationProbe />
+        </RecordScope>
+      </RecordProvider>,
+    )
+
+    const attempts = [
+      mutations!.create({ title: 'a' }),
+      mutations!.put('t1', { title: 'b' }),
+      mutations!.remove('t1'),
+      mutations!.createConfirmed({ title: 'c' }),
+      mutations!.putConfirmed('t1', { title: 'd' }),
+      mutations!.removeConfirmed('t1'),
+    ]
+    for (const attempt of attempts) {
+      await expect(attempt).rejects.toBeInstanceOf(RecordRoomNotReadyError)
+    }
+    expect(spy).toHaveBeenCalledTimes(attempts.length)
+    expect(spy.mock.calls.every(([e]) => e.kind === 'not_ready')).toBe(true)
+  })
+
+  it('the default handler covers not-ready writes when no onWriteError is passed', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mutations = null
+    await render(
+      <RecordProvider allowAnonymous>
+        <RecordScope roomId="app:test" schemas={[tasksSchema]}>
+          <MutationProbe />
+        </RecordScope>
+      </RecordProvider>,
+    )
+
+    await expect(mutations!.create({ title: 'too soon' })).rejects.toBeInstanceOf(
+      RecordRoomNotReadyError,
+    )
+    expect(errorSpy).toHaveBeenCalledTimes(1)
+    expect(String(errorSpy.mock.calls[0][0])).toContain('Pass onWriteError to <RecordProvider>')
   })
 })
 

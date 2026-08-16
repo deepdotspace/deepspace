@@ -83,10 +83,13 @@ export interface RecordAuthContextValue {
   userProfileLoading: boolean
   refetchUserProfile: () => Promise<void>
   allowAnonymous: boolean
-  /** Called by RecordScope when it receives an RBAC permission error */
-  onPermissionError?: (title: string, detail: string) => void
-  /** Called by RecordScope when it receives a validation/other error */
-  onValidationError?: (title: string, detail: string) => void
+  /**
+   * The one write-failure surface. RecordScope adapts socket rejections onto
+   * it (permission/validation) and useMutations dispatches writes it refuses
+   * before the room is ready (not_ready), so every rejected write reaches the
+   * app's single `onWriteError` prop.
+   */
+  onWriteError?: (error: WriteError) => void
   /** Get auth token for WebSocket connections. */
   getAuthToken?: () => Promise<string | null>
 }
@@ -106,8 +109,7 @@ interface RecordProviderStateProps {
   fetchUser: FetchUserProfile
   allowAnonymous?: boolean
   getAuthToken?: () => Promise<string | null>
-  onPermissionError?: (title: string, detail: string) => void
-  onValidationError?: (title: string, detail: string) => void
+  onWriteError: (error: WriteError) => void
 }
 
 function RecordProviderState({
@@ -115,26 +117,19 @@ function RecordProviderState({
   fetchUser,
   allowAnonymous = false,
   getAuthToken: getAuthTokenProp,
-  onPermissionError: onPermissionErrorProp,
-  onValidationError: onValidationErrorProp,
+  onWriteError: onWriteErrorProp,
 }: RecordProviderStateProps): React.ReactElement {
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null)
   const [userProfileLoading, setUserProfileLoading] = useState(true)
 
-  // Hold the latest app callbacks in refs and expose stable wrappers, so an
+  // Hold the latest app callback in a ref and expose a stable wrapper, so an
   // inline arrow prop doesn't churn authValue (and every RecordScope under
   // it) on each render.
-  const onPermissionErrorRef = useRef(onPermissionErrorProp)
-  onPermissionErrorRef.current = onPermissionErrorProp
-  const onValidationErrorRef = useRef(onValidationErrorProp)
-  onValidationErrorRef.current = onValidationErrorProp
+  const onWriteErrorRef = useRef(onWriteErrorProp)
+  onWriteErrorRef.current = onWriteErrorProp
 
-  const onPermissionError = useCallback((title: string, detail: string) => {
-    onPermissionErrorRef.current?.(title, detail)
-  }, [])
-
-  const onValidationError = useCallback((title: string, detail: string) => {
-    onValidationErrorRef.current?.(title, detail)
+  const onWriteError = useCallback((error: WriteError) => {
+    onWriteErrorRef.current(error)
   }, [])
 
   const refetchUserProfile = useCallback(async () => {
@@ -184,8 +179,7 @@ function RecordProviderState({
       refetchUserProfile,
       allowAnonymous,
       getAuthToken: getAuthTokenProp,
-      onPermissionError,
-      onValidationError,
+      onWriteError,
     }),
     [
       userProfile,
@@ -193,8 +187,7 @@ function RecordProviderState({
       refetchUserProfile,
       allowAnonymous,
       getAuthTokenProp,
-      onPermissionError,
-      onValidationError,
+      onWriteError,
     ],
   )
 
@@ -360,22 +353,16 @@ export function RecordProvider({
     return <>{null}</>
   }
 
-  // Adapt the public structured callback onto the two internal channels the
-  // socket layer dispatches (permission vs validation). Inline arrows are
-  // fine here: RecordProviderState holds them in refs behind stable wrappers, so
-  // their identity never reaches a dependency array.
-  const onPermissionError = (title: string, detail: string) =>
-    onWriteError({ kind: 'permission', title, detail })
-  const onValidationError = (title: string, detail: string) =>
-    onWriteError({ kind: 'validation', title, detail })
-
+  // The public callback travels down unchanged; every producer (socket
+  // rejections, not-ready mutations) shapes its own WriteError. Passing the
+  // raw prop is safe: RecordProviderState holds it in a ref behind a stable
+  // wrapper, so its identity never reaches a dependency array.
   return (
     <RecordProviderState
       fetchUser={fetchUser}
       allowAnonymous={allowAnonymous}
       getAuthToken={getAuthTokenFn}
-      onPermissionError={onPermissionError}
-      onValidationError={onValidationError}
+      onWriteError={onWriteError}
     >
       {children}
     </RecordProviderState>

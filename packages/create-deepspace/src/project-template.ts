@@ -228,7 +228,8 @@ function copyTemplate(template: string, appDir: string, appName: string): string
     // README/docs/agent files whose literal placeholder text belongs to the
     // user and must survive the merge unchanged. `__APP_ID__` deliberately
     // survives this pass: the id is server-minted by the authed
-    // `deepspace app init` step at the end of setup, which stamps it.
+    // `deepspace app init` step at the end of setup, which writes it to
+    // wrangler.toml (the client resolves it from there at build time).
     replaceInDir(stagingDirectory, '__APP_NAME__', appName)
     for (const entry of readdirSync(stagingDirectory)) {
       const source = join(stagingDirectory, entry)

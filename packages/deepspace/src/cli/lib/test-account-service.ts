@@ -61,6 +61,47 @@ export async function createRemoteTestAccount(
   return { ...data, label: data.label ?? null } as RemoteTestAccount
 }
 
+export interface RecoveredTestAccount extends RemoteTestAccount {
+  password: string
+}
+
+/**
+ * Rotate a test account's password to a fresh platform-generated one and
+ * return it, so an account created on another machine becomes usable here.
+ * The platform stores no recoverable plaintext, so recovery is a rotation —
+ * any other machine holding the old password must recover too.
+ */
+export async function recoverRemoteTestAccount(id: string): Promise<RecoveredTestAccount> {
+  const response = await fetch(`${AUTH_URL}/api/auth/test-accounts/${id}/credential`, {
+    method: 'POST',
+    headers: { Cookie: sessionCookie(), Origin: AUTH_URL },
+  })
+  const data = await response.json().catch(() => ({})) as Partial<RecoveredTestAccount> & {
+    error?: string
+  }
+  if (response.status === 404) {
+    throw new Error(
+      `No test account ${id} on this account. Run \`deepspace test accounts list\` for the current pool.`,
+    )
+  }
+  if (
+    !response.ok ||
+    typeof data.password !== 'string' ||
+    typeof data.email !== 'string' ||
+    typeof data.userId !== 'string'
+  ) {
+    throw new Error(data.error ?? 'Failed to re-issue the test account credential')
+  }
+  return {
+    id,
+    email: data.email,
+    userId: data.userId,
+    label: data.label ?? null,
+    createdAt: data.createdAt ?? Date.now(),
+    password: data.password,
+  }
+}
+
 export async function deleteRemoteTestAccount(id: string): Promise<void> {
   const response = await fetch(`${AUTH_URL}/api/auth/test-accounts/${id}`, {
     method: 'DELETE',

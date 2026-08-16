@@ -471,6 +471,10 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
       sql: this.sql,
       state: this.state,
       schemaRegistry: this.schemaRegistry,
+      // Every record room stub is addressed with `idFromName(scopeId)`, so the
+      // DO's own name is the scope. Handlers use it to name the room when a
+      // caller asks it for a collection that lives in a different scope.
+      scopeId: this.state.id.name,
       getPermissionContext: () => this.getPermissionContext(),
       send: (ws: WebSocket, msg: ServerMessage) => this.send(ws, msg),
       sendBinary: (ws: WebSocket, data: Uint8Array) => this.sendBinaryHelper(ws, data),

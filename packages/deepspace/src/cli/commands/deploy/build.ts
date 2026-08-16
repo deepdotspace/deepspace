@@ -105,11 +105,14 @@ function declaredCompatibilityDate(config: OutputWranglerConfig): string | null 
 export async function buildDeployBundle(options: {
   appDir: string
   appName: string
+  /** The immutable id this deploy targets — `[env.<name>.vars]
+   *  DEEPSPACE_APP_ID` when `envName` is set, `[vars]` otherwise. */
+  appId: string
   envName: string | undefined
   output: DeployOutput
   spinner: Spinner
 }): Promise<DeployBundle> {
-  const { appDir, appName, envName, output, spinner } = options
+  const { appDir, appName, appId, envName, output, spinner } = options
   const junk = removeMacosJunk(appDir)
   if (junk > 0) p.log.info(`Removed ${junk} macOS metadata file(s) (._*, .DS_Store)`)
 
@@ -205,6 +208,10 @@ export async function buildDeployBundle(options: {
   const assets = collectAssets(clientDir)
   const assetConfig = readDeployAssetConfig(clientDir)
   spinner.stop(`Collected ${assets.length} assets`)
+
+  const appIdRefusal = clientAppIdRefusal(assets, appId, envName)
+  if (appIdRefusal) output.die(appIdRefusal.message, appIdRefusal.code)
+
   const workerJs = readFileSync(workerBundlePath, 'utf-8')
 
   const doBindings = outputConfig.durable_objects?.bindings
@@ -306,6 +313,119 @@ export function oversizedAssetRefusal(assets: DeployAsset[]): string | null {
     `${tooBig.path} is ${formatBytes(tooBig.size)}; the per-file limit for deploy assets is ` +
     `${formatBytes(MAX_DEPLOY_ASSET_FILE_BYTES)}. ${LARGE_MEDIA_HOME}`
   )
+}
+
+/** Scripts and markup the browser evaluates — where a baked-in app id lands.
+ *  Images/fonts/sourcemaps are excluded: nothing keys a RecordRoom from them,
+ *  and scanning them only invents false refusals. */
+const CLIENT_CODE_ASSET = /\.(?:js|mjs|html)$/i
+
+/** `app_` + 26 Crockford base32 chars, anywhere in a file (not anchored — the
+ *  point is to find it inside minified code). Mirrors `APP_ID_RE`, which is
+ *  anchored and therefore can't be reused for a scan. */
+const APP_ID_LITERAL = /app_[0-9A-HJKMNP-TV-Z]{26}/g
+
+/** The identifier the current template's client reads its id from. Vite
+ *  replaces it through `define`; an occurrence in a BUILT asset means nothing
+ *  did. */
+const APP_ID_DEFINE = '__DEEPSPACE_APP_ID__'
+
+/** How an app gets from either broken state to the correct one. Stated once
+ *  so the two refusals below cannot disagree about what the change is. The SDK
+ *  supplies the machinery (`deepspace/build`), so adoption is three small edits
+ *  with no new file, no dependency, and no migration. */
+const APP_ID_ADOPTION_STEPS =
+  `Point the client at the build-injected id — the SDK's \`deepspace/build\` supplies it:\n` +
+  `  • vite.config.ts: import { deepspaceBuild } from 'deepspace/build' and add\n` +
+  `    deepspaceBuild({ appDir: fileURLToPath(new URL('.', import.meta.url)) }) to plugins\n` +
+  `  • vitest.config.ts: import { appIdDefine } and set define: appIdDefine({ appDir })\n` +
+  `  • src/constants.ts: declare const __DEEPSPACE_APP_ID__: string; export it as APP_ID\n` +
+  `    (drop the frozen literal)\n` +
+  `Apply all three together: src/constants.ts on its own builds clean and then throws ` +
+  `in the browser. A newly scaffolded app already has this.`
+
+export interface ClientAppIdRefusal {
+  message: string
+  code: string
+}
+
+/**
+ * Refuse a deploy whose built client is not keyed to the app being deployed —
+ * either because it carries a FOREIGN id, or because it carries NO id at all.
+ *
+ * NET-NEW COMPLEXITY, deliberately, and one scan for both. The root cause is
+ * fixed in the scaffold (the template's client no longer holds a literal id —
+ * it reads `DEEPSPACE_APP_ID` out of the wrangler config the build ran
+ * against), but a template only reaches apps scaffolded after it. Every app
+ * already on disk still has `export const APP_ID = 'app_…'` frozen at scaffold
+ * time, so `deploy --env staging` builds a browser bundle keyed to the DEFAULT
+ * env's rooms while the worker writes the staging env's — reported as
+ * `ok:true, serving:confirmed`, with the two halves reading different data
+ * stores.
+ *
+ * The second check exists because adopting the fix is a multi-file change, and
+ * applying only the `src/constants.ts` part is silent: Vite leaves an unmatched
+ * `define` identifier in the output, emits no warning, and the browser throws
+ * `ReferenceError: __DEEPSPACE_APP_ID__ is not defined` on the first module
+ * that imports it. No `app_…` literal survives that edit either, so the
+ * foreign-id scan sees a clean bundle and the deploy proceeds — a silent total
+ * outage in place of a silent wrong-store deploy. One emitted identifier is a
+ * cheap, exact signal that the client was moved halfway, and it belongs here
+ * rather than in a second pass over the same files.
+ *
+ * Detection is a literal scan of the built client code. That is reliable for
+ * the case that matters: an app id is an opaque 26-char constant and the
+ * define is a reserved-looking identifier, so bundlers carry both through
+ * minification intact — there is no folding, mangling, or splitting to do to
+ * them. Limits: it cannot see an id assembled at runtime from parts, and it
+ * cannot tell an id the app *uses* from one it merely *mentions* — an app that
+ * deliberately names another app's id in client code is refused and must move
+ * that literal server-side.
+ */
+export function clientAppIdRefusal(
+  assets: DeployAsset[],
+  appId: string,
+  envName?: string,
+): ClientAppIdRefusal | null {
+  const foreign = new Map<string, string>()
+  let unsubstituted: string | undefined
+  for (const asset of assets) {
+    if (!CLIENT_CODE_ASSET.test(asset.path)) continue
+    const source = readFileSync(asset.sourcePath, 'utf-8')
+    if (unsubstituted === undefined && source.includes(APP_ID_DEFINE)) unsubstituted = asset.path
+    for (const found of source.matchAll(APP_ID_LITERAL)) {
+      if (found[0] !== appId && !foreign.has(found[0])) foreign.set(found[0], asset.path)
+    }
+  }
+
+  // The dead-bundle case first: it is fatal on load, where a foreign id at
+  // least renders.
+  if (unsubstituted !== undefined) {
+    return {
+      code: 'app_id_define_unsubstituted',
+      message:
+        `Built client assets still contain \`${APP_ID_DEFINE}\` (first in ${unsubstituted}) — ` +
+        `nothing replaced it at build time. The browser evaluates that identifier and throws ` +
+        `ReferenceError before the app renders, so this bundle is a blank page for every ` +
+        `visitor. src/constants.ts was moved onto the build-time app id without the build ` +
+        `config that supplies it.\n${APP_ID_ADOPTION_STEPS}`,
+    }
+  }
+  if (foreign.size === 0) return null
+
+  const target = envName ? `--env ${envName} (${appId})` : appId
+  return {
+    code: 'app_id_env_mismatch',
+    message:
+      `Built client assets carry a different app id than the one being deployed. ` +
+      `Deploying ${target}, but the bundle contains:\n` +
+      [...foreign].map(([id, path]) => `  • ${id} in ${path}`).join('\n') +
+      `\nThe browser keys its RecordRooms to the id in the bundle, so this would ` +
+      `serve ${envName ? `${envName}'s` : "this app's"} worker against another app's data. ` +
+      `The usual cause is an app scaffolded before the id was build-injected: ` +
+      `src/constants.ts still holds \`export const APP_ID = 'app_…'\` frozen at scaffold ` +
+      `time.\n${APP_ID_ADOPTION_STEPS}`,
+  }
 }
 
 const LARGE_MEDIA_HOME =

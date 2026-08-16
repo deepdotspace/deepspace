@@ -25,6 +25,7 @@ import {
   createRemoteTestAccount,
   deleteRemoteTestAccount,
   fetchRemoteTestAccounts,
+  recoverRemoteTestAccount,
   syncTestAccountStore,
 } from '../lib/test-account-service'
 import {
@@ -360,6 +361,117 @@ const clear = defineDeepspaceCommand({
   },
 })
 
+const recover = defineDeepspaceCommand({
+  meta: {
+    name: 'recover',
+    description: 'Re-issue the local credential for a test account you own',
+  },
+  args: {
+    email: {
+      type: 'string',
+      description: 'Email of the test account to recover',
+      required: false,
+    },
+    id: {
+      type: 'string',
+      description: 'ID of the test account to recover',
+      required: false,
+    },
+    all: {
+      type: 'boolean',
+      description: 'Recover every pool account missing a local credential',
+      required: false,
+    },
+  },
+  async run({ args }) {
+    const selectors = [args.email, args.id, args.all].filter(Boolean).length
+    if (selectors === 0) {
+      throw new Refusal('Provide --email <email>, --id <id>, or --all.', 'missing_argument')
+    }
+    if (selectors > 1) {
+      throw new Refusal('Provide exactly one of --email, --id, or --all.', 'conflicting_arguments')
+    }
+
+    await ensureToken()
+
+    let remote: RemoteTestAccount[]
+    try {
+      remote = await fetchRemoteTestAccounts()
+    } catch (err) {
+      throw new Refusal(`Failed: ${(err as Error).message}`, 'test_accounts_list_failed')
+    }
+
+    const localAccounts = loadAllTestAccounts()
+    const known = new Set(localAccounts.map((account) => account.id))
+    // Display names this machine already knows. Rotation returns no name, and
+    // `name` is what a spec compares against — so keep the real one when we
+    // have it and never invent one from the address.
+    const localNames = new Map(
+      localAccounts.flatMap((account) =>
+        account.name ? [[account.email, account.name] as const] : [],
+      ),
+    )
+    let targets: RemoteTestAccount[]
+    if (args.all) {
+      targets = remote.filter((account) => !known.has(account.id))
+      if (targets.length === 0) {
+        if (!args.json) console.log('Every pool account already has a local credential.')
+        return { data: { recovered: [], alreadyLocal: remote.length } }
+      }
+    } else {
+      const match = args.id
+        ? remote.find((account) => account.id === args.id)
+        : remote.find((account) => account.email === args.email)
+      if (!match) {
+        throw new Refusal(
+          `No test account ${args.id ? `with id ${args.id}` : `with email ${args.email}`} on this account.`,
+          'test_account_not_found',
+          { action: cliAction('deepspace', 'test', 'accounts', 'list') },
+        )
+      }
+      targets = [match]
+    }
+
+    const recovered: Array<{ id: string; email: string }> = []
+    const failures: Array<{ email: string; error: string }> = []
+    for (const target of targets) {
+      try {
+        const account = await recoverRemoteTestAccount(target.id)
+        const name = localNames.get(account.email)
+        upsertTestAccount({
+          id: account.id,
+          email: account.email,
+          password: account.password,
+          userId: account.userId,
+          label: account.label,
+          ...(name ? { name } : {}),
+          createdAt: account.createdAt,
+        })
+        recovered.push({ id: account.id, email: account.email })
+      } catch (err) {
+        failures.push({ email: target.email, error: (err as Error).message })
+      }
+    }
+
+    if (failures.length > 0) {
+      throw new Refusal(
+        `Recovered ${recovered.length}/${targets.length} test account(s).\nFailed:\n` +
+          failures.map((failure) => `  ${failure.email}: ${failure.error}`).join('\n'),
+        'test_account_recover_failed',
+        { extra: { recovered, requested: targets.length, failures } },
+      )
+    }
+
+    if (!args.json) {
+      for (const account of recovered) console.log(`Recovered ${account.email}`)
+      console.log(
+        `\nStored in ${TEST_ACCOUNTS_PATH}. The previous password (if any machine still holds one) no longer works — recover there too.`,
+      )
+    }
+    return { data: { recovered, requested: targets.length, failures: [] } }
+  },
+})
+
 export default defineCommand({
   meta: {
     name: 'test-accounts',
@@ -370,5 +482,6 @@ export default defineCommand({
     list,
     delete: del,
     clear,
+    recover,
   },
 })

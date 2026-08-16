@@ -100,32 +100,3 @@ export function writeAppId(
   }
   writeFileSync(wranglerPath, src)
 }
-
-/** The identity placeholder the scaffolder leaves in template-owned files. */
-const APP_ID_PLACEHOLDER = '__APP_ID__'
-
-/**
- * Stamp the app id into the ONE template source file that bakes it into the
- * client bundle: `src/constants.ts`, whose SCOPE_ID must match the worker's
- * `app:${DEEPSPACE_APP_ID}` room name. Replaces the scaffold placeholder —
- * and, when forking with `--new-id`, the previous id, which would otherwise
- * keep scoping client data to the ORIGINAL app. Deliberately not a tree-wide
- * substitution: any other occurrence of the placeholder or the old id is
- * user-owned text the CLI must not rewrite (wrangler.toml has its own single
- * writer, {@link writeAppId}). Returns true when the file changed.
- */
-export function stampAppIdInSources(
-  cwd: string,
-  appId: string,
-  previousAppId?: string | null,
-): boolean {
-  const constantsPath = join(resolve(cwd), 'src', 'constants.ts')
-  if (!existsSync(constantsPath)) return false
-  const needles = [APP_ID_PLACEHOLDER, ...(previousAppId ? [previousAppId] : [])]
-  const content = readFileSync(constantsPath, 'utf-8')
-  let next = content
-  for (const needle of needles) next = next.replaceAll(needle, appId)
-  if (next === content) return false
-  writeFileSync(constantsPath, next)
-  return true
-}

@@ -91,12 +91,15 @@ let generatedConfigSeq = 0
  *                    silently deploy staging code to production.
  *
  * Returns a discriminated union so callers can surface a precise error
- * (matches the existing `resolveAppName` contract).
+ * (matches the existing `resolveAppName` contract). A failure may carry a
+ * `code`: the stable machine contract callers emit as `{ ok: false, code }`.
+ * Absent, the failure is about the name itself (`invalid_app_name`) — a
+ * missing env block is not, so it names itself.
  */
 export function resolveAppNameForEnv(
   config: WranglerConfig,
   envName: string | undefined,
-): { ok: true; name: string; warning?: string } | { ok: false; reason: string } {
+): { ok: true; name: string; warning?: string } | { ok: false; reason: string; code?: string } {
   if (!envName) {
     return resolveAppName(config.name)
   }
@@ -104,6 +107,7 @@ export function resolveAppNameForEnv(
   if (!envBlock) {
     return {
       ok: false,
+      code: 'missing_env_block',
       reason:
         `wrangler.toml: no [env.${envName}] block found. ` +
         `Add one with a distinct \`name\` to deploy this environment.`,

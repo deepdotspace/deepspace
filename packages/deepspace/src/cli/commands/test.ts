@@ -227,10 +227,10 @@ export default defineDeepspaceCommand({
         if (forwarded.grep || forwarded.project || forwarded.headed) {
           console.error('note: --grep/--project/--headed apply to Playwright suites and are ignored by `unit`')
         }
-        exitCode = runVitest(appDir)
+        exitCode = runVitest(appDir, wranglerEnv)
         break
       case 'all':
-        exitCode = runVitest(appDir)
+        exitCode = runVitest(appDir, wranglerEnv)
         if (exitCode === 0) exitCode = runPlaywright(appDir, [], port, wranglerEnv, forwarded)
         break
       case 'default':
@@ -265,12 +265,21 @@ export default defineDeepspaceCommand({
   },
 })
 
-function runPlaywright(
+/**
+ * Every suite runner goes through here, so `--env` reaches all of them.
+ *
+ * It is one chokepoint on purpose: the app's client reads its app id from the
+ * wrangler config the run targets (`deepspace/build`), so a runner spawned
+ * without this env resolves the DEFAULT environment's id. That made
+ * `deepspace test run --env staging` run its unit half against production's
+ * app id while its Playwright half used staging's — the two halves of one
+ * command disagreeing about which app they were testing.
+ */
+function runSuite(
   appDir: string,
-  testFiles: string[],
-  port: number,
+  argv: string[],
   wranglerEnv: string | undefined,
-  flags: PlaywrightForwardedFlags,
+  extraEnv: NodeJS.ProcessEnv = {},
 ): number {
   let wranglerConfig: PreparedWranglerEnvConfig
   try {
@@ -280,13 +289,10 @@ function runPlaywright(
     return 1
   }
   try {
-    const result = spawnSync('npx', playwrightTestArgs(testFiles, flags), {
+    const result = spawnSync('npx', argv, {
       cwd: appDir,
       stdio: 'inherit',
-      env: wranglerViteEnv(process.env, wranglerConfig, {
-        DEEPSPACE_PORT: String(port),
-        PLAYWRIGHT_HTML_OUTPUT_DIR: '.deepspace/playwright-report',
-      }),
+      env: wranglerViteEnv(process.env, wranglerConfig, extraEnv),
     })
     return result.status ?? 1
   } finally {
@@ -294,10 +300,21 @@ function runPlaywright(
   }
 }
 
-function runVitest(appDir: string): number {
-  const result = spawnSync('npx', ['vitest', 'run', '--passWithNoTests'], {
-    cwd: appDir,
-    stdio: 'inherit',
+function runPlaywright(
+  appDir: string,
+  testFiles: string[],
+  port: number,
+  wranglerEnv?: string,
+  flags: PlaywrightForwardedFlags = {},
+): number {
+  return runSuite(appDir, playwrightTestArgs(testFiles, flags), wranglerEnv, {
+    DEEPSPACE_PORT: String(port),
+    PLAYWRIGHT_HTML_OUTPUT_DIR: '.deepspace/playwright-report',
   })
-  return result.status ?? 1
+}
+
+/** Exported for its regression test: this runner used to spawn with no
+ *  wrangler env at all. */
+export function runVitest(appDir: string, wranglerEnv?: string): number {
+  return runSuite(appDir, ['vitest', 'run', '--passWithNoTests'], wranglerEnv)
 }

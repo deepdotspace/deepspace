@@ -47,6 +47,10 @@ function makeSql(db: Database.Database): SqlStorage {
 
 function makeState(db: Database.Database): DurableObjectState {
   return {
+    // Record room stubs are addressed with `idFromName(scopeId)`, so a real
+    // state always carries the scope as `id.name`. Handlers read it to name
+    // the room when a caller asks for a collection from another scope.
+    id: { name: 'workspace:default', toString: () => 'workspace:default' },
     storage: {
       sql: makeSql(db),
       setAlarm() {},

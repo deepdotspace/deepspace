@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+  findTestAccountByName,
   reconcileTestAccounts,
   reconcileTestAccountScopes,
+  testAccountEmailSlug,
   type RemoteTestAccount,
   type TestAccount,
   type TestAccountCredentialStore,
@@ -64,5 +66,47 @@ describe('test account registry reconciliation', () => {
     expect(backOnProduction.store.scopes[stagingOrigin]).toEqual([
       { ...staging, password: 'staging-secret' },
     ])
+  })
+})
+
+describe('testAccountEmailSlug', () => {
+  it('turns a display name into a runnable email local-part', () => {
+    // The not-found hint used to lowercase the name straight into an address,
+    // so "Collab A" produced `--email collab a@deepspace.test` — a command
+    // that cannot run because of the space.
+    expect(testAccountEmailSlug('Collab A')).toBe('collab-a')
+    expect(`${testAccountEmailSlug('Collab A')}@deepspace.test`).not.toMatch(/\s/)
+  })
+
+  it('collapses punctuation and trims separators', () => {
+    expect(testAccountEmailSlug("O'Brien  (QA)")).toBe('o-brien-qa')
+    expect(testAccountEmailSlug('  Ada  ')).toBe('ada')
+  })
+
+  it('falls back rather than emitting an empty local-part', () => {
+    expect(testAccountEmailSlug('***')).toBe('tester')
+  })
+})
+
+describe('findTestAccountByName failure', () => {
+  // Reads the developer's real credential store, so use a display name no
+  // pool account would ever carry — the assertion is about the message, and
+  // it must not depend on which machine runs it.
+  const ABSENT = 'Absent Fixture Account 9f3c'
+
+  it('suggests a runnable command and the recovery path', () => {
+    let message = ''
+    try {
+      findTestAccountByName(ABSENT)
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err)
+    }
+
+    const suggested = message.match(/--email (\S+)/)?.[1]
+    expect(suggested).toBe('absent-fixture-account-9f3c@deepspace.test')
+    expect(suggested).not.toMatch(/\s/)
+    // The pool is global but passwords are local-only, so "not found here"
+    // very often means "created on another machine" — say so.
+    expect(message).toContain('deepspace test accounts recover')
   })
 })

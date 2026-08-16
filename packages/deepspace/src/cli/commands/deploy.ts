@@ -114,7 +114,7 @@ export default defineCommand({
 
     const wranglerConfig: WranglerConfig = readWranglerConfig(appDir)
     const nameResult = resolveAppNameForEnv(wranglerConfig, envName)
-    if (!nameResult.ok) return output.die(nameResult.reason, 'invalid_app_name')
+    if (!nameResult.ok) return output.die(nameResult.reason, nameResult.code ?? 'invalid_app_name')
     const declaredName = envName ? wranglerConfig.env?.[envName]?.name : wranglerConfig.name
     if (declaredName !== nameResult.name) {
       const location = envName ? `[env.${envName}].name` : '`name`'
@@ -186,6 +186,7 @@ export default defineCommand({
     const bundle = await buildDeployBundle({
       appDir,
       appName,
+      appId,
       envName,
       output,
       spinner,

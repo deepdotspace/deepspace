@@ -123,12 +123,8 @@ function ScopeConnection({
   userProfileRef.current = auth?.userProfile ?? null
   const getAuthTokenRef = useRef(auth?.getAuthToken ?? null)
   getAuthTokenRef.current = auth?.getAuthToken ?? null
-  const authCallbacksRef = useRef({
-    onPermissionError: auth?.onPermissionError,
-    onValidationError: auth?.onValidationError,
-  })
-  authCallbacksRef.current.onPermissionError = auth?.onPermissionError
-  authCallbacksRef.current.onValidationError = auth?.onValidationError
+  const onWriteErrorRef = useRef(auth?.onWriteError)
+  onWriteErrorRef.current = auth?.onWriteError
   const allowAnonymous = auth?.allowAnonymous ?? false
 
   // ── Socket lifecycle ─────────────────────────────────────────────────
@@ -165,9 +161,9 @@ function ScopeConnection({
         },
         onSchemas: setDiscoveredSchemas,
         onPermissionError: (title, detail) =>
-          authCallbacksRef.current.onPermissionError?.(title, detail),
+          onWriteErrorRef.current?.({ kind: 'permission', title, detail }),
         onValidationError: (title, detail) =>
-          authCallbacksRef.current.onValidationError?.(title, detail),
+          onWriteErrorRef.current?.({ kind: 'validation', title, detail }),
       },
     })
     socketRef.current = socket

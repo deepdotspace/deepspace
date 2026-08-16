@@ -1,37 +1,25 @@
-import { existsSync, readdirSync, unlinkSync } from 'node:fs'
-import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { defineConfig, type Plugin } from 'vite'
+import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import generouted from '@generouted/react-router/plugin'
 import { cloudflare } from '@cloudflare/vite-plugin'
 import checker from 'vite-plugin-checker'
+import { deepspaceBuild } from 'deepspace/build'
 
-/** Cloudflare emits preview-only secrets beside its worker bundle. DeepSpace
- * has one local runtime (`dev start`), so do not retain that second copy. */
-function removeBuildPreviewSecrets(): Plugin {
-  return {
-    name: 'deepspace-remove-build-preview-secrets',
-    enforce: 'post',
-    closeBundle() {
-      const outputRoot = fileURLToPath(new URL('./dist', import.meta.url))
-      if (!existsSync(outputRoot)) return
-      for (const entry of readdirSync(outputRoot, { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue
-        const secretPath = join(outputRoot, entry.name, '.dev.vars')
-        if (!existsSync(secretPath)) continue
-        unlinkSync(secretPath)
-      }
-    },
-  }
-}
+const appDir = fileURLToPath(new URL('.', import.meta.url))
 
 export default defineConfig({
   plugins: [
     react(),
     generouted(),
     cloudflare(),
-    removeBuildPreviewSecrets(),
+    // The app id `define`, the preview-secret cleanup, and the client dedupe
+    // hint — all shipped by the SDK so a fix to any of them arrives with a
+    // version bump, not an app edit. The app id is read from the wrangler
+    // config THIS build targets (wrangler.toml, or the env-flattened config
+    // `deepspace deploy --env` generates); src/constants.ts is the only
+    // consumer.
+    deepspaceBuild({ appDir }),
     // Runs the Rules of Hooks lint (see eslint.config.js) automatically, so
     // there's no separate step to remember: a violation surfaces as an overlay
     // during `deepspace dev start` and fails the build during `deepspace deploy`.
@@ -48,7 +36,6 @@ export default defineConfig({
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
-    dedupe: ['react', 'react-dom', 'better-auth'],
   },
   optimizeDeps: {
     // generouted loads routes via `import.meta.glob`, which Vite's esbuild dep-scanner

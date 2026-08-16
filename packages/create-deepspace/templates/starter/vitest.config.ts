@@ -1,4 +1,6 @@
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
+import { appIdDefine } from 'deepspace/build'
 
 // Dedicated Vitest config, intentionally standalone (Vitest prefers this file
 // over vite.config.ts, so the app build config is never loaded for unit tests).
@@ -13,6 +15,9 @@ import { defineConfig } from 'vitest/config'
 //
 // Unit tests live next to the source they cover (src/**/*.test.ts[x]).
 export default defineConfig({
+  // src/constants.ts takes its APP_ID from the build, not a literal, so unit
+  // tests need the same injection the bundle gets (see deepspace/build).
+  define: appIdDefine({ appDir: fileURLToPath(new URL('.', import.meta.url)) }),
   test: {
     include: ['src/**/*.test.{ts,tsx}'],
     environment: 'node',

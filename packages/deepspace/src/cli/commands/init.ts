@@ -20,7 +20,7 @@ import { PLATFORM_URLS } from '../env'
 import { ApiError, apiFetch } from '../lib/api'
 import { findAppDir } from '../lib/app-context'
 import { getAppSource } from '../lib/source-api'
-import { readAppId, stampAppIdInSources, writeAppId } from '../lib/app-identity'
+import { readAppId, writeAppId } from '../lib/app-identity'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import { runGit } from '../lib/git/process'
 import { ensureGitIdentity } from '../lib/vc-remote'
@@ -130,10 +130,11 @@ export default defineDeepspaceCommand({
       method: 'POST',
     })
     writeAppId(appDir, appId, { wranglerEnv: envName, force: Boolean(args['new-id']) })
-    // The top-level id is what the scaffold bakes into client source (e.g.
-    // constants.ts SCOPE_ID); env blocks are separate apps whose ids live only
-    // in wrangler.toml, so only top-level init touches source files.
-    if (!envName) stampAppIdInSources(appDir, appId, existing)
+    // wrangler.toml is the ONLY place the id lives: the client bundle resolves
+    // it at build time from the same config (deepspace/build appIdDefine), so
+    // there is nothing to stamp into source files — including on --new-id
+    // forks, which previously needed re-stamping to avoid scoping the fork's
+    // client to the original app.
     const committedScaffold = commitScaffoldIfUnborn(appDir, token)
     if (!args.json) {
       if (existing) {

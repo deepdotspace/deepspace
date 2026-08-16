@@ -11,9 +11,13 @@
  * orchestration.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+// Node-only leaf (its only import is `node:fs`), and this module is Node-only
+// too — Playwright fixtures. Reusing it keeps one definition of "write a file
+// holding plaintext secrets" rather than a second hand-rolled copy here.
+import { writeSecretFileSync } from '../cli/lib/secure-file'
 
 export interface TestAccount {
   email: string
@@ -48,7 +52,8 @@ export interface RemoteTestAccount {
  * array if the file doesn't exist yet.
  */
 export function currentTestAccountScope(env: NodeJS.ProcessEnv = process.env): string {
-  const selected = env.DEEPSPACE_AUTH_URL ??
+  const selected =
+    env.DEEPSPACE_AUTH_URL ??
     (env.DEEPSPACE_ENV === 'staging' ? STAGING_AUTH_ORIGIN : PRODUCTION_AUTH_ORIGIN)
   return normalizeTestAccountScope(selected)
 }
@@ -104,7 +109,9 @@ export function reconcileTestAccounts(
   local: TestAccount[],
   remote: RemoteTestAccount[],
 ): TestAccount[] {
-  const localById = new Map(local.filter((account) => account.id).map((account) => [account.id, account]))
+  const localById = new Map(
+    local.filter((account) => account.id).map((account) => [account.id, account]),
+  )
   return remote.flatMap((account) => {
     const stored = localById.get(account.id)
     return stored ? [{ ...stored, ...account }] : []
@@ -149,9 +156,12 @@ function readTestAccountStore(): TestAccountCredentialStore {
       return { version: 2, scopes: {} }
     }
     const candidate = raw as { scopes?: unknown }
-    const scopes = candidate.scopes && typeof candidate.scopes === 'object' && !Array.isArray(candidate.scopes)
-      ? Object.fromEntries(Object.entries(candidate.scopes).map(([key, value]) => [key, validTestAccounts(value)]))
-      : {}
+    const scopes =
+      candidate.scopes && typeof candidate.scopes === 'object' && !Array.isArray(candidate.scopes)
+        ? Object.fromEntries(
+            Object.entries(candidate.scopes).map(([key, value]) => [key, validTestAccounts(value)]),
+          )
+        : {}
     return { version: 2, scopes }
   } catch {
     return { version: 2, scopes: {} }
@@ -163,17 +173,21 @@ function validTestAccounts(value: unknown): TestAccount[] {
   return value.filter((item): item is TestAccount =>
     Boolean(
       item &&
-        typeof item === 'object' &&
-        typeof (item as TestAccount).id === 'string' &&
-        typeof (item as TestAccount).email === 'string' &&
-        typeof (item as TestAccount).password === 'string',
+      typeof item === 'object' &&
+      typeof (item as TestAccount).id === 'string' &&
+      typeof (item as TestAccount).email === 'string' &&
+      typeof (item as TestAccount).password === 'string',
     ),
   )
 }
 
 function saveTestAccountStore(store: TestAccountCredentialStore): void {
   mkdirSync(join(homedir(), '.deepspace'), { recursive: true })
-  writeFileSync(TEST_ACCOUNTS_PATH, JSON.stringify(store, null, 2), { mode: 0o600 })
+  // Holds plaintext passwords, so it must end up 0600 even when the file
+  // already exists with a wider mode — `writeFileSync`'s `mode` applies only
+  // at creation, which would silently leave a pre-existing world-readable
+  // file world-readable while writing fresh credentials into it.
+  writeSecretFileSync(TEST_ACCOUNTS_PATH, JSON.stringify(store, null, 2))
 }
 
 /**
@@ -183,21 +197,21 @@ function saveTestAccountStore(store: TestAccountCredentialStore): void {
  *
  * Throws with a helpful message if not enough accounts exist.
  */
-export function pickTestAccounts(
-  count: number,
-  options?: { label?: string },
-): TestAccount[] {
+export function pickTestAccounts(count: number, options?: { label?: string }): TestAccount[] {
   const all = loadAllTestAccounts()
-  const filtered = options?.label
-    ? all.filter((a) => a.label === options.label)
-    : all
+  const filtered = options?.label ? all.filter((a) => a.label === options.label) : all
   const sorted = filtered.slice().sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
 
   if (sorted.length < count) {
     const labelHint = options?.label ? ` (label="${options.label}")` : ''
     throw new Error(
       `Multiplayer test needs ${count} test accounts${labelHint}, but only ${sorted.length} ` +
-        `are present in ${TEST_ACCOUNTS_PATH}. Create more with:\n` +
+        `are usable from ${TEST_ACCOUNTS_PATH}.\n` +
+        `The pool is global per developer, but passwords are stored only on the machine that ` +
+        `created the account — so accounts created elsewhere are listed by ` +
+        `\`deepspace test accounts list\` and count against the 10-cap, yet cannot be signed in ` +
+        `as here. Re-issue their credentials, or create more:\n` +
+        `  deepspace test accounts recover --all (note: --all only covers accounts missing a local credential; recover a stale one by its email)\n` +
         `  deepspace test accounts create --email <name>@deepspace.test --password <pw> --name "<name>"${
           options?.label ? ` --label ${options.label}` : ''
         }`,
@@ -205,6 +219,20 @@ export function pickTestAccounts(
   }
 
   return sorted.slice(0, count)
+}
+
+/**
+ * Turn a display name into the local-part of a test-account email.
+ * "Collab A" -> "collab-a". Without this the suggested command in the
+ * not-found error carried a space inside the address and could not be run.
+ */
+export function testAccountEmailSlug(name: string): string {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return slug || 'tester'
 }
 
 /**
@@ -216,8 +244,14 @@ export function findTestAccountByName(name: string): TestAccount {
   const match = all.find((a) => a.name === name)
   if (!match) {
     throw new Error(
-      `No test account named "${name}" in ${TEST_ACCOUNTS_PATH}. Create with:\n` +
-        `  deepspace test accounts create --email ${name.toLowerCase()}@deepspace.test --password <pw> --name "${name}"`,
+      `No test account named "${name}" is usable from ${TEST_ACCOUNTS_PATH}.\n` +
+        `If it exists in the pool but was created on another machine, its password is not ` +
+        `stored here — re-issue it:\n` +
+        `  deepspace test accounts recover --all (note: --all only covers accounts missing a local credential; recover a stale one by its email)\n` +
+        `Otherwise create it:\n` +
+        `  deepspace test accounts create --email ${testAccountEmailSlug(name)}@deepspace.test --password <pw> --name "${name}"\n` +
+        `Suites that do not depend on a specific identity should ask for any N accounts with ` +
+        `\`users(2)\` instead of naming them.`,
     )
   }
   return match

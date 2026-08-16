@@ -8,6 +8,7 @@ import type { ConnectionAttachment } from '../../shared/protocol/types'
 import type { RecordResult, PutPayload, DeletePayload } from '../../shared/types'
 import type { ToolResult } from '../utils/tools'
 import { serverBuild } from '../../shared/protocol/messages'
+import { RECORD_NOT_FOUND } from '../../shared/protocol/constants'
 import {
   type CollectionSchema,
   type ResolvedColumn,
@@ -17,7 +18,9 @@ import {
   canRead,
   checkFieldPermissions,
   checkUnclaimedOwnerTransition,
+  SYSTEM_ASSIGNED_COLUMNS,
   SYSTEM_MANAGED_COLUMNS,
+  coerceValue,
   resolveColumn,
   columnId,
   collectionTableName,
@@ -25,8 +28,7 @@ import {
   dataToColumnValues,
   buildTableSelect,
 } from '../schemas/registry'
-import { broadcastChange, type SubscriptionContext } from './subscriptions'
-import { SYSTEM_COLLECTIONS } from './yjs'
+import { broadcastChange, resolveCollection, type SubscriptionContext } from './subscriptions'
 
 export interface RecordContext extends SubscriptionContext {
   state: DurableObjectState
@@ -37,6 +39,23 @@ export interface RecordContext extends SubscriptionContext {
  */
 function getResolvedColumns(schema: CollectionSchema): ResolvedColumn[] {
   return (schema.columns ?? []).map(resolveColumn)
+}
+
+/** Refusal text for a record write that tries to set a system-assigned column. */
+function systemManagedColumnError(column: string, isUpdate: boolean): string {
+  const roleHint =
+    column === 'role' ? ', or the admin-gated useUsers().setRole() to change a role' : ''
+  // On an update there is a current value to echo, and echoing it succeeds. On
+  // a create there is none, and no value at all is accepted — pointing at a
+  // "current value" would send the caller looking for something that does not
+  // exist. The row itself is registration's to make.
+  const remedy = isUpdate
+    ? `Re-sending the current value of '${column}' unchanged is accepted and ignored.`
+    : `A users row is created by registration, so no value for '${column}' is accepted here — omit it.`
+  return (
+    `FIELD ERROR: '${column}' is system-managed and cannot be set by a record write — ` +
+    `nothing was written. Use tools.registerUser({ userId, isAdmin })${roleHint}. ${remedy}`
+  )
 }
 
 // ============================================================================
@@ -215,13 +234,12 @@ export function putRecord(
   skipUserRbac = false,
   systemUpdate = false,
 ): ToolResult {
-  const isSystem = SYSTEM_COLLECTIONS.has(collection)
-  const schema = ctx.schemaRegistry.get(collection)
+  const resolved = resolveCollection(ctx, collection)
+  if (!resolved.ok) return { success: false, error: resolved.error }
 
-  if (!schema && !isSystem) {
-    return { success: false, error: `Schema not registered for collection: ${collection}` }
-  }
-
+  // A write needs declared columns, so a schema-less system collection is not
+  // writable through this path even though it resolves.
+  const schema = resolved.schema
   if (!schema) {
     return { success: false, error: `Schema not registered for collection: ${collection}` }
   }
@@ -297,18 +315,7 @@ export function putRecord(
     }
   }
 
-  // Strip system-managed columns (email, name, role, etc.) unless this is a system update
-  let finalData = mergedData
-  if (!systemUpdate && schema.name === 'users') {
-    finalData = { ...mergedData }
-    for (const key of SYSTEM_MANAGED_COLUMNS) {
-      if (existing?.data[key] !== undefined) {
-        finalData[key] = existing.data[key] // preserve existing
-      } else {
-        delete finalData[key]
-      }
-    }
-  }
+  const finalData = { ...mergedData }
 
   // RBAC checks
   if (!skipUserRbac) {
@@ -344,6 +351,38 @@ export function putRecord(
     const ownerError = checkUnclaimedOwnerTransition(schema, userRole, finalData, userId)
     if (ownerError) {
       return { success: false, error: `FIELD ERROR: ${ownerError}` }
+    }
+  }
+
+  // System-managed columns on `users` belong to registerUser, not to ordinary
+  // record writes, so none of them is ever written from here. How a supplied
+  // value is answered depends on whether the caller could have chosen it:
+  //
+  //  - SYSTEM_ASSIGNED (email, name, imageUrl, role): a different value is a
+  //    change the caller means and will not get. Refuse loudly instead of
+  //    returning `{ success: true }` over a silently discarded write.
+  //  - SYSTEM_MAINTAINED (createdAt, lastSeenAt): the server moves these on
+  //    its own without broadcasting, so a stale echo is an artifact of
+  //    read-modify-write, not an attempted change. Preserve silently.
+  //
+  // "Different" means different *once written*: `coerceValue` is what decides
+  // the stored column, and it maps undefined, null and '' alike to NULL. Those
+  // three spellings are one state, so comparing anything but the coerced values
+  // refuses writes that would not change a byte.
+  if (!systemUpdate && schema.name === 'users') {
+    for (const col of columns) {
+      if (!SYSTEM_MANAGED_COLUMNS.has(col.name)) continue
+      const current = existing?.data[col.name]
+      if (
+        SYSTEM_ASSIGNED_COLUMNS.has(col.name) &&
+        Object.hasOwn(data, col.name) &&
+        coerceValue(data[col.name], col.storage, col.interpretation) !==
+          coerceValue(current, col.storage, col.interpretation)
+      ) {
+        return { success: false, error: systemManagedColumnError(col.name, isUpdate) }
+      }
+      if (current !== undefined) finalData[col.name] = current // preserve existing
+      else delete finalData[col.name]
     }
   }
 
@@ -426,16 +465,13 @@ export function deleteRecord(
   userRole: string,
   skipUserRbac = false,
 ): ToolResult {
-  const isSystem = SYSTEM_COLLECTIONS.has(collection)
-  const schema = ctx.schemaRegistry.get(collection)
-
-  if (!schema && !isSystem) {
-    return { success: false, error: `Schema not registered for collection: ${collection}` }
-  }
+  const resolved = resolveCollection(ctx, collection)
+  if (!resolved.ok) return { success: false, error: resolved.error }
+  const schema = resolved.schema
 
   const existing = getRecord(ctx.sql, collection, recordId, schema)
   if (!existing) {
-    return { success: false, error: 'Record not found' }
+    return { success: false, error: RECORD_NOT_FOUND }
   }
 
   if (
@@ -475,16 +511,13 @@ export function readRecord(
   userRole: string,
   skipUserRbac = false,
 ): ToolResult {
-  const isSystem = SYSTEM_COLLECTIONS.has(collection)
-  const schema = ctx.schemaRegistry.get(collection)
-
-  if (!schema && !isSystem) {
-    return { success: false, error: `Schema not registered for collection: ${collection}` }
-  }
+  const resolved = resolveCollection(ctx, collection)
+  if (!resolved.ok) return { success: false, error: resolved.error }
+  const schema = resolved.schema
 
   const existing = getRecord(ctx.sql, collection, recordId, schema)
   if (!existing) {
-    return { success: false, error: 'Record not found' }
+    return { success: false, error: RECORD_NOT_FOUND }
   }
 
   if (

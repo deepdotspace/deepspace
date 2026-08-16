@@ -2,8 +2,10 @@
  * Top nav — minimal placeholder bar wired to the app's mechanisms:
  * nav.ts-driven links (with role/dev filtering), sign-in via <AuthOverlay>,
  * and sign-out. Restyle or rebuild it freely; keep the data-testid hooks
- * (`app-navigation`, `nav-sign-in-button`, `nav-user-name`) — the shipped
- * tests rely on them.
+ * (`app-navigation`, `nav-sign-in-button`, `nav-user-name`, `nav-user-email`)
+ * — the shipped tests rely on them. `nav-user-email` is the one that carries
+ * an identity the test can check exactly: a display name is optional, the
+ * email is the credential the session was opened with.
  */
 
 import { useState, useEffect } from 'react'
@@ -116,7 +118,10 @@ export default function Navigation() {
                   <div className="truncate font-medium text-foreground">
                     {user.name || 'Signed in'}
                   </div>
-                  <div className="truncate text-xs font-normal text-muted-foreground">
+                  <div
+                    data-testid="nav-user-email"
+                    className="truncate text-xs font-normal text-muted-foreground"
+                  >
                     {user.email}
                   </div>
                 </DropdownMenuLabel>

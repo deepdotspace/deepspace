@@ -19,11 +19,13 @@ import { MAX_DEPLOY_ASSET_FILE_BYTES } from '../../../shared/app-files'
 import {
   collectAssets,
   extractRunWorkerFirst,
+  clientAppIdRefusal,
   isDeployAssetControlFile,
   oversizedAssetRefusal,
   readDeployAssetConfig,
   removeBuildDevVars,
   resolveDeployRunWorkerFirst,
+  type DeployAsset,
 } from '../deploy/build'
 import {
   assetManifest,
@@ -261,6 +263,120 @@ describe('content-addressed asset collection', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+/**
+ * The safety net for apps scaffolded before the client app id was injected
+ * from wrangler.toml. Those apps still carry `export const APP_ID = 'app_…'`
+ * frozen at scaffold time, so `deploy --env staging` builds a worker on
+ * staging's rooms and a browser on the default env's — and used to report
+ * `ok:true, serving:confirmed` while the two halves read different stores.
+ */
+describe('clientAppIdRefusal', () => {
+  const TARGET = 'app_01JG8QK4M2N7P9RSTVWXYZ0123'
+  const OTHER = 'app_01JG8QK4M2N7P9RSTVWXYZ0456'
+
+  function withClient<T>(files: Record<string, string>, fn: (assets: DeployAsset[]) => T): T {
+    const dir = mkdtempSync(join(tmpdir(), 'deepspace-foreign-id-'))
+    try {
+      for (const [name, content] of Object.entries(files)) {
+        writeFileSync(join(dir, name), content)
+      }
+      return fn(collectAssets(dir))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('passes a bundle built against the id being deployed', () => {
+    withClient({ 'app.js': `const a="${TARGET}";console.log(a)` }, (assets) => {
+      expect(clientAppIdRefusal(assets, TARGET)).toBeNull()
+    })
+  })
+
+  it('passes a bundle that names no app id at all', () => {
+    withClient({ 'app.js': 'console.log("hi")' }, (assets) => {
+      expect(clientAppIdRefusal(assets, TARGET)).toBeNull()
+    })
+  })
+
+  it('refuses a staging deploy whose client still carries the default id', () => {
+    withClient(
+      { 'index.html': '<html/>', 'chunk-a1b2.js': `const e="${OTHER}",t=\`app:\${e}\`;` },
+      (assets) => {
+        const refusal = clientAppIdRefusal(assets, TARGET, 'staging')?.message ?? ''
+        expect(refusal).toContain(OTHER)
+        expect(refusal).toContain(TARGET)
+        expect(refusal).toContain('--env staging')
+        // Names the file so the fix is findable, not just the id.
+        expect(refusal).toContain('/chunk-a1b2.js')
+        expect(refusal).toContain('src/constants.ts')
+      },
+    )
+  })
+
+  it('finds the literal inside minified code and inlined html scripts', () => {
+    withClient({ 'index.html': `<script>window.__ID="${OTHER}"</script>` }, (assets) => {
+      expect(clientAppIdRefusal(assets, TARGET)?.message).toContain(OTHER)
+    })
+  })
+
+  it('ignores non-code assets, which key nothing', () => {
+    // A png whose bytes happen to spell an id is not what the browser runs.
+    withClient({ 'logo.png': OTHER, 'notes.txt': OTHER }, (assets) => {
+      expect(clientAppIdRefusal(assets, TARGET)).toBeNull()
+    })
+  })
+
+  it('reports each foreign id once even when it is bundled into many chunks', () => {
+    withClient(
+      { 'a.js': `x="${OTHER}"`, 'b.js': `y="${OTHER}"`, 'c.js': `z="${TARGET}"` },
+      (assets) => {
+        const refusal = clientAppIdRefusal(assets, TARGET)?.message ?? ''
+        expect(refusal.match(new RegExp(OTHER, 'g'))).toHaveLength(1)
+      },
+    )
+  })
+
+  /**
+   * The half-migrated bundle. Verified against a real Vite 8 build of the
+   * current src/constants.ts with no `define`: it succeeds with zero warnings
+   * and emits `var e=__DEEPSPACE_APP_ID__`, which is a ReferenceError on the
+   * first client module. No `app_…` literal survives that edit, so the
+   * foreign-id scan above sees a clean bundle — this is the only thing between
+   * that app and a silent total outage.
+   */
+  it('refuses a bundle whose app-id define was never substituted', () => {
+    withClient({ 'index-a1b2.js': 'var e=__DEEPSPACE_APP_ID__,t=`app:${e}`;' }, (assets) => {
+      const refusal = clientAppIdRefusal(assets, TARGET)
+      expect(refusal?.code).toBe('app_id_define_unsubstituted')
+      expect(refusal?.message).toContain('/index-a1b2.js')
+      expect(refusal?.message).toContain('ReferenceError')
+    })
+  })
+
+  it('names every edit the migration needs, so half of it cannot be applied', () => {
+    // Both refusals must enumerate the full adoption, or an app applies part of
+    // it and ships a dead bundle. The steps are three files, no migration.
+    for (const files of [
+      { 'a.js': 'var e=__DEEPSPACE_APP_ID__' },
+      { 'a.js': `var e="${OTHER}"` },
+    ]) {
+      withClient(files, (assets) => {
+        const message = clientAppIdRefusal(assets, TARGET)?.message ?? ''
+        expect(message).toContain('deepspace/build')
+        expect(message).toContain('vite.config.ts')
+        expect(message).toContain('vitest.config.ts')
+        expect(message).toContain('src/constants.ts')
+      })
+    }
+  })
+
+  it('reports the dead bundle before a foreign id when a bundle has both', () => {
+    withClient({ 'a.js': `var e=__DEEPSPACE_APP_ID__,f="${OTHER}"` }, (assets) => {
+      expect(clientAppIdRefusal(assets, TARGET)?.code).toBe('app_id_define_unsubstituted')
+    })
   })
 })
 

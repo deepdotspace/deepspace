@@ -108,6 +108,15 @@ export default defineConfig([
     },
   },
   {
+    // Node-only build helpers an app's vite.config imports (app-id resolver).
+    // `smol-toml` stays a runtime dep so the app never needs its own copy.
+    entry: { build: 'src/build/index.ts' },
+    format: ['esm'],
+    dts: true,
+    sourcemap: true,
+    external: ['smol-toml', /^node:.*/],
+  },
+  {
     // Node-only documentation compiler. Its source graph contains no React
     // import; rendering and hydration are isolated artifacts below.
     entry: { documentation: 'src/documentation/index.ts' },

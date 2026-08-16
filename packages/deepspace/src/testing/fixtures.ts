@@ -33,7 +33,7 @@ import {
   pickTestAccounts,
   findTestAccountByName,
 } from './accounts'
-import { ensureStorageState } from './storage-state'
+import { ensureStorageState, type EnsureStorageStateOptions } from './storage-state'
 
 export interface MultiplayerUser {
   context: BrowserContext
@@ -51,7 +51,11 @@ export interface MultiplayerUser {
  */
 export type UsersFixture = (
   selector: number | string[],
-  options?: { label?: string },
+  options?: {
+    label?: string
+    /** Sign in again even if the cached session still validates. */
+    force?: boolean
+  },
 ) => Promise<MultiplayerUser[]>
 
 interface MultiplayerFixtures {
@@ -62,8 +66,9 @@ async function buildUser(
   browser: Browser,
   account: TestAccount,
   baseURL: string,
+  options: EnsureStorageStateOptions = {},
 ): Promise<{ user: MultiplayerUser; cleanup: () => Promise<void> }> {
-  const statePath = await ensureStorageState(browser, account, baseURL)
+  const statePath = await ensureStorageState(browser, account, baseURL, options)
   const context = await browser.newContext({ storageState: statePath, baseURL })
   const page = await context.newPage()
   return {
@@ -98,7 +103,7 @@ export const test = baseTest.extend<MultiplayerFixtures>({
         : pickTestAccounts(selector, options)
 
       const built = await Promise.all(
-        accounts.map((acct) => buildUser(browser, acct, baseURL)),
+        accounts.map((acct) => buildUser(browser, acct, baseURL, { force: options?.force })),
       )
       for (const b of built) cleanups.push(b.cleanup)
       return built.map((b) => b.user)

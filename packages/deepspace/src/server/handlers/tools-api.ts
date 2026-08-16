@@ -21,7 +21,8 @@ import * as Y from 'yjs'
 import type { ToolResult } from '../utils/tools'
 import { BUILT_IN_TOOLS } from '../utils/tools'
 import type { YjsDocKey } from '../../shared/types'
-import { executeQuery, type SubscriptionContext } from './subscriptions'
+import { RECORD_NOT_FOUND } from '../../shared/protocol/constants'
+import { executeQuery, resolveCollection, type SubscriptionContext } from './subscriptions'
 import { getRecord, putRecord, deleteRecord, readRecord, type RecordContext } from './records'
 import { getUser, getAllUsers, registerUser } from './users'
 import {
@@ -55,7 +56,7 @@ const CORS_HEADERS = {
 export async function handleToolsRequest(
   ctx: ToolsApiContext,
   request: Request,
-  path: string
+  path: string,
 ): Promise<Response> {
   if (request.method === 'OPTIONS') {
     return new Response(null, { headers: CORS_HEADERS })
@@ -69,9 +70,12 @@ export async function handleToolsRequest(
   // GET /tools/describe/:toolName — return single tool schema
   if (path.startsWith('tools/describe/')) {
     const toolName = path.replace('tools/describe/', '')
-    const tool = BUILT_IN_TOOLS.find(t => t.name === toolName)
+    const tool = BUILT_IN_TOOLS.find((t) => t.name === toolName)
     if (!tool) {
-      return Response.json({ error: `Tool not found: ${toolName}` }, { status: 404, headers: CORS_HEADERS })
+      return Response.json(
+        { error: `Tool not found: ${toolName}` },
+        { status: 404, headers: CORS_HEADERS },
+      )
     }
     return Response.json({ tool }, { headers: CORS_HEADERS })
   }
@@ -93,17 +97,14 @@ export async function handleToolsRequest(
  * Headers: X-User-Id (required for identity-bound tools)
  *          X-App-Action: 'true' (optional, bypasses user RBAC)
  */
-async function handleToolExecute(
-  ctx: ToolsApiContext,
-  request: Request
-): Promise<Response> {
+async function handleToolExecute(ctx: ToolsApiContext, request: Request): Promise<Response> {
   let body: { tool: string; params: Record<string, unknown> }
   try {
-    body = await request.json() as typeof body
+    body = (await request.json()) as typeof body
   } catch {
     return Response.json(
       { success: false, error: 'Invalid JSON body' },
-      { status: 400, headers: CORS_HEADERS }
+      { status: 400, headers: CORS_HEADERS },
     )
   }
 
@@ -112,7 +113,7 @@ async function handleToolExecute(
   if (!tool) {
     return Response.json(
       { success: false, error: 'Missing "tool" in request body' },
-      { status: 400, headers: CORS_HEADERS }
+      { status: 400, headers: CORS_HEADERS },
     )
   }
 
@@ -137,20 +138,21 @@ async function handleToolExecute(
   // Yjs tools have a dedicated dispatcher because they need Yjs-specific context.
   if (tool.startsWith('yjs.')) {
     const result = executeYjsTool(ctx, tool, params, userId, userRole)
-    const status = result.success ? 200 : (result.error?.includes('not found') ? 404 : 400)
+    const status = result.success ? 200 : result.error?.includes('not found') ? 404 : 400
     return Response.json(result, { status, headers: CORS_HEADERS })
   }
 
   const recordCtx: RecordContext = {
     sql: ctx.sql,
     schemaRegistry: ctx.schemaRegistry,
+    scopeId: ctx.scopeId,
     state: ctx.state,
     getPermissionContext: ctx.getPermissionContext,
     send: ctx.send,
   }
 
   const result = await executeTool(recordCtx, tool, params, userId, userRole, isAppAction)
-  const status = result.success ? 200 : (result.error?.includes('not found') ? 404 : 400)
+  const status = result.success ? 200 : result.error?.includes('not found') ? 404 : 400
   return Response.json(result, { status, headers: CORS_HEADERS })
 }
 
@@ -170,6 +172,11 @@ async function executeTool(
     case 'records.query': {
       const collection = params.collection as string
       if (!collection) return { success: false, error: 'Missing required param: collection' }
+      // An unknown collection is a wrong-room mistake, not an empty table. The
+      // other `records.*` tools inherit this from putRecord/readRecord/
+      // deleteRecord; the query path is row-returning, so it asks directly.
+      const resolved = resolveCollection(ctx, collection)
+      if (!resolved.ok) return { success: false, error: resolved.error }
       // No default `limit` here: this dispatch is the SDK's general record-read
       // path (chat history, cron, app `actions.query`), which must return every
       // row. The assistant's page-size default is applied upstream in the AI
@@ -254,7 +261,7 @@ async function executeTool(
       return {
         success: true,
         data: {
-          schemas: schemas.map(s => ({
+          schemas: schemas.map((s) => ({
             name: s.name,
             columns: s.columns,
             permissions: s.permissions,
@@ -307,15 +314,18 @@ function checkYjsPermission(
   recordId: string,
   userId: string,
   userRole: string,
-  action: 'read' | 'write'
+  action: 'read' | 'write',
 ): ToolResult | null {
   if (SYSTEM_COLLECTIONS.has(collection)) return null
 
-  const schema = ctx.schemaRegistry.get(collection)
-  if (!schema) return { success: false, error: `Schema not registered for collection: ${collection}` }
+  const resolution = resolveCollection(ctx, collection)
+  if (!resolution.ok) return { success: false, error: resolution.error }
+  const schema = resolution.schema
+  if (!schema)
+    return { success: false, error: `Schema not registered for collection: ${collection}` }
 
   const record = getRecord(ctx.sql, collection, recordId, schema)
-  if (!record) return { success: false, error: `Record not found: ${collection}/${recordId}` }
+  if (!record) return { success: false, error: `${RECORD_NOT_FOUND}: ${collection}/${recordId}` }
 
   const recordWithId = { ...record, recordId }
   const permCtx = ctx.getPermissionContext()
@@ -345,11 +355,7 @@ function buildYjsCtx(ctx: ToolsApiContext): YjsContext {
 }
 
 /** Use a cached document for one synchronous operation, then release it if idle. */
-function withYjsDoc<T>(
-  ctx: YjsContext,
-  docKey: YjsDocKey,
-  operation: (doc: Y.Doc) => T,
-): T {
+function withYjsDoc<T>(ctx: YjsContext, docKey: YjsDocKey, operation: (doc: Y.Doc) => T): T {
   const doc = getOrCreateYjsDoc(ctx, docKey)
   try {
     return operation(doc)
@@ -364,15 +370,15 @@ function executeYjsTool(
   toolName: string,
   params: Record<string, unknown>,
   userId: string,
-  userRole: string
+  userRole: string,
 ): ToolResult {
   switch (toolName) {
     case 'yjs.list': {
-      const rows = ctx.sql.exec(
-        `SELECT doc_key, updated_at FROM yjs_docs ORDER BY updated_at DESC`
-      ).toArray() as Array<{ doc_key: string; updated_at: string }>
+      const rows = ctx.sql
+        .exec(`SELECT doc_key, updated_at FROM yjs_docs ORDER BY updated_at DESC`)
+        .toArray() as Array<{ doc_key: string; updated_at: string }>
 
-      const docs = rows.map(row => {
+      const docs = rows.map((row) => {
         const firstColon = row.doc_key.indexOf(':')
         const lastColon = row.doc_key.lastIndexOf(':')
         return {
@@ -387,7 +393,11 @@ function executeYjsTool(
     }
 
     case 'yjs.getText': {
-      const { collection, recordId, fieldName } = params as { collection: string; recordId: string; fieldName: string }
+      const { collection, recordId, fieldName } = params as {
+        collection: string
+        recordId: string
+        fieldName: string
+      }
       if (!collection || !recordId || !fieldName) {
         return { success: false, error: 'Missing required params: collection, recordId, fieldName' }
       }
@@ -397,7 +407,7 @@ function executeYjsTool(
 
       const docKey = getYjsDocKey(collection, recordId, fieldName)
       const yjsCtx = buildYjsCtx(ctx)
-      return withYjsDoc(yjsCtx, docKey, doc => {
+      return withYjsDoc(yjsCtx, docKey, (doc) => {
         const ytext = doc.getText(fieldName)
         const text = ytext.toString()
 
@@ -417,7 +427,12 @@ function executeYjsTool(
     }
 
     case 'yjs.setText': {
-      const { collection, recordId, fieldName, text } = params as { collection: string; recordId: string; fieldName: string; text: string }
+      const { collection, recordId, fieldName, text } = params as {
+        collection: string
+        recordId: string
+        fieldName: string
+        text: string
+      }
       if (!collection || !recordId || !fieldName) {
         return { success: false, error: 'Missing required params: collection, recordId, fieldName' }
       }
@@ -430,10 +445,12 @@ function executeYjsTool(
 
       const docKey = getYjsDocKey(collection, recordId, fieldName)
       const yjsCtx = buildYjsCtx(ctx)
-      return withYjsDoc(yjsCtx, docKey, doc => {
+      return withYjsDoc(yjsCtx, docKey, (doc) => {
         const ytext = doc.getText(fieldName)
         let capturedUpdate: Uint8Array | null = null
-        const updateHandler = (update: Uint8Array) => { capturedUpdate = update }
+        const updateHandler = (update: Uint8Array) => {
+          capturedUpdate = update
+        }
         doc.on('update', updateHandler)
 
         try {

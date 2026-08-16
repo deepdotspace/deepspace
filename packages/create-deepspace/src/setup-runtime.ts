@@ -57,7 +57,8 @@ export async function completeProjectSetup(
   installDependencies(project.appDir)
   // The app id is SERVER-MINTED under the user's login: the just-installed
   // CLI's `app init` asks the platform for an id registered to the caller and
-  // stamps it into wrangler.toml + the client constants. Without a login the
+  // writes it to wrangler.toml — the ONLY place it lives; the client bundle
+  // resolves it at build time from the same config. Without a login the
   // scaffold stays usable but carries no identity until `app init` succeeds.
   // The initial commit is `app init`'s job (invoked just below):
   // identity must exist before anything is committed,
@@ -73,8 +74,8 @@ export async function completeProjectSetup(
  * Run the freshly-installed CLI's authed `deepspace app init` — the ONLY
  * place app ids come from (server-authoritative minting). Soft-fails: an
  * offline or logged-out scaffold prints the recovery pair (`auth login`, `app init`)
- * instead of stranding a finished install, and `app init` later heals the
- * remaining `__APP_ID__` placeholders itself.
+ * instead of stranding a finished install; `app init` later writes the id to
+ * wrangler.toml, the one place it lives.
  */
 function registerAppIdentity(appDir: string, progress: Progress): boolean {
   progress.start('Registering app identity')

@@ -7,7 +7,7 @@
  */
 
 import { useCallback, useContext, useMemo } from 'react'
-import { RecordContext } from '../context'
+import { RecordContext, useRecordAuth } from '../context'
 import { useScopeRegistry } from '../ScopeRegistry'
 import { RecordRoomNotReadyError } from '../errors'
 import { MSG } from '@/shared/protocol/constants'
@@ -48,6 +48,8 @@ export function useMutations<T = unknown>(collection: string): {
   // Resolve through the registry and retain the nearest scope during navigation.
   const registry = useScopeRegistry()
   const recordCtx = useContext(RecordContext)
+  // Stable wrapper from RecordProvider — safe in a dependency array.
+  const onWriteError = useRecordAuth()?.onWriteError
 
   const scopeEntry = registry?.resolve(collection) ?? null
 
@@ -63,9 +65,22 @@ export function useMutations<T = unknown>(collection: string): {
     )
   }
 
+  // The single readiness gate for every mutation below. A write refused here
+  // never touches the socket, so `onWriteError` — the one surface an app can
+  // observe a rejected optimistic write on — is the only place it can show
+  // up; it reports *and* throws, so callers that await keep their contract
+  // and callers that don't still get a visible failure instead of silence.
   const assertReady = useCallback(() => {
-    if (!ready) throw new RecordRoomNotReadyError(collection)
-  }, [ready, collection])
+    if (ready) return
+    onWriteError?.({
+      kind: 'not_ready',
+      title: 'Not saved — still connecting',
+      detail:
+        `The room backing "${collection}" was not ready to accept writes yet, so the change was dropped. ` +
+        `Gate the action on the \`ready\` flag from useMutations('${collection}') (e.g. \`disabled={!ready}\`) and retry once it is true.`,
+    })
+    throw new RecordRoomNotReadyError(collection)
+  }, [ready, collection, onWriteError])
 
   const create = useCallback(
     async (data: T): Promise<string> => {

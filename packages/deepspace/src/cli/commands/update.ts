@@ -129,8 +129,17 @@ export function buildPreviewSecretsUpgradeInstruction(appDir: string): string | 
   ].find((candidate) => existsSync(join(appDir, candidate)))
   if (!configName) return null
   const source = readFileSync(join(appDir, configName), 'utf8')
-  if (source.includes('deepspace-remove-build-preview-secrets')) return null
-  return `${configName}: add the build-preview secret cleanup from ${BUILD_PREVIEW_SECRETS_GUIDE}; app update left this app-owned file unchanged.`
+  // Either form satisfies the contract: the legacy inline plugin, or the
+  // deepspace/build plugin that now owns the cleanup (0.23.0 scaffolds).
+  if (
+    source.includes('deepspace-remove-build-preview-secrets') ||
+    source.includes('deepspaceBuild(') ||
+    source.includes("'deepspace/build'") ||
+    source.includes('"deepspace/build"')
+  ) {
+    return null
+  }
+  return `${configName}: adopt the deepspaceBuild() plugin from deepspace/build (which owns this cleanup), or add the inline cleanup from ${BUILD_PREVIEW_SECRETS_GUIDE}; app update left this app-owned file unchanged.`
 }
 
 /** Existing app-owned users schemas keep their current visibility until edited explicitly. */

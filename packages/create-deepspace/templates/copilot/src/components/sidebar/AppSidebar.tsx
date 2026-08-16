@@ -2,8 +2,10 @@
  * AppSidebar — collapsible left rail wired to the app's mechanisms:
  * nav.ts-driven links (role/dev filtering), sign-in via <AuthOverlay>,
  * account menu with sign-out. Restyle freely; keep the data-testid hooks
- * (`app-navigation`, `nav-sign-in-button`, `nav-user-name`) — the shipped
- * tests rely on them.
+ * (`app-navigation`, `nav-sign-in-button`, `nav-user-name`, `nav-user-email`)
+ * — the shipped tests rely on them. `nav-user-email` is the one that carries
+ * an identity the test can check exactly: a display name is optional, the
+ * email is the credential the session was opened with.
  *
  * Fixed-icon collapse: only the rail's width animates (216px ↔ 64px).
  * Every icon is a fixed-size `shrink-0` first flex child at a constant
@@ -274,7 +276,12 @@ export function AppSidebar({ mobileOpen, onMobileClose }: AppSidebarProps) {
             <DropdownMenuContent side="top" align="start" className="w-56">
               <DropdownMenuLabel>
                 <div className="truncate font-medium text-foreground">{user.name || 'Signed in'}</div>
-                <div className="truncate text-xs font-normal text-muted-foreground">{user.email}</div>
+                <div
+                  data-testid="nav-user-email"
+                  className="truncate text-xs font-normal text-muted-foreground"
+                >
+                  {user.email}
+                </div>
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={() => signOut()}>
