@@ -413,6 +413,22 @@ describe('records.deleteWhere', () => {
     expect(noteCount(db)).toBe(3)
   })
 
+  it('records.query refuses an unknown where key too — a dropped filter over-returns', async () => {
+    seedNotes(db, 'chat-1', 3)
+    seedNotes(db, 'chat-2', 2)
+
+    const typo = await execTool(ctx, 'records.query', { collection: 'notes', where: { chatid_typo: 'chat-1' } })
+    expect(typo.success).toBe(false)
+    expect(typo.error).toContain('chatid_typo')
+    expect(typo.error).toContain('recordId, createdBy, chatId, body')
+
+    // The real key still filters, and no where still returns everything.
+    const real = await execTool(ctx, 'records.query', { collection: 'notes', where: { chatId: 'chat-1' } })
+    expect(real.data.count).toBe(3)
+    const all = await execTool(ctx, 'records.query', { collection: 'notes' })
+    expect(all.data.count).toBe(5)
+  })
+
   it('refuses a filter key that names no field instead of silently dropping it', async () => {
     // executeQuery ignores unknown where keys; a delete that inherited that
     // leniency would truncate a page of the collection on a typo.

@@ -6,6 +6,29 @@ import type { Spinner } from '../../lib/spinner'
 import type { DeployAsset, DeployBundle } from './build'
 import type { DeployOutput } from './output'
 import { shouldSendLineage, type DeployRepositoryState } from './repository'
+
+/**
+ * The two rename sentences — ONE source for the pre-build check in deploy.ts
+ * and the commit-time 409 path below, so an agent meets the same text either
+ * way. Non-interactive refusal:
+ */
+export function renameRefusalMessage(rename: { fromHost: string; toHost: string }): string {
+  return (
+    `This deploy renames the app: ${rename.fromHost} → ${rename.toHost}. ` +
+    'Confirmation needs an interactive terminal — re-run with --rename to approve the ' +
+    'rename, or `deepspace app init --new-id` if you meant a separate app.'
+  )
+}
+
+/** Interactive rename confirmation. */
+export function renamePromptMessage(rename: { fromHost: string; toHost: string }): string {
+  return (
+    `This deploy renames the app: ${rename.fromHost} → ${rename.toHost}. ` +
+    'The URL changes and the old one stops serving right away; data, secrets, and ' +
+    'collaborators travel with it — the display name in `src/constants.ts` (`APP_NAME`) does not, ' +
+    'update it yourself. (Meant a separate app? Run `deepspace app init --new-id` instead.) Rename?'
+  )
+}
 import type { DeploySecretsPayload } from './secrets'
 
 const CLOUDFLARE_DEPLOY_ERROR_HINT =
@@ -206,21 +229,11 @@ export async function deployBuiltBundle(options: {
 
   if (response.status === 409 && body.code === 'rename_required' && !confirmRename) {
     spinner.stop('Rename confirmation needed')
+    const rename = { fromHost: body.fromHost ?? '', toHost: body.toHost ?? '' }
     if (output.nonInteractive) {
-      await bail(
-        `This deploy renames the app: ${body.fromHost} → ${body.toHost}. ` +
-          'Confirmation needs an interactive terminal — re-run with --rename to approve the ' +
-          'rename, or `deepspace app init --new-id` if you meant a separate app.',
-        null,
-        'rename_required',
-      )
+      await bail(renameRefusalMessage(rename), null, 'rename_required')
     }
-    const confirmed = await p.confirm({
-      message:
-        `This deploy renames the app: ${body.fromHost} → ${body.toHost}. ` +
-        `The URL changes and the old one stops serving right away; data, secrets, and collaborators travel with it. ` +
-        '(Meant a separate app? Run `deepspace app init --new-id` instead.) Rename?',
-    })
+    const confirmed = await p.confirm({ message: renamePromptMessage(rename) })
     if (p.isCancel(confirmed) || !confirmed) await bail('Deploy cancelled.', null)
 
     confirmRename = true

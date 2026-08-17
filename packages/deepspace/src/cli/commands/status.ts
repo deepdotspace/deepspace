@@ -121,29 +121,28 @@ export default defineCommand({
     }
     const json: Record<string, unknown> = { ok: true }
 
-    // ── environment (print ONLY when not plain prod — half of all staging
-    // confusion is not being able to see which plane a command talks to) ──
+    // ── environment — always. "Which plane am I about to mutate?" is the
+    // first thing an agent has to know, and production is the answer that
+    // matters most, so it is never elided. Service URLs are listed only when
+    // they are not the plain preset (staging, or a per-service override).
     const urlOverrides = [
       'DEEPSPACE_DEPLOY_URL',
       'DEEPSPACE_AUTH_URL',
       'DEEPSPACE_API_URL',
       'DEEPSPACE_PLATFORM_URL',
     ].filter((k) => process.env[k])
+    const urls = effectivePlatformUrls()
+    lines.push([
+      'Env',
+      [DEEPSPACE_ENV, ...urlOverrides.map((k) => `${k} set`)].join(' · '),
+    ])
+    json.env = DEEPSPACE_ENV
+    json.services = urls
     if (DEEPSPACE_ENV !== 'production' || urlOverrides.length > 0) {
-      const urls = effectivePlatformUrls()
-      const detail = [
-        DEEPSPACE_ENV !== 'production' ? DEEPSPACE_ENV : null,
-        ...urlOverrides.map((k) => `${k} set`),
-      ]
-        .filter(Boolean)
-        .join(' · ')
-      lines.push(['Env', detail])
       lines.push([
         'Services',
         `auth ${urls.auth} · api ${urls.api} · platform ${urls.platform} · deploy ${urls.deploy}`,
       ])
-      json.env = DEEPSPACE_ENV
-      json.services = urls
       if (urlOverrides.length > 0) json.urlOverrides = urlOverrides
     }
 

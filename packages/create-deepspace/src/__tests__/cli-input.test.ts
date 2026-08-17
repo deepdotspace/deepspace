@@ -28,6 +28,15 @@ describe('parseArgs', () => {
     })
   })
 
+  it('accepts --no-register and explains --yes instead of calling it unknown', () => {
+    expect(parseArgs(argv('my-app', '--no-register'))).toMatchObject({
+      appName: 'my-app',
+      noRegister: true,
+      invalid: undefined,
+    })
+    expect(parseArgs(argv('my-app', '--yes')).invalid).toContain('non-interactive by default')
+  })
+
   it('rejects a second positional app name', () => {
     expect(parseArgs(argv('first-app', 'second-app'))).toMatchObject({
       appName: 'first-app',

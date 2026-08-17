@@ -85,7 +85,7 @@ export const BUILT_IN_TOOLS: ToolSchema[] = [
       'to see the rest.',
     params: {
       collection: { type: 'string', description: 'Collection name to query', required: true },
-      where: { type: 'object', description: 'Filter object with field=value equality conditions', required: false },
+      where: { type: 'object', description: 'Filter object with field=value equality conditions; every key must be recordId, createdBy, or a schema column (an unknown key is refused, not ignored)', required: false },
       orderBy: { type: 'string', description: 'Field to order by (or "createdAt"/"updatedAt")', required: false },
       orderDir: { type: 'string', description: 'Order direction: "asc" or "desc" (default: "desc")', required: false },
       limit: { type: 'number', description: `Maximum number of records to return (default: ${DEFAULT_QUERY_LIMIT}). Oversized pages are still capped at ~30KB and truncated with returned/total flags.`, required: false },

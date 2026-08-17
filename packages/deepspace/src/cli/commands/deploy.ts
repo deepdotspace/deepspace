@@ -23,7 +23,10 @@ import {
 import { buildDeployBundle, oversizedAssetRefusal } from './deploy/build'
 import { syncOneTimeProducts, syncSubscriptionPlans } from './deploy/commerce'
 import { createDeployOutput, type DeployOutput } from './deploy/output'
-import { deployBuiltBundle } from './deploy/request'
+import { CliExit, errorCode, formatCliError } from '../lib/cli-errors'
+import { deployBuiltBundle, renamePromptMessage, renameRefusalMessage } from './deploy/request'
+// Re-exported so the rename wording keeps one import site for tests and callers.
+export { renamePromptMessage, renameRefusalMessage }
 import { preflightDeployRepository, syncDeployRepository } from './deploy/repository'
 import { getAppSource } from '../lib/source-api'
 import { loadDeploySecrets, prepareDeploySecrets } from './deploy/secrets'
@@ -91,229 +94,254 @@ export default defineCommand({
   },
   async run({ args }) {
     const output = createDeployOutput(args.json === true)
-    preflightNodeVersion('deploy')
-    const appDir = resolve(args.dir ?? '.')
-
-    const selectorRefusal = blankSelectorRefusal(args)
-    if (selectorRefusal) output.die(selectorRefusal.error, selectorRefusal.code)
-    const envName = typeof args.env === 'string' && args.env.trim() ? args.env.trim() : undefined
-
-    if (!hasWranglerConfig(appDir)) {
-      output.die(noWranglerConfigMessage(join(appDir, 'wrangler.toml')), 'not_in_app_repo')
-    }
+    // Every failure leaves through `output.die`, deploy's one exit door. An
+    // error that escaped this body used to reach the shared renderer, whose
+    // JSON envelope landed on the stdout deploy has redirected — and the exit
+    // fallback then wrapped that JSON *as the error string* under
+    // `deploy_failed`, hiding the real code (`forbidden`, `app_not_found`, …).
     try {
-      ensureInstallReady(appDir)
-    } catch (error: unknown) {
-      const refusal = error as { message?: string; code?: string; action?: CliAction }
-      output.die(refusal.message ?? String(error), refusal.code ?? 'deps_missing', {
-        action: refusal.action,
-      })
+      await runDeploy(args, output)
+    } catch (error) {
+      if (error instanceof CliExit) throw error
+      output.die(formatCliError(error), errorCode(error) ?? 'deploy_failed')
     }
-
-    p.intro('Deploying DeepSpace app')
-    output.showIntro()
-
-    const wranglerConfig: WranglerConfig = readWranglerConfig(appDir)
-    const nameResult = resolveAppNameForEnv(wranglerConfig, envName)
-    if (!nameResult.ok) return output.die(nameResult.reason, nameResult.code ?? 'invalid_app_name')
-    const declaredName = envName ? wranglerConfig.env?.[envName]?.name : wranglerConfig.name
-    if (declaredName !== nameResult.name) {
-      const location = envName ? `[env.${envName}].name` : '`name`'
-      output.die(
-        `wrangler.toml: ${location} "${declaredName}" is not in canonical form. ` +
-          `Update it to "${nameResult.name}" and re-run.`,
-        'invalid_app_name',
-      )
-    }
-    const appName = nameResult.name
-    const appId = readAppId(appDir, envName)
-    p.log.info(envName ? `App: ${appName}  (env: ${envName})` : `App: ${appName}`)
-
-    const { token, ownerId } = await authenticate(appDir, output)
-
-    if (!appId) {
-      return output.die(
-        `No app id in wrangler.toml${envName ? ` for [env.${envName}]` : ''}. Run ` +
-          `\`deepspace app init${envName ? ` --env ${envName}` : ''}\` to register this app, then re-deploy.`,
-        'app_not_initialized',
-        {
-          action: {
-            cwd: appDir,
-            argv: ['deepspace', 'app', 'init', ...(envName ? ['--env', envName] : [])],
-          },
-          actionRequired: true,
-        },
-      )
-    }
-    p.log.info(`Id: ${appId}`)
-
-    // Registration first: it is the cheapest, most specific precondition, and
-    // every later server call (the secrets refresh included) refuses an
-    // unregistered id with a less useful sentence. Refuse HERE, before any
-    // build or push: without this, the failure surfaces later as a raw git
-    // 404 from the repo transport (git discards response bodies), which reads
-    // as infra breakage instead of the registration gap it is.
-    const sourceState = await getAppSource(DEPLOY_URL, token, appId)
-    if (!sourceState.registered) {
-      output.die(
-        `${appId} is not registered. If this repo's id came from an older SDK's scaffold, run ` +
-          `\`deepspace app init --new-id\` to register it as a fresh app; a brand-new app dir ` +
-          `registers with \`deepspace app init\`.`,
-        'app_not_registered',
-      )
-    }
-    const secretsCache = await loadDeploySecrets({
-      deployUrl: DEPLOY_URL,
-      appDir,
-      appId,
-      envName,
-      ownerId,
-      token,
-      output,
-    })
-
-    // Both refusals the platform can only reach at commit time, settled here
-    // from the response the CLI already fetched — before the build and the
-    // ~hundreds of KiB of asset uploads that used to precede them. The server
-    // keeps both checks; these only move the refusal to where it costs nothing.
-    const ownerJwtRefusal = ownerJwtMissingRefusal(sourceState)
-    if (ownerJwtRefusal) output.die(ownerJwtRefusal.error, ownerJwtRefusal.code)
-
-    let confirmRename = args.rename === true
-    const rename = pendingRename(sourceState.registeredHost, appName)
-    if (rename && !confirmRename) {
-      if (output.nonInteractive) {
-        output.die(renameRefusalMessage(rename), 'rename_required')
-      }
-      const confirmed = await p.confirm({ message: renamePromptMessage(rename) })
-      if (p.isCancel(confirmed) || !confirmed) output.die('Deploy cancelled.', 'rename_declined')
-      confirmRename = true
-    }
-
-    const repositoryPreflight = preflightDeployRepository({
-      appDir,
-      push: args.push !== false,
-      source: sourceState.source,
-    })
-    if (repositoryPreflight) {
-      output.die(repositoryPreflight.error, repositoryPreflight.code)
-    }
-
-    // Build and size-check BEFORE the push. The push is the irreversible step
-    // — it advances the cloud repo — and an asset the platform will refuse is
-    // knowable from the local build, so refusing here leaves the repo exactly
-    // where the caller left it instead of one commit ahead of a failed release.
-    const spinner = createSpinner()
-    const bundle = await buildDeployBundle({
-      appDir,
-      appName,
-      appId,
-      envName,
-      output,
-      spinner,
-    })
-    const oversized = oversizedAssetRefusal(bundle.assets)
-    if (oversized) {
-      spinner.stop('Deploy failed')
-      output.die(oversized, 'assets_too_large')
-    }
-
-    const repository = await syncDeployRepository({
-      deployUrl: DEPLOY_URL,
-      appDir,
-      appId,
-      token,
-      push: args.push !== false,
-      ignoreStale: Boolean(args['ignore-stale']),
-      output,
-      sourceState,
-    })
-
-    const secrets = prepareDeploySecrets({
-      cache: secretsCache,
-      customBindings: bundle.customBindings,
-      doManifest: bundle.doManifest,
-      output,
-    })
-    const body = await deployBuiltBundle({
-      deployUrl: DEPLOY_URL,
-      appDir,
-      appId,
-      appName,
-      token,
-      rename: confirmRename,
-      claimReleased: args['claim-released'] === true,
-      ignoreStale: Boolean(args['ignore-stale']),
-      bundle,
-      secrets,
-      repository,
-      output,
-      spinner,
-    })
-
-    let serving: ReleaseWait = 'unverifiable'
-    const edgeWaitStarted = Date.now()
-    if (body.url) {
-      spinner.message('Waiting for the edge to serve this release...')
-      serving = await waitForLiveRelease(body.url, body.releaseStamp, 90_000)
-      if (serving !== 'confirmed') {
-        spinner.stop(
-          serving === 'unconfirmed'
-            ? 'Deployed — the edge is still rolling this release out'
-            : 'Deployed — serving could not be verified from here',
-        )
-        p.log.warn(
-          serving === 'unconfirmed'
-            ? 'Some requests still get the previous release. Cloudflare rolls a version out per ' +
-                'edge machine; it usually settles within a couple of minutes. Wait before asserting against it.'
-            : 'This release carries no serving stamp (older platform, or a resumed deploy), so the ' +
-                'CLI cannot tell which release the edge answers with.',
-        )
-        p.log.info(`URL: ${body.url}`)
-        await syncCommerce(appDir, appId, token, output.nonInteractive)
-        if (output.json) {
-          return output.emitJson({
-            ok: true,
-            appId,
-            appName,
-            url: body.url,
-            releaseId: body.releaseId ?? null,
-            bundleRetained: body.bundleRetained ?? null,
-            serving,
-            recoverable: repository.recoverable,
-            ...staleBaseGuardFields(body),
-          })
-        }
-        p.outro('Done')
-        return
-      }
-    }
-
-    spinner.stop(
-      `Deployed! (edge confirmed in ${Math.round((Date.now() - edgeWaitStarted) / 1000)}s)`,
-    )
-    // Verified from HERE: ten independent connections agreed. Other regions
-    // may still be rolling over — see lib/edge-propagation.ts.
-    p.log.success(`Live at: ${body.url}`)
-    await syncCommerce(appDir, appId, token, output.nonInteractive)
-    if (output.json) {
-      return output.emitJson({
-        ok: true,
-        appId,
-        appName,
-        url: body.url ?? null,
-        // Always present, so a caller branches on one field instead of
-        // inferring success from an absent one.
-        serving,
-        releaseId: body.releaseId ?? null,
-        bundleRetained: body.bundleRetained ?? null,
-        recoverable: repository.recoverable,
-        ...staleBaseGuardFields(body),
-      })
-    }
-    p.outro('Done')
   },
 })
+
+/** The parsed flags `runDeploy` reads (citty's own type is inferred inline). */
+interface DeployArgs {
+  dir?: string
+  env?: string | boolean
+  json?: boolean
+  push?: boolean
+  rename?: boolean
+  'ignore-stale'?: boolean
+  'claim-released'?: boolean
+}
+
+async function runDeploy(args: DeployArgs, output: DeployOutput): Promise<void> {
+  preflightNodeVersion('deploy')
+  const appDir = resolve(args.dir ?? '.')
+
+  const selectorRefusal = blankSelectorRefusal(args)
+  if (selectorRefusal) output.die(selectorRefusal.error, selectorRefusal.code)
+  const envName = typeof args.env === 'string' && args.env.trim() ? args.env.trim() : undefined
+
+  if (!hasWranglerConfig(appDir)) {
+    output.die(noWranglerConfigMessage(join(appDir, 'wrangler.toml')), 'not_in_app_repo')
+  }
+  try {
+    ensureInstallReady(appDir)
+  } catch (error: unknown) {
+    const refusal = error as { message?: string; code?: string; action?: CliAction }
+    output.die(refusal.message ?? String(error), refusal.code ?? 'deps_missing', {
+      action: refusal.action,
+    })
+  }
+
+  p.intro('Deploying DeepSpace app')
+  output.showIntro()
+
+  const wranglerConfig: WranglerConfig = readWranglerConfig(appDir)
+  const nameResult = resolveAppNameForEnv(wranglerConfig, envName)
+  if (!nameResult.ok) return output.die(nameResult.reason, nameResult.code ?? 'invalid_app_name')
+  const declaredName = envName ? wranglerConfig.env?.[envName]?.name : wranglerConfig.name
+  if (declaredName !== nameResult.name) {
+    const location = envName ? `[env.${envName}].name` : '`name`'
+    output.die(
+      `wrangler.toml: ${location} "${declaredName}" is not in canonical form. ` +
+        `Update it to "${nameResult.name}" and re-run.`,
+      'invalid_app_name',
+    )
+  }
+  const appName = nameResult.name
+  const appId = readAppId(appDir, envName)
+  p.log.info(envName ? `App: ${appName}  (env: ${envName})` : `App: ${appName}`)
+
+  const { token, ownerId } = await authenticate(appDir, output)
+
+  if (!appId) {
+    return output.die(
+      `No app id in wrangler.toml${envName ? ` for [env.${envName}]` : ''}. Run ` +
+        `\`deepspace app init${envName ? ` --env ${envName}` : ''}\` to register this app, then re-deploy.`,
+      'app_not_initialized',
+      {
+        action: {
+          cwd: appDir,
+          argv: ['deepspace', 'app', 'init', ...(envName ? ['--env', envName] : [])],
+        },
+        actionRequired: true,
+      },
+    )
+  }
+  p.log.info(`Id: ${appId}`)
+
+  // Registration first: it is the cheapest, most specific precondition, and
+  // every later server call (the secrets refresh included) refuses an
+  // unregistered id with a less useful sentence. Refuse HERE, before any
+  // build or push: without this, the failure surfaces later as a raw git
+  // 404 from the repo transport (git discards response bodies), which reads
+  // as infra breakage instead of the registration gap it is.
+  const sourceState = await getAppSource(DEPLOY_URL, token, appId)
+  if (!sourceState.registered) {
+    output.die(
+      `${appId} is not registered. If this repo's id came from an older SDK's scaffold, run ` +
+        `\`deepspace app init --new-id\` to register it as a fresh app; a brand-new app dir ` +
+        `registers with \`deepspace app init\`.`,
+      'app_not_registered',
+    )
+  }
+  const secretsCache = await loadDeploySecrets({
+    deployUrl: DEPLOY_URL,
+    appDir,
+    appId,
+    envName,
+    ownerId,
+    token,
+    output,
+  })
+
+  // Both refusals the platform can only reach at commit time, settled here
+  // from the response the CLI already fetched — before the build and the
+  // ~hundreds of KiB of asset uploads that used to precede them. The server
+  // keeps both checks; these only move the refusal to where it costs nothing.
+  const ownerJwtRefusal = ownerJwtMissingRefusal(sourceState)
+  if (ownerJwtRefusal) output.die(ownerJwtRefusal.error, ownerJwtRefusal.code)
+
+  let confirmRename = args.rename === true
+  const rename = pendingRename(sourceState.registeredHost, appName)
+  if (rename && !confirmRename) {
+    if (output.nonInteractive) {
+      output.die(renameRefusalMessage(rename), 'rename_required')
+    }
+    const confirmed = await p.confirm({ message: renamePromptMessage(rename) })
+    if (p.isCancel(confirmed) || !confirmed) output.die('Deploy cancelled.', 'rename_declined')
+    confirmRename = true
+  }
+
+  const repositoryPreflight = preflightDeployRepository({
+    appDir,
+    push: args.push !== false,
+    source: sourceState.source,
+  })
+  if (repositoryPreflight) {
+    output.die(repositoryPreflight.error, repositoryPreflight.code)
+  }
+
+  // Build and size-check BEFORE the push. The push is the irreversible step
+  // — it advances the cloud repo — and an asset the platform will refuse is
+  // knowable from the local build, so refusing here leaves the repo exactly
+  // where the caller left it instead of one commit ahead of a failed release.
+  const spinner = createSpinner()
+  const bundle = await buildDeployBundle({
+    appDir,
+    appName,
+    appId,
+    envName,
+    output,
+    spinner,
+  })
+  const oversized = oversizedAssetRefusal(bundle.assets)
+  if (oversized) {
+    spinner.stop('Deploy failed')
+    output.die(oversized, 'assets_too_large')
+  }
+
+  const repository = await syncDeployRepository({
+    deployUrl: DEPLOY_URL,
+    appDir,
+    appId,
+    token,
+    push: args.push !== false,
+    ignoreStale: Boolean(args['ignore-stale']),
+    output,
+    sourceState,
+  })
+
+  const secrets = prepareDeploySecrets({
+    cache: secretsCache,
+    customBindings: bundle.customBindings,
+    doManifest: bundle.doManifest,
+    output,
+  })
+  const body = await deployBuiltBundle({
+    deployUrl: DEPLOY_URL,
+    appDir,
+    appId,
+    appName,
+    token,
+    rename: confirmRename,
+    claimReleased: args['claim-released'] === true,
+    ignoreStale: Boolean(args['ignore-stale']),
+    bundle,
+    secrets,
+    repository,
+    output,
+    spinner,
+  })
+
+  let serving: ReleaseWait = 'unverifiable'
+  const edgeWaitStarted = Date.now()
+  if (body.url) {
+    spinner.message('Waiting for the edge to serve this release...')
+    serving = await waitForLiveRelease(body.url, body.releaseStamp, 90_000)
+    if (serving !== 'confirmed') {
+      spinner.stop(
+        serving === 'unconfirmed'
+          ? 'Deployed — the edge is still rolling this release out'
+          : 'Deployed — serving could not be verified from here',
+      )
+      p.log.warn(
+        serving === 'unconfirmed'
+          ? 'Some requests still get the previous release. Cloudflare rolls a version out per ' +
+              'edge machine; it usually settles within a couple of minutes. Wait before asserting against it.'
+          : 'This release carries no serving stamp (older platform, or a resumed deploy), so the ' +
+              'CLI cannot tell which release the edge answers with.',
+      )
+      p.log.info(`URL: ${body.url}`)
+      await syncCommerce(appDir, appId, token, output.nonInteractive)
+      if (output.json) {
+        return output.emitJson({
+          ok: true,
+          appId,
+          appName,
+          url: body.url,
+          releaseId: body.releaseId ?? null,
+          bundleRetained: body.bundleRetained ?? null,
+          serving,
+          recoverable: repository.recoverable,
+          ...staleBaseGuardFields(body),
+        })
+      }
+      p.outro('Done')
+      return
+    }
+  }
+
+  spinner.stop(
+    `Deployed! (edge confirmed in ${Math.round((Date.now() - edgeWaitStarted) / 1000)}s)`,
+  )
+  // Verified from HERE: ten independent connections agreed. Other regions
+  // may still be rolling over — see lib/edge-propagation.ts.
+  p.log.success(`Live at: ${body.url}`)
+  await syncCommerce(appDir, appId, token, output.nonInteractive)
+  if (output.json) {
+    return output.emitJson({
+      ok: true,
+      appId,
+      appName,
+      url: body.url ?? null,
+      // Always present, so a caller branches on one field instead of
+      // inferring success from an absent one.
+      serving,
+      releaseId: body.releaseId ?? null,
+      bundleRetained: body.bundleRetained ?? null,
+      recoverable: repository.recoverable,
+      ...staleBaseGuardFields(body),
+    })
+  }
+  p.outro('Done')
+}
 
 async function syncCommerce(
   appDir: string,
@@ -366,25 +394,6 @@ export function pendingRename(
   return { fromHost: registeredHost, toHost: [appName, ...domain].join('.') }
 }
 
-/** Non-interactive rename refusal — the deploy worker's `rename_required`
- *  wording, said before the build rather than after the upload. */
-export function renameRefusalMessage(rename: { fromHost: string; toHost: string }): string {
-  return (
-    `This deploy renames the app: ${rename.fromHost} → ${rename.toHost}. ` +
-    'Confirmation needs an interactive terminal — re-run with --rename to approve the ' +
-    'rename, or `deepspace app init --new-id` if you meant a separate app.'
-  )
-}
-
-/** Interactive rename confirmation, same wording as the post-commit prompt. */
-export function renamePromptMessage(rename: { fromHost: string; toHost: string }): string {
-  return (
-    `This deploy renames the app: ${rename.fromHost} → ${rename.toHost}. ` +
-    'The URL changes and the old one stops serving right away; data, secrets, and ' +
-    'collaborators travel with it. (Meant a separate app? Run `deepspace app init --new-id` ' +
-    'instead.) Rename?'
-  )
-}
 
 /** Refuse explicit blank selectors before auth so they cannot fall back to production/cwd. */
 export function blankSelectorRefusal(args: {

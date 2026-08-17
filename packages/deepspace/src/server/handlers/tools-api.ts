@@ -28,6 +28,7 @@ import {
   putRecord,
   deleteRecord,
   deleteWhere,
+  refuseUnknownWhere,
   readRecord,
   type RecordContext,
 } from './records'
@@ -184,13 +185,28 @@ async function executeTool(
       // deleteRecord; the query path is row-returning, so it asks directly.
       const resolved = resolveCollection(ctx, collection)
       if (!resolved.ok) return { success: false, error: resolved.error }
+      // A `where` key that names no field is refused, not dropped: dropped, it
+      // returned the whole readable collection as if filtered (the same class
+      // `records.deleteWhere` refuses). Schemaless system collections have no
+      // filterable fields, so a `where` on them is refused the same way.
+      const where = params.where as Record<string, unknown> | undefined
+      if (where && typeof where === 'object' && Object.keys(where).length > 0) {
+        if (!resolved.schema) {
+          return {
+            success: false,
+            error: `records.query: collection "${collection}" has no schema, so it has no filterable fields — query it without \`where\``,
+          }
+        }
+        const refusal = refuseUnknownWhere(collection, resolved.schema, where)
+        if (refusal) return refusal
+      }
       // No default `limit` here: this dispatch is the SDK's general record-read
       // path (chat history, cron, app `actions.query`), which must return every
       // row. The assistant's page-size default is applied upstream in the AI
       // tool layer (`applyAiToolDefaults` in `buildTools`).
       const query = {
         collection,
-        where: params.where as Record<string, unknown> | undefined,
+        where,
         orderBy: params.orderBy as string | undefined,
         orderDir: params.orderDir as 'asc' | 'desc' | undefined,
         limit: params.limit as number | undefined,

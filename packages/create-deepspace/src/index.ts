@@ -31,7 +31,7 @@ async function main(): Promise<void> {
   )
   const progress = createProgress()
   const project = prepareProject(input, readCreatorVersion(), progress)
-  await completeProjectSetup(project, progress)
+  await completeProjectSetup(project, progress, { noRegister: input.noRegister })
 }
 
 main().catch((error) => {

@@ -21,18 +21,53 @@ describe('nextStepsLines', () => {
   const project = { appName: 'demo', isInPlace: false }
 
   it('omits the login/init recovery pair once the identity registered', () => {
-    const lines = nextStepsLines(project, true)
+    const lines = nextStepsLines(project, { status: 'registered', plane: 'production' })
     expect(lines).not.toContain('npx deepspace auth login')
     expect(lines).not.toContain('npx deepspace app init')
     expect(lines).toContain('npx deepspace dev start')
   })
 
   it('lists login AND init together when the scaffold has no identity yet', () => {
-    expect(nextStepsLines(project, false).slice(0, 3)).toEqual([
+    expect(
+      nextStepsLines(project, {
+        status: 'failed',
+        code: 'not_authenticated',
+        error: 'Not logged in.',
+        plane: 'production',
+      }).slice(0, 3),
+    ).toEqual([
       'cd demo',
       'npx deepspace auth login',
       'npx deepspace app init',
     ])
+  })
+
+  it('offers only `app init` when registration failed for a non-login reason', () => {
+    // A quota (or ownership, or network) refusal is not fixed by signing in;
+    // telling a signed-in user to `auth login` sent them the wrong way.
+    const quota = nextStepsLines(project, {
+      status: 'failed',
+      code: 'app_quota_exceeded',
+      error: 'Active app quota exceeded.',
+      plane: 'production',
+    })
+    expect(quota.slice(0, 2)).toEqual(['cd demo', 'npx deepspace app init'])
+    expect(quota).not.toContain('npx deepspace auth login')
+  })
+
+  it('offers login + init when registration was skipped or the login was missing', () => {
+    expect(nextStepsLines(project, { status: 'skipped' }).slice(1, 3)).toEqual([
+      'npx deepspace auth login',
+      'npx deepspace app init',
+    ])
+    expect(
+      nextStepsLines(project, {
+        status: 'failed',
+        code: 'not_authenticated',
+        error: 'Not logged in.',
+        plane: 'production',
+      }).slice(1, 3),
+    ).toEqual(['npx deepspace auth login', 'npx deepspace app init'])
   })
 })
 

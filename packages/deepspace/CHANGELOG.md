@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.23.2
+
+### Patch Changes
+
+- Fixes from the v0.23.1 production AX pass: `create-deepspace` exits nonzero when its registration step fails (and says "scaffolded, no app id yet" instead of "is ready"), renders the CLI's refusal sentence instead of a raw JSON envelope, offers `auth login` only when the failure was a missing login, names the account and plane it registered on, and takes `--no-register` (plus a hint that `--yes` is unnecessary); `records.query` refuses a `where` key that names no field (an ignored key returned the whole readable collection as if filtered — the same class `deleteWhere` refuses); `deepspace pull` checks the cloud repo before writing the `space` git remote, so a GitHub-source refusal no longer leaves the push-capable remote behind; `deploy --json` reports a stray server refusal under its real code instead of `deploy_failed` wrapping the JSON as text; `app undeploy` confirms at an interactive terminal (`--yes` skips; scripts and `--json` are never prompted); `test run --json` streams the suite on stderr so stdout is the single JSON line; `status` always states the environment (`env`, `services` in `--json`); the rename prompt says the display `APP_NAME` does not travel, and lives in one place for both the pre-build and commit-time paths.
+
 ## 0.23.1
 
 ### Patch Changes

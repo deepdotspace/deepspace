@@ -38,6 +38,12 @@ export default defineDeepspaceCommand({
         '(e.g. --env staging). Ignored if a positional name is given.',
       required: false,
     },
+    yes: {
+      type: 'boolean',
+      description:
+        'Skip the interactive confirmation. (Scripts and --json callers are never prompted; the command itself is their consent.)',
+      default: false,
+    },
   },
   async run({ args }) {
     const envName = typeof args.env === 'string' && args.env.trim() ? args.env.trim() : undefined
@@ -71,7 +77,22 @@ export default defineDeepspaceCommand({
       )
     }
 
-    if (!args.json) p.intro(`Undeploying ${appId}`)
+    // The most destructive app command: at an interactive terminal, confirm
+    // before the live URL goes dark. Scripts, agents and `--json` callers are
+    // never prompted (a paused piped stdin would hang the exit; the command
+    // is their consent) — matching how the rest of the CLI treats consent.
+    if (!args.json && !args.yes && process.stdin.isTTY) {
+      p.intro(`Undeploying ${appId}`)
+      const confirmed = await p.confirm({
+        message: `Take ${appId} offline now? Its URL stops serving immediately; data, secrets, and the registration stay (the name is reserved for you for 30 days).`,
+        initialValue: false,
+      })
+      if (p.isCancel(confirmed) || !confirmed) {
+        throw new Refusal('Undeploy cancelled.', 'undeploy_declined')
+      }
+    } else if (!args.json) {
+      p.intro(`Undeploying ${appId}`)
+    }
     const s = args.json ? null : createSpinner()
     s?.start('Removing...')
 

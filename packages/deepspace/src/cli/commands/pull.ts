@@ -194,12 +194,17 @@ export default defineDeepspaceCommand({
     const token = await ensureToken()
     const deployUrl = deployBaseUrl()
     const appId = await resolveAppTarget(deployUrl, token, appArg)
-    ensureSpaceRemote(appDir, appId)
 
     // JSON refs first: "no repo" and "no such branch" get actionable
-    // messages instead of git's couldn't-find-remote-ref stderr.
+    // messages instead of git's couldn't-find-remote-ref stderr — and a
+    // GitHub-source app is refused here (the server's 422) BEFORE the `space`
+    // remote is written into the user's .git/config. Read-only verbs must not
+    // leave a push-capable remote behind on a refusal: with it installed, a
+    // raw `git push space` walks around `push`'s own preflight and gets git's
+    // bare 422 with no sentence.
     spinner?.message(`Checking the cloud ${branch} ref…`)
     const remote = await repoApi(deployUrl, token, appId).getRefs()
+    ensureSpaceRemote(appDir, appId)
     if (!remote) {
       spinner?.stop('No cloud repo yet.')
       const pushCommand = targetedVcCommand('push', appId, branch)

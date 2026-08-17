@@ -507,6 +507,44 @@ export function deleteRecord(
 }
 
 /**
+ * The one `where` validator for the tools API's filtered reads and deletes.
+ * `executeQuery` is lenient — a key that names no column is silently dropped
+ * — which for a delete truncates and for a read over-returns (a typo'd
+ * filter hands the whole readable collection back with `success: true`, and
+ * an assistant or action then reasons over it as the filtered set). Every key
+ * must be `recordId`, `createdBy`, or a schema column, and every value a
+ * primitive (equality only). `null` = nothing to refuse.
+ */
+export function refuseUnknownWhere(
+  collection: string,
+  schema: CollectionSchema,
+  where: Record<string, unknown>,
+): ToolResult | null {
+  const columns = (schema.columns ?? []).map(resolveColumn)
+  const filterable = ['recordId', 'createdBy', ...columns.map((c) => c.name)]
+  const unknown = Object.keys(where).filter(
+    (key) =>
+      key !== 'recordId' &&
+      key !== 'createdBy' &&
+      !columns.some((c) => c.id === columnId(key) || c.name === key),
+  )
+  if (unknown.length > 0) {
+    return {
+      success: false,
+      error: `Unknown field(s) in where for "${collection}": ${unknown.join(', ')} — filterable fields: ${filterable.join(', ')}`,
+    }
+  }
+  const nonPrimitive = Object.entries(where).filter(([, v]) => v !== null && typeof v === 'object')
+  if (nonPrimitive.length > 0) {
+    return {
+      success: false,
+      error: `where values must be primitives (equality only): ${nonPrimitive.map(([k]) => k).join(', ')}`,
+    }
+  }
+  return null
+}
+
+/**
  * Delete every record matching `where`, capped at one bounded page.
  *
  * The batch primitive behind cascading deletes: a caller that deleted row by
@@ -551,27 +589,8 @@ export function deleteWhere(
   if (!where || typeof where !== 'object' || Array.isArray(where) || Object.keys(where).length === 0) {
     return { success: false, error: 'Missing required param: where (must match at least one field)' }
   }
-  const columns = (schema.columns ?? []).map(resolveColumn)
-  const filterable = ['recordId', 'createdBy', ...columns.map((c) => c.name)]
-  const unknown = Object.keys(where).filter(
-    (key) =>
-      key !== 'recordId' &&
-      key !== 'createdBy' &&
-      !columns.some((c) => c.id === columnId(key) || c.name === key),
-  )
-  if (unknown.length > 0) {
-    return {
-      success: false,
-      error: `Unknown field(s) in where for "${collection}": ${unknown.join(', ')} — filterable fields: ${filterable.join(', ')}`,
-    }
-  }
-  const nonPrimitive = Object.entries(where).filter(([, v]) => v !== null && typeof v === 'object')
-  if (nonPrimitive.length > 0) {
-    return {
-      success: false,
-      error: `where values must be primitives (equality only): ${nonPrimitive.map(([k]) => k).join(', ')}`,
-    }
-  }
+  const whereRefusal = refuseUnknownWhere(collection, schema, where as Record<string, unknown>)
+  if (whereRefusal) return whereRefusal
 
   if (limit !== undefined && !(typeof limit === 'number' && Number.isFinite(limit))) {
     return { success: false, error: 'limit must be a finite number' }

@@ -82,10 +82,10 @@ describe('the command runtime supplies --json', () => {
     expect((cmd.args as Record<string, { type?: string }>).json?.type).toBe('boolean')
   })
 
-  it('describes test output as a stream with a final JSON line', () => {
+  it('describes test output as a stream on stderr with stdout the single JSON line', () => {
     const description = (test.args as Record<string, { description?: string }>).json.description
-    expect(description).toContain('Stream test output')
-    expect(description).toContain('last line')
+    expect(description).toContain('Stream test output on stderr')
+    expect(description).toContain('single-line JSON')
   })
 })
 

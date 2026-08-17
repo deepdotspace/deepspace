@@ -4,6 +4,9 @@ export interface CliInput {
   appName: string
   local?: string
   template: string
+  /** Skip the authed `app init` step (harnesses that register later, or a
+   *  shell whose ambient login is not the account the app should belong to). */
+  noRegister: boolean
 }
 
 interface ParsedArgs {
@@ -13,6 +16,7 @@ interface ParsedArgs {
   help: boolean
   version: boolean
   interactive: boolean
+  noRegister: boolean
   /** First bad flag (unknown option, or a value flag with no value). */
   invalid?: string
 }
@@ -29,6 +33,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let help = false
   let version = false
   let interactive = false
+  let noRegister = false
   let invalid: string | undefined
 
   // Value flags accept both `--flag value` and `--flag=value`. A missing or
@@ -62,6 +67,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
       version = true
     } else if (argument === '--interactive' || argument === '-i') {
       interactive = true
+    } else if (argument === '--no-register') {
+      noRegister = true
+    } else if (argument === '--yes' || argument === '-y') {
+      // The npm-ecosystem reflex; this scaffolder is already non-interactive.
+      invalid ??= "'--yes' is not needed — create-deepspace is non-interactive by default (--interactive opts in)"
     } else if (!argument.startsWith('-')) {
       if (appName === undefined) appName = argument
       else {
@@ -72,7 +82,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
-  return { appName, local, template, help, version, interactive, invalid }
+  return { appName, local, template, help, version, interactive, noRegister, invalid }
 }
 
 export async function readCliInput(
@@ -153,7 +163,7 @@ export async function readCliInput(
     template = result as string
   }
 
-  return { appName, local: args.local, template }
+  return { appName, local: args.local, template, noRegister: args.noRegister }
 }
 
 /** Runtime guard for npm's default non-strict handling of `engines`. */
@@ -193,6 +203,10 @@ OPTIONS
                       Template to scaffold from (default: ${defaultTemplate}).
   -i, --interactive   Prompt for missing values instead of erroring.
                       (Default behavior is non-interactive — designed for agents.)
+      --no-register   Skip the final \`deepspace app init\` (which registers the
+                      app under whatever login the shell holds, on the plane
+                      DEEPSPACE_ENV selects). Run it yourself once logged in
+                      as the intended owner.
       --local <path>  Use a local SDK monorepo checkout instead of the
                       published deepspace package. Requires a built
                       <path>/packages/deepspace/dist/.

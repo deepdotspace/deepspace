@@ -27,11 +27,10 @@
  * (and test suites) in parallel.
  *
  * Defined with the command runtime (lib/command.ts). The suite runner streams
- * playwright/vitest output through inherited stdio, so under `--json` that
- * text still scrolls past and the envelope is the LAST line rather than the
- * only one — buffering a test run to keep stdout pristine would cost the live
- * feedback the command exists for. The suite's own exit code collapses to the
- * contract's 0/1.
+ * playwright/vitest output live; under `--json` that stream goes to STDERR so
+ * stdout carries exactly one line — the envelope — like every other command
+ * (buffering it would cost the live feedback the command exists for; moving
+ * it keeps both). The suite's own exit code collapses to the contract's 0/1.
  */
 
 import { readAppId } from '../lib/app-identity'
@@ -130,7 +129,7 @@ export default defineDeepspaceCommand({
     name: 'test',
     description: 'Run tests for your DeepSpace app',
   },
-  jsonDescription: 'Stream test output; emit the final JSON result on the last line',
+  jsonDescription: 'Stream test output on stderr; stdout is the single-line JSON result',
   args: {
     suite: {
       type: 'positional',
@@ -166,6 +165,7 @@ export default defineDeepspaceCommand({
     },
   },
   async run({ args }) {
+    suiteOutputToStderr = args.json === true
     const say = (line: string) => {
       if (!args.json) console.log(line)
     }
@@ -324,6 +324,10 @@ export default defineDeepspaceCommand({
  * app id while its Playwright half used staging's — the two halves of one
  * command disagreeing about which app they were testing.
  */
+/** Set once per invocation by `run`: `--json` moves the spawned suite's
+ *  stdout to stderr so the envelope is stdout's only line. */
+let suiteOutputToStderr = false
+
 function runSuite(
   appDir: string,
   argv: string[],
@@ -340,7 +344,9 @@ function runSuite(
   try {
     const result = spawnSync('npx', argv, {
       cwd: appDir,
-      stdio: 'inherit',
+      // Under --json the child's stdout is routed to our stderr: the live
+      // suite output stays visible and stdout stays a single JSON line.
+      stdio: suiteOutputToStderr ? ['inherit', 2, 2] : 'inherit',
       env: wranglerViteEnv(process.env, wranglerConfig, extraEnv),
     })
     return result.status ?? 1
