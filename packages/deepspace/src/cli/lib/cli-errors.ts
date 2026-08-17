@@ -62,6 +62,12 @@ export function errorCode(err: unknown): string | undefined {
   // own slug, if set) so a --json caller can branch on "a git op failed"
   // instead of scraping the fatal-… prose.
   if (err instanceof Error && err.name === 'GitError') return (err as { code?: string }).code ?? 'git_error'
+  // WranglerConfigError (unreadable / malformed / self-contradictory
+  // wrangler.toml) — duck-typed for the same reason: it lives in the one
+  // wrangler.toml reader, which `deepspace/build` imports and which therefore
+  // must not pull this module's CLI stack into an app's build graph.
+  if (err instanceof Error && err.name === 'WranglerConfigError')
+    return (err as { code?: string }).code ?? 'invalid_config'
   return undefined
 }
 

@@ -8,6 +8,19 @@ export interface AppSourceState {
   source: AppSource | null
   revision: number
   registered: boolean
+  /**
+   * The app's live subdomain host, or null when it has never been deployed.
+   * `deploy` compares it against the wrangler `name` to settle a rename BEFORE
+   * it builds. Absent from a platform older than this field.
+   */
+  registeredHost?: string | null
+  /**
+   * Present only when the caller is NOT the app's owner: whether the live
+   * version carries the APP_OWNER_JWT an on-behalf deploy has to inherit.
+   * Absent when the platform could not determine it (or predates the field) —
+   * treat absence as unknown and let the commit-time guard answer.
+   */
+  onBehalf?: { ownerJwtLive: boolean }
 }
 
 export interface AppSourceChangeResult {

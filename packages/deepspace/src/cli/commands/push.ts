@@ -22,6 +22,8 @@ import { ensureToken } from '../auth'
 import { ApiError } from '../lib/api'
 import { getAppSource } from '../lib/source-api'
 import { findAppDir } from '../lib/app-context'
+import { readAppId } from '../lib/app-identity'
+import { hasWranglerConfig, noWranglerConfigMessage } from '../lib/wrangler-env'
 import { resolveAppTarget, warnIfPhantomApp, assertAppTargetResolvable } from '../lib/app-target'
 import {
   assertSyncableRepo,
@@ -141,11 +143,7 @@ export default defineDeepspaceCommand({
     // Outside the try: the catch below needs it to name oversized objects.
     const appDir = findAppDir()
     try {
-      if (!appDir)
-        throw new Refusal(
-          'No wrangler.toml found — run from inside an app directory.',
-          'not_in_app_repo',
-        )
+      if (!appDir) throw new Refusal(noWranglerConfigMessage(process.cwd()), 'not_in_app_repo')
 
       assertSyncableRepo(appDir)
       // An explicitly-blank --branch must not silently fall back to the current
@@ -177,9 +175,24 @@ export default defineDeepspaceCommand({
             'unknown_branch',
           )
         }
+        // This fires BEFORE the identity preflight (which needs a token and
+        // three server round-trips — too expensive to hoist above the local
+        // checks, and hoisting it would change which refusal every other
+        // local failure gets). An unborn HEAD on a scaffold that still carries
+        // the `__APP_ID__` placeholder is exactly the logged-out state
+        // `app init` heals, so that case names it (and ships it as the action):
+        // obeying "commit first" literally would freeze the placeholder into
+        // the repo's first commit. With a real id already in wrangler.toml,
+        // "commit first" is simply right.
+        const uninitialized = hasWranglerConfig(appDir) && readAppId(appDir) === null
         throw new Refusal(
-          `Branch "${branch}" has no commits yet — commit first, then push.`,
+          uninitialized
+            ? `Branch "${branch}" has no commits yet, and wrangler.toml still holds the \`__APP_ID__\` ` +
+                'placeholder — run `deepspace app init` first: it registers the app and makes the ' +
+                'initial commit (committing first would put the unregistered placeholder in history).'
+            : `Branch "${branch}" has no commits yet — commit first, then push.`,
           'no_commits',
+          uninitialized ? { action: { cwd: appDir, argv: ['deepspace', 'app', 'init'] } } : {},
         )
       }
 
@@ -276,6 +289,19 @@ export default defineDeepspaceCommand({
             'run `deepspace app init --new-id` to register it as a fresh app; a brand-new ' +
             'app dir registers with `deepspace app init`.',
           'app_not_registered',
+        )
+      }
+      // GitHub-source apps have no cloud repo to push to. Refuse HERE, where
+      // the repository name is in hand: the server's own 422 says the same
+      // thing but git's smart-HTTP transport discards its body, so the CLI
+      // could only ever reconstruct a repository-less sentence from the bare
+      // status. This is the best-informed site, and it refuses before git runs.
+      if (sourceState.source?.provider === 'github') {
+        throw new Refusal(
+          `This app uses GitHub source (${sourceState.source.repository}). Manage commits with ` +
+            'normal Git/GitHub; `deepspace deploy` ships the local working tree without changing Git.',
+          'source_managed_by_github',
+          { extra: { appId, repository: sourceState.source.repository } },
         )
       }
       const pullRecoveryCwd = selectedBranchCheckout(appDir, branch) ?? appDir

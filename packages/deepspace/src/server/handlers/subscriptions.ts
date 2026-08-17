@@ -127,12 +127,28 @@ export function handleUnsubscribe(
  * `X-App-Action`) bypass the per-user read filter for parity with the other
  * `tools.*` operations (`get`, `create`, `update`, `remove`).
  */
+/** The scan budget for one limited, row-filtered query call — the bound that
+ *  keeps `limit` a bound on work when unreadable rows dominate a table. The
+ *  scan stops on the first batch boundary at or past this, so the exact worst
+ *  case is `MAX + batch − 1` rows where `batch = max(limit, 200)` — i.e.
+ *  O(cap + limit), and a `limit` above the cap is honored as asked. */
+export const MAX_FILTERED_SCAN_ROWS = 5_000
+
+/** Out-param for {@link executeQuery}: `capped` is set when a limited,
+ *  row-filtered scan stopped on {@link MAX_FILTERED_SCAN_ROWS} rather than on
+ *  exhausting the rows — the one case a short result does NOT mean "no more
+ *  matches". */
+export interface QueryScanState {
+  capped: boolean
+}
+
 export function executeQuery(
   ctx: SubscriptionContext,
   query: Query,
   userId: string,
   userRole: string,
   skipUserRbac: boolean = false,
+  scanState?: QueryScanState,
 ): RecordResult[] {
   const resolved = resolveCollection(ctx, query.collection)
 
@@ -156,6 +172,7 @@ export function executeQuery(
     userRole,
     resolved.isSystem,
     skipUserRbac,
+    scanState,
   )
 }
 
@@ -217,6 +234,7 @@ function executeTableQuery(
   userRole: string,
   isSystem: boolean,
   skipUserRbac: boolean = false,
+  scanState?: QueryScanState,
 ): RecordResult[] {
   const columns = (schema.columns ?? []).map(resolveColumn)
   const perms = getRolePermissions(schema, userRole)
@@ -231,19 +249,40 @@ function executeTableQuery(
   let skipPerRecordCheck = skipUserRbac
   if (!skipUserRbac && schema.teamField && perms.read === 'team') {
     // '_rowId' is a sentinel: the record's own ID is the team ID (e.g. teams table)
+    // Push down only when the field resolves to a real column — a synthesized
+    // id for a misdeclared field would throw `no such column` out of SQL,
+    // where the per-row check merely (and correctly) matches nothing.
     const filterCol = schema.teamField === '_rowId'
       ? '_row_id'
-      : (columns.find(c => c.name === schema.teamField)?.id ?? columnId(schema.teamField))
-    const teamIds = preloadUserTeamIds(ctx, userId)
+      : columns.find(c => c.name === schema.teamField)?.id
+    const teamIds = filterCol ? preloadUserTeamIds(ctx, userId) : null
 
-    if (teamIds && teamIds.length > 0) {
-      const placeholders = teamIds.map(() => '?').join(', ')
-      whereClauses.push(`("${filterCol}" IN (${placeholders}) OR _created_by = ?)`)
-      params.push(...teamIds, userId)
-    } else {
-      whereClauses.push(`_created_by = ?`)
-      params.push(userId)
+    if (filterCol) {
+      if (teamIds && teamIds.length > 0) {
+        const placeholders = teamIds.map(() => '?').join(', ')
+        whereClauses.push(`("${filterCol}" IN (${placeholders}) OR _created_by = ?)`)
+        params.push(...teamIds, userId)
+      } else {
+        whereClauses.push(`_created_by = ?`)
+        params.push(userId)
+      }
+      skipPerRecordCheck = true
     }
+  } else if (!skipUserRbac && perms.read === 'own') {
+    // Same shape as the team pushdown. 'own' is exactly `isOwner`: the
+    // declared ownerField when there is one, else the row's creator — so the
+    // SQL predicate is the whole check and the per-row pass can be skipped.
+    const ownerCol = schema.ownerField
+      ? columns.find(c => c.name === schema.ownerField)?.id
+      : '_created_by'
+    if (ownerCol) {
+      whereClauses.push(`"${ownerCol}" = ?`)
+      params.push(userId)
+      skipPerRecordCheck = true
+    }
+  } else if (!skipUserRbac && perms.read === true) {
+    // Unconditional read: the per-row check cannot refuse anything, and
+    // skipping it makes `limit` safe to push into SQL.
     skipPerRecordCheck = true
   }
 
@@ -285,31 +324,57 @@ function executeTableQuery(
     sql += ` ORDER BY _created_at DESC`
   }
 
-  if (query.limit) {
-    sql += ` LIMIT ?`
-    params.push(query.limit)
+  const readPage = (limitClause: string, limitParams: number[]): { records: RecordResult[]; scanned: number } => {
+    const cursor = ctx.sql.exec(sql + limitClause, ...params, ...limitParams)
+    const rows = cursor.toArray()
+    const records: RecordResult[] = []
+    for (const row of rows) {
+      const r = row as { _row_id: string; _created_by: string; _created_at: string; _updated_at: string; [key: string]: unknown }
+      const record: RecordResult = {
+        recordId: r._row_id,
+        data: rowToData(r, columns),
+        createdBy: r._created_by,
+        createdAt: r._created_at,
+        updatedAt: r._updated_at,
+      }
+      if (isSystem || skipPerRecordCheck || canRead(schema, userRole, { data: record.data, createdBy: record.createdBy, recordId: record.recordId }, userId, ctx.getPermissionContext())) {
+        records.push(record)
+      }
+    }
+    return { records, scanned: rows.length }
   }
 
-  const cursor = ctx.sql.exec(sql, ...params)
+  // `limit` counts the records the caller receives. When the SQL predicates
+  // are the whole check it pushes straight into SQL; when a per-row read
+  // filter still applies, a SQL LIMIT would end the result early (a page of
+  // unreadable rows reads as "no more matches"), so scan in bounded batches
+  // until the limit is met, the rows run out, or the scan cap is hit — the
+  // cap keeps `limit` a bound on work, and `scanState.capped` makes hitting
+  // it observable so a caller's drain loop cannot read a capped short page
+  // as exhaustion.
+  if (!query.limit) return readPage('', []).records
+  const rowFiltered = !isSystem && !skipPerRecordCheck
+  if (!rowFiltered) return readPage(' LIMIT ?', [query.limit]).records
+
   const results: RecordResult[] = []
-
-  for (const row of cursor.toArray()) {
-    const r = row as { _row_id: string; _created_by: string; _created_at: string; _updated_at: string; [key: string]: unknown }
-    const data = rowToData(r, columns)
-    const record: RecordResult = {
-      recordId: r._row_id,
-      data,
-      createdBy: r._created_by,
-      createdAt: r._created_at,
-      updatedAt: r._updated_at,
-    }
-
-    if (isSystem || skipPerRecordCheck || canRead(schema, userRole, { data: record.data, createdBy: record.createdBy, recordId: record.recordId }, userId, ctx.getPermissionContext())) {
+  const batch = Math.max(query.limit, 200)
+  for (let offset = 0; ; offset += batch) {
+    const { records, scanned } = readPage(' LIMIT ? OFFSET ?', [batch, offset])
+    for (const record of records) {
       results.push(record)
+      if (results.length >= query.limit) return results
+    }
+    if (scanned < batch) return results
+    if (offset + batch >= MAX_FILTERED_SCAN_ROWS) {
+      // A full final page leaves "capped" and "exhausted exactly on the
+      // boundary" indistinguishable; one single-row probe settles it, so
+      // `capped` never fires on a table that simply ended here.
+      if (scanState && readPage(' LIMIT ? OFFSET ?', [1, offset + batch]).scanned > 0) {
+        scanState.capped = true
+      }
+      return results
     }
   }
-
-  return results
 }
 
 /**

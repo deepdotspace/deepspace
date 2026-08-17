@@ -86,7 +86,11 @@ const list = defineDeepspaceCommand({
 })
 
 const add = defineDeepspaceCommand({
-  meta: { name: 'add', description: 'Authorize someone to deploy your app' },
+  meta: {
+    name: 'add',
+    description:
+      'Authorize someone to deploy your app — a collaborator can also read and change every app secret (plaintext); they cannot undeploy or transfer',
+  },
   args: {
     email: {
       type: 'positional',

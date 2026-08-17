@@ -429,6 +429,28 @@ describe('generated worker route owners', () => {
     expect(action.status).toBe(401)
   })
 
+  it('refuses a cookie-authenticated action call instead of crashing on the missing bearer token', async () => {
+    // `resolveAuth` is pluggable and may accept a cookie session — the caller
+    // is then authenticated with no Authorization header at all. Actions need
+    // the raw JWT (user-billed integrations forward it), and reading it
+    // unguarded used to throw a TypeError and answer 500.
+    const actions = new Hono<TestContext>()
+    const cookieSession = (async () => ({
+      userId: 'cookie-user',
+      claims: { sub: 'cookie-user' },
+    })) as unknown as () => Promise<null>
+    registerActionRoutes(actions, cookieSession)
+
+    const action = await actions.request(
+      'https://app.test/api/actions/example',
+      { method: 'POST', body: '{}', headers: { cookie: 'session=abc' } },
+      env(),
+    )
+
+    expect(action.status).toBe(401)
+    expect(await action.json()).toEqual({ error: 'Unauthorized' })
+  })
+
   it('rejects unlisted browser proxies and registers the SPA fallback last', async () => {
     const platform = new Hono<TestContext>()
     registerPlatformProxyRoutes(platform)

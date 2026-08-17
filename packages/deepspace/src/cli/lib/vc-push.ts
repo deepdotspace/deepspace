@@ -78,7 +78,7 @@ export function isRecoverablePushFailure(status: PushRefStatus): boolean {
 }
 
 export interface PushTransportFailure {
-  code: 'app_quota_exceeded' | 'source_managed_by_github' | 'rate_limited' | 'push_too_large'
+  code: 'app_quota_exceeded' | 'rate_limited' | 'push_too_large' | 'source_managed_by_github'
   error: string
 }
 
@@ -89,6 +89,14 @@ export interface PushTransportFailure {
  * server's sentence — so each branch reconstructs the advice client-side.
  * `cwd` is optional and only used to name the offending objects on a 413; the
  * classification never depends on it.
+ *
+ * The server's 422 (`source_managed_by_github`) is normally decided BEFORE
+ * git runs — `push` refuses from `getAppSource` in its preflight
+ * (`commands/push.ts`, which can name the repository) and `deploy` skips the
+ * cloud push entirely for GitHub source (`commands/deploy/repository.ts`).
+ * The branch below is the last resort for the case the preflight cannot see
+ * (an older platform whose `/source` reports no provider): it cannot name the
+ * repository, only the state.
  */
 export function classifyPushTransportFailure(
   error: unknown,
@@ -104,13 +112,6 @@ export function classifyPushTransportFailure(
         `Use \`deepspace app list\` to choose an app to undeploy, or upgrade your plan, then retry.`,
     }
   }
-  if (/(?:HTTP |error: )422\b/i.test(message)) {
-    return {
-      code: 'source_managed_by_github',
-      error:
-        'This app uses GitHub source. Manage commits with normal Git/GitHub; `deepspace deploy` ships the local working tree without changing Git.',
-    }
-  }
   if (/(?:HTTP |error: )429\b/i.test(message)) {
     return {
       code: 'rate_limited',
@@ -119,6 +120,14 @@ export function classifyPushTransportFailure(
   }
   if (/(?:HTTP |error: )413\b/i.test(message)) {
     return { code: 'push_too_large', error: pushTooLargeMessage(cwd) }
+  }
+  if (/(?:HTTP |error: )422\b/i.test(message)) {
+    return {
+      code: 'source_managed_by_github',
+      error:
+        'This app\'s source is managed by GitHub, so pushes to the DeepSpace repo are refused. ' +
+        'Push to the GitHub repository instead — `deepspace app status` names it.',
+    }
   }
   return null
 }

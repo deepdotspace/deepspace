@@ -29,7 +29,9 @@ import Database from 'better-sqlite3'
 import type { ConnectionAttachment } from '../../../shared/protocol/types'
 import type { YjsSubscription } from '../../../shared/types'
 import { executeQuery } from '../subscriptions'
+import { deleteWhere } from '../records'
 import { handleToolsRequest, type ToolsApiContext } from '../tools-api'
+import { DEFAULT_DELETE_WHERE_LIMIT, MAX_DELETE_WHERE_LIMIT } from '../../utils/tools'
 import {
   getOrCreateYjsDoc,
   getYjsDocKey,
@@ -288,6 +290,233 @@ describe('records.query oversized result degrades to a usable page', () => {
     expect(capped.data.returned as number).toBeGreaterThan(0)
     expect(capped.data.returned as number).toBeLessThan(120)
     expect(JSON.stringify(capped).length).toBeLessThanOrEqual(CAP)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// records.deleteWhere — the bounded batch delete behind cascading deletes.
+// ---------------------------------------------------------------------------
+
+const notes: CollectionSchema = {
+  name: 'notes',
+  columns: [
+    { name: 'chatId', storage: 'text', interpretation: 'plain' },
+    { name: 'body', storage: 'text', interpretation: 'plain' },
+  ],
+  permissions: {
+    member: { read: true, create: true, update: true, delete: true },
+    viewer: { read: true, create: false, update: false, delete: false },
+  },
+}
+
+function seedNotes(db: Database.Database, chatId: string, count: number, from = 0) {
+  for (let i = from; i < from + count; i++) {
+    insert(db, 'c_notes', {
+      recordId: `${chatId}-n${i}`,
+      createdBy: 'author',
+      cols: { chatId, body: `note ${i}` },
+    })
+  }
+}
+
+function noteCount(db: Database.Database, chatId?: string): number {
+  const sql = chatId
+    ? `SELECT COUNT(*) AS n FROM c_notes WHERE "${columnId('chatId')}" = ?`
+    : `SELECT COUNT(*) AS n FROM c_notes`
+  const row = (chatId ? db.prepare(sql).get(chatId) : db.prepare(sql).get()) as { n: number }
+  return row.n
+}
+
+describe('records.deleteWhere', () => {
+  let db: Database.Database
+  let ctx: ToolsApiContext
+
+  beforeEach(() => {
+    db = new Database(':memory:')
+    const sql = makeSql(db)
+    ctx = makeToolsContext(sql, [notes])
+    ensureCollectionTable(sql, notes)
+  })
+
+  it('deletes only the matching rows and reports how many', async () => {
+    seedNotes(db, 'chat-1', 5)
+    seedNotes(db, 'chat-2', 3)
+
+    const out = await execTool(ctx, 'records.deleteWhere', {
+      collection: 'notes',
+      where: { chatId: 'chat-1' },
+    })
+
+    expect(out).toMatchObject({ success: true, data: { deleted: 5 } })
+    expect(noteCount(db, 'chat-1')).toBe(0)
+    expect(noteCount(db, 'chat-2')).toBe(3)
+  })
+
+  it('caps a call at `limit` so the caller can drain a large set page by page', async () => {
+    seedNotes(db, 'chat-1', 25)
+
+    const first = await execTool(ctx, 'records.deleteWhere', {
+      collection: 'notes',
+      where: { chatId: 'chat-1' },
+      limit: 10,
+    })
+    expect(first.data.deleted).toBe(10)
+    expect(noteCount(db, 'chat-1')).toBe(15)
+
+    // Paging terminates: every full page really removes its rows, and a short
+    // page is the last one — the contract `deleteChatCascade` loops on.
+    let deleted = 10
+    while (deleted === 10) {
+      const page = await execTool(ctx, 'records.deleteWhere', {
+        collection: 'notes',
+        where: { chatId: 'chat-1' },
+        limit: 10,
+      })
+      deleted = page.data.deleted as number
+    }
+    expect(deleted).toBe(5)
+    expect(noteCount(db, 'chat-1')).toBe(0)
+  })
+
+  it('clamps an oversized limit to the ceiling instead of running unbounded', async () => {
+    seedNotes(db, 'chat-1', MAX_DELETE_WHERE_LIMIT + 20)
+
+    const out = await execTool(ctx, 'records.deleteWhere', {
+      collection: 'notes',
+      where: { chatId: 'chat-1' },
+      limit: 100_000,
+    })
+
+    expect(out.data.deleted).toBe(MAX_DELETE_WHERE_LIMIT)
+    expect(noteCount(db, 'chat-1')).toBe(20)
+  })
+
+  it('defaults to the standard page size when no limit is given', async () => {
+    seedNotes(db, 'chat-1', DEFAULT_DELETE_WHERE_LIMIT + 5)
+
+    const out = await execTool(ctx, 'records.deleteWhere', {
+      collection: 'notes',
+      where: { chatId: 'chat-1' },
+    })
+
+    expect(out.data.deleted).toBe(DEFAULT_DELETE_WHERE_LIMIT)
+  })
+
+  it('refuses a missing or empty filter — it never truncates a collection', async () => {
+    seedNotes(db, 'chat-1', 3)
+
+    for (const params of [{ collection: 'notes' }, { collection: 'notes', where: {} }]) {
+      const out = await execTool(ctx, 'records.deleteWhere', params)
+      expect(out.success).toBe(false)
+      expect(out.error).toContain('where')
+    }
+    expect(noteCount(db)).toBe(3)
+  })
+
+  it('refuses a filter key that names no field instead of silently dropping it', async () => {
+    // executeQuery ignores unknown where keys; a delete that inherited that
+    // leniency would truncate a page of the collection on a typo.
+    seedNotes(db, 'chat-1', 8)
+
+    const cases: Record<string, unknown>[] = [
+      { chatId_typo: 'chat-1' },
+      { chatId: 'chat-1', nosuch: 'x' },
+      ['chatId', 'body'] as unknown as Record<string, unknown>,
+    ]
+    for (const where of cases) {
+      const out = await execTool(ctx, 'records.deleteWhere', { collection: 'notes', where })
+      expect(out.success).toBe(false)
+    }
+    const named = await execTool(ctx, 'records.deleteWhere', {
+      collection: 'notes',
+      where: { chatId_typo: 'chat-1' },
+    })
+    expect(named.error).toContain('chatId_typo')
+    expect(named.error).toContain('recordId, createdBy, chatId, body')
+    expect(noteCount(db)).toBe(8)
+  })
+
+  it('refuses a non-numeric limit instead of running without one', async () => {
+    seedNotes(db, 'chat-1', DEFAULT_DELETE_WHERE_LIMIT + 5)
+
+    for (const limit of ['all', {}, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const out = await execTool(ctx, 'records.deleteWhere', {
+        collection: 'notes',
+        where: { chatId: 'chat-1' },
+        limit,
+      })
+      expect(out).toMatchObject({ success: false })
+      expect(out.error).toContain('limit')
+    }
+    expect(noteCount(db, 'chat-1')).toBe(DEFAULT_DELETE_WHERE_LIMIT + 5)
+  })
+
+  it('refuses a schemaless system collection, whose query ignores where entirely', async () => {
+    db.exec(
+      `CREATE TABLE c_canvas_settings (_row_id TEXT PRIMARY KEY, _created_by TEXT, _created_at TEXT, _updated_at TEXT)`,
+    )
+    insert(db, 'c_canvas_settings', { recordId: 's1', createdBy: 'someone' })
+
+    const out = await execTool(ctx, 'records.deleteWhere', {
+      collection: 'canvas-settings',
+      where: { anything: 'x' },
+    })
+
+    expect(out).toMatchObject({ success: false })
+    expect(out.error).toContain('no schema')
+    expect((db.prepare('SELECT COUNT(*) AS n FROM c_canvas_settings').get() as { n: number }).n).toBe(1)
+  })
+
+  it('pages after the RBAC read filter, so a caller draining their own rows never stops early', async () => {
+    // Bob's rows sort ahead of Alice's; with `read: 'own'` a SQL LIMIT taken
+    // before the per-row filter would hand Alice an empty first page.
+    const ownNotes: CollectionSchema = {
+      ...notes,
+      name: 'own_notes',
+      permissions: { member: { read: 'own', create: true, update: 'own', delete: 'own' } },
+    }
+    const sqlite = makeSql(db)
+    ctx = makeToolsContext(sqlite, [ownNotes])
+    ensureCollectionTable(sqlite, ownNotes)
+    for (let i = 0; i < 4; i++) {
+      insert(db, 'c_own_notes', { recordId: `bob-${i}`, createdBy: 'bob', cols: { chatId: 'c', body: 'b' } })
+    }
+    for (let i = 0; i < 4; i++) {
+      insert(db, 'c_own_notes', { recordId: `alice-${i}`, createdBy: 'alice', cols: { chatId: 'c', body: 'a' } })
+    }
+
+    let total = 0
+    let deleted = 2
+    while (deleted === 2) {
+      const page = deleteWhere(ctx, 'own_notes', { chatId: 'c' }, 2, 'alice', 'member') as {
+        data: { deleted: number }
+      }
+      deleted = page.data.deleted
+      total += deleted
+    }
+    expect(total).toBe(4)
+    expect((db.prepare('SELECT COUNT(*) AS n FROM c_own_notes').get() as { n: number }).n).toBe(4)
+  })
+
+  it('refuses the whole page when the caller may not delete one of the matches', async () => {
+    // Same posture as records.delete, applied before anything is removed: a
+    // half-applied batch would leave the caller unable to tell what happened.
+    seedNotes(db, 'chat-1', 4)
+
+    const denied = deleteWhere(ctx, 'notes', { chatId: 'chat-1' }, undefined, 'reader', 'viewer')
+
+    expect(denied).toMatchObject({ success: false })
+    expect((denied as { error: string }).error).toContain('DELETE DENIED')
+    expect(noteCount(db, 'chat-1')).toBe(4)
+  })
+
+  it('deletes under RBAC when the role is allowed to', async () => {
+    seedNotes(db, 'chat-1', 4)
+
+    const allowed = deleteWhere(ctx, 'notes', { chatId: 'chat-1' }, undefined, 'member', 'member')
+
+    expect(allowed).toMatchObject({ success: true, data: { deleted: 4 } })
+    expect(noteCount(db, 'chat-1')).toBe(0)
   })
 })
 

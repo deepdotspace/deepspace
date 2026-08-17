@@ -23,7 +23,14 @@ import { BUILT_IN_TOOLS } from '../utils/tools'
 import type { YjsDocKey } from '../../shared/types'
 import { RECORD_NOT_FOUND } from '../../shared/protocol/constants'
 import { executeQuery, resolveCollection, type SubscriptionContext } from './subscriptions'
-import { getRecord, putRecord, deleteRecord, readRecord, type RecordContext } from './records'
+import {
+  getRecord,
+  putRecord,
+  deleteRecord,
+  deleteWhere,
+  readRecord,
+  type RecordContext,
+} from './records'
 import { getUser, getAllUsers, registerUser } from './users'
 import {
   getOrCreateYjsDoc,
@@ -225,6 +232,16 @@ async function executeTool(
       if (!collection) return { success: false, error: 'Missing required param: collection' }
       if (!recordId) return { success: false, error: 'Missing required param: recordId' }
       return deleteRecord(ctx, collection, recordId, userId, userRole, skipUserRbac)
+    }
+
+    // Bounded batch delete — one subrequest per page instead of one per row.
+    // Same authorization posture as `records.delete`; `deleteWhere` itself
+    // validates `where` (every key must name a real field) and `limit`, so no
+    // dispatch path can reach a collection-wide truncation.
+    case 'records.deleteWhere': {
+      const collection = params.collection as string
+      if (!collection) return { success: false, error: 'Missing required param: collection' }
+      return deleteWhere(ctx, collection, params.where, params.limit, userId, userRole, skipUserRbac)
     }
 
     // ---- Users ----

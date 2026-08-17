@@ -112,23 +112,15 @@ export async function secretsApi<T>(
       ...(init.headers ?? {}),
     },
   })
-  const body = (await res.json().catch(() => ({}))) as T & { error?: string }
+  const body = (await res.json().catch(() => ({}))) as T & { error?: string; code?: string }
   if (!res.ok) {
     // Surface the server's sentence, not the internal `/api/secrets/app_…/…`
     // slug — that path is an implementation detail and reads like a bug to
-    // users. `status` carries the code for programmatic branches; set DEBUG=1
-    // (via cli-errors) for the full error. `apiPath` is kept for debugging.
-    const err = new Error(body.error ?? `Secrets request failed (${res.status})`) as Error & {
-      status?: number
-      code?: string
-      apiPath?: string
-    }
-    err.status = res.status
-    // Preserve the server's machine code (e.g. app_not_registered) so the
-    // shared renderer and --json envelope expose it instead of a bare slug.
-    err.code = (body as { code?: string }).code
-    err.apiPath = path
-    throw err
+    // users. An `ApiError` (not a plain Error with ad-hoc fields) is what
+    // `errorCode` reads, so the server's machine code (e.g.
+    // not_app_owner_or_collaborator) reaches the renderer and the --json
+    // envelope; `apiPath` stays off the message (DEBUG-only rendering).
+    throw new ApiError(body.error ?? `Secrets request failed (${res.status})`, res.status, body.code, path)
   }
   return body
 }

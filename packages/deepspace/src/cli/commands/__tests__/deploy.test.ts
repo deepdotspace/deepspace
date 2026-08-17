@@ -2,19 +2,18 @@
 
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { blankSelectorRefusal, staleBaseGuardFields } from '../deploy'
+import {
+  blankSelectorRefusal,
+  ownerJwtMissingRefusal,
+  pendingRename,
+  renamePromptMessage,
+  renameRefusalMessage,
+  staleBaseGuardFields,
+} from '../deploy'
 import { MAX_DEPLOY_ASSET_FILE_BYTES } from '../../../shared/app-files'
 import {
   collectAssets,
@@ -23,7 +22,6 @@ import {
   isDeployAssetControlFile,
   oversizedAssetRefusal,
   readDeployAssetConfig,
-  removeBuildDevVars,
   resolveDeployRunWorkerFirst,
   type DeployAsset,
 } from '../deploy/build'
@@ -99,35 +97,9 @@ describe('static asset control files', () => {
   })
 })
 
-describe('build-output preview secrets', () => {
-  it('deletes Cloudflare preview secrets before deploy collection', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'deepspace-build-secrets-'))
-    try {
-      const path = join(dir, '.dev.vars')
-      writeFileSync(path, 'SECRET=value\n', { mode: 0o644 })
-
-      expect(removeBuildDevVars(dir)).toBe(true)
-      expect(existsSync(path)).toBe(false)
-      expect(removeBuildDevVars(dir)).toBe(false)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('refuses a symlink without touching its target', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'deepspace-build-secrets-'))
-    try {
-      const target = join(dir, 'target')
-      writeFileSync(target, 'SECRET=value\n')
-      symlinkSync(target, join(dir, '.dev.vars'))
-
-      expect(() => removeBuildDevVars(dir)).toThrow(/unsafe build secret path/)
-      expect(readFileSync(target, 'utf8')).toBe('SECRET=value\n')
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-})
+// The build-preview `.dev.vars` delete moved to `src/build/plugin.ts` — one
+// implementation for the plugin sweep and this deploy path — and its tests
+// moved with it (`src/build/__tests__/build-dev-vars.test.ts`).
 
 describe('blankSelectorRefusal (pre-auth blank deploy selector)', () => {
   // A present-but-blank target selector is refused pre-auth with a true code so an
@@ -143,6 +115,55 @@ describe('blankSelectorRefusal (pre-auth blank deploy selector)', () => {
   it('allows an omitted or real selector (undefined → documented default)', () => {
     expect(blankSelectorRefusal({})).toBeNull()
     expect(blankSelectorRefusal({ env: 'staging', dir: 'apps/web' })).toBeNull()
+  })
+})
+
+/**
+ * Both refusals used to fire at commit time — after a full build and a
+ * multi-hundred-KiB upload. They are answered by the pre-build `/source`
+ * response, so the CLI settles them before `buildDeployBundle` runs.
+ */
+describe('pre-build deploy refusals', () => {
+  it('refuses a collaborator whose app has no live APP_OWNER_JWT, with the platform’s sentence', () => {
+    const refusal = ownerJwtMissingRefusal({ onBehalf: { ownerJwtLive: false } })
+    expect(refusal?.code).toBe('owner_jwt_missing')
+    // Pinned by tests/docker/collaborators.sh and by the deploy worker's own 409.
+    expect(refusal?.error).toBe(
+      'Cannot preserve the existing secrets: this app has no live deployment ' +
+        'carrying an APP_OWNER_JWT. Ask the owner to redeploy.',
+    )
+  })
+
+  it('lets an owner, a live-JWT collaborator, and an unanswering platform through', () => {
+    // The owner branch omits onBehalf entirely; an older platform omits it too.
+    // Unknown must never read as "missing" — the server still guards it.
+    expect(ownerJwtMissingRefusal({})).toBeNull()
+    expect(ownerJwtMissingRefusal({ onBehalf: { ownerJwtLive: true } })).toBeNull()
+  })
+
+  it('sees a rename when the wrangler name no longer matches the served host', () => {
+    expect(pendingRename('old-name.app.space', 'new-name')).toEqual({
+      fromHost: 'old-name.app.space',
+      toHost: 'new-name.app.space',
+    })
+  })
+
+  it('sees no rename on an unchanged name or an app that has never been deployed', () => {
+    expect(pendingRename('same.app.space', 'same')).toBeNull()
+    expect(pendingRename(null, 'fresh')).toBeNull()
+    // An older platform sends no host at all: leave it to the server.
+    expect(pendingRename(undefined, 'fresh')).toBeNull()
+  })
+
+  it('names both hosts and both escapes, matching the server’s rename_required', () => {
+    const rename = { fromHost: 'old-name.app.space', toHost: 'new-name.app.space' }
+    for (const message of [renameRefusalMessage(rename), renamePromptMessage(rename)]) {
+      expect(message).toContain(
+        'This deploy renames the app: old-name.app.space → new-name.app.space',
+      )
+      expect(message).toContain('deepspace app init --new-id')
+    }
+    expect(renameRefusalMessage(rename)).toContain('--rename')
   })
 })
 

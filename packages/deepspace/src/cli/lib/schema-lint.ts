@@ -17,7 +17,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { lintSchema, type CollectionSchema } from '../../server/schemas/registry'
+import { lintSchema, lintSchemas, type CollectionSchema } from '../../server/schemas/registry'
 
 /**
  * Lint every schema exported from `<appDir>/src/schemas.ts`.
@@ -60,16 +60,24 @@ export async function lintProjectSchemas(appDir: string): Promise<string[] | nul
 
   if (!Array.isArray(schemas)) return null
 
-  const findings: string[] = []
-  for (const schema of schemas) {
-    if (!schema || typeof schema !== 'object') continue
+  // A malformed schema entry fails loudly at runtime anyway — skip it here,
+  // keeping the findings for the rest. The outer catch keeps the whole lint
+  // advisory: the per-schema probe only proves `lintSchema` doesn't throw,
+  // and the set-level rules read fields it never touches.
+  const wellFormed = schemas.filter((schema): schema is CollectionSchema => {
+    if (!schema || typeof schema !== 'object') return false
     try {
-      findings.push(...lintSchema(schema as CollectionSchema))
+      lintSchema(schema as CollectionSchema)
+      return true
     } catch {
-      // A malformed schema entry fails loudly at runtime anyway — skip here.
+      return false
     }
+  })
+  try {
+    return lintSchemas(wellFormed)
+  } catch {
+    return null
   }
-  return findings
 }
 
 /** Max findings printed in full — the rest collapse to a count so a

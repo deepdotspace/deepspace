@@ -6,8 +6,12 @@
  * undeploy?" when the deploy quota message names an id you've lost track of,
  * and the discovery surface for a second checkout / lost app dir.
  *
- * `--json` emits the entries for scripts, under `apps` in the standard
- * `{ ok, … }` envelope.
+ * It is also where an incoming ownership transfer surfaces: an offered app is
+ * not yours until you accept, so it is in no other listing, and its id would
+ * otherwise have to reach you out of band.
+ *
+ * `--json` emits the entries for scripts, under `apps` (and `pendingTransfers`)
+ * in the standard `{ ok, … }` envelope.
  *
  * Defined with the command runtime (lib/command.ts): `--json`, the envelope,
  * the slug, and the exit codes come from there, not from this file.
@@ -16,7 +20,7 @@
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { defineDeepspaceCommand } from '../lib/command'
-import { listApps, liveAppUrl } from '../lib/app-target'
+import { listAppsPage, liveAppUrl, type AppListEntry } from '../lib/app-target'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
@@ -27,12 +31,12 @@ export default defineDeepspaceCommand({
   },
   async run({ args }) {
     const token = await ensureToken()
-    const apps = await listApps(DEPLOY_URL, token)
+    const { apps, pendingTransfers } = await listAppsPage(DEPLOY_URL, token)
 
     if (!args.json) {
-      if (!apps.length) {
+      if (!apps.length && !pendingTransfers.length) {
         console.log('No apps yet. Create one with `npx create-deepspace <name>` and `deepspace deploy`.')
-      } else {
+      } else if (apps.length) {
         // Active apps hold quota slots — list them first so "which app do I
         // undeploy?" is answerable without scanning released registrations.
         const rows = [...apps].sort(
@@ -43,7 +47,7 @@ export default defineDeepspaceCommand({
         // reading `.length` off that crashed the whole listing.
         const roleOf = (a: (typeof rows)[number]) => a.role ?? 'owner'
         const roleWidth = Math.max(4, ...rows.map((a) => roleOf(a).length))
-        const nameWidth = Math.max(4, ...rows.map((a) => (a.name ?? '—').length))
+        const nameWidth = Math.max(4, ...rows.map((a) => nameCell(a).length))
         const statusWidth = Math.max(6, ...rows.map((a) => a.status.length))
         const idWidth = Math.max(6, ...rows.map((a) => a.appId.length))
         console.log(
@@ -52,13 +56,43 @@ export default defineDeepspaceCommand({
         for (const a of rows) {
           const url = liveAppUrl(a) ?? '(not deployed)'
           console.log(
-            `${(a.name ?? '—').padEnd(nameWidth)}  ${a.status.padEnd(statusWidth)}  ${roleOf(a).padEnd(roleWidth)}  ${a.appId.padEnd(idWidth)}  ${url}`,
+            `${nameCell(a).padEnd(nameWidth)}  ${a.status.padEnd(statusWidth)}  ${roleOf(a).padEnd(roleWidth)}  ${a.appId.padEnd(idWidth)}  ${url}`,
           )
         }
+        // A reserved name is nobody else's to take until it lapses — the one
+        // fact the table can't carry. A renamed app holds its old name while
+        // serving the new one, so this is keyed on the reservation, not on
+        // the app lacking a live name.
+        const reserved = rows.filter((a) => a.reservedName && a.reservedUntil)
+        if (reserved.length) {
+          console.log('\nReserved names return to the open pool when they expire:')
+          for (const a of reserved) {
+            console.log(
+              `  ${a.reservedName} — held for you until ${a.reservedUntil}${a.name ? ` (${a.appId} now serves ${a.name})` : ''}`,
+            )
+          }
+        }
+      }
+      // Offered apps are not yours yet, so they are in no row above.
+      if (pendingTransfers.length) {
+        console.log('\nTransfer offers waiting for you:')
+        for (const offer of pendingTransfers) {
+          console.log(`  ${offer.appId} — expires ${offer.expiresAt}`)
+        }
+        console.log(
+          '  Accept with `deepspace app transfer accept --app <APP ID>`; ' +
+            '`deepspace app transfer status --app <APP ID>` names the offerer.',
+        )
       }
     }
     // No `next`: a listing is terminal — which app you act on, and how, is the
     // caller's choice.
-    return { data: { apps } }
+    return { data: { apps, pendingTransfers } }
   },
 })
+
+/** An app with no live route still shows the name it holds, marked as held. */
+function nameCell(app: AppListEntry): string {
+  if (app.name) return app.name
+  return app.reservedName ? `${app.reservedName} (reserved)` : '—'
+}

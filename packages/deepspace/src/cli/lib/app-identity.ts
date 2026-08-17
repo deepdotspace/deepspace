@@ -18,40 +18,21 @@
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { parse as parseToml } from 'smol-toml'
-import { InputError } from './cli-errors'
+import { hasWranglerConfig, readAppIdVar, readWranglerConfig } from './wrangler-env'
 
 // Single source: the shared registry client owns the id shape. Import-then-
 // re-export (not a bare `export from`) because readAppId uses it locally too.
 import { APP_ID_RE } from '../../server/utils/registry-client'
 export { APP_ID_RE }
 
-export interface WranglerIdentityConfig {
-  name?: unknown
-  vars?: Record<string, unknown>
-  env?: Record<string, { name?: unknown; vars?: Record<string, unknown> }>
-}
-
-export function readWranglerIdentityConfig(cwd: string): WranglerIdentityConfig | null {
-  const wranglerPath = join(resolve(cwd), 'wrangler.toml')
-  if (!existsSync(wranglerPath)) return null
-  try {
-    return parseToml(readFileSync(wranglerPath, 'utf-8')) as WranglerIdentityConfig
-  } catch (err) {
-    throw new InputError(
-      `Could not parse ${wranglerPath}: ${err instanceof Error ? err.message : String(err)}`,
-      'invalid_config',
-    )
-  }
-}
-
 /** Read DEEPSPACE_APP_ID for the given wrangler env (top-level when omitted).
- *  Env blocks do NOT inherit the top-level id — each env is its own app. */
+ *  `null` when there is no app here or the section carries no valid id; a
+ *  wrangler.toml that exists but is unreadable, malformed, or gives one id to
+ *  two sections throws `WranglerConfigError` from the shared reader. */
 export function readAppId(cwd: string = process.cwd(), wranglerEnv?: string): string | null {
-  const cfg = readWranglerIdentityConfig(cwd)
-  if (!cfg) return null
-  const vars = wranglerEnv ? cfg.env?.[wranglerEnv]?.vars : cfg.vars
-  const id = vars?.DEEPSPACE_APP_ID
+  const appDir = resolve(cwd)
+  if (!hasWranglerConfig(appDir)) return null
+  const id = readAppIdVar(readWranglerConfig(appDir), wranglerEnv)
   return typeof id === 'string' && APP_ID_RE.test(id) ? id : null
 }
 

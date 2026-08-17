@@ -1,8 +1,12 @@
 import * as p from '@clack/prompts'
 import { execSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, readFileSync, readdirSync, unlinkSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+// One implementation, two lifetimes: the plugin sweeps every `vite build`,
+// this deploy path guards the artifact that actually ships. See the function's
+// header and docs/migrations/build-preview-secrets.md.
+import { removeBuildDevVars } from '../../../build/plugin'
 import { readDocumentationDeployManifest } from '../../../documentation/deploy'
 import { DEEPSPACE_ENV } from '../../env'
 import {
@@ -73,18 +77,6 @@ interface OutputWranglerConfig extends Record<string, unknown> {
   assets?: { directory: string; run_worker_first?: unknown; not_found_handling?: unknown }
   durable_objects?: { bindings: Array<{ name: string; class_name: string }> }
   migrations?: Array<{ new_sqlite_classes?: string[] }>
-}
-
-/** Delete Cloudflare's preview-only secret copy before any deploy artifact is read. */
-export function removeBuildDevVars(workerDir: string): boolean {
-  const path = join(workerDir, '.dev.vars')
-  if (!existsSync(path)) return false
-  const stat = lstatSync(path)
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new Error(`Refusing unsafe build secret path: ${path}`)
-  }
-  unlinkSync(path)
-  return true
 }
 
 /**

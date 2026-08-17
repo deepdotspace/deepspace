@@ -1,5 +1,6 @@
 import { ensureToken } from '../../auth'
 import { findAppDir } from '../../lib/app-context'
+import { noWranglerConfigMessage } from '../../lib/wrangler-env'
 import { resolveAppTarget, parseAppArg, assertAppTargetResolvable } from '../../lib/app-target'
 import { Refusal } from '../../lib/command'
 import type { CliAction } from '../../lib/output'
@@ -35,7 +36,7 @@ export async function resolveTarget(appArg: string | undefined): Promise<Target>
   const appDir = findAppDir()
   if (!appDir) {
     throw new Refusal(
-      'No wrangler.toml found — run from inside an app directory (or use -a <app> for list, and for drop with an explicit ws_ id).',
+      `${noWranglerConfigMessage(process.cwd())} (Or use -a <app> for list, and for drop with an explicit ws_ id.)`,
       'not_in_app_repo',
     )
   }

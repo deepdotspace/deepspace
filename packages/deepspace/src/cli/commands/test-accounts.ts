@@ -403,9 +403,10 @@ const recover = defineDeepspaceCommand({
 
     const localAccounts = loadAllTestAccounts()
     const known = new Set(localAccounts.map((account) => account.id))
-    // Display names this machine already knows. Rotation returns no name, and
-    // `name` is what a spec compares against — so keep the real one when we
-    // have it and never invent one from the address.
+    // Display names this machine already knows. Rotation now returns the name
+    // off the platform's own user row, so this only covers a platform older
+    // than that join; `name` is what a spec compares against, so keep a real
+    // one wherever it comes from and never invent one from the address.
     const localNames = new Map(
       localAccounts.flatMap((account) =>
         account.name ? [[account.email, account.name] as const] : [],
@@ -437,7 +438,7 @@ const recover = defineDeepspaceCommand({
     for (const target of targets) {
       try {
         const account = await recoverRemoteTestAccount(target.id)
-        const name = localNames.get(account.email)
+        const name = account.name ?? localNames.get(account.email)
         upsertTestAccount({
           id: account.id,
           email: account.email,

@@ -112,6 +112,78 @@ describe('workspaceBranchPushRefusal', () => {
   })
 })
 
+describe('unborn scaffold', () => {
+  it('sends `no_commits` to `app init` (with the action) while the placeholder is still in wrangler.toml', async () => {
+    // The identity preflight is three server round-trips below this point, so
+    // the refusal reads the local config: a scaffold whose wrangler.toml still
+    // holds `__APP_ID__` is the state `app init` heals, and obeying "commit
+    // first" would freeze the placeholder into history.
+    repo = mkdtempSync(join(tmpdir(), 'ds-push-unborn-'))
+    git(repo, ['init', '-q', '-b', 'main'])
+    writeFileSync(join(repo, 'wrangler.toml'), 'name = "x"\n[vars]\nDEEPSPACE_APP_ID = "__APP_ID__"\n')
+
+    const { output, exits } = await runPushJson({}, repo)
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'no_commits',
+      action: { cwd: repo, argv: ['deepspace', 'app', 'init'] },
+    })
+    expect(output.error).toContain('__APP_ID__')
+    expect(exits).toEqual([1])
+  })
+
+  it('says only "commit first" when wrangler.toml already carries a real id', async () => {
+    repo = mkdtempSync(join(tmpdir(), 'ds-push-unborn-'))
+    git(repo, ['init', '-q', '-b', 'main'])
+    writeFileSync(
+      join(repo, 'wrangler.toml'),
+      'name = "x"\n[vars]\nDEEPSPACE_APP_ID = "app_01ABCDEFGHJKMNPQRSTVWXYZ00"\n',
+    )
+
+    const { output } = await runPushJson({}, repo)
+
+    expect(output).toMatchObject({ ok: false, code: 'no_commits' })
+    expect(output.error).not.toContain('__APP_ID__')
+    expect(output).not.toHaveProperty('action')
+  })
+})
+
+describe('GitHub-source preflight', () => {
+  it('refuses before git runs and NAMES the repository', async () => {
+    const branch = 'main'
+    const appId = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
+    repo = makeRepo(branch)
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(appId)
+    vi.spyOn(appTargetModule, 'warnIfPhantomApp').mockResolvedValue()
+    vi.spyOn(sourceApiModule, 'getAppSource').mockResolvedValue({
+      appId,
+      source: { provider: 'github', repository: 'acme/widgets' },
+      revision: 3,
+      registered: true,
+    })
+    // The refusal must come from the preflight, not from git's discarded 422.
+    const ensureRemote = vi
+      .spyOn(vcRemoteModule, 'ensureSpaceRemote')
+      .mockReturnValue('https://example.invalid/repo')
+    const push = vi.spyOn(vcPushModule, 'pushToSpace')
+
+    const { output, exits } = await runPushJson({ app: 'selected-app', branch }, repo)
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'source_managed_by_github',
+      appId,
+      repository: 'acme/widgets',
+    })
+    expect(output.error).toContain('acme/widgets')
+    expect(ensureRemote).not.toHaveBeenCalled()
+    expect(push).not.toHaveBeenCalled()
+    expect(exits).toEqual([1])
+  })
+})
+
 describe('push recovery target', () => {
   it('preserves the resolved app id and selected branch in a divergence action', async () => {
     const branch = 'feature/selected'

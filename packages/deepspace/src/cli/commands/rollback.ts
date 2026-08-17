@@ -59,7 +59,7 @@ export function pickPreviousRelease(
 export default defineDeepspaceCommand({
   meta: {
     name: 'rollback',
-    description: "Re-deploy a prior release's exact bundle (no rebuild)",
+    description: "Re-deploy a prior release's exact bundle (no rebuild); the live secrets are kept, not the release's",
   },
   args: {
     release: {

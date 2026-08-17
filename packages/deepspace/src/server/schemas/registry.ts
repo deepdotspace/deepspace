@@ -499,13 +499,47 @@ export function lintSchema(schema: CollectionSchema): string[] {
   return warnings
 }
 
+/**
+ * Lint a whole schema set: every per-schema warning, plus the rules that
+ * need to see the set. The `'team'` permission level resolves membership from
+ * a `team_members` collection (`teamId`, `userId`, `status`); without one it
+ * denies everything, silently — a mistake that presents as a sync bug, not
+ * as a schema error, so name it here.
+ */
+export function lintSchemas(schemas: CollectionSchema[]): string[] {
+  return [...schemas.flatMap((schema) => lintSchema(schema)), ...lintSchemaSet(schemas)]
+}
+
+/** The rules that need to see the whole schema set (per-schema rules live in
+ *  `lintSchema`; `lintSchemas` composes both). */
+export function lintSchemaSet(schemas: CollectionSchema[]): string[] {
+  const warnings: string[] = []
+  if (!schemas.some((schema) => schema.name === 'team_members')) {
+    for (const schema of schemas) {
+      const teamRoles = Object.entries(schema.permissions)
+        .filter(([, p]) => [p.read, p.update, p.delete].includes('team'))
+        .map(([role]) => role)
+      if (teamRoles.length > 0) {
+        warnings.push(
+          `[${schema.name}] role(s) ${teamRoles.join(', ')} use the 'team' permission level, but no ` +
+            `'team_members' collection is registered. 'team' resolves membership from team_members ` +
+            `(teamId, userId, status), so without it those roles are denied everything — silently. ` +
+            `Register a team_members schema or use another level.`,
+        )
+      }
+    }
+  }
+  return warnings
+}
+
 export class SchemaRegistry {
   private trusted: Map<string, CollectionSchema> = new Map()
 
   constructor(schemas: CollectionSchema[] = []) {
-    for (const schema of schemas) {
-      this.registerTrusted(schema)
-    }
+    // registerTrusted runs the per-schema lint; only the set-level rules are
+    // this loop's to add.
+    for (const w of lintSchemaSet(schemas)) console.warn(`[schema-lint] ${w}`)
+    for (const schema of schemas) this.registerTrusted(schema)
   }
 
   registerTrusted(schema: CollectionSchema): void {

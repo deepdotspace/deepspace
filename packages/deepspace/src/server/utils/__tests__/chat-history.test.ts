@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest'
-import { getChat } from '../chat-history'
+import { appendMessage, deleteChatCascade, getChat, updateChat } from '../chat-history'
 import { RECORD_NOT_FOUND } from '../../../shared/protocol/constants'
 
 const OWNER = 'user-owner'
@@ -121,6 +121,148 @@ describe('regression: the exact reported vector', () => {
     const { stub } = stubReturning(chatRecord('user-A'))
 
     await expect(getChat(stub, 'chat-owned-by-A', 'user-B')).resolves.toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Write-after-delete guards and the bounded cascade
+// ---------------------------------------------------------------------------
+
+type Call = { tool: string; params: Record<string, unknown> }
+
+/** A RecordRoom stub whose reply to each tool call the test decides. */
+function roomStub(respond: (call: Call) => { success: boolean; data?: unknown; error?: string }): {
+  stub: DurableObjectStub
+  calls: Call[]
+} {
+  const calls: Call[] = []
+  const stub = {
+    fetch: async (req: Request) => {
+      const body = (await req.json()) as { tool: string; params: Record<string, unknown> }
+      calls.push({ tool: body.tool, params: body.params })
+      return new Response(JSON.stringify(respond(body)), {
+        headers: { 'content-type': 'application/json' },
+      })
+    },
+  } as unknown as DurableObjectStub
+  return { stub, calls }
+}
+
+/** Replies as a room holding exactly the chats in `chats` (by owner). */
+function roomWithChat(owner: string | null) {
+  return roomStub((call) => {
+    if (call.tool === 'records.get') {
+      return { success: true, data: { record: owner ? chatRecord(owner) : null } }
+    }
+    return { success: true, data: {} }
+  })
+}
+
+describe('write-after-delete: updateChat', () => {
+  it('does not write when the chat is gone — records.update is an upsert and would resurrect it', async () => {
+    const { stub, calls } = roomWithChat(null)
+
+    await expect(updateChat(stub, 'chat-1', OWNER, { title: 'Auto title' })).resolves.toBe(false)
+
+    expect(calls.map((c) => c.tool)).toEqual(['records.get'])
+  })
+
+  it('writes and reports true when the chat still exists', async () => {
+    const { stub, calls } = roomWithChat(OWNER)
+
+    await expect(updateChat(stub, 'chat-1', OWNER, { model: 'm' })).resolves.toBe(true)
+
+    expect(calls.map((c) => c.tool)).toEqual(['records.get', 'records.update'])
+    expect(calls[1].params).toMatchObject({ collection: 'ai-chats', recordId: 'chat-1' })
+  })
+
+  it('does not write to another user\'s chat', async () => {
+    const { stub, calls } = roomWithChat(OWNER)
+
+    await expect(updateChat(stub, 'chat-1', OTHER, { title: 'nope' })).resolves.toBe(false)
+
+    expect(calls.map((c) => c.tool)).toEqual(['records.get'])
+  })
+})
+
+describe('write-after-delete: appendMessage', () => {
+  const message = {
+    id: 'msg-1',
+    chatId: 'chat-1',
+    userId: OWNER,
+    role: 'assistant' as const,
+    content: 'hi',
+  }
+
+  it('skips the write when the chat was deleted mid-stream', async () => {
+    const { stub, calls } = roomWithChat(null)
+
+    await expect(appendMessage(stub, message)).resolves.toBe(false)
+
+    expect(calls.map((c) => c.tool)).toEqual(['records.get'])
+  })
+
+  it('writes and reports true while the chat exists', async () => {
+    const { stub, calls } = roomWithChat(OWNER)
+
+    await expect(appendMessage(stub, message)).resolves.toBe(true)
+
+    expect(calls.map((c) => c.tool)).toEqual(['records.get', 'records.create'])
+  })
+})
+
+/** A room holding `count` messages, draining them through records.deleteWhere. */
+function roomWithMessages(count: number, opts: { deleteWhereFails?: boolean } = {}) {
+  let remaining = count
+  return roomStub((call) => {
+    if (call.tool === 'records.deleteWhere') {
+      if (opts.deleteWhereFails) return { success: false, error: 'storage exploded' }
+      const limit = call.params.limit as number
+      const deleted = Math.min(remaining, limit)
+      remaining -= deleted
+      return { success: true, data: { deleted } }
+    }
+    return { success: true, data: { deleted: true } }
+  })
+}
+
+describe('deleteChatCascade is bounded in subrequests', () => {
+  it('spends one subrequest per page, not one per message', async () => {
+    // 4500 messages used to mean 4501 stub.fetch calls — past the Workers
+    // subrequest cap, so the tail of the chat (and often the chat row itself)
+    // survived the delete.
+    const { stub, calls } = roomWithMessages(4500)
+
+    await deleteChatCascade(stub, 'chat-1', OWNER)
+
+    const deleteWheres = calls.filter((c) => c.tool === 'records.deleteWhere')
+    expect(deleteWheres).toHaveLength(23) // 22 full pages of 200 + a short one
+    expect(deleteWheres[0].params).toMatchObject({
+      collection: 'ai-messages',
+      where: { chatId: 'chat-1' },
+    })
+    expect(calls.filter((c) => c.tool === 'records.delete')).toEqual([
+      { tool: 'records.delete', params: { collection: 'ai-chats', recordId: 'chat-1' } },
+    ])
+    expect(calls).toHaveLength(24)
+  })
+
+  it('stops after one call when the chat has no messages', async () => {
+    const { stub, calls } = roomWithMessages(0)
+
+    await deleteChatCascade(stub, 'chat-1', OWNER)
+
+    expect(calls.map((c) => c.tool)).toEqual(['records.deleteWhere', 'records.delete'])
+  })
+
+  it('still deletes the chat row when message deletion fails, then reports the failure', async () => {
+    // The row must leave the user's listing even if messages orphan — but the
+    // caller must not be told the cascade succeeded.
+    const { stub, calls } = roomWithMessages(10, { deleteWhereFails: true })
+
+    await expect(deleteChatCascade(stub, 'chat-1', OWNER)).rejects.toThrow(/storage exploded/)
+
+    expect(calls.map((c) => c.tool)).toEqual(['records.deleteWhere', 'records.delete'])
   })
 })
 

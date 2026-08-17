@@ -40,7 +40,7 @@ function splitTokenPath(
  * mean …?") and are withheld from `action`, which is the executable channel —
  * a destructive command has to be typed on purpose.
  */
-const DESTRUCTIVE_VERBS = new Set(['rm', 'delete', 'remove', 'drop', 'clear', 'undeploy', 'kill'])
+const DESTRUCTIVE_VERBS = new Set(['rm', 'delete', 'remove', 'drop', 'clear', 'undeploy', 'kill', 'logout'])
 
 /** Levenshtein distance for short command names. */
 export function editDistance(a: string, b: string): number {
@@ -113,11 +113,18 @@ export function findUnknownCommand(
       const split = splitTokenPath(token, table)
       const relativeSuggestion = split ?? closestCommandPath(token, table)
       if (!relativeSuggestion) return null
+      // A guess is a useful hint to a human, but only the quoted-token case —
+      // an exact command path typed as one argument — is deterministic enough
+      // to hand back as a runnable `action`. A ranked guess executed blindly
+      // can be catastrophic (`credits` ranks `create` closest, which starts an
+      // interactive scaffold; `auth status` ranks `logout`), and no distance
+      // threshold separates those cases reliably.
+      const guessed = relativeSuggestion.at(-1) ?? ''
       return {
         attemptedPath: ['deepspace', ...accepted, token],
         helpPath: ['deepspace', ...accepted],
         suggestion: ['deepspace', ...accepted, ...relativeSuggestion],
-        executable: !DESTRUCTIVE_VERBS.has(relativeSuggestion.at(-1) ?? ''),
+        executable: split !== null && !DESTRUCTIVE_VERBS.has(guessed),
         ...(split ? { quotedToken: true as const } : {}),
       }
     }

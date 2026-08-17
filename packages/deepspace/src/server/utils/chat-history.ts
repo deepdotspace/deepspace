@@ -16,6 +16,13 @@
  * that skips it is writing across users, so route new consumers through
  * `getChat` first.
  *
+ * `updateChat` and `appendMessage` re-run that precheck themselves and report
+ * `false` instead of writing when the chat is gone: `records.update` /
+ * `records.create` are upserts, so a write racing the user's delete would
+ * resurrect the chat as a ghost row or orphan messages under a chat that no
+ * longer exists. The guard lives in the helpers, not the routes, so every copy
+ * of the scaffolded chat routes gets it.
+ *
  * The tools API returns records as `{ recordId, data, createdAt, updatedAt }`
  * envelopes; helpers below flatten them into ChatRow / ChatMessageRow.
  */
@@ -164,59 +171,75 @@ export async function createChat(
   return toChatRow(result.record)
 }
 
+/**
+ * Patch a chat the caller owns. Returns true if the row was written, false if
+ * the chat no longer exists (or never belonged to the caller).
+ *
+ * The `getChat` precheck is not redundant with the route's own: `records.update`
+ * is an upsert on the DO — same code path as create — so an unguarded patch of
+ * a chat the user deleted mid-stream *recreates* it as a title-less ghost whose
+ * messages are already cascaded away. Writing only over a row that still exists
+ * is the one place that can be prevented for every caller, so the guard lives
+ * here rather than at each call site. A tiny TOCTOU window remains between the
+ * read and the write (closing it needs a compare-and-set on the DO); a delete
+ * landing inside that window is the same rare race as before, not the routine
+ * "user deleted the chat while the stream ran" case this closes.
+ */
 export async function updateChat(
   stub: DurableObjectStub,
   chatId: string,
   userId: string,
   patch: Partial<Pick<ChatRow, 'title' | 'model' | 'compactedSummary' | 'compactedThroughId'>>,
-): Promise<void> {
+): Promise<boolean> {
+  if (!(await getChat(stub, chatId, userId))) return false
   await executeToolAsApp(stub, userId, 'records.update', {
     collection: 'ai-chats',
     recordId: chatId,
     data: patch,
   })
+  return true
 }
+
+/**
+ * Messages removed per `records.deleteWhere` call. One subrequest per page,
+ * so a chat of any length costs `ceil(messages / PAGE) + 1` subrequests
+ * instead of one per message — the old shape ran out of the Workers
+ * subrequest budget mid-cascade and orphaned the remainder.
+ */
+const MESSAGE_DELETE_PAGE = 200
 
 export async function deleteChatCascade(
   stub: DurableObjectStub,
   chatId: string,
   userId: string,
 ): Promise<void> {
-  const list = await executeToolAsApp<{ records: Array<RecordEnvelope<MessageColumns>> }>(stub, userId, 'records.query', {
-    collection: 'ai-messages',
-    where: { chatId },
-  })
-
-  const errors: unknown[] = []
-  for (const env of list.records) {
-    try {
-      await executeToolAsApp(stub, userId, 'records.delete', {
+  let messagesError: unknown = null
+  try {
+    // Each page really removes its rows, so the remaining set strictly shrinks
+    // and a short page is the last one.
+    let deleted = MESSAGE_DELETE_PAGE
+    while (deleted === MESSAGE_DELETE_PAGE) {
+      const page = await executeToolAsApp<{ deleted: number }>(stub, userId, 'records.deleteWhere', {
         collection: 'ai-messages',
-        recordId: env.recordId,
+        where: { chatId },
+        limit: MESSAGE_DELETE_PAGE,
       })
-    } catch (err) {
-      errors.push(err)
+      deleted = page.deleted
     }
+  } catch (err) {
+    messagesError = err
   }
 
   // Always attempt the chat row delete so the row disappears from listings,
-  // even if some message rows got orphaned.
-  try {
-    await executeToolAsApp(stub, userId, 'records.delete', {
-      collection: 'ai-chats',
-      recordId: chatId,
-    })
-  } catch (err) {
-    errors.push(err)
-  }
+  // even if some message rows got orphaned. If it fails too, its error is the
+  // one that surfaces — a chat still sitting in the user's list is the visible
+  // failure, orphaned messages are not.
+  await executeToolAsApp(stub, userId, 'records.delete', {
+    collection: 'ai-chats',
+    recordId: chatId,
+  })
 
-  if (errors.length > 0) {
-    const first = errors[0]
-    throw new Error(
-      `deleteChatCascade: ${errors.length} delete(s) failed; first: ${first instanceof Error ? first.message : String(first)}`,
-      { cause: errors },
-    )
-  }
+  if (messagesError) throw messagesError
 }
 
 export async function loadMessages(
@@ -236,6 +259,15 @@ export async function loadMessages(
   return result.records.map(toMessageRow)
 }
 
+/**
+ * Append one message to a chat the caller owns. Returns true if the row was
+ * written, false if the chat is gone (or never belonged to the caller).
+ *
+ * Same write-after-delete guard as `updateChat`, for the same reason: a turn
+ * that finishes after the user deleted the chat would otherwise write messages
+ * whose parent row no longer exists — invisible in every listing and never
+ * cascaded again.
+ */
 export async function appendMessage(
   stub: DurableObjectStub,
   msg: {
@@ -246,7 +278,8 @@ export async function appendMessage(
     content: string
     parts?: unknown[]
   },
-): Promise<void> {
+): Promise<boolean> {
+  if (!(await getChat(stub, msg.chatId, msg.userId))) return false
   const data: Record<string, unknown> = {
     chatId: msg.chatId,
     userId: msg.userId,
@@ -259,4 +292,5 @@ export async function appendMessage(
     recordId: msg.id,
     data,
   })
+  return true
 }

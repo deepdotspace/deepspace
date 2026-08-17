@@ -159,6 +159,9 @@ function warnIfDebugRoutesEnabled(secrets: Record<string, string>): boolean {
 }
 
 const APPLY_HINT = 'Run `deepspace deploy` to apply — secrets take effect at deploy time.'
+/** The same fact for `--json`, which never sees APPLY_HINT: a store write is
+ *  not live until the next deploy. */
+const APPLIES_AT_DEPLOY = { appliesAtDeploy: true as const }
 // `deepspace dev start` regenerates .dev.vars from the store only at startup, so a
 // secret changed mid-session isn't picked up until dev restarts (DEV-4).
 const LOCAL_DEV_HINT = 'Running `deepspace dev start`? Restart it to load the change locally.'
@@ -231,7 +234,7 @@ const set = defineCommand({
       const n = Object.keys(secrets).length
       ok(
         args.json === true,
-        { appId: t.appId, config: t.configName, set: Object.keys(secrets) },
+        { appId: t.appId, config: t.configName, set: Object.keys(secrets), ...APPLIES_AT_DEPLOY },
         () => {
           console.log(`Set ${n} secret${n === 1 ? '' : 's'} in ${t.configName}.`)
           if (!warnIfDebugRoutesEnabled(secrets)) {
@@ -312,7 +315,7 @@ const del = defineCommand({
         }
       }
       const note = absent > 0 ? ` (${absent} already absent)` : ''
-      ok(args.json === true, { appId: t.appId, config: t.configName, deleted, absent }, () => {
+      ok(args.json === true, { appId: t.appId, config: t.configName, deleted, absent, ...APPLIES_AT_DEPLOY }, () => {
         console.log(
           `Deleted ${deleted} secret${deleted === 1 ? '' : 's'} from ${t.configName}.${note}`,
         )
@@ -351,7 +354,7 @@ const upload = defineCommand({
       const uploaded = Object.keys(secrets)
       ok(
         args.json === true,
-        { appId: t.appId, config: t.configName, uploaded, replaced: args.replace === true },
+        { appId: t.appId, config: t.configName, uploaded, replaced: args.replace === true, ...APPLIES_AT_DEPLOY },
         () => {
           console.log(`Uploaded ${uploaded.length} secrets to ${t.configName}.`)
           // A file can turn on the debug API just like `set` can — warn either way.

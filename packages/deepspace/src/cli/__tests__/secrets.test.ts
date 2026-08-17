@@ -6,6 +6,8 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../lib/api'
+import { errorCode } from '../lib/cli-errors'
 import {
   defaultConfigNameForEnv,
   formatSecretsDownload,
@@ -224,18 +226,29 @@ describe('pullAppSecretsCache', () => {
   it('propagates real failures with a clean message (server sentence, no API path) + status', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => Response.json({ error: 'not_app_owner_or_collaborator' }, { status: 403 })),
+      vi.fn(async () =>
+        Response.json(
+          { error: 'Not the app owner or a collaborator.', code: 'not_app_owner_or_collaborator' },
+          { status: 403 },
+        ),
+      ),
     )
     const err = await pullAppSecretsCache('https://deploy.test', 't', APP_ID, 'prd').then(
       () => {
         throw new Error('expected pullAppSecretsCache to reject')
       },
-      (e: Error & { status?: number; apiPath?: string }) => e,
+      (e: unknown) => e,
     )
     // The user-facing message is the server's sentence, not the internal
-    // `/api/secrets/app_…/configs/prd/values` path (SEC-6).
-    expect(err.message).toBe('not_app_owner_or_collaborator')
-    expect(err.message).not.toContain('/api/secrets')
-    expect(err.status).toBe(403)
+    // `/api/secrets/app_…/configs/prd/values` path (SEC-6) — and it is an
+    // ApiError, the one shape `errorCode` reads a machine code from, so
+    // `--json` carries the server's `code` rather than dropping it.
+    expect(err).toBeInstanceOf(ApiError)
+    const apiErr = err as ApiError
+    expect(apiErr.message).toBe('Not the app owner or a collaborator.')
+    expect(apiErr.message).not.toContain('/api/secrets')
+    expect(apiErr.status).toBe(403)
+    expect(apiErr.code).toBe('not_app_owner_or_collaborator')
+    expect(errorCode(err)).toBe('not_app_owner_or_collaborator')
   })
 })

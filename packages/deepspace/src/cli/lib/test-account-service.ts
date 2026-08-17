@@ -63,6 +63,9 @@ export async function createRemoteTestAccount(
 
 export interface RecoveredTestAccount extends RemoteTestAccount {
   password: string
+  /** Better Auth display name, joined in by the rotate endpoint. Null when the
+   *  account has none; absent from a platform older than that join. */
+  name?: string | null
 }
 
 /**
@@ -97,6 +100,7 @@ export async function recoverRemoteTestAccount(id: string): Promise<RecoveredTes
     email: data.email,
     userId: data.userId,
     label: data.label ?? null,
+    name: typeof data.name === 'string' ? data.name : null,
     createdAt: data.createdAt ?? Date.now(),
     password: data.password,
   }

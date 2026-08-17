@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CollectionSchema } from '../../../shared/types'
-import { checkUnclaimedOwnerTransition, lintSchema } from '../registry'
+import { checkUnclaimedOwnerTransition, lintSchema, lintSchemas } from '../registry'
 
 const claimableSchema: CollectionSchema = {
   name: 'tasks',
@@ -57,5 +57,43 @@ describe('lintSchema claimable ownership', () => {
       },
     }
     expect(lintSchema(unsafe)).toHaveLength(1)
+  })
+})
+
+describe('lintSchemas team level', () => {
+  const incidents: CollectionSchema = {
+    name: 'incidents',
+    columns: [
+      { name: 'teamId', storage: 'text', interpretation: 'plain' },
+      { name: 'title', storage: 'text', interpretation: 'plain' },
+    ],
+    teamField: 'teamId',
+    permissions: {
+      member: { read: 'team', create: true, update: 'team', delete: false },
+      admin: { read: true, create: true, update: true, delete: true },
+    },
+  }
+  const teamMembers: CollectionSchema = {
+    name: 'team_members',
+    columns: [
+      { name: 'teamId', storage: 'text', interpretation: 'plain' },
+      { name: 'userId', storage: 'text', interpretation: 'plain' },
+      { name: 'status', storage: 'text', interpretation: 'plain' },
+    ],
+    permissions: { admin: { read: true, create: true, update: true, delete: true } },
+  }
+
+  it("names the roles that use 'team' when no team_members collection is registered", () => {
+    // Without team_members the level denies everything silently — it reads
+    // as a sync bug, so the lint has to say it.
+    const warnings = lintSchemas([incidents])
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('[incidents]')
+    expect(warnings[0]).toContain('member')
+    expect(warnings[0]).toContain("'team_members'")
+  })
+
+  it('is quiet once team_members is registered', () => {
+    expect(lintSchemas([incidents, teamMembers])).toEqual([])
   })
 })

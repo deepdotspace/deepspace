@@ -110,7 +110,9 @@ describe('test accounts clear confirmation gate', () => {
 })
 
 /**
- * `recover` rotates a credential; the platform hands back no display name.
+ * `recover` rotates a credential. The platform now joins the Better Auth
+ * `user` row into the rotate response, so the display name comes back with it;
+ * an older platform sends none, and the local store is the only source left.
  * Writing `email.split('@')[0]` as one invented a name the app never renders —
  * and the shipped collab spec compared the page against exactly that field.
  */
@@ -122,6 +124,22 @@ describe('test accounts recover display names', () => {
     mocks.fetchRemoteTestAccounts.mockResolvedValue([remote])
     mocks.recoverRemoteTestAccount.mockResolvedValue({ ...remote, password: 'rotated' })
     vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+
+  it('restores the display name the rotate response carries', async () => {
+    // The whole point of the join: this machine has never seen the account.
+    mocks.loadAllTestAccounts.mockReturnValue([])
+    mocks.recoverRemoteTestAccount.mockResolvedValue({
+      ...remote,
+      password: 'rotated',
+      name: 'Collab A',
+    })
+
+    await recover.run({ args: { email: remote.email, json: true } })
+
+    expect(mocks.upsertTestAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ email: remote.email, name: 'Collab A' }),
+    )
   })
 
   it('keeps the display name this machine already knows', async () => {

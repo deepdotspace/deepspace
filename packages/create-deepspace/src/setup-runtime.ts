@@ -78,16 +78,22 @@ export async function completeProjectSetup(
  * wrangler.toml, the one place it lives.
  */
 function registerAppIdentity(appDir: string, progress: Progress): boolean {
-  progress.start('Registering app identity')
+  // The child CLI inherits this process's environment, so it registers on
+  // whichever plane DEEPSPACE_ENV selects (production when unset) with
+  // whichever login that plane holds — say which, and which id, so a scaffold
+  // run in the wrong shell cannot mint an id somewhere silently.
+  const plane = process.env.DEEPSPACE_ENV?.trim() || 'production'
+  progress.start(`Registering app identity (${plane})`)
   const cli = join(appDir, 'node_modules', '.bin', 'deepspace')
-  const result = spawn.sync(cli, ['app', 'init'], {
+  const result = spawn.sync(cli, ['app', 'init', '--json'], {
     cwd: appDir,
     stdio: 'pipe',
     encoding: 'utf-8',
     timeout: 120_000,
   })
   if (!result.error && result.status === 0) {
-    progress.stop('App identity registered')
+    const appId = /"appId":"(app_[0-9A-Z]{26})"/.exec(result.stdout ?? '')?.[1]
+    progress.stop(`App identity registered (${plane})${appId ? `: ${appId}` : ''}`)
     return true
   }
   progress.stop('App identity not registered yet')
@@ -226,22 +232,32 @@ function installDependencies(appDir: string): void {
   }
 }
 
+/**
+ * The Next-steps list. Pure + exported for its unit test: the login/init pair
+ * is the RECOVERY for a scaffold whose identity never registered, so it is
+ * shown only when that happened. A registered identity means `app init`
+ * already ran under a live login — printing `auth login` there told a
+ * signed-in user to sign in.
+ */
+export function nextStepsLines(
+  project: Pick<PreparedProject, 'appName' | 'isInPlace'>,
+  identityRegistered: boolean,
+): string[] {
+  return [
+    ...(project.isInPlace ? [] : [`cd ${project.appName}`]),
+    ...(identityRegistered ? [] : ['npx deepspace auth login', 'npx deepspace app init']),
+    'npx deepspace dev start',
+    '',
+    'Deploy:',
+    '  npx deepspace deploy',
+    '',
+    'Add features:',
+    '  npx deepspace add --list',
+    '  npx deepspace add messaging',
+  ]
+}
+
 function printNextSteps(project: PreparedProject, identityRegistered: boolean): void {
-  p.note(
-    [
-      ...(project.isInPlace ? [] : [`cd ${project.appName}`]),
-      'npx deepspace auth login',
-      ...(identityRegistered ? [] : ['npx deepspace app init']),
-      'npx deepspace dev start',
-      '',
-      'Deploy:',
-      '  npx deepspace deploy',
-      '',
-      'Add features:',
-      '  npx deepspace add --list',
-      '  npx deepspace add messaging',
-    ].join('\n'),
-    'Next steps',
-  )
+  p.note(nextStepsLines(project, identityRegistered).join('\n'), 'Next steps')
   p.outro(`${project.appName} is ready`)
 }

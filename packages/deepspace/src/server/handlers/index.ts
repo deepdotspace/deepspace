@@ -28,6 +28,7 @@ export {
   registerUser,
   getUser,
   getAllUsers,
+  broadcastUserList,
   type UserContext,
 } from './users'
 

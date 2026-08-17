@@ -117,7 +117,25 @@ describe('resolveAppId', () => {
 
   it('fails loudly when the config is missing entirely', () => {
     withTempDir((dir) => {
-      expect(() => resolveAppId({ appDir: dir, env: {} })).toThrow(/missing or not valid TOML/)
+      expect(() => resolveAppId({ appDir: dir, env: {} })).toThrow(/No wrangler\.toml at/)
+    })
+  })
+
+  it('inherits the shared reader’s one-section-per-id guard', () => {
+    // The resolver no longer parses wrangler.toml itself — it goes through the
+    // CLI's single reader, so a config the CLI refuses cannot slip into a
+    // bundle by way of a bare `vite build`. The guard's own cases live in
+    // cli/__tests__/wrangler-env.test.ts.
+    withTempDir((dir) => {
+      writeConfig(dir, [
+        '[vars]',
+        `DEEPSPACE_APP_ID = "${PROD_ID}"`,
+        '[env.staging.vars]',
+        `DEEPSPACE_APP_ID = "${PROD_ID}"`,
+      ])
+      expect(() => resolveAppId({ appDir: dir, env: {} })).toThrow(
+        /each environment is its own app/,
+      )
     })
   })
 })

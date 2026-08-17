@@ -2,7 +2,7 @@
 
 import * as p from '@clack/prompts'
 import { defineCommand } from 'citty'
-import { resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { decodeJwtPayload } from '../../shared/jwt'
@@ -15,6 +15,7 @@ import { waitForLiveRelease, type ReleaseWait } from '../lib/edge-propagation'
 import { MAX_DEPLOY_ASSET_FILE_BYTES, formatBytes } from '../../shared/app-files'
 import {
   hasWranglerConfig,
+  noWranglerConfigMessage,
   readWranglerConfig,
   resolveAppNameForEnv,
   type WranglerConfig,
@@ -98,7 +99,7 @@ export default defineCommand({
     const envName = typeof args.env === 'string' && args.env.trim() ? args.env.trim() : undefined
 
     if (!hasWranglerConfig(appDir)) {
-      output.die('No wrangler.toml found. Are you in a DeepSpace app directory?', 'not_in_app_repo')
+      output.die(noWranglerConfigMessage(join(appDir, 'wrangler.toml')), 'not_in_app_repo')
     }
     try {
       ensureInstallReady(appDir)
@@ -146,6 +147,21 @@ export default defineCommand({
     }
     p.log.info(`Id: ${appId}`)
 
+    // Registration first: it is the cheapest, most specific precondition, and
+    // every later server call (the secrets refresh included) refuses an
+    // unregistered id with a less useful sentence. Refuse HERE, before any
+    // build or push: without this, the failure surfaces later as a raw git
+    // 404 from the repo transport (git discards response bodies), which reads
+    // as infra breakage instead of the registration gap it is.
+    const sourceState = await getAppSource(DEPLOY_URL, token, appId)
+    if (!sourceState.registered) {
+      output.die(
+        `${appId} is not registered. If this repo's id came from an older SDK's scaffold, run ` +
+          `\`deepspace app init --new-id\` to register it as a fresh app; a brand-new app dir ` +
+          `registers with \`deepspace app init\`.`,
+        'app_not_registered',
+      )
+    }
     const secretsCache = await loadDeploySecrets({
       deployUrl: DEPLOY_URL,
       appDir,
@@ -155,18 +171,23 @@ export default defineCommand({
       token,
       output,
     })
-    const sourceState = await getAppSource(DEPLOY_URL, token, appId)
-    if (!sourceState.registered) {
-      // Refuse HERE, before any build or push: without this, the failure
-      // surfaces later as a raw git 404 from the repo transport (git discards
-      // response bodies), which reads as infra breakage instead of the
-      // registration gap it is.
-      output.die(
-        `${appId} is not registered. If this repo's id came from an older SDK's scaffold, run ` +
-          `\`deepspace app init --new-id\` to register it as a fresh app; a brand-new app dir ` +
-          `registers with \`deepspace app init\`.`,
-        'app_not_registered',
-      )
+
+    // Both refusals the platform can only reach at commit time, settled here
+    // from the response the CLI already fetched — before the build and the
+    // ~hundreds of KiB of asset uploads that used to precede them. The server
+    // keeps both checks; these only move the refusal to where it costs nothing.
+    const ownerJwtRefusal = ownerJwtMissingRefusal(sourceState)
+    if (ownerJwtRefusal) output.die(ownerJwtRefusal.error, ownerJwtRefusal.code)
+
+    let confirmRename = args.rename === true
+    const rename = pendingRename(sourceState.registeredHost, appName)
+    if (rename && !confirmRename) {
+      if (output.nonInteractive) {
+        output.die(renameRefusalMessage(rename), 'rename_required')
+      }
+      const confirmed = await p.confirm({ message: renamePromptMessage(rename) })
+      if (p.isCancel(confirmed) || !confirmed) output.die('Deploy cancelled.', 'rename_declined')
+      confirmRename = true
     }
 
     const repositoryPreflight = preflightDeployRepository({
@@ -220,7 +241,7 @@ export default defineCommand({
       appId,
       appName,
       token,
-      rename: args.rename === true,
+      rename: confirmRename,
       claimReleased: args['claim-released'] === true,
       ignoreStale: Boolean(args['ignore-stale']),
       bundle,
@@ -302,6 +323,67 @@ async function syncCommerce(
 ): Promise<void> {
   await syncSubscriptionPlans(appDir, appId, token, nonInteractive)
   await syncOneTimeProducts(appDir, appId, token)
+}
+
+/**
+ * A collaborator's (or admin's) deploy of an app the owner has never deployed:
+ * the platform cannot preserve secrets it has no live version to inherit them
+ * from, so the deploy is refused — at commit time, after the whole bundle was
+ * built and uploaded. The pre-build `/source` response answers the same
+ * question, so refuse here instead.
+ *
+ * The sentence is the deploy worker's own (`cloudflare-deploy.ts`, pinned by
+ * `tests/docker/collaborators.sh`); `owner_jwt_missing` is the machine code
+ * both sides now send.
+ */
+export function ownerJwtMissingRefusal(state: {
+  onBehalf?: { ownerJwtLive: boolean }
+}): { code: string; error: string } | null {
+  // Absent means the platform did not answer (older platform, or Cloudflare
+  // was unreadable). Unknown is not "missing": let the deploy proceed to the
+  // server's authoritative guard.
+  if (state.onBehalf?.ownerJwtLive !== false) return null
+  return {
+    code: 'owner_jwt_missing',
+    error:
+      'Cannot preserve the existing secrets: this app has no live deployment ' +
+      'carrying an APP_OWNER_JWT. Ask the owner to redeploy.',
+  }
+}
+
+/**
+ * The rename this deploy would perform, comparing the wrangler `name` against
+ * the host the registry currently serves. Null when nothing moves: no live
+ * subdomain yet (first deploy), or the same label.
+ */
+export function pendingRename(
+  registeredHost: string | null | undefined,
+  appName: string,
+): { fromHost: string; toHost: string } | null {
+  if (!registeredHost) return null
+  const [label, ...domain] = registeredHost.split('.')
+  if (label === appName) return null
+  return { fromHost: registeredHost, toHost: [appName, ...domain].join('.') }
+}
+
+/** Non-interactive rename refusal — the deploy worker's `rename_required`
+ *  wording, said before the build rather than after the upload. */
+export function renameRefusalMessage(rename: { fromHost: string; toHost: string }): string {
+  return (
+    `This deploy renames the app: ${rename.fromHost} → ${rename.toHost}. ` +
+    'Confirmation needs an interactive terminal — re-run with --rename to approve the ' +
+    'rename, or `deepspace app init --new-id` if you meant a separate app.'
+  )
+}
+
+/** Interactive rename confirmation, same wording as the post-commit prompt. */
+export function renamePromptMessage(rename: { fromHost: string; toHost: string }): string {
+  return (
+    `This deploy renames the app: ${rename.fromHost} → ${rename.toHost}. ` +
+    'The URL changes and the old one stops serving right away; data, secrets, and ' +
+    'collaborators travel with it. (Meant a separate app? Run `deepspace app init --new-id` ' +
+    'instead.) Rename?'
+  )
 }
 
 /** Refuse explicit blank selectors before auth so they cannot fall back to production/cwd. */

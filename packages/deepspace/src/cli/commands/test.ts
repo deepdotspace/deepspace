@@ -14,6 +14,10 @@
  * `--grep <pattern>`, `--project <name>`, and `--headed` forward to
  * `playwright test` on the Playwright suites.
  *
+ * The default suite is a quick check, not a full run — it names every spec it
+ * left out (prose line + `skippedSpecs` in the JSON envelope) so a green
+ * summary never reads as "all of this app's tests passed".
+ *
  * Port is `--port` > $DEEPSPACE_PORT > a stable linked-worktree port > 5173.
  * In any linked checkout the worktree's own default is used
  * so tests hit the worktree's server, not the main repo's. The chosen port is
@@ -31,7 +35,8 @@
  */
 
 import { readAppId } from '../lib/app-identity'
-import { resolve } from 'node:path'
+import { readdirSync, type Dirent } from 'node:fs'
+import { join, relative, resolve, sep } from 'node:path'
 import { sync as spawnSync } from 'cross-spawn'
 import { ensureToken } from '../auth'
 import { findAppDir, findChildApps } from '../lib/app-context'
@@ -64,6 +69,42 @@ export interface PlaywrightForwardedFlags {
   grep?: string
   project?: string
   headed?: boolean
+}
+
+/** The two spec files the no-argument `deepspace test run` executes. */
+export const DEFAULT_SUITE_SPECS: readonly string[] = ['tests/smoke.spec.ts', 'tests/api.spec.ts']
+
+/**
+ * The spec files the default suite does NOT run.
+ *
+ * The default is a deliberate quick-check, but its green summary used to claim
+ * more than it ran: a scaffold's own `collab.spec.ts` (and every spec an agent
+ * writes) never executed and nothing said so. Enumerating them here is what
+ * makes the disclosure line possible — the set is the scaffold Playwright
+ * config's `testMatch` (`tests/**\/*.spec.ts`) minus the two above. Paths are
+ * relative to `appDir` and forward-slashed so they read as the arguments
+ * `deepspace test run <file>` takes. Pure + exported for its unit test.
+ */
+export function specsSkippedByDefaultSuite(appDir: string): string[] {
+  const found: string[] = []
+  const walk = (dir: string): void => {
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return // no tests/ dir (or unreadable) — nothing to disclose
+    }
+    for (const entry of entries) {
+      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (entry.name.endsWith('.spec.ts')) {
+        found.push(relative(appDir, full).split(sep).join('/'))
+      }
+    }
+  }
+  walk(join(appDir, 'tests'))
+  return found.filter((spec) => !DEFAULT_SUITE_SPECS.includes(spec)).sort()
 }
 
 export function playwrightTestArgs(
@@ -212,6 +253,10 @@ export default defineDeepspaceCommand({
     }
 
     let exitCode = 0
+    // What the chosen suite did not run. Only the default suite can leave
+    // specs out without being asked to (`smoke`/`api`/`<file>` were named by
+    // the caller; `e2e`/`all` run everything), so this stays empty elsewhere.
+    let skippedSpecs: string[] = []
 
     switch (suite) {
       case 'smoke':
@@ -234,13 +279,17 @@ export default defineDeepspaceCommand({
         if (exitCode === 0) exitCode = runPlaywright(appDir, [], port, wranglerEnv, forwarded)
         break
       case 'default':
-        exitCode = runPlaywright(
-          appDir,
-          ['tests/smoke.spec.ts', 'tests/api.spec.ts'],
-          port,
-          wranglerEnv,
-          forwarded,
-        )
+        skippedSpecs = specsSkippedByDefaultSuite(appDir)
+        exitCode = runPlaywright(appDir, [...DEFAULT_SUITE_SPECS], port, wranglerEnv, forwarded)
+        // After the run, next to the runner's own summary — that summary is
+        // what claimed "everything passed", so the correction belongs beside
+        // it rather than scrolled off the top by the Playwright output.
+        if (skippedSpecs.length > 0) {
+          say(
+            `skipped ${skippedSpecs.length} spec file(s) not in smoke+api ` +
+              `(${skippedSpecs.join(', ')}) — run 'deepspace test run all'`,
+          )
+        }
         break
       default:
         if (suite.endsWith('.spec.ts')) {
@@ -258,10 +307,10 @@ export default defineDeepspaceCommand({
     // contract reserves 0/1/2 and every non-zero code here means "tests failed".
     if (exitCode !== 0) {
       throw new Refusal(`Test suite '${suite}' failed (exit ${exitCode}).`, 'tests_failed', {
-        extra: { suite, port, exitCode },
+        extra: { suite, port, exitCode, skippedSpecs },
       })
     }
-    return { data: { suite, port, appDir, wranglerEnv: wranglerEnv ?? null } }
+    return { data: { suite, port, appDir, wranglerEnv: wranglerEnv ?? null, skippedSpecs } }
   },
 })
 

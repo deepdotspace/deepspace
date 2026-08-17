@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -6,7 +6,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 const { spawnSyncMock } = vi.hoisted(() => ({ spawnSyncMock: vi.fn() }))
 vi.mock('cross-spawn', () => ({ sync: spawnSyncMock }))
 
-import { PLAYWRIGHT_OUTPUT_DIR, playwrightTestArgs, runVitest } from '../test'
+import testCommand, {
+  DEFAULT_SUITE_SPECS,
+  PLAYWRIGHT_OUTPUT_DIR,
+  playwrightTestArgs,
+  runVitest,
+  specsSkippedByDefaultSuite,
+} from '../test'
+import * as appContext from '../../lib/app-context'
+import * as authModule from '../../auth'
+import * as devVarsModule from '../../lib/dev-vars'
+import * as installStatusModule from '../../lib/install-status'
+import * as playwrightModule from '../../lib/playwright'
+import * as preflightModule from '../../lib/preflight'
+import * as testAccountModule from '../../lib/test-account-service'
 
 const STAGING_ID = 'app_01JG8QK4M2N7P9RSTVWXYZ0456'
 const DEFAULT_ID = 'app_01JG8QK4M2N7P9RSTVWXYZ0123'
@@ -14,9 +27,107 @@ const DEFAULT_ID = 'app_01JG8QK4M2N7P9RSTVWXYZ0123'
 let appDir: string | undefined
 
 afterEach(() => {
+  vi.restoreAllMocks()
+  process.exitCode = undefined
   if (appDir) rmSync(appDir, { recursive: true, force: true })
   appDir = undefined
   spawnSyncMock.mockReset()
+})
+
+/**
+ * The default suite is a quick check that used to claim more than it ran: the
+ * scaffold's own `collab.spec.ts` (and every spec an agent adds) never
+ * executed, and the green summary said nothing about it.
+ */
+describe('default-suite disclosure', () => {
+  function makeAppWithSpecs(specs: string[]): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ds-test-skipped-'))
+    // No DEEPSPACE_APP_ID: an uninitialized app skips the secrets-cache
+    // refresh, so this suite never reaches the network.
+    writeFileSync(join(dir, 'wrangler.toml'), 'name = "demo"\n')
+    for (const spec of specs) {
+      mkdirSync(join(dir, spec, '..'), { recursive: true })
+      writeFileSync(join(dir, spec), 'test.skip("x", () => {})\n')
+    }
+    appDir = dir
+    return dir
+  }
+
+  it('lists every spec the default suite leaves out, and nothing it runs', () => {
+    const dir = makeAppWithSpecs([
+      ...DEFAULT_SUITE_SPECS,
+      'tests/collab.spec.ts',
+      'tests/nested/billing.spec.ts',
+      'tests/helpers/global-setup.ts',
+    ])
+    expect(specsSkippedByDefaultSuite(dir)).toEqual([
+      'tests/collab.spec.ts',
+      'tests/nested/billing.spec.ts',
+    ])
+  })
+
+  it('is empty when the app only has the two default specs', () => {
+    expect(specsSkippedByDefaultSuite(makeAppWithSpecs([...DEFAULT_SUITE_SPECS]))).toEqual([])
+  })
+
+  async function runDefaultSuite(dir: string, json: boolean) {
+    const lines: string[] = []
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(dir)
+    vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
+    vi.spyOn(preflightModule, 'preflightNodeVersion').mockImplementation(() => {})
+    vi.spyOn(preflightModule, 'preflightWindowsWorkerd').mockImplementation(() => {})
+    vi.spyOn(installStatusModule, 'ensureInstallReady').mockImplementation(() => {})
+    vi.spyOn(playwrightModule, 'ensurePlaywright').mockImplementation(() => {})
+    vi.spyOn(testAccountModule, 'syncTestAccountStore').mockResolvedValue({
+      accounts: [],
+      removed: 0,
+    })
+    vi.spyOn(devVarsModule, 'writeDevVars').mockResolvedValue(undefined as never)
+    // sub = the id decodeJwtPayload reads to mint the local dev vars.
+    const payload = Buffer.from(JSON.stringify({ sub: 'user_1' })).toString('base64url')
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue(`h.${payload}.s`)
+    spawnSyncMock.mockReturnValue({ status: 0 })
+
+    // The runtime prints the envelope and returns nothing (lib/command.ts),
+    // so under --json the last log line IS the machine-readable result.
+    const command = testCommand as unknown as {
+      run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+    }
+    process.exitCode = undefined
+    await command.run({ args: { json } })
+    return {
+      lines,
+      envelope: json ? (JSON.parse(lines[lines.length - 1]) as Record<string, unknown>) : null,
+    }
+  }
+
+  it('prints the skipped specs and carries them in the JSON envelope', async () => {
+    const dir = makeAppWithSpecs([...DEFAULT_SUITE_SPECS, 'tests/collab.spec.ts'])
+
+    const human = await runDefaultSuite(dir, false)
+    expect(human.lines).toContain(
+      "skipped 1 spec file(s) not in smoke+api (tests/collab.spec.ts) — run 'deepspace test run all'",
+    )
+
+    vi.restoreAllMocks()
+    const machine = await runDefaultSuite(dir, true)
+    // --json suppresses the prose, so the envelope has to carry it.
+    expect(machine.envelope).toMatchObject({
+      ok: true,
+      suite: 'default',
+      skippedSpecs: ['tests/collab.spec.ts'],
+    })
+  })
+
+  it('says nothing when the default suite is the whole suite', async () => {
+    const dir = makeAppWithSpecs([...DEFAULT_SUITE_SPECS])
+    const { lines } = await runDefaultSuite(dir, false)
+    expect(lines.join('\n')).not.toContain('skipped')
+
+    vi.restoreAllMocks()
+    const { envelope } = await runDefaultSuite(dir, true)
+    expect(envelope).toMatchObject({ ok: true, skippedSpecs: [] })
+  })
 })
 
 describe('Playwright artifact routing', () => {

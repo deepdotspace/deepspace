@@ -74,6 +74,16 @@ export interface CollectionSchema {
   permissions: Record<string, RolePermissions>
   /** Default role assigned on the `users` collection. */
   defaultRole?: string
+  /**
+   * `users` collection only: what the `user.list` roster shows a non-admin
+   * whose `read` policy is row-scoped (`'own'`, `'team'`, …). Default
+   * `'public-identity'`: every registered user's id/name/imageUrl/role — the
+   * row policy keeps guarding full-row reads on the records/query path.
+   * `'read-policy'`: the roster contains only the rows the caller's read
+   * policy grants (still projected to public identity) — for apps that scope
+   * users to a tenant/team and must not show names across it.
+   */
+  roster?: 'public-identity' | 'read-policy'
 }
 
 // ============================================================================

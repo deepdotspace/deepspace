@@ -47,6 +47,18 @@ export interface AppListEntry {
   url: string | null
   /** Absent when an older deploy worker answers a newer CLI. */
   role?: 'owner' | 'collaborator'
+  /** A name this app released and still holds — nothing routes to it. */
+  reservedName?: string | null
+  /** When that hold lapses and the name returns to the open pool. */
+  reservedUntil?: string | null
+}
+
+/** A transfer offer addressed to the caller, from `GET /api/apps`. */
+export interface PendingTransferOffer {
+  appId: string
+  fromUserId: string
+  createdAt: string
+  expiresAt: string
 }
 
 /**
@@ -59,17 +71,33 @@ export function liveAppUrl(app: AppListEntry): string | null {
   return app.status === 'active' && app.deployedAt !== null ? app.url : null
 }
 
-/** Fetch the caller's apps — owned and collaborated — from the registry. */
-export async function listApps(deployUrl: string, token: string): Promise<AppListEntry[]> {
-  const { apps } = await apiFetch<{ apps: AppListEntry[] }>(deployUrl, token, '/api/apps')
-  if (!Array.isArray(apps)) {
+/**
+ * The whole `GET /api/apps` page: the caller's apps — owned and collaborated
+ * — plus the transfer offers addressed to them, which belong to no app they
+ * can access yet and so appear in no other listing.
+ */
+export async function listAppsPage(
+  deployUrl: string,
+  token: string,
+): Promise<{ apps: AppListEntry[]; pendingTransfers: PendingTransferOffer[] }> {
+  const body = await apiFetch<{
+    apps: AppListEntry[]
+    pendingTransfers?: PendingTransferOffer[]
+  }>(deployUrl, token, '/api/apps')
+  if (!Array.isArray(body.apps)) {
     throw new InputError(
       `The deploy service at ${deployUrl} returned an unexpected response shape for the app list — ` +
         `check DEEPSPACE_DEPLOY_URL (is this the service the app lives on?).`,
       'invalid_response',
     )
   }
-  return apps
+  // Absent when an older deploy worker answers a newer CLI.
+  return { apps: body.apps, pendingTransfers: body.pendingTransfers ?? [] }
+}
+
+/** Fetch the caller's apps — owned and collaborated — from the registry. */
+export async function listApps(deployUrl: string, token: string): Promise<AppListEntry[]> {
+  return (await listAppsPage(deployUrl, token)).apps
 }
 
 export interface AppTargetOptions {

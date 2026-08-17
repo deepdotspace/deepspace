@@ -35,6 +35,20 @@ const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
  * healed). Commits only in that exact state — a repo with any history is the
  * user's to commit.
  */
+/** True exactly when the post-init `git commit … wrangler.toml` action would
+ *  succeed. Asked of git itself via `--dry-run` rather than parsed out of
+ *  porcelain codes: an untracked pathspec, a clean file, and a mid-merge
+ *  partial commit (which git refuses even when wrangler.toml is not the
+ *  conflicted file) all fail the dry run the same way they would fail the
+ *  offered command, so the predicate cannot drift from git's behavior. */
+export function wranglerConfigUncommitted(appDir: string): boolean {
+  if (!existsSync(join(appDir, '.git'))) return false
+  const dryRun = runGit(appDir, ['commit', '--dry-run', '-m', 'x', '--', 'wrangler.toml'], {
+    allowFail: true,
+  })
+  return dryRun.status === 0
+}
+
 function commitScaffoldIfUnborn(appDir: string, token: string): boolean {
   try {
     if (!existsSync(join(appDir, '.git'))) return false
@@ -137,16 +151,18 @@ export default defineDeepspaceCommand({
     // client to the original app.
     const committedScaffold = commitScaffoldIfUnborn(appDir, token)
     if (!args.json) {
+      const envSuffix = envName ? ` (env: ${envName})` : ''
+      // The id lives only in wrangler.toml, so the follow-up is identical for a
+      // first registration and for a `--new-id` fork — one suffix for both, so
+      // the fork path cannot drift back into leaving the edit uncommitted.
+      const commitNote = committedScaffold
+        ? ' — initial scaffold commit created.'
+        : ' — commit wrangler.toml.'
       if (existing) {
-        console.log(`Forked: ${existing} → ${appId}${envName ? ` (env: ${envName})` : ''}`)
+        console.log(`Forked: ${existing} → ${appId}${envSuffix}${commitNote}`)
         console.log('Registered as a NEW app under your account; the original is untouched.')
       } else {
-        console.log(
-          `Registered ${appId}${envName ? ` (env: ${envName})` : ''} to your account` +
-            (committedScaffold
-              ? ' — initial scaffold commit created.'
-              : ' — commit wrangler.toml.'),
-        )
+        console.log(`Registered ${appId}${envSuffix} to your account${commitNote}`)
         console.log('The first deploy claims the `name` subdomain.')
       }
       console.log(`App dir: ${appDir}`)
@@ -160,6 +176,19 @@ export default defineDeepspaceCommand({
         appDir,
         env: envName ?? null,
       },
+      // The one follow-up when the id was written into an existing history:
+      // rendered as the `Next:` line and carried in `--json`, so a machine
+      // caller does not have to infer it from `committedScaffold: false`.
+      // Offered only when the file is actually uncommitted — `git commit` on
+      // a clean file fails, and an action must be executable as handed over.
+      ...(!committedScaffold && wranglerConfigUncommitted(appDir)
+        ? {
+            action: {
+              cwd: appDir,
+              argv: ['git', 'commit', '-m', existing ? `Fork as ${appId}` : `Register ${appId}`, '--', 'wrangler.toml'],
+            },
+          }
+        : {}),
     }
   },
 })

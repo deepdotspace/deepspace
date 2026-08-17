@@ -36,7 +36,10 @@ import { MSG } from '@/shared/protocol/constants'
  * ```
  */
 export function useMutations<T = unknown>(collection: string): {
-  /** True once the collection's RecordRoom can accept writes. */
+  /** True once the collection's RecordRoom can accept writes. Disable the
+   *  control on it (`disabled={!ready}`) rather than early-returning from
+   *  the handler: an early return drops the user's write silently, while a
+   *  write attempted before `ready` at least raises a `not_ready` error. */
   ready: boolean
   create: (data: T) => Promise<string>
   put: (recordId: string, data: Partial<T>) => Promise<void>

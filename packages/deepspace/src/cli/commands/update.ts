@@ -24,7 +24,7 @@ import * as p from '@clack/prompts'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import sdkPackage from '../../../package.json'
-import { hasWranglerConfig } from '../lib/wrangler-env'
+import { hasWranglerConfig, noWranglerConfigMessage } from '../lib/wrangler-env'
 import { assertSyncableRepo } from '../lib/git/repository'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 import {
@@ -92,9 +92,14 @@ export function pinSdkVersion(appDir: string, version: string): boolean {
   if (!dependencies || typeof dependencies !== 'object' || Array.isArray(dependencies)) return false
 
   let changed = false
+  // A non-registry spec (`file:` tarball, `link:`, `workspace:`, a git URL) is
+  // a deliberate pin to a build that is not on npm — rewriting it to `^x.y.z`
+  // would silently swap the app back onto the registry.
+  const registrySpec = (spec: string) => !/^(file|link|workspace|git\+|github|https?):/.test(spec) && !spec.includes('/')
   if (
     Object.prototype.hasOwnProperty.call(dependencies, 'deepspace') &&
     typeof dependencies.deepspace === 'string' &&
+    registrySpec(dependencies.deepspace) &&
     dependencies.deepspace !== `^${version}`
   ) {
     dependencies.deepspace = `^${version}`
@@ -217,10 +222,7 @@ export default defineDeepspaceCommand({
   async run({ args }) {
     const appDir = resolve('.')
     if (!hasWranglerConfig(appDir)) {
-      throw new Refusal(
-        'No wrangler.toml found — run this from inside a DeepSpace app directory.',
-        'not_in_app_repo',
-      )
+      throw new Refusal(noWranglerConfigMessage(join(appDir, 'wrangler.toml')), 'not_in_app_repo')
     }
     // The plan is built from tracked files, so a missing repo is a refusal
     // with a fix, not a raw `git rev-parse` failure surfacing from four

@@ -1,23 +1,16 @@
 /** Discover the local DeepSpace app surrounding a working directory. */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { parse as parseToml } from 'smol-toml'
-import { InputError } from './cli-errors'
+import { readWranglerConfig } from './wrangler-env'
 
-/** Read the app name from the local wrangler.toml, when present. */
+/** Read the app name from the local wrangler.toml, when present. A broken
+ *  file surfaces as the shared reader's `WranglerConfigError`. */
 export function detectAppName(cwd: string = process.cwd()): string | null {
-  const wranglerPath = join(resolve(cwd), 'wrangler.toml')
-  if (!existsSync(wranglerPath)) return null
-  try {
-    const config = parseToml(readFileSync(wranglerPath, 'utf-8')) as { name?: string }
-    return typeof config.name === 'string' && config.name.length > 0 ? config.name : null
-  } catch (error) {
-    throw new InputError(
-      `Could not parse ${wranglerPath}: ${error instanceof Error ? error.message : String(error)}`,
-      'invalid_config',
-    )
-  }
+  const appDir = resolve(cwd)
+  if (!existsSync(join(appDir, 'wrangler.toml'))) return null
+  const { name } = readWranglerConfig(appDir)
+  return typeof name === 'string' && name.length > 0 ? name : null
 }
 
 /** Walk upward to the nearest directory containing wrangler.toml. */

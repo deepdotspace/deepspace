@@ -19,18 +19,17 @@
  * instead of every app's.
  */
 
-import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { parse as parseToml } from 'smol-toml'
 
 /** `app_` + 26-char Crockford ULID. */
 // Single source: the shared registry client owns the id shape.
 import { APP_ID_RE } from '../server/utils/registry-client'
-
-interface WranglerIdentity {
-  vars?: Record<string, unknown>
-  env?: Record<string, { vars?: Record<string, unknown> } | undefined>
-}
+// Single source: `cli/lib/wrangler-env` is the SDK's only wrangler.toml reader,
+// so the build sees the same parse, the same failure shape, and the same
+// whole-file guards the CLI does. Both are Node-only. Imported as that one
+// module, never through the CLI barrel — nothing else of the CLI belongs in an
+// app's build graph.
+import { readAppIdVar, readWranglerConfigFile } from '../cli/lib/wrangler-env'
 
 /**
  * The build's environment, typed structurally. This module is imported from an
@@ -73,17 +72,7 @@ export function resolveAppId({ appDir, env = process.env }: ResolveAppIdOptions)
   const envName = env.CLOUDFLARE_ENV
   const section = envName ? `[env.${envName}.vars]` : '[vars]'
 
-  let config: WranglerIdentity
-  try {
-    config = parseToml(readFileSync(configPath, 'utf-8')) as WranglerIdentity
-  } catch (error) {
-    throw new Error(
-      `Could not read the app id: ${configPath} is missing or not valid TOML ` +
-        `(${error instanceof Error ? error.message : String(error)}).`,
-    )
-  }
-
-  const appId = (envName ? config.env?.[envName]?.vars : config.vars)?.DEEPSPACE_APP_ID
+  const appId = readAppIdVar(readWranglerConfigFile(configPath), envName)
   if (typeof appId !== 'string' || !APP_ID_RE.test(appId)) {
     // A fresh-but-uninitialized scaffold (signed out at scaffold time) still
     // carries the __APP_ID__ placeholder — the remedy is registration, not

@@ -17,6 +17,7 @@ import {
   YjsRoom,
 } from 'deepspace/worker'
 import type { DOBindings, DOManifest, Job, JobContext } from 'deepspace/worker'
+import { AI_CHATS_SCHEMA } from 'deepspace/schema'
 import { registerAiChatRoutes } from './src/ai/chat-routes.js'
 import { tasks as cronTasks, runTask as runCronTask } from './src/cron.js'
 import { runJob } from './src/jobs.js'
@@ -124,7 +125,11 @@ app.use('/api/*', cors())
 registerAuthAndIntegrationRoutes(app)
 registerRealtimeRoutes(app)
 registerActionRoutes(app, resolveAuth)
-registerAiChatRoutes(app, resolveAuth)
+// The chat routes read and write the `ai-chats` / `ai-messages` collections,
+// which only the copilot overlay declares in src/schemas.ts. Without them the
+// routes could only ever answer 500 (tools-api refuses the unknown
+// collection), so an app that has not adopted the schemas gets an honest 404.
+if (schemas.some((schema) => schema.name === AI_CHATS_SCHEMA.name)) registerAiChatRoutes(app, resolveAuth)
 registerPlatformProxyRoutes(app)
 registerStaticRoutes(app)
 

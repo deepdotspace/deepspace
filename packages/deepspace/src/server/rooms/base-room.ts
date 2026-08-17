@@ -20,6 +20,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import type { ServerMessage } from '../../shared/protocol/messages'
+import { ANONYMOUS_USER_ID_PREFIX } from '../../shared/protocol/constants'
 import { decodeRoomIdentityHeader } from '../../shared/room-identity-headers'
 
 // ============================================================================
@@ -39,7 +40,8 @@ export interface UserAttachment {
 export function connectionAttachmentFromRequest(request: Request): UserAttachment {
   return {
     userId:
-      decodeRoomIdentityHeader(request.headers.get('x-user-id')) || `anon-${crypto.randomUUID()}`,
+      decodeRoomIdentityHeader(request.headers.get('x-user-id')) ||
+        `${ANONYMOUS_USER_ID_PREFIX}${crypto.randomUUID()}`,
     userName: decodeRoomIdentityHeader(request.headers.get('x-user-name')) || 'Anonymous',
     userEmail: decodeRoomIdentityHeader(request.headers.get('x-user-email')) || '',
     userImageUrl: decodeRoomIdentityHeader(request.headers.get('x-user-image-url')),

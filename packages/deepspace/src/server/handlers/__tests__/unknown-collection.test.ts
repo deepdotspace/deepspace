@@ -107,6 +107,7 @@ describe('collections the room does not serve', () => {
       ['records.create', { collection: 'messages', recordId: 'm1', data: { content: 'hi' } }],
       ['records.update', { collection: 'messages', recordId: 'm1', data: { content: 'hi' } }],
       ['records.delete', { collection: 'messages', recordId: 'm1' }],
+      ['records.deleteWhere', { collection: 'messages', where: { chatId: 'c1' } }],
     ] as const
 
     for (const [tool, params] of calls) {

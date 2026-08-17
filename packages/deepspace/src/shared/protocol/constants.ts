@@ -121,6 +121,13 @@ export const MSG_YJS_AWARENESS = 23
 
 /** Role assigned to unauthenticated WebSocket connections */
 export const ROLE_ANONYMOUS = 'viewer'
+/** Prefix `base-room` mints anonymous socket ids with. */
+export const ANONYMOUS_USER_ID_PREFIX = 'anon-'
+/** The one test for an anonymous socket identity — `ROLE_ANONYMOUS` cannot be
+ *  it, since authenticated users can legitimately hold the same role name. */
+export function isAnonymousUserId(userId: string): boolean {
+  return userId.startsWith(ANONYMOUS_USER_ID_PREFIX)
+}
 /** Default role for newly registered authenticated users */
 export const ROLE_DEFAULT = 'member'
 /** Admin role */

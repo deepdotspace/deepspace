@@ -15,7 +15,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest'
 import Database from 'better-sqlite3'
-import { executeQuery, type SubscriptionContext } from '../subscriptions'
+import { executeQuery, MAX_FILTERED_SCAN_ROWS, type SubscriptionContext } from '../subscriptions'
 import {
   SchemaRegistry,
   noopPermissionContext,
@@ -339,5 +339,136 @@ describe("executeQuery with read: true (regression)", () => {
   it('returns identical rows with skipUserRbac=true (no regression)', () => {
     const records = executeQuery(ctx, { collection: 'public_announcements' }, 'carol', 'member', true)
     expect(records.map(r => r.recordId).sort()).toEqual(['a1', 'a2'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// limit semantics
+// ---------------------------------------------------------------------------
+
+describe('executeQuery limit', () => {
+  // `collaborator` has no SQL pushdown, so the per-row filter still runs —
+  // the case where a SQL LIMIT would end the result early.
+  const schema: CollectionSchema = {
+    name: 'notes',
+    columns: [
+      { name: 'body', storage: 'text', interpretation: 'plain' },
+      { name: 'sharedWith', storage: 'text', interpretation: 'plain' },
+    ],
+    collaboratorsField: 'sharedWith',
+    permissions: {
+      member: { read: 'collaborator', create: true, update: 'own', delete: 'own' },
+    },
+  }
+
+  let db: Database.Database
+
+  beforeEach(() => {
+    db = new Database(':memory:')
+  })
+
+  it('counts records the caller receives, scanning past rows the read filter hides', () => {
+    const ctx = makeContext(db, [schema])
+    ensureCollectionTable(ctx.sql, schema)
+    // 5 of bob's private rows sort ahead (same timestamp, insertion order) of
+    // 3 readable ones. A pre-filter SQL LIMIT 2 would return zero rows here.
+    for (let i = 0; i < 5; i++) {
+      insert(db, 'c_notes', { recordId: `bob-${i}`, createdBy: 'bob', cols: { body: 'x' } })
+    }
+    for (let i = 0; i < 3; i++) {
+      insert(db, 'c_notes', {
+        recordId: `shared-${i}`,
+        createdBy: 'bob',
+        cols: { body: 'y', sharedWith: JSON.stringify(['alice']) },
+      })
+    }
+
+    const records = executeQuery(ctx, { collection: 'notes', limit: 2 }, 'alice', 'member')
+    expect(records).toHaveLength(2)
+    expect(records.every(r => r.recordId.startsWith('shared-'))).toBe(true)
+
+    // And the limit still caps the result: 3 readable rows, limit 2.
+    const all = executeQuery(ctx, { collection: 'notes' }, 'alice', 'member')
+    expect(all).toHaveLength(3)
+  })
+
+  it('spans multiple scan batches without skipping or duplicating rows', () => {
+    const ctx = makeContext(db, [schema])
+    ensureCollectionTable(ctx.sql, schema)
+    // 450 unreadable rows, then 3 readable ones — past the first 200-row
+    // batch, so the loop's offset advance and termination both run.
+    for (let i = 0; i < 450; i++) {
+      insert(db, 'c_notes', { recordId: `bob-${String(i).padStart(3, '0')}`, createdBy: 'bob', cols: { body: 'x' } })
+    }
+    for (let i = 0; i < 3; i++) {
+      insert(db, 'c_notes', {
+        recordId: `shared-${i}`,
+        createdBy: 'bob',
+        cols: { body: 'y', sharedWith: JSON.stringify(['alice']) },
+      })
+    }
+
+    const records = executeQuery(ctx, { collection: 'notes', limit: 5 }, 'alice', 'member')
+    expect(records.map(r => r.recordId).sort()).toEqual(['shared-0', 'shared-1', 'shared-2'])
+  })
+
+  it('stops at the scan cap and reports it instead of scanning forever', () => {
+    const ctx = makeContext(db, [schema])
+    ensureCollectionTable(ctx.sql, schema)
+    for (let i = 0; i < MAX_FILTERED_SCAN_ROWS + 10; i++) {
+      insert(db, 'c_notes', { recordId: `bob-${String(i).padStart(5, '0')}`, createdBy: 'bob', cols: { body: 'x' } })
+    }
+    // One readable row sorted past the cap — the scan must stop before it and
+    // say so, rather than either finding it (unbounded work) or silently
+    // reporting "no matches".
+    insert(db, 'c_notes', {
+      recordId: 'zz-shared',
+      createdBy: 'bob',
+      cols: { body: 'y', sharedWith: JSON.stringify(['alice']) },
+    })
+
+    const scan = { capped: false }
+    const records = executeQuery(ctx, { collection: 'notes', limit: 1 }, 'alice', 'member', false, scan)
+    expect(records).toEqual([])
+    expect(scan.capped).toBe(true)
+  })
+
+  it('does not report the cap when the rows end exactly on its boundary', () => {
+    const ctx = makeContext(db, [schema])
+    ensureCollectionTable(ctx.sql, schema)
+    for (let i = 0; i < MAX_FILTERED_SCAN_ROWS; i++) {
+      insert(db, 'c_notes', { recordId: `bob-${String(i).padStart(5, '0')}`, createdBy: 'bob', cols: { body: 'x' } })
+    }
+
+    // Exactly MAX rows, all unreadable: exhausted, not capped — a spurious
+    // `capped` here would make deleteWhere refuse a table that simply ended.
+    const scan = { capped: false }
+    const records = executeQuery(ctx, { collection: 'notes', limit: 1 }, 'alice', 'member', false, scan)
+    expect(records).toEqual([])
+    expect(scan.capped).toBe(false)
+  })
+
+  it("pushes the limit into SQL when the predicate is the whole check (read: 'own')", () => {
+    const own: CollectionSchema = {
+      ...schema,
+      name: 'own_notes',
+      collaboratorsField: undefined,
+      permissions: { member: { read: 'own', create: true, update: 'own', delete: 'own' } },
+    }
+    const spy = makeSqlSpy(db)
+    const ctx = makeContext(db, [own], spy)
+    ensureCollectionTable(ctx.sql, own)
+    for (let i = 0; i < 4; i++) {
+      insert(db, 'c_own_notes', { recordId: `a-${i}`, createdBy: 'alice', cols: { body: 'x' } })
+      insert(db, 'c_own_notes', { recordId: `b-${i}`, createdBy: 'bob', cols: { body: 'x' } })
+    }
+
+    const records = executeQuery(ctx, { collection: 'own_notes', limit: 3 }, 'alice', 'member')
+    expect(records).toHaveLength(3)
+    expect(records.every(r => r.createdBy === 'alice')).toBe(true)
+    const select = findSelectFor(spy, 'c_own_notes')
+    expect(select.query).toContain('"_created_by" = ?')
+    expect(select.query).toContain('LIMIT ?')
+    expect(select.query).not.toContain('OFFSET')
   })
 })

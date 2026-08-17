@@ -39,6 +39,18 @@ export type ToolResult =
 export const DEFAULT_QUERY_LIMIT = 50
 
 /**
+ * Page size `records.deleteWhere` uses when the caller omits `limit`, and the
+ * ceiling it clamps any larger `limit` to.
+ *
+ * The tool exists so a cascade costs one subrequest per *page* instead of one
+ * per row (see `deleteChatCascade`); the ceiling keeps a single call's SQL and
+ * delete broadcasts bounded, and callers page by repeating the call until it
+ * reports fewer deletions than the page size.
+ */
+export const DEFAULT_DELETE_WHERE_LIMIT = 100
+export const MAX_DELETE_WHERE_LIMIT = 500
+
+/**
  * Fill in assistant-only parameter defaults for a built-in tool call.
  *
  * Applied by the AI tool layer (`buildTools`) before a model-issued tool call
@@ -111,6 +123,22 @@ export const BUILT_IN_TOOLS: ToolSchema[] = [
     params: {
       collection: { type: 'string', description: 'Collection name', required: true },
       recordId: { type: 'string', description: 'Record ID to delete', required: true },
+    }
+  },
+  {
+    name: 'records.deleteWhere',
+    description:
+      'Delete every record matching a filter, in one bounded batch. ' +
+      `Deletes at most \`limit\` records (default ${DEFAULT_DELETE_WHERE_LIMIT}, max ${MAX_DELETE_WHERE_LIMIT}) and returns ` +
+      '`{ deleted }`; repeat the same call until `deleted` is less than the limit to drain a larger set. ' +
+      'A non-empty `where` whose every key names a real field (`recordId`, `createdBy`, or a schema column) is required — ' +
+      'an unknown key is refused rather than ignored, so this tool never deletes a whole collection. ' +
+      'Every matched record goes through the same delete permission check as `records.delete`; ' +
+      'if any of them is denied, nothing in the batch is deleted.',
+    params: {
+      collection: { type: 'string', description: 'Collection name (must have a schema)', required: true },
+      where: { type: 'object', description: 'Filter object with field=value equality conditions; every key must be recordId, createdBy, or a schema column', required: true },
+      limit: { type: 'number', description: `Maximum number of records to delete in this call (default: ${DEFAULT_DELETE_WHERE_LIMIT}, max: ${MAX_DELETE_WHERE_LIMIT})`, required: false },
     }
   },
   // Schema tools

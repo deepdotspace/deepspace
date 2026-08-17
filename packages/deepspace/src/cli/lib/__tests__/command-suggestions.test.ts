@@ -33,7 +33,7 @@ describe('command suggestions', () => {
       attemptedPath: ['deepspace', 'migrate'],
       helpPath: ['deepspace'],
       suggestion: ['deepspace', 'app', 'migrate'],
-      executable: true,
+      executable: false,
     })
   })
 
@@ -42,7 +42,7 @@ describe('command suggestions', () => {
       attemptedPath: ['deepspace', 'app', 'migarte'],
       helpPath: ['deepspace', 'app'],
       suggestion: ['deepspace', 'app', 'migrate'],
-      executable: true,
+      executable: false,
     })
   })
 
@@ -54,26 +54,46 @@ describe('command suggestions', () => {
     expect(closestCommandPath('list', tied)).toEqual(['app', 'list'])
   })
 
+  it('withholds the executable action for every ranked guess — only an exact quoted path runs', () => {
+    // `credits` ranks `create` closest; running that guess would start an
+    // interactive scaffold, and no distance threshold separates a harmless
+    // typo from that reliably. Say "did you mean", but never hand a ranked
+    // guess over to run; the quoted-token case is exact and stays executable.
+    const tree: Record<string, CommandTreeNode> = {
+      app: { subCommands: { create: {}, usage: {} } },
+    }
+    const unknown = findUnknownCommand(['credits'], tree)
+    expect(unknown?.suggestion).toEqual(['deepspace', 'app', 'create'])
+    expect(unknown?.executable).toBe(false)
+    expect(findUnknownCommand(['app', 'usgae'], tree)?.executable).toBe(false)
+    expect(findUnknownCommand(['app usage'], tree)).toMatchObject({
+      executable: true,
+      quotedToken: true,
+    })
+  })
+
   /** A one-word guess that lands on a destructive verb must not come back as
    *  something an agent can paste and run. */
-  it('withholds the executable action when the suggestion destroys something', () => {
+  it('withholds the executable action when the suggestion destroys something (quoted paths too)', () => {
     const tree: Record<string, CommandTreeNode> = {
       app: { subCommands: { files: { subCommands: { rm: {}, list: {} } } } },
       secrets: { subCommands: { delete: {} } },
       status: {},
     }
+    // Ranked guesses are never executable; the destructive floor is what keeps
+    // even the exact quoted-token path from handing back a deleting command.
     expect(findUnknownCommand(['rm'], tree)).toMatchObject({
       suggestion: ['deepspace', 'app', 'files', 'rm'],
       executable: false,
     })
-    expect(findUnknownCommand(['delete'], tree)).toMatchObject({
+    expect(findUnknownCommand(['secrets delete'], tree)).toMatchObject({
       suggestion: ['deepspace', 'secrets', 'delete'],
       executable: false,
+      quotedToken: true,
     })
-    // A non-destructive target keeps its action — the floor is about damage,
-    // not about suppressing suggestions.
-    expect(findUnknownCommand(['stats'], tree)).toMatchObject({
-      suggestion: ['deepspace', 'status'],
+    // A non-destructive exact path keeps its action.
+    expect(findUnknownCommand(['app files list'], tree)).toMatchObject({
+      suggestion: ['deepspace', 'app', 'files', 'list'],
       executable: true,
     })
   })

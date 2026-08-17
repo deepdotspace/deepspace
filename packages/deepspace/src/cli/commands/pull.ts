@@ -13,6 +13,7 @@ import * as p from '@clack/prompts'
 import { realpathSync } from 'node:fs'
 import { ensureToken } from '../auth'
 import { findAppDir } from '../lib/app-context'
+import { noWranglerConfigMessage } from '../lib/wrangler-env'
 import { resolveAppTarget, assertAppTargetResolvable } from '../lib/app-target'
 import {
   assertSyncableRepo,
@@ -157,11 +158,7 @@ export default defineDeepspaceCommand({
     const branchArg = args.branch === undefined ? undefined : String(args.branch)
     const appArg = typeof args.app === 'string' ? args.app : undefined
     const appDir = findAppDir()
-    if (!appDir)
-      throw new Refusal(
-        'No wrangler.toml found — run from inside an app directory.',
-        'not_in_app_repo',
-      )
+    if (!appDir) throw new Refusal(noWranglerConfigMessage(process.cwd()), 'not_in_app_repo')
 
     // An explicitly-blank --branch must not silently fall back to the current
     // branch (an unset `--branch "$VAR"` would pull the wrong ref). Validate

@@ -29,6 +29,20 @@ describe('app update dependency pinning', () => {
     expect(pinSdkVersion(appDir, '0.19.1')).toBe(false)
   })
 
+  it('leaves a non-registry deepspace spec alone (a file: tarball is a deliberate pin)', () => {
+    const appDir = mkdtempSync(join(tmpdir(), 'deepspace-update-'))
+    const packagePath = join(appDir, 'package.json')
+    writeFileSync(
+      packagePath,
+      JSON.stringify({ dependencies: { deepspace: 'file:../deepspace-0.23.0.tgz' } }),
+    )
+
+    expect(pinSdkVersion(appDir, '0.23.0')).toBe(false)
+    expect(JSON.parse(readFileSync(packagePath, 'utf8')).dependencies.deepspace).toBe(
+      'file:../deepspace-0.23.0.tgz',
+    )
+  })
+
   it('does not add AI when the app does not use it directly', () => {
     const appDir = mkdtempSync(join(tmpdir(), 'deepspace-update-'))
     const packagePath = join(appDir, 'package.json')

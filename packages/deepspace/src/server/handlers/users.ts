@@ -6,10 +6,11 @@
  */
 
 import type { ConnectionAttachment } from '../../shared/protocol/types'
-import type { SetRolePayload } from '../../shared/types'
-import { MSG } from '../../shared/protocol/constants'
+import type { CollectionSchema, SetRolePayload } from '../../shared/types'
+import { MSG, isAnonymousUserId } from '../../shared/protocol/constants'
 import {
   canRead,
+  getRolePermissions,
   type PermissionContext,
   type User,
   type ResolvedColumn,
@@ -273,6 +274,60 @@ export async function registerUser(
   return { id: userId, email, name, imageUrl, role, createdAt: now, lastSeenAt: now }
 }
 
+type UserRow = { recordId: string; data: UserRecord; createdBy: string }
+type PublicIdentity = { id: string; name: string; imageUrl?: string; role: string }
+
+/**
+ * What one socket may see of the roster. Anonymous sockets and roles whose
+ * users policy is switched off (`read: false`, or no `read` at all — the same
+ * "deny" `canRead` uses) get nothing: that is a policy statement, not a row
+ * filter. Admins get whole rows — email and any app-defined column — so their
+ * read still goes through the schema's row policy. Everyone else gets the
+ * public-identity projection of the whole roster: a row-level policy (`'own'`,
+ * `'team'`, a predicate) guards full-row reads on the records/query path, and
+ * nothing it protects survives this projection — applying it here left every
+ * member of a `read: 'own'` room (every `chat:*` room, since messaging ships
+ * no users schema) with a roster of just themselves and peers rendered as
+ * "Unknown".
+ */
+function rosterFor(
+  ctx: UserContext,
+  schema: CollectionSchema,
+  records: UserRow[],
+  publicRoster: PublicIdentity[],
+  attachment: ConnectionAttachment,
+): Array<Record<string, unknown>> {
+  if (isAnonymousUserId(attachment.userId)) return []
+  if (attachment.role === 'admin') {
+    const permissionContext = ctx.getPermissionContext()
+    return records
+      .filter((record) => canRead(schema, 'admin', record, attachment.userId, permissionContext))
+      .map((record) => ({ id: record.recordId, ...record.data }))
+  }
+  if (!getRolePermissions(schema, attachment.role).read) return []
+  // `roster: 'read-policy'` opts a tenant/team-scoped app out of the shared
+  // roster: only the rows the caller's read policy grants, still projected.
+  if (schema.roster === 'read-policy') {
+    const permissionContext = ctx.getPermissionContext()
+    const readable = new Set(
+      records
+        .filter((record) => canRead(schema, attachment.role, record, attachment.userId, permissionContext))
+        .map((record) => record.recordId),
+    )
+    return publicRoster.filter((user) => readable.has(user.id))
+  }
+  return publicRoster
+}
+
+function publicIdentities(records: UserRow[]): PublicIdentity[] {
+  return records.map(({ recordId, data }) => ({
+    id: recordId,
+    name: data.name,
+    ...(data.imageUrl ? { imageUrl: data.imageUrl } : {}),
+    role: data.role,
+  }))
+}
+
 /** Handle user list requests without bypassing the users collection's privacy boundary. */
 export function handleUserList(
   ctx: UserContext,
@@ -280,41 +335,51 @@ export function handleUserList(
   attachment: ConnectionAttachment
 ): void {
   // Public rooms support anonymous sockets, but that must not turn the users
-  // table into a public directory. Apply the schema's ordinary row policy,
-  // then expose only stable public identity fields to non-admin callers.
+  // table into a public directory; a room with no users schema has none.
   const schema = ctx.schemaRegistry.get('users')
-  const permissionContext = ctx.getPermissionContext()
-  const visibleRecords =
-    attachment.userId.startsWith('anon-') || !schema
-      ? []
-      : getAllUserRecords(ctx.sql, ctx.schemaRegistry).filter((record) =>
-          canRead(
-            schema,
-            attachment.role,
-            record,
-            attachment.userId,
-            permissionContext,
-          ),
-        )
-  const users = visibleRecords.map((record) => {
-    if (attachment.role === 'admin') return { id: record.recordId, ...record.data }
-    const { name, imageUrl, role } = record.data
-    return {
-      id: record.recordId,
-      name,
-      ...(imageUrl ? { imageUrl } : {}),
-      role,
-    }
-  })
+  if (!schema) {
+    ctx.send(ws, { type: MSG.USER_LIST, payload: { users: [] } })
+    return
+  }
+  const records = getAllUserRecords(ctx.sql, ctx.schemaRegistry)
+  const users = rosterFor(ctx, schema, records, publicIdentities(records), attachment)
   ctx.send(ws, { type: MSG.USER_LIST, payload: { users } })
+}
+
+/**
+ * Push the current roster to every connected socket (except `except`). The
+ * client asks for `user.list` once per connection and never again, so anything
+ * that changes what the roster shows — a user registering, a rename, a new
+ * avatar, a role change — must push, or every open tab keeps rendering the
+ * peer it has never seen as "Unknown" until it reconnects. The roster is read
+ * and projected once; each socket then gets its own view of it.
+ */
+export function broadcastUserList(
+  ctx: UserContext,
+  except?: WebSocket | ReadonlySet<WebSocket>,
+): void {
+  const schema = ctx.schemaRegistry.get('users')
+  if (!schema) return
+  const skip = except instanceof Set ? except : new Set(except ? [except] : [])
+  const records = getAllUserRecords(ctx.sql, ctx.schemaRegistry)
+  const publicRoster = publicIdentities(records)
+  for (const other of ctx.state.getWebSockets()) {
+    if (skip.has(other)) continue
+    const attachment = other.deserializeAttachment() as ConnectionAttachment | null
+    if (!attachment) continue
+    ctx.send(other, {
+      type: MSG.USER_LIST,
+      payload: { users: rosterFor(ctx, schema, records, publicRoster, attachment) },
+    })
+  }
 }
 
 /**
  * Handle user profile update.
  *
  * Called when the client's profile loads after the initial WS connection.
- * Updates the user's name/email/imageUrl in c_users and broadcasts the
- * updated user list to all connected clients so names refresh in real time.
+ * Updates the user's name/email/imageUrl in c_users and pushes the updated
+ * roster to every connected client so names refresh in real time.
  */
 export interface UserUpdatePayload {
   name?: string
@@ -338,8 +403,14 @@ export function handleUserUpdate(
 
   // systemUpdate=true bypasses system-managed field stripping so we can
   // write to name/email/imageUrl. broadcastChange fires automatically,
-  // updating any useQuery('users') subscriptions on connected clients.
+  // updating any useQuery('users') subscriptions on connected clients; the
+  // `user.list` roster (`useUsers()`) is a separate request/response and
+  // needs the explicit push.
   putRecord(ctx, 'users', attachment.userId, data, attachment.userId, 'admin', true, true)
+  const rosterChanged =
+    (data.name !== undefined && data.name !== existing.data.name) ||
+    (data.imageUrl !== undefined && data.imageUrl !== existing.data.imageUrl)
+  if (rosterChanged) broadcastUserList(ctx)
 }
 
 /**
@@ -372,23 +443,21 @@ export async function handleSetRole(
 
   // Close the changed user's live sockets. Reconnect runs the ordinary role
   // lookup again, so no connection keeps permissions from before the change.
+  const closing = new Set<WebSocket>()
   for (const otherWs of ctx.state.getWebSockets()) {
     const otherAttachment = otherWs.deserializeAttachment() as ConnectionAttachment | null
-    if (!otherAttachment) continue
-
-    if (otherAttachment.userId === payload.userId) {
-      try {
-        otherWs.close(1008, 'role-changed')
-      } catch {
-        // Already closing.
-      }
-      continue
-    }
-
-    // Send the updated list through the same row and field filtering as a
-    // direct request so role changes cannot bypass users-schema privacy.
-    if (otherAttachment.role === 'admin') {
-      handleUserList(ctx, otherWs, otherAttachment)
+    if (otherAttachment?.userId !== payload.userId) continue
+    closing.add(otherWs)
+    try {
+      otherWs.close(1008, 'role-changed')
+    } catch {
+      // Already closing.
     }
   }
+
+  // Then push the roster to everyone else — one read, each socket its own
+  // projection — so their tabs see the new role instead of holding the stale
+  // one until reconnect. The closed sockets are skipped by identity rather
+  // than trusted to drop the frame.
+  broadcastUserList(ctx, closing)
 }

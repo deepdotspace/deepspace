@@ -8,7 +8,8 @@
  *      environment THIS build targets, never a literal frozen at scaffold time;
  *   2. removing the preview `.dev.vars` the Cloudflare plugin drops beside the
  *      built worker — DeepSpace has one local runtime, so that second plaintext
- *      copy is not kept;
+ *      copy is not kept (`removeBuildDevVars` below; `deepspace deploy` calls
+ *      the same function on the artifact it ships);
  *   3. the client `dedupe` hint — two copies of React (or better-auth) break
  *      the SDK's hooks, and which packages must be single-instance is the SDK's
  *      knowledge, not the app's.
@@ -22,10 +23,42 @@
  * assignable to `PluginOption` where an app composes it.
  */
 
-import { existsSync, readdirSync, unlinkSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, unlinkSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { appIdDefine } from './app-id'
 import type { ResolveAppIdOptions } from './app-id'
+
+/**
+ * Delete Cloudflare's preview-only `.dev.vars` copy from ONE built worker dir.
+ * Returns whether a file was removed; throws rather than following a symlink
+ * or unlinking a directory, so a booby-trapped build output cannot make this
+ * delete something else.
+ *
+ * TWO call sites, deliberately, and this is the single implementation they
+ * share (they used to have one each, with only the CLI's carrying the symlink
+ * guard):
+ *
+ *   1. `closeBundle` below — every `vite build` of an app that uses
+ *      `deepspaceBuild()`, including plain `npm run build` in CI, so a generic
+ *      archive step cannot pick the plaintext file up.
+ *   2. `cli/commands/deploy/build.ts` — the AUTHORITATIVE one: it runs against
+ *      the exact worker dir the deploy is about to read, covers apps that do
+ *      not use this plugin, and fails the deploy (`build_output_unsafe`) when
+ *      the path is unsafe.
+ *
+ * Neither subsumes the other — they have different lifetimes (any build vs.
+ * the artifact that ships). See `docs/migrations/build-preview-secrets.md`.
+ */
+export function removeBuildDevVars(workerDir: string): boolean {
+  const path = join(workerDir, '.dev.vars')
+  if (!existsSync(path)) return false
+  // lstat, not stat: a symlink reports as a link, not as its target's file.
+  if (!lstatSync(path).isFile()) {
+    throw new Error(`Refusing unsafe build secret path: ${path}`)
+  }
+  unlinkSync(path)
+  return true
+}
 
 /**
  * Packages that must resolve to a single instance in the client graph. Two
@@ -59,12 +92,19 @@ export function deepspaceBuild(options: DeepspaceBuildOptions): VitePluginLike {
     },
     closeBundle() {
       // Cloudflare emits a preview-only `.dev.vars` beside each built worker.
+      // Sweep every worker dir before reporting an unsafe one: an early throw
+      // would leave the plaintext copies after it in place (fail-open).
       if (!existsSync(distDir)) return
+      const unsafe: string[] = []
       for (const entry of readdirSync(distDir, { withFileTypes: true })) {
         if (!entry.isDirectory()) continue
-        const secretPath = join(distDir, entry.name, '.dev.vars')
-        if (existsSync(secretPath)) unlinkSync(secretPath)
+        try {
+          removeBuildDevVars(join(distDir, entry.name))
+        } catch (err) {
+          unsafe.push(err instanceof Error ? err.message : String(err))
+        }
       }
+      if (unsafe.length > 0) throw new Error(unsafe.join('\n'))
     },
   }
 }

@@ -23,12 +23,20 @@
  * file. For `--env`, it flattens the selected Wrangler env into a generated
  * config for the Cloudflare Vite plugin instead of passing `CLOUDFLARE_ENV`;
  * otherwise Wrangler would look for a separate `.dev.vars.<env>` file.
+ *
+ * This module is also the ONE reader of `wrangler.toml` — `cli/lib/app-identity`
+ * (ids) and `deepspace/build` (the browser's id define) both come through
+ * {@link readWranglerConfigFile}, so there is one parse, one error shape, and
+ * one place for a whole-file guard. It stays free of CLI-only imports for that
+ * reason: the `deepspace/build` bundle pulls this in, and must not drag citty
+ * or the prompt stack along with it.
  */
 
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import { resolveAppName } from '../../server/rooms/app-name'
+import { APP_ID_RE } from '../../server/utils/registry-client'
 
 /** Shape of the bits of wrangler.toml that DeepSpace CLI commands read.
  *  Add an optional field here whenever a new command starts consulting
@@ -221,31 +229,118 @@ function safeGeneratedConfigSegment(value: string): string {
 }
 
 /**
- * Read + parse wrangler.toml. Caller checks existence first via
- * `hasWranglerConfig`. Throws a `WranglerConfigError` with the absolute
- * path embedded on a malformed file — saves the user from staring at
- * a raw smol-toml parser stack trace when they have one stray
- * unquoted character in their config.
+ * The one failure shape for reading wrangler.toml — unreadable, malformed, or
+ * self-contradictory. Carries the absolute path so the user is not left
+ * staring at a raw smol-toml stack trace guessing which config in a multi-app
+ * repo is broken, and a machine `code` so `--json` callers keep getting one
+ * (`cli-errors.errorCode` recognizes this class by name, since this module
+ * must not import the CLI error stack — see the header).
  */
 export class WranglerConfigError extends Error {
   constructor(
     public readonly path: string,
-    public readonly cause: unknown,
+    message: string,
+    public readonly code: string = 'invalid_config',
+    public readonly cause?: unknown,
   ) {
-    const detail = cause instanceof Error ? cause.message : String(cause)
-    super(`wrangler.toml: malformed TOML at ${path}: ${detail}`)
+    super(message)
     this.name = 'WranglerConfigError'
   }
 }
 
-export function readWranglerConfig(appDir: string): WranglerConfig {
-  const path = join(appDir, 'wrangler.toml')
-  const raw = readFileSync(path, 'utf-8')
+function causeDetail(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * Read + parse one wrangler.toml by absolute path. The single reader: every
+ * consumer of this file in the SDK (deploy/status/dev, `readAppId`, and the
+ * build's `__DEEPSPACE_APP_ID__` define) lands here, so a config that is wrong
+ * is refused once, the same way, wherever it is read.
+ */
+export function readWranglerConfigFile(path: string): WranglerConfig {
+  let raw: string
   try {
-    return parseToml(raw) as WranglerConfig
+    raw = readFileSync(path, 'utf-8')
   } catch (err) {
-    throw new WranglerConfigError(path, err)
+    const missing = (err as NodeJS.ErrnoException | null)?.code === 'ENOENT'
+    throw new WranglerConfigError(
+      path,
+      missing ? noWranglerConfigMessage(path) : `wrangler.toml: could not read ${path}: ${causeDetail(err)}`,
+      missing ? 'not_in_app_repo' : 'invalid_config',
+      err,
+    )
   }
+  let config: WranglerConfig
+  try {
+    config = parseToml(raw) as WranglerConfig
+  } catch (err) {
+    throw new WranglerConfigError(
+      path,
+      `wrangler.toml: malformed TOML at ${path}: ${causeDetail(err)}`,
+      'invalid_config',
+      err,
+    )
+  }
+  assertOneSectionPerAppId(config, path)
+  return config
+}
+
+/** Read + parse `<appDir>/wrangler.toml`. Caller may check existence first via
+ *  `hasWranglerConfig` to distinguish "no app here" from "broken app here". */
+export function readWranglerConfig(appDir: string): WranglerConfig {
+  return readWranglerConfigFile(join(appDir, 'wrangler.toml'))
+}
+
+/**
+ * The raw `DEEPSPACE_APP_ID` of one section — `[env.<envName>.vars]` when an
+ * env is named, `[vars]` otherwise. Env blocks do NOT inherit the top-level
+ * id: each environment is its own app, and silently inheriting is what once
+ * shipped a staging worker beside a production browser.
+ */
+export function readAppIdVar(config: WranglerConfig, envName?: string): unknown {
+  return (envName ? config.env?.[envName]?.vars : config.vars)?.DEEPSPACE_APP_ID
+}
+
+/**
+ * Refuse a config that gives one app id to more than one section.
+ *
+ * Copying the `[vars]` block into `[env.staging.vars]` leaves both halves of a
+ * build agreeing on the same app while the deploy targets another — the client
+ * id-mismatch guard cannot fire, because there is no mismatch to see. Only
+ * real (`app_…`-shaped) ids count, so a fresh scaffold's repeated `__APP_ID__`
+ * placeholder is still initializable.
+ */
+function assertOneSectionPerAppId(config: WranglerConfig, path: string): void {
+  const sections = new Map<string, string[]>()
+  const record = (section: string, value: unknown) => {
+    if (typeof value !== 'string' || !APP_ID_RE.test(value)) return
+    sections.set(value, [...(sections.get(value) ?? []), section])
+  }
+  record('[vars]', config.vars?.DEEPSPACE_APP_ID)
+  for (const envName of Object.keys(config.env ?? {})) {
+    record(`[env.${envName}.vars]`, config.env?.[envName]?.vars?.DEEPSPACE_APP_ID)
+  }
+  for (const [appId, where] of sections) {
+    if (where.length < 2) continue
+    throw new WranglerConfigError(
+      path,
+      `wrangler.toml: ${where.join(' and ')} ${where.length === 2 ? 'both' : 'all'} set DEEPSPACE_APP_ID = "${appId}" in ${path}. ` +
+        `One id under several sections points every environment's data, secrets, and billing at the ` +
+        `same app while the deploys go to different places — each environment is its own app — ` +
+        `run \`deepspace app init --env <name>\` to mint one for it.`,
+      'duplicate_app_id',
+    )
+  }
+}
+
+/**
+ * The one "not in an app directory" sentence — the reader's own, and what
+ * every command that pre-checks for wrangler.toml says (`not_in_app_repo`),
+ * so an agent meets one text with one remedy wherever it hits this.
+ */
+export function noWranglerConfigMessage(where: string): string {
+  return `No wrangler.toml at ${where}. Are you in a DeepSpace app directory? (Scaffold one with \`npm create deepspace\`, or cd into an existing app.)`
 }
 
 /** Convenience: true when wrangler.toml exists at the standard path. */

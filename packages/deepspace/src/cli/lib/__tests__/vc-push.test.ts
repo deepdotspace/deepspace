@@ -182,7 +182,7 @@ describe('push rejection decisions', () => {
     expect(isRecoverablePushFailure('up_to_date')).toBe(false)
   })
 
-  it('keeps transport-only source, quota, and rate-limit refusals distinct', () => {
+  it('keeps transport-only quota and rate-limit refusals distinct', () => {
     expect(
       classifyPushTransportFailure(
         new Error("fatal: unable to access 'https://x/': The requested URL returned error: 409"),
@@ -190,17 +190,22 @@ describe('push rejection decisions', () => {
     ).toMatchObject({ code: 'app_quota_exceeded' })
     expect(
       classifyPushTransportFailure(
-        new Error("fatal: unable to access 'https://x/': The requested URL returned error: 422"),
-      ),
-    ).toMatchObject({
-      code: 'source_managed_by_github',
-      error: expect.stringContaining('normal Git/GitHub'),
-    })
-    expect(
-      classifyPushTransportFailure(
         new Error("fatal: unable to access 'https://x/': The requested URL returned error: 429"),
       ),
     ).toMatchObject({ code: 'rate_limited' })
+  })
+
+  it('classifies the GitHub-source 422 as a last resort, without inventing a repository', () => {
+    // Both push paths normally decide this BEFORE git runs (push's getAppSource
+    // preflight names the repository; deploy skips the cloud push for GitHub
+    // source). This branch only catches an older platform whose /source
+    // reports no provider — so it names the state and where to look, never a
+    // repository it cannot know.
+    const failure = classifyPushTransportFailure(
+      new Error("fatal: unable to access 'https://x/': The requested URL returned error: 422"),
+    )
+    expect(failure?.code).toBe('source_managed_by_github')
+    expect(failure?.error).toContain('deepspace app status')
   })
 
   describe('413 (too large)', () => {

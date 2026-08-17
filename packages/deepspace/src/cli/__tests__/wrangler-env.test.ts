@@ -6,11 +6,17 @@ import {
   resolveAppNameForEnv,
   devVarsPathFor,
   prepareWranglerEnvConfig,
+  readAppIdVar,
   readWranglerConfig,
   wranglerViteEnv,
   WranglerConfigError,
   type WranglerConfig,
 } from '../lib/wrangler-env'
+import { readAppId } from '../lib/app-identity'
+import { errorCode } from '../lib/cli-errors'
+
+const PROD_ID = 'app_01JG8QK4M2N7P9RSTVWXYZ0123'
+const STAGING_ID = 'app_01JG8QK4M2N7P9RSTVWXYZ0456'
 
 describe('resolveAppNameForEnv', () => {
   it('returns the top-level name when no env is given', () => {
@@ -250,6 +256,25 @@ describe('readWranglerConfig', () => {
     })
   })
 
+  it('reports a missing config through the same error shape', () => {
+    // Three readers used to disagree here — `deepspace/build` said "missing or
+    // not valid TOML", app-identity threw an InputError, and this one let a
+    // raw ENOENT escape. One reader, one class, one machine code.
+    withTempDir((dir) => {
+      let caught: unknown
+      try {
+        readWranglerConfig(dir)
+      } catch (e) {
+        caught = e
+      }
+      expect(caught).toBeInstanceOf(WranglerConfigError)
+      // A missing file is "not an app dir", not "a broken config" — its own
+      // code and a sentence that says what to do about it.
+      expect((caught as Error).message).toMatch(/No wrangler\.toml at .*Are you in a DeepSpace app directory\?/)
+      expect(errorCode(caught)).toBe('not_in_app_repo')
+    })
+  })
+
   it('throws WranglerConfigError with the path on malformed TOML', () => {
     // Regression: previously the parser's raw stack trace was surfaced
     // to the user with no path context, leaving them to guess which
@@ -267,6 +292,7 @@ describe('readWranglerConfig', () => {
       expect(err.path).toBe(join(dir, 'wrangler.toml'))
       expect(err.message).toContain('wrangler.toml: malformed TOML')
       expect(err.message).toContain(err.path)
+      expect(errorCode(err)).toBe('invalid_config')
     })
   })
 
@@ -290,5 +316,118 @@ describe('readWranglerConfig', () => {
       expect(config.assets?.directory).toBe('dist')
       expect(config.assets?.run_worker_first).toEqual(['/api/*'])
     })
+  })
+})
+
+/**
+ * One id under two sections. Copying the `[vars]` block into an env's block is
+ * an easy edit and nothing detected it: both halves of the build then agree on
+ * the same app, so the client id-mismatch guard has no mismatch to see, and
+ * the user finds out only when the deploy `rename` guard trips over the env's
+ * differing `name`. The guard lives in the one reader, so every consumer —
+ * `deploy`, `status`, `readAppId`, the build's define — inherits it.
+ */
+describe('one section per app id', () => {
+  function withConfig<T>(lines: string[], fn: (dir: string) => T): T {
+    const dir = mkdtempSync(join(tmpdir(), 'wrangler-dup-id-'))
+    try {
+      writeFileSync(join(dir, 'wrangler.toml'), `${lines.join('\n')}\n`)
+      return fn(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  const DUPLICATED = [
+    'name = "hopkins"',
+    '[vars]',
+    `DEEPSPACE_APP_ID = "${PROD_ID}"`,
+    '[env.staging]',
+    'name = "hopkins-staging"',
+    '[env.staging.vars]',
+    `DEEPSPACE_APP_ID = "${PROD_ID}"`,
+  ]
+
+  it('refuses the same id in [vars] and an env block, and says what to run', () => {
+    withConfig(DUPLICATED, (dir) => {
+      let caught: unknown
+      try {
+        readWranglerConfig(dir)
+      } catch (e) {
+        caught = e
+      }
+      expect(caught).toBeInstanceOf(WranglerConfigError)
+      const message = (caught as Error).message
+      expect(message).toContain('[vars] and [env.staging.vars]')
+      expect(message).toContain(PROD_ID)
+      expect(message).toContain('each environment is its own app')
+      expect(message).toContain('deepspace app init --env <name>')
+      expect(errorCode(caught)).toBe('duplicate_app_id')
+    })
+  })
+
+  it('refuses two env blocks sharing one id', () => {
+    withConfig(
+      [
+        'name = "hopkins"',
+        '[env.staging.vars]',
+        `DEEPSPACE_APP_ID = "${STAGING_ID}"`,
+        '[env.qa.vars]',
+        `DEEPSPACE_APP_ID = "${STAGING_ID}"`,
+      ],
+      (dir) => {
+        expect(() => readWranglerConfig(dir)).toThrow(/\[env\.staging\.vars\] and \[env\.qa\.vars\]/)
+      },
+    )
+  })
+
+  it('refuses through readAppId too — the guard is the reader, not a call site', () => {
+    withConfig(DUPLICATED, (dir) => {
+      expect(() => readAppId(dir)).toThrow(/each environment is its own app/)
+      expect(() => readAppId(dir, 'staging')).toThrow(/each environment is its own app/)
+    })
+  })
+
+  it('accepts distinct ids per section', () => {
+    withConfig(
+      [
+        'name = "hopkins"',
+        '[vars]',
+        `DEEPSPACE_APP_ID = "${PROD_ID}"`,
+        '[env.staging.vars]',
+        `DEEPSPACE_APP_ID = "${STAGING_ID}"`,
+      ],
+      (dir) => {
+        expect(readAppId(dir)).toBe(PROD_ID)
+        expect(readAppId(dir, 'staging')).toBe(STAGING_ID)
+        expect(readAppIdVar(readWranglerConfig(dir), 'staging')).toBe(STAGING_ID)
+      },
+    )
+  })
+
+  it('leaves a fresh scaffold initializable — the placeholder is not an id', () => {
+    // `app init --env staging` has to be able to run on a template that
+    // carries `__APP_ID__` in more than one place; only real ids collide.
+    withConfig(
+      [
+        '[vars]',
+        'DEEPSPACE_APP_ID = "__APP_ID__"',
+        '[env.staging.vars]',
+        'DEEPSPACE_APP_ID = "__APP_ID__"',
+      ],
+      (dir) => {
+        expect(readAppId(dir)).toBeNull()
+        expect(readAppId(dir, 'staging')).toBeNull()
+      },
+    )
+  })
+
+  it('returns null rather than throwing when there is no app here', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wrangler-dup-id-'))
+    try {
+      expect(readAppId(dir)).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

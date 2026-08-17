@@ -32,7 +32,7 @@ import type {
   YjsJoinPayload,
   YjsLeavePayload,
 } from '../../shared/types'
-import { ROLE_ANONYMOUS, MSG } from '../../shared/protocol/constants'
+import { ROLE_ANONYMOUS, MSG, isAnonymousUserId } from '../../shared/protocol/constants'
 import type { ServerMessage } from '../../shared/protocol/messages'
 import {
   type CollectionSchema,
@@ -50,6 +50,8 @@ import {
   handleUserUpdate,
   handleSetRole,
   registerUser,
+  getUser,
+  broadcastUserList,
   handleYjsJoin,
   handleYjsLeave,
   handleYjsBinaryMessage,
@@ -248,7 +250,7 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
     const userName = user.userName
     const userEmail = user.userEmail
     const userImageUrl = user.userImageUrl
-    const isAuthenticated = !userId.startsWith('anon-')
+    const isAuthenticated = !isAnonymousUserId(userId)
 
     let attachment: ConnectionAttachment
 
@@ -256,6 +258,7 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
       const isOwner = this.ownerUserId != null && userId === this.ownerUserId
       const regStart = Date.now()
       const defaultRole = this.schemaRegistry.get('users')?.defaultRole ?? 'member'
+      const before = getUser(this.sql, userId, this.schemaRegistry)
       const registeredUser = await registerUser(
         this.sql,
         userId,
@@ -267,6 +270,17 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
         this.schemaRegistry,
       )
       const regMs = Date.now() - regStart
+      // A first registration (or a changed name/avatar/role) changes what
+      // every other tab's roster should show — push it, or peers who joined
+      // after a tab connected render as "Unknown" there until it reconnects.
+      if (
+        !before ||
+        before.name !== registeredUser.name ||
+        before.imageUrl !== registeredUser.imageUrl ||
+        before.role !== registeredUser.role
+      ) {
+        broadcastUserList(this.createUserContext(), ws)
+      }
 
       attachment = {
         userId: registeredUser.id,

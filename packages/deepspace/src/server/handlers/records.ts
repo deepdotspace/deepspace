@@ -7,6 +7,7 @@
 import type { ConnectionAttachment } from '../../shared/protocol/types'
 import type { RecordResult, PutPayload, DeletePayload } from '../../shared/types'
 import type { ToolResult } from '../utils/tools'
+import { DEFAULT_DELETE_WHERE_LIMIT, MAX_DELETE_WHERE_LIMIT } from '../utils/tools'
 import { serverBuild } from '../../shared/protocol/messages'
 import { RECORD_NOT_FOUND } from '../../shared/protocol/constants'
 import {
@@ -28,7 +29,14 @@ import {
   dataToColumnValues,
   buildTableSelect,
 } from '../schemas/registry'
-import { broadcastChange, resolveCollection, type SubscriptionContext } from './subscriptions'
+import {
+  broadcastChange,
+  executeQuery,
+  resolveCollection,
+  MAX_FILTERED_SCAN_ROWS,
+  type QueryScanState,
+  type SubscriptionContext,
+} from './subscriptions'
 
 export interface RecordContext extends SubscriptionContext {
   state: DurableObjectState
@@ -496,6 +504,128 @@ export function deleteRecord(
   notifyTeamMembershipChange(ctx, collection, record)
 
   return { success: true, data: { deleted: true } }
+}
+
+/**
+ * Delete every record matching `where`, capped at one bounded page.
+ *
+ * The batch primitive behind cascading deletes: a caller that deleted row by
+ * row spent one DO subrequest per row and ran out of subrequest budget on a
+ * large set, orphaning the rest. One call handles a page; the caller repeats
+ * it while `deleted` equals the page size (each page really removes rows, so
+ * the loop terminates).
+ *
+ * Authorization is exactly `records.delete`'s: every matched record is checked
+ * with `canDelete` *before* anything is removed, so a denied row refuses the
+ * whole page rather than leaving a half-applied batch.
+ *
+ * `where` is validated strictly here because `executeQuery` is lenient — it
+ * silently drops a key that names no column, and ignores `where` altogether on
+ * a schemaless system collection. A read that ignores a filter over-returns; a
+ * delete that ignores one truncates. So every key must name a real field
+ * (`recordId`, `createdBy`, or a schema column), the collection must have a
+ * schema, and `limit` must be a finite number — anything else is refused, and
+ * collection-wide truncation is not reachable through this tool.
+ *
+ * @param skipUserRbac - When true, skip user role checks. Used by server actions.
+ */
+export function deleteWhere(
+  ctx: RecordContext,
+  collection: string,
+  where: unknown,
+  limit: unknown,
+  userId: string,
+  userRole: string,
+  skipUserRbac = false,
+): ToolResult {
+  const resolved = resolveCollection(ctx, collection)
+  if (!resolved.ok) return { success: false, error: resolved.error }
+  const schema = resolved.schema
+  if (!schema) {
+    return {
+      success: false,
+      error: `records.deleteWhere: collection "${collection}" has no schema, so it has no filterable fields — delete its rows by recordId with records.delete`,
+    }
+  }
+
+  if (!where || typeof where !== 'object' || Array.isArray(where) || Object.keys(where).length === 0) {
+    return { success: false, error: 'Missing required param: where (must match at least one field)' }
+  }
+  const columns = (schema.columns ?? []).map(resolveColumn)
+  const filterable = ['recordId', 'createdBy', ...columns.map((c) => c.name)]
+  const unknown = Object.keys(where).filter(
+    (key) =>
+      key !== 'recordId' &&
+      key !== 'createdBy' &&
+      !columns.some((c) => c.id === columnId(key) || c.name === key),
+  )
+  if (unknown.length > 0) {
+    return {
+      success: false,
+      error: `Unknown field(s) in where for "${collection}": ${unknown.join(', ')} — filterable fields: ${filterable.join(', ')}`,
+    }
+  }
+  const nonPrimitive = Object.entries(where).filter(([, v]) => v !== null && typeof v === 'object')
+  if (nonPrimitive.length > 0) {
+    return {
+      success: false,
+      error: `where values must be primitives (equality only): ${nonPrimitive.map(([k]) => k).join(', ')}`,
+    }
+  }
+
+  if (limit !== undefined && !(typeof limit === 'number' && Number.isFinite(limit))) {
+    return { success: false, error: 'limit must be a finite number' }
+  }
+  const page = Math.min(
+    Math.max(1, Math.floor(limit ?? DEFAULT_DELETE_WHERE_LIMIT)),
+    MAX_DELETE_WHERE_LIMIT,
+  )
+  // `executeQuery`'s limit counts readable records (it scans past rows a
+  // per-row filter hides, up to its scan cap), so a short page means "no more
+  // matches" — the contract the caller's drain loop depends on — unless the
+  // scan was capped, which must refuse rather than masquerade as exhaustion.
+  const scan: QueryScanState = { capped: false }
+  const matched = executeQuery(
+    ctx,
+    { collection, where: where as Record<string, unknown>, limit: page },
+    userId,
+    userRole,
+    skipUserRbac,
+    scan,
+  )
+  if (scan.capped && matched.length < page) {
+    return {
+      success: false,
+      error:
+        `records.deleteWhere scanned ${MAX_FILTERED_SCAN_ROWS} rows without filling a page of ` +
+        `readable matches in "${collection}" — narrow \`where\` (or delete by recordId) and retry`,
+    }
+  }
+
+  if (!skipUserRbac && schema) {
+    const permCtx = ctx.getPermissionContext()
+    for (const record of matched) {
+      if (!canDelete(schema, userRole, record, userId, permCtx)) {
+        return { success: false, error: `DELETE DENIED: role=${userRole}, collection=${collection}` }
+      }
+    }
+  }
+
+  let deleted = 0
+  for (const record of matched) {
+    if (deleteRecord(ctx, collection, record.recordId, userId, userRole, skipUserRbac).success) {
+      deleted++
+    }
+  }
+  if (deleted < matched.length) {
+    // A short page must mean "no more matches", never "some deletes failed" —
+    // a drain loop reading it as exhaustion would silently orphan the rest.
+    return {
+      success: false,
+      error: `Deleted ${deleted} of ${matched.length} matched record(s) in "${collection}"; the rest failed — retry`,
+    }
+  }
+  return { success: true, data: { deleted } }
 }
 
 /**

@@ -14,7 +14,27 @@ import {
   agentSkillInstallerCommand,
   assertClaudeSkillLinkAvailable,
   ensureClaudeSkillLink,
+  nextStepsLines,
 } from '../setup-runtime'
+
+describe('nextStepsLines', () => {
+  const project = { appName: 'demo', isInPlace: false }
+
+  it('omits the login/init recovery pair once the identity registered', () => {
+    const lines = nextStepsLines(project, true)
+    expect(lines).not.toContain('npx deepspace auth login')
+    expect(lines).not.toContain('npx deepspace app init')
+    expect(lines).toContain('npx deepspace dev start')
+  })
+
+  it('lists login AND init together when the scaffold has no identity yet', () => {
+    expect(nextStepsLines(project, false).slice(0, 3)).toEqual([
+      'cd demo',
+      'npx deepspace auth login',
+      'npx deepspace app init',
+    ])
+  })
+})
 
 describe('agentSkillInstallerCommand', () => {
   it('executes npm through the current Node runtime when nested under npm exec', () => {
