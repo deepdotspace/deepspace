@@ -22,6 +22,19 @@ import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
+/**
+ * Everything the grant actually confers. The `--help` line, the human success
+ * line and the `--json` envelope are all built from THIS array, so they cannot
+ * drift: `--help` used to be the only surface that admitted a collaborator
+ * reads and rewrites every app secret in plaintext, while the grant itself
+ * said "can now deploy" and the envelope carried no field to check at all.
+ */
+const COLLABORATOR_GRANTS = ['deploy', 'secrets:read', 'secrets:write'] as const
+
+const COLLABORATOR_GRANT_SENTENCE =
+  `grants ${COLLABORATOR_GRANTS.join(', ')} — they can deploy the app AND read and change ` +
+  'every app secret in plaintext; they cannot undeploy or transfer it'
+
 interface Collaborator {
   userId: string
   emailDisplay: string
@@ -88,8 +101,7 @@ const list = defineDeepspaceCommand({
 const add = defineDeepspaceCommand({
   meta: {
     name: 'add',
-    description:
-      'Authorize someone to deploy your app — a collaborator can also read and change every app secret (plaintext); they cannot undeploy or transfer',
+    description: `Authorize someone on your app — ${COLLABORATOR_GRANT_SENTENCE}`,
   },
   args: {
     email: {
@@ -118,6 +130,9 @@ const add = defineDeepspaceCommand({
       `/api/app-collaborators/${encodeURIComponent(app)}`,
       { method: 'POST', body: JSON.stringify({ email }) },
     )
+    // `grants` rides every outcome: an invite confers exactly the same access
+    // the moment it is accepted, so an agent reads one field either way.
+    const grants = [...COLLABORATOR_GRANTS]
     if (res.status === 'invited' || res.status === 'already_invited') {
       const expires = new Date(res.expiresAt).toLocaleDateString()
       if (res.status === 'already_invited') {
@@ -127,19 +142,24 @@ const add = defineDeepspaceCommand({
               `No new email was sent. Cancel it with \`deepspace app collaborators cancel ${res.email}\` to reset.`,
           )
         }
-        return { data: { ...res } }
+        return { data: { ...res, grants } }
       }
       if (!args.json) {
         console.log(
           `✓ Invite sent to ${res.email} (expires ${expires}). ` +
-            `They accept it from the emailed link, or by signing in and running ` +
+            `Accepting it ${COLLABORATOR_GRANT_SENTENCE}. ` +
+            `They accept from the emailed link, or by signing in and running ` +
             `\`deepspace app collaborators accept ${app}\`.`,
         )
       }
-      return { data: { ...res } }
+      return { data: { ...res, grants } }
     }
-    if (!args.json) console.log(`✓ ${res.collaborator.emailDisplay} can now deploy ${app}`)
-    return { data: { ...res } }
+    if (!args.json) {
+      console.log(
+        `✓ ${res.collaborator.emailDisplay} on ${app}: ${COLLABORATOR_GRANT_SENTENCE}.`,
+      )
+    }
+    return { data: { ...res, grants } }
   },
 })
 

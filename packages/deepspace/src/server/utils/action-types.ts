@@ -55,6 +55,22 @@ export interface ActionTools {
     data: Partial<T>,
   ): Promise<ActionResult<MutateActionData>>
   remove(collection: string, recordId: string): Promise<ActionResult<MutateActionData>>
+  /**
+   * Delete every record matching `where`, in one bounded batch — the cascade
+   * primitive, so draining a set costs one subrequest per page instead of one
+   * per row. Deletes at most `limit` (default 100, max 500) and returns
+   * `{ deleted }`; repeat the same call until `deleted` is below the limit to
+   * drain a larger set.
+   *
+   * `where` must be non-empty and every key must name a real field
+   * (`recordId`, `createdBy`, or a schema column) — an unknown key is refused,
+   * not ignored, so this can never truncate a whole collection.
+   */
+  deleteWhere(
+    collection: string,
+    where: Record<string, unknown>,
+    limit?: number,
+  ): Promise<ActionResult<{ deleted: number }>>
   get<T extends Record<string, unknown> = Record<string, unknown>>(
     collection: string,
     recordId: string,

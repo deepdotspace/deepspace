@@ -40,11 +40,13 @@ import {
   type YjsContext,
 } from '../yjs'
 import {
+  BASE_USERS_SCHEMA,
   SchemaRegistry,
   noopPermissionContext,
   columnId,
   type CollectionSchema,
 } from '../../schemas/registry'
+import { registerUser } from '../users'
 import { ensureCollectionTable } from '../../rooms/collection-table-migration'
 import { capToolResultSize, DEFAULT_CONTEXT_CONFIG } from '../../utils/chat-context'
 import { MSG_YJS_AWARENESS } from '../../../shared/protocol/constants'
@@ -417,16 +419,62 @@ describe('records.deleteWhere', () => {
     seedNotes(db, 'chat-1', 3)
     seedNotes(db, 'chat-2', 2)
 
-    const typo = await execTool(ctx, 'records.query', { collection: 'notes', where: { chatid_typo: 'chat-1' } })
+    const typo = await execTool(ctx, 'records.query', {
+      collection: 'notes',
+      where: { chatid_typo: 'chat-1' },
+    })
     expect(typo.success).toBe(false)
     expect(typo.error).toContain('chatid_typo')
     expect(typo.error).toContain('recordId, createdBy, chatId, body')
 
     // The real key still filters, and no where still returns everything.
-    const real = await execTool(ctx, 'records.query', { collection: 'notes', where: { chatId: 'chat-1' } })
+    const real = await execTool(ctx, 'records.query', {
+      collection: 'notes',
+      where: { chatId: 'chat-1' },
+    })
     expect(real.data.count).toBe(3)
     const all = await execTool(ctx, 'records.query', { collection: 'notes' })
     expect(all.data.count).toBe(5)
+  })
+
+  it('names an array or scalar `where` for what it is instead of reporting a field "0"', async () => {
+    // `refuseUnknownWhere` owns the shape check for both tools now: `[]` used
+    // to slip through the query path's emptiness test and filter nothing, and
+    // `['chatId']` was reported as an unknown field named "0".
+    seedNotes(db, 'chat-1', 3)
+
+    for (const where of [[], ['chatId'], 'chatId', 7]) {
+      for (const tool of ['records.query', 'records.deleteWhere']) {
+        const out = await execTool(ctx, tool, { collection: 'notes', where })
+        expect(out.success, `${tool} with ${JSON.stringify(where)}`).toBe(false)
+        expect(out.error).toContain('must be an object of field=value pairs')
+        expect(out.error).toContain('recordId, createdBy, chatId, body')
+      }
+    }
+    expect(noteCount(db)).toBe(3)
+  })
+
+  it('refuses ANY `where` on a schemaless system collection', async () => {
+    // `executeSystemQuery` ignores `where` entirely, so a filter on a
+    // schemaless collection — even by `recordId` — would hand back the whole
+    // collection as if filtered. The one guard refuses every non-empty
+    // `where` there and says why.
+    db.exec(
+      `CREATE TABLE c_canvas_settings (_row_id TEXT PRIMARY KEY, _created_by TEXT, _created_at TEXT, _updated_at TEXT)`,
+    )
+    insert(db, 'c_canvas_settings', { recordId: 's1', createdBy: 'someone' })
+
+    for (const where of [{ anything: 'x' }, { recordId: 's1' }]) {
+      const out = await execTool(ctx, 'records.query', { collection: 'canvas-settings', where })
+      expect(out.success).toBe(false)
+      expect(out.error).toBe(
+        '"canvas-settings" has no schema, so it has no filterable fields — query it without `where`',
+      )
+    }
+
+    // Without a `where` it is still a readable collection.
+    const rows = await execTool(ctx, 'records.query', { collection: 'canvas-settings' })
+    expect(rows).toMatchObject({ success: true, data: { count: 1 } })
   })
 
   it('refuses a filter key that names no field instead of silently dropping it', async () => {
@@ -480,12 +528,15 @@ describe('records.deleteWhere', () => {
 
     expect(out).toMatchObject({ success: false })
     expect(out.error).toContain('no schema')
-    expect((db.prepare('SELECT COUNT(*) AS n FROM c_canvas_settings').get() as { n: number }).n).toBe(1)
+    expect(
+      (db.prepare('SELECT COUNT(*) AS n FROM c_canvas_settings').get() as { n: number }).n,
+    ).toBe(1)
   })
 
-  it('pages after the RBAC read filter, so a caller draining their own rows never stops early', async () => {
-    // Bob's rows sort ahead of Alice's; with `read: 'own'` a SQL LIMIT taken
-    // before the per-row filter would hand Alice an empty first page.
+  it('does not use read filtering to hide matched rows from delete authorization', async () => {
+    // Bob's rows sort ahead of Alice's. A read filter used as candidate
+    // selection would silently hide them and turn a broad delete into
+    // "delete whichever matching rows I can read".
     const ownNotes: CollectionSchema = {
       ...notes,
       name: 'own_notes',
@@ -495,23 +546,59 @@ describe('records.deleteWhere', () => {
     ctx = makeToolsContext(sqlite, [ownNotes])
     ensureCollectionTable(sqlite, ownNotes)
     for (let i = 0; i < 4; i++) {
-      insert(db, 'c_own_notes', { recordId: `bob-${i}`, createdBy: 'bob', cols: { chatId: 'c', body: 'b' } })
+      insert(db, 'c_own_notes', {
+        recordId: `bob-${i}`,
+        createdBy: 'bob',
+        cols: { chatId: 'c', body: 'b' },
+      })
     }
     for (let i = 0; i < 4; i++) {
-      insert(db, 'c_own_notes', { recordId: `alice-${i}`, createdBy: 'alice', cols: { chatId: 'c', body: 'a' } })
+      insert(db, 'c_own_notes', {
+        recordId: `alice-${i}`,
+        createdBy: 'alice',
+        cols: { chatId: 'c', body: 'a' },
+      })
     }
 
-    let total = 0
-    let deleted = 2
-    while (deleted === 2) {
-      const page = deleteWhere(ctx, 'own_notes', { chatId: 'c' }, 2, 'alice', 'member') as {
-        data: { deleted: number }
-      }
-      deleted = page.data.deleted
-      total += deleted
+    const result = deleteWhere(ctx, 'own_notes', { chatId: 'c' }, 2, 'alice', 'member')
+
+    expect(result).toMatchObject({
+      success: false,
+      error: expect.stringContaining('DELETE DENIED'),
+    })
+    expect((db.prepare('SELECT COUNT(*) AS n FROM c_own_notes').get() as { n: number }).n).toBe(8)
+  })
+
+  it('authorizes deleteWhere from delete permission alone, independently of read', () => {
+    const deleteOnly: CollectionSchema = {
+      ...notes,
+      name: 'delete_only_notes',
+      permissions: {
+        deleter: { read: false, create: false, update: false, delete: true },
+        reader: { read: true, create: false, update: false, delete: false },
+      },
     }
-    expect(total).toBe(4)
-    expect((db.prepare('SELECT COUNT(*) AS n FROM c_own_notes').get() as { n: number }).n).toBe(4)
+    const sqlite = makeSql(db)
+    ctx = makeToolsContext(sqlite, [deleteOnly])
+    ensureCollectionTable(sqlite, deleteOnly)
+    insert(db, 'c_delete_only_notes', {
+      recordId: 'n1',
+      createdBy: 'owner',
+      cols: { chatId: 'c', body: 'secret' },
+    })
+
+    expect(
+      deleteWhere(ctx, deleteOnly.name, { chatId: 'c' }, undefined, 'dana', 'deleter'),
+    ).toMatchObject({ success: true, data: { deleted: 1 } })
+
+    insert(db, 'c_delete_only_notes', {
+      recordId: 'n2',
+      createdBy: 'owner',
+      cols: { chatId: 'c', body: 'still here' },
+    })
+    expect(
+      deleteWhere(ctx, deleteOnly.name, { chatId: 'c' }, undefined, 'riley', 'reader'),
+    ).toMatchObject({ success: false, error: expect.stringContaining('DELETE DENIED') })
   })
 
   it('refuses the whole page when the caller may not delete one of the matches', async () => {
@@ -715,6 +802,155 @@ describe('Yjs document cache lifetime', () => {
     })
     expect(read).toMatchObject({ success: true, data: { text: 'persisted' } })
     expect(ctx.yjsDocs.size).toBe(0)
+    db.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// user.list — the tool and the socket answer the same question, so they must
+// answer it the same way. The tool used to read the users table directly and
+// hand any caller every row, emails included, regardless of the room's users
+// policy: the same member's `useUsers()` roster and `useQuery('users')` obeyed
+// `roster: 'read-policy'` while this one did not.
+// ---------------------------------------------------------------------------
+
+/** Execute a tool as a real caller: identity by header, no app-action bypass. */
+async function execToolAs(
+  ctx: ToolsApiContext,
+  tool: string,
+  headers: Record<string, string>,
+): Promise<{ success: boolean; error?: string; data: { users: Array<Record<string, unknown>> } }> {
+  const request = new Request('https://internal/api/tools/execute', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify({ tool, params: {} }),
+  })
+  const res = await handleToolsRequest(ctx, request, 'tools/execute')
+  return res.json() as Promise<Awaited<ReturnType<typeof execToolAs>>>
+}
+
+function usersSchemaWith(extra: Partial<CollectionSchema> = {}): CollectionSchema {
+  return {
+    ...BASE_USERS_SCHEMA,
+    columns: [
+      ...BASE_USERS_SCHEMA.columns,
+      { name: 'privateNote', storage: 'text', interpretation: 'plain' },
+    ],
+    ...extra,
+  }
+}
+
+async function seedRoster(schema: CollectionSchema): Promise<{
+  db: Database.Database
+  ctx: ToolsApiContext
+}> {
+  const db = new Database(':memory:')
+  const sql = makeSql(db)
+  const ctx = makeToolsContext(sql, [schema])
+  ensureCollectionTable(sql, schema)
+  await registerUser(
+    sql,
+    'admin',
+    'Admin',
+    'admin@example.test',
+    undefined,
+    true,
+    'member',
+    ctx.schemaRegistry,
+  )
+  await registerUser(
+    sql,
+    'member',
+    'Member',
+    'member@example.test',
+    undefined,
+    false,
+    'member',
+    ctx.schemaRegistry,
+  )
+  sql.exec(`UPDATE c_users SET col_privatenote = ? WHERE _row_id = ?`, 'private', 'member')
+  return { db, ctx }
+}
+
+describe('user.list', () => {
+  it('gives a non-admin the public projection, never the directory of emails', async () => {
+    const { db, ctx } = await seedRoster(usersSchemaWith())
+
+    const out = await execToolAs(ctx, 'user.list', { 'X-User-Id': 'member' })
+
+    expect(out.success).toBe(true)
+    expect(out.data.users.map((u) => u.id).sort()).toEqual(['admin', 'member'])
+    for (const user of out.data.users) {
+      expect(user).not.toHaveProperty('email')
+      expect(user).not.toHaveProperty('privateNote')
+      // Presence is public — `usePresence()` needs it.
+      expect(user.lastSeenAt).toEqual(expect.any(String))
+    }
+    expect(JSON.stringify(out.data.users)).not.toContain('@example.test')
+    db.close()
+  })
+
+  it('gives an admin whole rows, still through the users read policy', async () => {
+    const { db, ctx } = await seedRoster(usersSchemaWith())
+
+    const out = await execToolAs(ctx, 'user.list', { 'X-User-Id': 'admin' })
+
+    expect(out.data.users).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'member',
+          email: 'member@example.test',
+          privateNote: 'private',
+        }),
+      ]),
+    )
+    db.close()
+  })
+
+  it("honors roster: 'read-policy' and an explicit read: false, exactly as the socket does", async () => {
+    const scoped = await seedRoster(
+      usersSchemaWith({
+        roster: 'read-policy',
+        permissions: {
+          '*': { read: 'own', create: false, update: false, delete: false },
+          admin: BASE_USERS_SCHEMA.permissions.admin,
+        },
+      }),
+    )
+    const scopedOut = await execToolAs(scoped.ctx, 'user.list', { 'X-User-Id': 'member' })
+    expect(scopedOut.data.users.map((u) => u.id)).toEqual(['member'])
+    scoped.db.close()
+
+    const closed = await seedRoster(
+      usersSchemaWith({
+        permissions: {
+          '*': { read: false, create: false, update: false, delete: false },
+          admin: BASE_USERS_SCHEMA.permissions.admin,
+        },
+      }),
+    )
+    const closedOut = await execToolAs(closed.ctx, 'user.list', { 'X-User-Id': 'member' })
+    expect(closedOut.data.users).toEqual([])
+    closed.db.close()
+  })
+
+  it('returns nothing to a caller with no identity', async () => {
+    const { db, ctx } = await seedRoster(usersSchemaWith())
+
+    const out = await execToolAs(ctx, 'user.list', {})
+
+    expect(out).toMatchObject({ success: true, data: { users: [] } })
+    db.close()
+  })
+
+  it('keeps whole rows for an app action, which is RBAC-off by contract', async () => {
+    const { db, ctx } = await seedRoster(usersSchemaWith())
+
+    const out = await execToolAs(ctx, 'user.list', { 'X-App-Action': 'true' })
+
+    expect(out.data.users).toEqual(
+      expect.arrayContaining([expect.objectContaining({ email: 'member@example.test' })]),
+    )
     db.close()
   })
 })

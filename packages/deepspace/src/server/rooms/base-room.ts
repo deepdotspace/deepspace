@@ -38,6 +38,16 @@ export interface UserAttachment {
 
 /** Build the hibernation attachment from app-worker-verified headers only. */
 export function connectionAttachmentFromRequest(request: Request): UserAttachment {
+  // The client only ever sends `?token=`; `?userId=` on the internal URL is the
+  // pre-0.19 app proxy shape, which rooms no longer read. Say so, because the
+  // visible symptom — every signed-in user anonymous — does not.
+  if (!request.headers.has('x-user-id') && new URL(request.url).searchParams.has('userId')) {
+    console.warn(
+      '[BaseRoom] Connection carries identity in the URL (?userId=) but no x-user-id header, ' +
+        "so this user joins as anonymous. The app worker's room proxy predates 0.19 or forwards " +
+        "the client's URL unstripped: forward with authenticatedRoomRequest() from deepspace/worker.",
+    )
+  }
   return {
     userId:
       decodeRoomIdentityHeader(request.headers.get('x-user-id')) ||

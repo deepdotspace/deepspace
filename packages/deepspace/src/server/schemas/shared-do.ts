@@ -8,14 +8,15 @@
  * Scope tiers:
  * - App DO (app:{appHandle}) — private to each app, app defines tables
  * - Dir DO (dir:{appHandle}) — cross-app directory (conversations, communities, posts)
- * - Workspace DO (workspace:default) — shared business data (teams, tasks, people, ledger)
  * - Conv DO (conv:{id}) — single conversation (messages, reactions, members)
+ *
+ * There is no platform-wide singleton scope: every global room is keyed by
+ * a conversation or an app, so no one DO holds data shared by all apps.
  */
 
 import type { CollectionSchema } from './registry'
 import { CONVERSATION_SCHEMAS, VOTING_SCHEMAS } from './conversation'
 import { DIRECTORY_SCHEMAS } from './directory'
-import { WORKSPACE_SCHEMAS } from './workspace'
 
 // ============================================================================
 // Registry types
@@ -37,11 +38,6 @@ export interface GlobalDOType {
 // ============================================================================
 
 export const GLOBAL_DO_TYPES: GlobalDOType[] = [
-  {
-    name: 'workspace',
-    schemas: WORKSPACE_SCHEMAS,
-    description: 'Shared workspace data (teams, tasks, projects, people, ledger)',
-  },
   {
     name: 'conv',
     schemas: [...CONVERSATION_SCHEMAS, ...VOTING_SCHEMAS],

@@ -35,7 +35,7 @@ interface EndpointInfo {
   /** Present (true) only on endpoints that answer with a requiresOAuth
    *  payload until the user connects the provider. */
   requiresOAuth?: boolean
-  billing: { model: string; baseCost: number; currency: string }
+  billing: { model: string; baseCost: number | null; currency: string; variesWithInput?: true }
   inputSchema: Record<string, unknown> | null
   example: Record<string, unknown> | null
   outputSchema?: Record<string, unknown> | null
@@ -158,6 +158,19 @@ function formatCurrency(value: number, currency: string): string {
 }
 
 /**
+ * The one price sentence — list, info, and the consent prompt all say the
+ * same thing. The catalog is honest about the two cases one number does not
+ * cover: a metered endpoint (`baseCost: null`) is billed at the provider's
+ * actual cost after the call, and an endpoint whose multipliers depend on
+ * the input names its 1x reference rate without pretending it is a floor.
+ */
+export function priceLabel(billing: EndpointInfo['billing']): string {
+  if (billing.baseCost === null) return "metered at the provider's actual cost"
+  const figure = `${formatCurrency(billing.baseCost, billing.currency)} ${billingUnit(billing.model)}`
+  return billing.variesWithInput ? `base ${figure} (some inputs cost less or more)` : figure
+}
+
+/**
  * Human-readable billing unit for a pricing model. `per_token` → "per token",
  * `per_call` → "per call". Unknown/future models render their raw `per_*` shape
  * ("per foo") or pass through, so we never mislabel one mode as another (INT-1).
@@ -182,17 +195,61 @@ export function isInteractive(
 }
 
 /**
- * Whether to confirm a paid invoke before firing it (FEAT-13). Only on an
- * interactive terminal, for a non-free endpoint, when the caller hasn't asked
- * for machine output (--json) or pre-approved (--yes). Pure for testing.
+ * What stands between `invoke` and a PAID call (FEAT-13). `--yes` is the one
+ * pre-approval; a free endpoint needs none. Otherwise a person at an
+ * interactive terminal is asked (default No); every other caller — piped,
+ * CI, or `--json` (an agent) — is refused with the price and told to pass
+ * `--yes`, so nothing is ever billed silently. Pure for testing.
  */
-export function shouldConfirmCost(opts: {
+export function costGate(opts: {
   json: boolean
-  yes: boolean
-  isTTY: boolean
-  baseCost: number
-}): boolean {
-  return !opts.json && !opts.yes && opts.isTTY && opts.baseCost > 0
+  interactive: boolean
+  /** Catalog price; `null` = metered (billed after the call) — paid until proven free. */
+  baseCost: number | null
+}): 'proceed' | 'confirm' | 'refuse' {
+  if (opts.baseCost === 0) return 'proceed'
+  return opts.interactive && !opts.json ? 'confirm' : 'refuse'
+}
+
+/**
+ * The example body `info` prints. The catalog's own example when it names a
+ * field; otherwise one synthesized from the input schema's `required` keys,
+ * so the body an agent copies is never `{}` for an endpoint that rejects `{}`.
+ * Placeholders come from the schema (`example`, `default`, first `enum`) or
+ * the type (`"<string>"`, `0`, `false`, `[]`, `{}`). Null when neither the
+ * catalog nor the schema says anything.
+ */
+export function exampleBody(info: {
+  example: Record<string, unknown> | null
+  inputSchema: Record<string, unknown> | null
+}): Record<string, unknown> | null {
+  if (info.example && Object.keys(info.example).length > 0) return info.example
+  const required = info.inputSchema?.required
+  const properties = info.inputSchema?.properties as Record<string, unknown> | undefined
+  if (!Array.isArray(required) || required.length === 0) return info.example
+  const body: Record<string, unknown> = {}
+  for (const key of required) {
+    if (typeof key !== 'string') continue
+    const prop = (properties?.[key] ?? {}) as Record<string, unknown>
+    body[key] =
+      'example' in prop
+        ? prop.example
+        : 'default' in prop
+          ? prop.default
+          : Array.isArray(prop.enum) && prop.enum.length
+            ? prop.enum[0]
+            : PLACEHOLDER_BY_TYPE[String(prop.type)] ?? '<value>'
+  }
+  return body
+}
+
+const PLACEHOLDER_BY_TYPE: Record<string, unknown> = {
+  string: '<string>',
+  number: 0,
+  integer: 0,
+  boolean: false,
+  array: [],
+  object: {},
 }
 
 /**
@@ -201,7 +258,14 @@ export function shouldConfirmCost(opts: {
  */
 export async function runList(args: ListArgs): Promise<CommandResult> {
   const catalog = await fetchCatalog({ summary: true })
-  const names = Object.keys(catalog.integrations).sort()
+  // One order for both outputs: integrations by name, endpoints by name.
+  const integrations: Catalog['integrations'] = {}
+  for (const name of Object.keys(catalog.integrations).sort()) {
+    integrations[name] = [...catalog.integrations[name]].sort((a, b) =>
+      a.endpoint.localeCompare(b.endpoint),
+    )
+  }
+  const names = Object.keys(integrations)
 
   if (!args.json) {
     if (names.length === 0) {
@@ -209,18 +273,15 @@ export async function runList(args: ListArgs): Promise<CommandResult> {
     } else {
       for (const name of names) {
         console.log(name)
-        const endpoints = [...catalog.integrations[name]].sort((a, b) =>
-          a.endpoint.localeCompare(b.endpoint),
-        )
+        const endpoints = integrations[name]
         const widest = Math.max(...endpoints.map((e) => e.endpoint.length))
         // Two lines per endpoint: key + billing + [oauth] flag, then the
         // description indented below — so the flag is never buried past the
         // terminal width by a long description.
         for (const ep of endpoints) {
           const pad = ep.endpoint.padEnd(widest)
-          const cost = formatCurrency(ep.billing.baseCost, ep.billing.currency)
           const oauth = ep.requiresOAuth ? ' [oauth]' : ''
-          console.log(`  ${pad}  ${ep.billing.model.padEnd(12)} ${cost}${oauth}`)
+          console.log(`  ${pad}  ${ep.billing.model.padEnd(12)} ${priceLabel(ep.billing)}${oauth}`)
           if (ep.description) console.log(`    ${ep.description}`)
         }
         console.log()
@@ -228,39 +289,44 @@ export async function runList(args: ListArgs): Promise<CommandResult> {
     }
   }
 
-  return { data: catalog as unknown as Record<string, unknown> }
+  return { data: { ...catalog, integrations } as unknown as Record<string, unknown> }
 }
 
 /**
  * `deepspace integrations info <target>`
  * Prints the schema + example body for a single endpoint.
  */
+/** The endpoint's catalog entry, or the one refusal `info` and `invoke` share for a name the catalog does not know. */
+function requireEndpoint(catalog: Catalog, integration: string, endpoint: string): EndpointInfo {
+  const info = findEndpoint(catalog, integration, endpoint)
+  if (info) return info
+  const available = catalog.integrations[integration]
+  if (!available) {
+    const names = Object.keys(catalog.integrations).sort().join(', ')
+    throw new Refusal(`Unknown integration '${integration}'. Available: ${names}`, 'unknown_integration', {
+      action: cliAction('deepspace', 'integrations', 'list'),
+    })
+  }
+  const endpoints = available.map((e) => e.endpoint).join(', ')
+  throw new Refusal(
+    `Unknown endpoint '${endpoint}' for '${integration}'. Available: ${endpoints}`,
+    'unknown_endpoint',
+    { action: cliAction('deepspace', 'integrations', 'list') },
+  )
+}
+
 export async function runInfo(args: InfoArgs): Promise<CommandResult> {
   const { integration, endpoint } = parseTarget(args.target)
-  const catalog = await fetchCatalog()
-  const info = findEndpoint(catalog, integration, endpoint)
+  const info = requireEndpoint(await fetchCatalog(), integration, endpoint)
 
-  if (!info) {
-    const available = catalog.integrations[integration]
-    if (!available) {
-      const names = Object.keys(catalog.integrations).sort().join(', ')
-      throw new Refusal(`Unknown integration '${integration}'. Available: ${names}`, 'unknown_integration', {
-        action: cliAction('deepspace', 'integrations', 'list'),
-      })
-    }
-    const endpoints = available.map((e) => e.endpoint).join(', ')
-    throw new Refusal(
-      `Unknown endpoint '${endpoint}' for '${integration}'. Available: ${endpoints}`,
-      'unknown_endpoint',
-      { action: cliAction('deepspace', 'integrations', 'list') },
-    )
-  }
+  // Human and --json show the same body (see exampleBody).
+  info.example = exampleBody(info)
 
   if (!args.json) {
     console.log(`${integration}/${endpoint}`)
     if (info.description) console.log(`  ${info.description}`)
     console.log(
-      `  billing: ${formatCurrency(info.billing.baseCost, info.billing.currency)} ${billingUnit(info.billing.model)}`,
+      `  billing: ${priceLabel(info.billing)}`,
     )
     if (info.requiresOAuth) {
       console.log(
@@ -294,35 +360,30 @@ export async function runInvoke(args: InvokeArgs): Promise<CommandResult> {
   const body = resolveBody({ body: args.body, bodyFile: args.bodyFile })
   const timeoutMs = args.timeout ?? DEFAULT_TIMEOUT_MS
 
-  // FEAT-13: this fires a PAID call billed to the logged-in user. On a fully
-  // interactive terminal, confirm the cost first (unless --yes or --json).
-  // Gate on BOTH streams: p.confirm reads stdin and draws to stdout, so a piped
-  // stdin (e.g. `echo {} | deepspace integrations invoke … --body-file -`) must never reach
-  // the prompt — it would hang waiting for input that can't come.
-  const interactive = isInteractive(process.stdin, process.stdout)
-  if (!args.json && !args.yes && interactive) {
-    let info: EndpointInfo | null = null
-    try {
-      info = findEndpoint(await fetchCatalog({ summary: true }), integration, endpoint)
-    } catch {
-      // Couldn't fetch billing — don't block the call, but say so, so a paid
-      // call never fires completely silently. The POST still enforces
-      // auth/existence and reports its own errors.
-      console.error('Note: could not verify the call cost; proceeding. Pass --yes to skip this check.')
-      info = null
-    }
-    if (
-      info &&
-      shouldConfirmCost({
-        json: !!args.json,
-        yes: !!args.yes,
-        isTTY: interactive,
-        baseCost: info.billing.baseCost,
-      })
-    ) {
-      const cost = formatCurrency(info.billing.baseCost, info.billing.currency)
+  // FEAT-13: this fires a PAID call billed to the logged-in user. Without
+  // `--yes` the price is looked up first (an unknown endpoint is left to the
+  // POST, which reports it); a catalog that cannot be read is a refusal from
+  // fetchCatalog, never a silent spend. Interactive means BOTH streams are
+  // TTYs: p.confirm reads stdin and draws to stdout, so a piped stdin (e.g.
+  // `echo {} | … --body-file -`) must never reach the prompt — it would hang.
+  if (!args.yes) {
+    const info = requireEndpoint(await fetchCatalog({ summary: true }), integration, endpoint)
+    const gate = costGate({
+      json: !!args.json,
+      interactive: isInteractive(process.stdin, process.stdout),
+      baseCost: info.billing.baseCost,
+    })
+    if (gate !== 'proceed') {
+      const price = priceLabel(info.billing)
+      if (gate === 'refuse') {
+        throw new Refusal(
+          `${integration}/${endpoint} is billed to your account: ${price}. Pass --yes to confirm the spend (no call was made).`,
+          'cost_confirmation_required',
+        )
+      }
       const ok = await p.confirm({
-        message: `${integration}/${endpoint} costs ${cost} ${billingUnit(info.billing.model)}, billed to your account. Continue?`,
+        message: `${integration}/${endpoint} is billed to your account: ${price}. Continue?`,
+        initialValue: false,
       })
       if (p.isCancel(ok) || !ok) {
         p.cancel('Cancelled — no call made.')

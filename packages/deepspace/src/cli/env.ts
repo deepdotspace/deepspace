@@ -45,6 +45,13 @@ export const PLATFORM_URLS =
       ? STAGING_URLS
       : INVALID_URLS
 
+/** Every plane's auth service — the key credentials are stored under (see
+ *  cli/auth.ts), so a refusal can name the plane a stored session belongs to. */
+export const PLANE_AUTH_URLS: Record<Exclude<DeepSpaceEnvironment, 'invalid'>, string> = {
+  production: PROD_URLS.auth,
+  staging: STAGING_URLS.auth,
+}
+
 /** Report per-service process overrides without changing the stable presets. */
 export function effectivePlatformUrls(env: NodeJS.ProcessEnv = process.env) {
   return {

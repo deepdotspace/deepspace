@@ -95,12 +95,15 @@ const create = defineDeepspaceCommand({
       createdAt: account.createdAt,
     })
 
+    // Neither surface echoes the password: the caller passed it in with
+    // `--password`, it is stored 0600 in TEST_ACCOUNTS_PATH (named below), and
+    // `test accounts list --reveal` prints it on request. Repeating it here
+    // only put a live credential into every log that captures this command.
     if (!args.json) {
       console.log(`Created test account:`)
       console.log(`  ID:       ${account.id}`)
       console.log(`  Email:    ${account.email}`)
       console.log(`  Selector: ${name}`)
-      console.log(`  Password: ${password}`)
       console.log(`  UserID:   ${account.userId}`)
       if (account.label) console.log(`  Label:    ${account.label}`)
       console.log(`\nSaved to ${TEST_ACCOUNTS_PATH}`)
@@ -111,10 +114,6 @@ const create = defineDeepspaceCommand({
         id: account.id,
         email: account.email,
         name,
-        // The password is already echoed on the human path and stored 0600 in
-        // ACCOUNTS_PATH — withholding it from --json would only force scripts
-        // to parse the file themselves.
-        password,
         userId: account.userId,
         label: account.label ?? null,
         createdAt: account.createdAt,
@@ -137,7 +136,8 @@ const list = defineDeepspaceCommand({
     },
     reveal: {
       type: 'boolean',
-      description: 'Print locally saved passwords instead of masking them',
+      description:
+        'Print locally saved passwords instead of masking them (in --json too: without it the `password` field is omitted)',
       default: false,
     },
   },
@@ -165,7 +165,9 @@ const list = defineDeepspaceCommand({
           label: a.label,
           createdAt: a.createdAt,
           name: stored?.name ?? null,
-          password: stored?.password ?? null,
+          // A saved password leaves this machine only on request — `--reveal`
+          // gates it in `--json` exactly as it does in the human listing.
+          ...(args.reveal ? { password: stored?.password ?? null } : {}),
           usableByFixture: Boolean(stored?.password),
         }
       })
@@ -210,7 +212,12 @@ const list = defineDeepspaceCommand({
 const del = defineDeepspaceCommand({
   meta: {
     name: 'delete',
-    description: 'Delete a test account by --email or --id',
+    // Deleting ONE named account is unambiguous, so this verb never prompts
+    // and has no --yes to skip a prompt with (`clear`, which deletes the whole
+    // pool, is the one that confirms). Say so in --help: a teardown script
+    // written straight after `app undeploy --yes` otherwise reaches for a flag
+    // that does not exist here.
+    description: 'Delete a test account by --email or --id (immediate; never prompts)',
   },
   args: {
     email: {

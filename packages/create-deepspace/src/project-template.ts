@@ -260,7 +260,9 @@ function assembleTemplate(name: string, destination: string): void {
   }
 }
 
-function configurePackageJson(
+/** Exported for its unit test: the SDK spec this writes is what decides which
+ *  runtime a scaffold actually gets. */
+export function configurePackageJson(
   appDir: string,
   appName: string,
   template: TemplateMeta,
@@ -285,7 +287,13 @@ function configurePackageJson(
       if (dependency !== 'deepspace') {
         throw new Error(`No published-version mapping for workspace dep '${dependency}'`)
       }
-      packageJson[section]![dependency] = `^${creatorVersion}`
+      // EXACT, not `^`: these template files are generated for exactly this
+      // creator's version, and `deepspace app update` explains the app-owned
+      // work required to adopt a newer one. A caret let `create-deepspace@X`
+      // install SDK X+1 — so a
+      // pinned scaffolder produced an unpinned app, and anyone bisecting or
+      // reproducing "built on X" was measuring a different version.
+      packageJson[section]![dependency] = creatorVersion
     }
   }
 

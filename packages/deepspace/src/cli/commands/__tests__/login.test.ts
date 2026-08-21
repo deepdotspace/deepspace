@@ -2,7 +2,7 @@
  * ONB-4: non-interactive login credential precedence.
  * ONB-7: `-e` alias parity for --env across dev/deploy/test.
  */
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import login, { resolveLoginCredentials, loginModeDecision } from '../login'
 import dev from '../dev'
 import deploy from '../deploy'
@@ -97,5 +97,34 @@ describe('--env has the -e alias everywhere init does (ONB-7)', () => {
     expect((dev.args as Record<string, { alias?: string }>).env.alias).toBe('e')
     expect((deploy.args as Record<string, { alias?: string }>).env.alias).toBe('e')
     expect((test.args as Record<string, { alias?: string }>).env.alias).toBe('e')
+  })
+})
+
+describe('wrong password carries a code (the commonest auth failure of all)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    process.exitCode = undefined
+  })
+
+  it('401 from the auth service → invalid_credentials, the server sentence, exit 1', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({ code: 'INVALID_EMAIL_OR_PASSWORD', message: 'Invalid email or password' }, { status: 401 }),
+      ),
+    )
+    const lines: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
+    const command = login as unknown as {
+      run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+    }
+    await command.run({ args: { json: true, email: 'me@x.test', password: 'wrong', 'password-stdin': false } })
+    expect(JSON.parse(lines[0])).toEqual({
+      ok: false,
+      code: 'invalid_credentials',
+      error: 'Invalid email or password',
+    })
+    expect(process.exitCode).toBe(1)
   })
 })

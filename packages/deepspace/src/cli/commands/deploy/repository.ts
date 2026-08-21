@@ -1,5 +1,6 @@
 import * as p from '@clack/prompts'
 import {
+  assertNoOperationInProgress,
   assertSyncableRepo,
   currentBranch,
   isAncestor,
@@ -29,6 +30,28 @@ export interface DeployRepositoryState {
   source: AppSource | null
   sourceRevision: number
   baseReleaseId: string | null
+  /** The branch this release was built from; null on a detached HEAD or a
+   *  non-repository app dir. */
+  branch: string | null
+  /** Whether the tree carried uncommitted changes; null when there is no
+   *  repository to ask. */
+  dirty: boolean | null
+}
+
+/**
+ * Branch and cleanliness of the tree being deployed, read once for every path
+ * through `syncDeployRepository`. Descriptive, never a gate: the GitHub-source
+ * and `--no-push` paths deploy trees that need not be a syncable repo at all
+ * (a depth-1 CI clone, no git). When git cannot answer, the answer is
+ * null/null — "unknown", reported as such — and the paths that DO require a
+ * syncable repo assert it themselves, with their own refusals.
+ */
+function describeWorktree(appDir: string): { branch: string | null; dirty: boolean | null } {
+  try {
+    return { branch: currentBranch(appDir), dirty: !isWorkTreeClean(appDir) }
+  } catch {
+    return { branch: null, dirty: null }
+  }
 }
 
 /**
@@ -53,6 +76,9 @@ export function preflightDeployRepository(options: {
           'This app has a GitHub remote but no claimed source. Choose once with `deepspace app source github` (manual GitHub ownership) or `deepspace app source deepspace` (packaged DeepSpace source), then deploy again.',
       }
     }
+    // Before the dirty check: a half-finished merge IS a dirty tree, but
+    // "commit them" is not its remedy — the same refusal push and pull give.
+    assertNoOperationInProgress(appDir)
     const branch = currentBranch(appDir)
     if (!isWorkTreeClean(appDir)) return dirtyWorktreeRefusal(branch)
     if (!branch) return detachedHeadRefusal()
@@ -79,12 +105,26 @@ export async function syncDeployRepository(options: {
   let source = sourceState.source
   let sourceRevision = sourceState.revision
   const baseReleaseId: string | null = null
+  const worktree = describeWorktree(appDir)
 
   // GitHub owns source, but deployment remains the traditional manual flow:
   // ship the local working tree without inspecting or mutating Git. Only
   // DeepSpace source has commit-first synchronization and workspace lineage.
   if (source?.provider === 'github') {
-    return { commitOid, recoverable, deployKey, source, sourceRevision, baseReleaseId }
+    // This release records no commit, so the branch and the dirty flag are the
+    // only trace of what it shipped. Say them — the deploy is NOT refused
+    // (shipping the working tree is what GitHub source means), but an
+    // uncommitted tree going live silently was untraceable from every surface.
+    const where = `GitHub source: shipping the working tree of ${worktree.branch ?? '(detached HEAD)'}`
+    if (worktree.dirty) {
+      p.log.warn(
+        `${where} WITH uncommitted changes. This release records no commit, so nothing can ` +
+          'reconstruct afterwards what went live — commit and redeploy if it should be traceable.',
+      )
+    } else {
+      p.log.info(`${where} (clean). GitHub-source releases record no commit lineage.`)
+    }
+    return { commitOid, recoverable, deployKey, source, sourceRevision, baseReleaseId, ...worktree }
   }
 
   if (!push) {
@@ -94,7 +134,7 @@ export async function syncDeployRepository(options: {
     } catch {
       // A non-repository app can still deploy; it simply has no source lineage.
     }
-    return { commitOid, recoverable, deployKey, source, sourceRevision, baseReleaseId }
+    return { commitOid, recoverable, deployKey, source, sourceRevision, baseReleaseId, ...worktree }
   }
 
   try {
@@ -113,7 +153,7 @@ export async function syncDeployRepository(options: {
 
     const tip = resolveCommit(appDir, `refs/heads/${branch}`)
     if (!tip) {
-      return { commitOid, recoverable, deployKey, source, sourceRevision, baseReleaseId }
+      return { commitOid, recoverable, deployKey, source, sourceRevision, baseReleaseId, ...worktree }
     }
 
     const secretFiles = workspaceBranchId ? [] : trackedSecretFiles(appDir, tip)
@@ -220,7 +260,7 @@ export async function syncDeployRepository(options: {
     output.die(failure.error, failure.code)
   }
 
-  return { commitOid, recoverable, deployKey, source, sourceRevision, baseReleaseId }
+  return { commitOid, recoverable, deployKey, source, sourceRevision, baseReleaseId, ...worktree }
 }
 
 function classifyRemoteState(

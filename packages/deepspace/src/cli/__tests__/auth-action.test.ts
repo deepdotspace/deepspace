@@ -61,3 +61,30 @@ describe('ensureToken recovery action', () => {
     expect(mocks.chmod).toHaveBeenCalledWith(TOKEN_PATH, 0o600)
   })
 })
+
+describe('ensureToken not_authenticated sentence', () => {
+  it('names the headless login form up front (the bare action refuses without a TTY)', async () => {
+    mocks.exists.mockReturnValue(false)
+    const err = await ensureToken().catch((e: Error) => e)
+    expect((err as Error).message).toMatch(/Not logged in on production\./)
+    expect((err as Error).message).toContain('--password-stdin')
+    expect((err as Error).message).toContain('DEEPSPACE_EMAIL')
+  })
+
+  it('names the plane the session belongs to when the selected plane has none', async () => {
+    // Selected: production (no override in this process). Stored: a staging
+    // session only — exactly what a `DEEPSPACE_ENV=staging` login leaves behind.
+    const stagingSession = '/tmp/deepspace-auth-action-test/.deepspace/session.auth-deepspacesites-com'
+    mocks.exists.mockImplementation((path) => path === stagingSession)
+    const err = await ensureToken().catch((e: Error) => e)
+    expect((err as Error).message).toMatch(/Not logged in on production\. You are signed in on staging/)
+    expect((err as Error).message).toContain('DEEPSPACE_ENV=staging')
+    expect(err).toMatchObject(loginRefusal)
+  })
+
+  it('says the session is invalid — not merely "expired" — when the refresh is refused', async () => {
+    mocks.exists.mockImplementation((path) => path === SESSION_PATH)
+    const err = await ensureToken().catch((e: Error) => e)
+    expect((err as Error).message).toMatch(/no longer valid \(expired or unreadable\) on production/)
+  })
+})

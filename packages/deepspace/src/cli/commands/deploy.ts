@@ -11,7 +11,7 @@ import { ensureInstallReady } from '../lib/install-status'
 import type { CliAction } from '../lib/output'
 import { preflightNodeVersion } from '../lib/preflight'
 import { createSpinner } from '../lib/spinner'
-import { waitForLiveRelease, type ReleaseWait } from '../lib/edge-propagation'
+import { wakeWorker, waitForLiveRelease, type ReleaseWait } from '../lib/edge-propagation'
 import { MAX_DEPLOY_ASSET_FILE_BYTES, formatBytes } from '../../shared/app-files'
 import {
   hasWranglerConfig,
@@ -23,13 +23,19 @@ import {
 import { buildDeployBundle, oversizedAssetRefusal } from './deploy/build'
 import { syncOneTimeProducts, syncSubscriptionPlans } from './deploy/commerce'
 import { createDeployOutput, type DeployOutput } from './deploy/output'
-import { CliExit, errorCode, formatCliError } from '../lib/cli-errors'
-import { deployBuiltBundle, renamePromptMessage, renameRefusalMessage } from './deploy/request'
+import { CliExit, Refusal, errorCode, formatCliError } from '../lib/cli-errors'
+import {
+  deployBuiltBundle,
+  renamePromptMessage,
+  renameRefusalMessage,
+  STALE_DISPLAY_NAME_LOCATIONS,
+} from './deploy/request'
 // Re-exported so the rename wording keeps one import site for tests and callers.
 export { renamePromptMessage, renameRefusalMessage }
 import { preflightDeployRepository, syncDeployRepository } from './deploy/repository'
 import { getAppSource } from '../lib/source-api'
 import { loadDeploySecrets, prepareDeploySecrets } from './deploy/secrets'
+import { acquireDeployLock } from './deploy/lock'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
@@ -103,7 +109,15 @@ export default defineCommand({
       await runDeploy(args, output)
     } catch (error) {
       if (error instanceof CliExit) throw error
-      output.die(formatCliError(error), errorCode(error) ?? 'deploy_failed')
+      // A Refusal keeps its action, tier, and machine fields (the lock's
+      // holder, a stale-base's release) on the way out — the door must not
+      // strip what the refusal was built to say.
+      const refusal = error instanceof Refusal ? error : undefined
+      output.die(formatCliError(error), errorCode(error) ?? 'deploy_failed', {
+        action: refusal?.action,
+        actionRequired: refusal?.actionRequired,
+        extra: refusal?.extra,
+      })
     }
   },
 })
@@ -139,6 +153,21 @@ async function runDeploy(args: DeployArgs, output: DeployOutput): Promise<void> 
     })
   }
 
+  // One deploy per checkout: taken before any work, released on every exit.
+  const releaseLock = acquireDeployLock(appDir)
+  try {
+    await runLockedDeploy(args, output, appDir, envName)
+  } finally {
+    releaseLock()
+  }
+}
+
+async function runLockedDeploy(
+  args: DeployArgs,
+  output: DeployOutput,
+  appDir: string,
+  envName: string | undefined,
+): Promise<void> {
   p.intro('Deploying DeepSpace app')
   output.showIntro()
 
@@ -182,7 +211,15 @@ async function runDeploy(args: DeployArgs, output: DeployOutput): Promise<void> 
   // build or push: without this, the failure surfaces later as a raw git
   // 404 from the repo transport (git discards response bodies), which reads
   // as infra breakage instead of the registration gap it is.
-  const sourceState = await getAppSource(DEPLOY_URL, token, appId)
+  const sourceState = await getAppSource(DEPLOY_URL, token, appId).catch((error: unknown) => {
+    // The server's `forbidden` is a bare "Not authorized". The one fact that
+    // recovers this state is WHO is signed in and WHOSE app this is — both
+    // known here, so say them once, on the first server call.
+    if (errorCode(error) === 'forbidden') {
+      output.die(forbiddenDeployMessage(appId, token), 'forbidden')
+    }
+    throw error
+  })
   if (!sourceState.registered) {
     output.die(
       `${appId} is not registered. If this repo's id came from an older SDK's scaffold, run ` +
@@ -280,11 +317,35 @@ async function runDeploy(args: DeployArgs, output: DeployOutput): Promise<void> 
     spinner,
   })
 
+  // What tree this release shipped. Under DeepSpace source these restate a
+  // guarded invariant (a dirty worktree is refused, and `commitOid` pins the
+  // code); under GitHub source they are the ONLY record of it — that path ships
+  // the working tree from any branch, uncommitted edits included, and records
+  // no commit, so nothing else can say afterwards what went live.
+  const worktree = { branch: repository.branch, dirty: repository.dirty }
+
+  // A rename that landed. Two mutually exclusive paths settle one: the
+  // pre-build check above (whenever the platform reported `registeredHost`) or
+  // the commit-time 409 inside deployBuiltBundle. Reported once, on BOTH
+  // surfaces — the stale display name is the whole reason a renamed app keeps
+  // serving its old name, and until now only the interactive prompt said so.
+  const renamedFrom = rename?.fromHost ?? body.renamedFrom ?? null
+  const renameFields = renamedFrom
+    ? { renamedFrom, staleDisplayName: [...STALE_DISPLAY_NAME_LOCATIONS] }
+    : {}
+  if (renamedFrom) {
+    p.log.warn(
+      `Renamed from ${renamedFrom}. The display name did NOT travel — it is still the old ` +
+        `name in ${STALE_DISPLAY_NAME_LOCATIONS.join(' and ')}; update both and redeploy.`,
+    )
+  }
+
   let serving: ReleaseWait = 'unverifiable'
   const edgeWaitStarted = Date.now()
   if (body.url) {
     spinner.message('Waiting for the edge to serve this release...')
     serving = await waitForLiveRelease(body.url, body.releaseStamp, 90_000)
+    if (serving === 'confirmed') await wakeWorker(body.url)
     if (serving !== 'confirmed') {
       spinner.stop(
         serving === 'unconfirmed'
@@ -310,6 +371,8 @@ async function runDeploy(args: DeployArgs, output: DeployOutput): Promise<void> 
           bundleRetained: body.bundleRetained ?? null,
           serving,
           recoverable: repository.recoverable,
+          ...worktree,
+          ...renameFields,
           ...staleBaseGuardFields(body),
         })
       }
@@ -337,6 +400,8 @@ async function runDeploy(args: DeployArgs, output: DeployOutput): Promise<void> 
       releaseId: body.releaseId ?? null,
       bundleRetained: body.bundleRetained ?? null,
       recoverable: repository.recoverable,
+      ...worktree,
+      ...renameFields,
       ...staleBaseGuardFields(body),
     })
   }
@@ -425,6 +490,30 @@ export function staleBaseGuardFields(body: {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** `forbidden` on deploy means the app is registered to another account. */
+export function forbiddenDeployMessage(appId: string, token: string): string {
+  let who = 'this account'
+  let email: string | undefined
+  try {
+    const claims = decodeJwtPayload<{ email?: string; sub?: string }>(token)
+    email = claims.email
+    who = email ?? claims.sub ?? who
+  } catch {
+    // An undecodable bearer still names the app; the account stays generic.
+  }
+  // `collaborators add` takes an email, so the quoted command is only
+  // copyable when the token carries one; otherwise name the step, not a
+  // command that would not run.
+  const grant = email
+    ? `run \`deepspace app collaborators add ${email}\``
+    : 'add your email as a collaborator'
+  return (
+    `${appId} belongs to another account — you are signed in as ${who}, who is neither its owner nor a ` +
+    `collaborator. Ask the owner to ${grant} (collaborators can deploy), or log in as the owner; ` +
+    `to publish this code as your OWN app instead, run \`deepspace app init --new-id\`.`
+  )
 }
 
 async function authenticate(

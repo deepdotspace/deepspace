@@ -9,7 +9,7 @@ The member `read` rule governs full-row reads, not the roster: it decides
 what an ordinary `useQuery('users')` subscription receives — with
 `read: true` that is every full users row, including email and any
 app-defined profile column. `useUsers()`, by contrast, returns the
-public-identity projection (`id`, `name`, optional image, `role`) of every
+public-identity projection (`id`, `name`, optional image, `role`, `lastSeenAt`) of every
 registered user to every signed-in caller regardless of the row rule, so
 collaborators can always name each other. Two roster opt-outs exist on the
 users schema: a role whose `read` is `false` (or absent) gets an empty

@@ -1,20 +1,12 @@
 import { createRoot } from 'react-dom/client'
-import { Routes } from '@generouted/react-router'
+// Route-based code splitting keeps authenticated/collaborative pages out of
+// the initial bundle for a public top-level route such as `/`.
+import { routes } from '@generouted/react-router/lazy'
+import { createBrowserRouter, RouterProvider } from 'react-router'
+import { installStaleChunkRecovery } from './stale-chunk-recovery'
 import './styles.css'
 
-/**
- * Recover a tab that outlived a deploy: its index.html names chunks the deploy
- * deleted, so the next lazy route fails to import. One reload picks up the
- * current build. The session flag stops a loop when the cause is not staleness.
- */
-const RELOAD_KEY = 'deepspace:reloaded-for-stale-chunk'
-window.addEventListener('vite:preloadError', (event) => {
-  if (sessionStorage.getItem(RELOAD_KEY)) return
-  event.preventDefault()
-  sessionStorage.setItem(RELOAD_KEY, '1')
-  window.location.reload()
-})
-// Got here, so the current chunks load: clear the guard for the next deploy.
-sessionStorage.removeItem(RELOAD_KEY)
+const router = createBrowserRouter(routes)
+installStaleChunkRecovery(router)
 
-createRoot(document.getElementById('root')!).render(<Routes />)
+createRoot(document.getElementById('root')!).render(<RouterProvider router={router} />)

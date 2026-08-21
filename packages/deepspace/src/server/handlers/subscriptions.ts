@@ -28,7 +28,7 @@ export interface SubscriptionContext {
   state: DurableObjectState // Needed to get all connected WebSockets
   /**
    * The scope this room was addressed by — `app:{appId}`, `chat:{channelId}`,
-   * `conv:{convId}`, `workspace:default`, … Records are sharded across rooms
+   * `conv:{convId}`, `dir:{appId}`, … Records are sharded across rooms
    * by scope, so the scope is what names the room in an unknown-collection
    * failure. Undefined only for rooms addressed by a unique id rather than a
    * name (`idFromName` populates `DurableObjectId.name`).
@@ -213,7 +213,7 @@ function executeSystemQuery(
 
 /**
  * Preload the current user's team IDs from the c_team_members collection table.
- * Returns null if no team_members collection schema is registered (non-workspace DOs).
+ * Returns null if no team_members collection schema is registered (rooms without teams).
  */
 function preloadUserTeamIds(ctx: SubscriptionContext, userId: string): string[] | null {
   const tmSchema = ctx.schemaRegistry.get('team_members')

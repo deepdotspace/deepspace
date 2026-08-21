@@ -63,11 +63,13 @@ import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
 /**
- * The "no wrangler.toml here" refusal, shared verbatim by `dev` and `test`.
+ * The "no wrangler.toml here" refusal, shared verbatim by `dev` and `test` —
+ * the same `not_in_app_repo` code every other command gives this state.
  * Multi-line on purpose: the sibling-app suggestions are the whole point of
  * the message, and the runtime appends the slug to its last line.
  */
-export function noAppDirMessage(start: string, children: string[]): string {
+export function noAppDirRefusal(start: string): Refusal {
+  const children = findChildApps(start)
   const lines = [`No wrangler.toml found at or above ${start}.`]
   if (children.length > 0) {
     lines.push('Did you mean to run inside one of these app directories?')
@@ -75,7 +77,7 @@ export function noAppDirMessage(start: string, children: string[]): string {
   } else {
     lines.push('Run from a DeepSpace app directory (one containing wrangler.toml).')
   }
-  return lines.join('\n')
+  return new Refusal(lines.join('\n'), 'not_in_app_repo')
 }
 
 export function devExitSucceeded(code: number | null, stopping: boolean): boolean {
@@ -127,7 +129,7 @@ export default defineDeepspaceCommand({
     const start = resolve((args.dir as string | undefined) ?? '.')
     const appDir = findAppDir(start)
     if (!appDir) {
-      throw new Refusal(noAppDirMessage(start, findChildApps(start)), 'no_app_dir')
+      throw noAppDirRefusal(start)
     }
 
     const junk = removeMacosJunk(appDir)

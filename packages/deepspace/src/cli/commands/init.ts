@@ -16,12 +16,14 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { ensureToken } from '../auth'
-import { PLATFORM_URLS } from '../env'
+import { DEEPSPACE_ENV, PLATFORM_URLS } from '../env'
 import { ApiError, apiFetch } from '../lib/api'
 import { findAppDir } from '../lib/app-context'
 import { getAppSource } from '../lib/source-api'
 import { readAppId, writeAppId } from '../lib/app-identity'
-import { defineDeepspaceCommand, Refusal } from '../lib/command'
+import { errorCode } from '../lib/cli-errors'
+import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
+import { readAppIdVar, readWranglerConfig } from '../lib/wrangler-env'
 import { runGit } from '../lib/git/process'
 import { ensureGitIdentity } from '../lib/vc-remote'
 
@@ -98,7 +100,19 @@ export default defineDeepspaceCommand({
       )
     }
     const envName = (args.env as string) || undefined
-    const existing = readAppId(appDir, envName)
+    // A malformed DEEPSPACE_APP_ID refuses (`invalid_app_id`, from the shared
+    // reader) exactly like it does everywhere else — init must not mint a fresh
+    // id over a value that may be a corrupted real one. Only an explicit
+    // `--new-id` replaces it, and then the result names what it replaced.
+    let existing: string | null
+    let replacedMalformed: string | null = null
+    try {
+      existing = readAppId(appDir, envName)
+    } catch (err) {
+      if (errorCode(err) !== 'invalid_app_id' || !args['new-id']) throw err
+      existing = null
+      replacedMalformed = String(readAppIdVar(readWranglerConfig(appDir), envName))
+    }
     if (existing && !args['new-id']) {
       // "Already initialized" must mean REGISTERED, not merely id-shaped: an
       // older SDK's scaffold minted a valid-looking id locally that no server
@@ -122,6 +136,9 @@ export default defineDeepspaceCommand({
         throw error
       }
       if (!state.registered) {
+        // Executable, unlike the fork offered to a not_app_owner: forking
+        // there is a data decision, and here there is no data — the old id
+        // never had server-side state, so --new-id is the one next command.
         throw new Refusal(
           `wrangler.toml carries ${existing}, but that id was never registered — it was ` +
             `minted locally by an older SDK. Ids are server-minted at registration now, and an ` +
@@ -129,14 +146,31 @@ export default defineDeepspaceCommand({
             `register this repo as a fresh app (new data and secrets; nothing to migrate — the ` +
             `old id never had server-side state).`,
           'app_not_registered',
+          {
+            action: cliAction(
+              'deepspace',
+              'app',
+              'init',
+              '--new-id',
+              ...(envName ? ['--env', envName] : []),
+            ),
+          },
         )
       }
       if (!args.json) {
-        console.log(`Already initialized: ${existing}${envName ? ` (env: ${envName})` : ''}`)
+        console.log(
+          `Already initialized: ${existing}${envName ? ` (env: ${envName})` : ''} — registered on ${DEEPSPACE_ENV}`,
+        )
         console.log(`App dir: ${appDir}`)
       }
       return {
-        data: { status: 'already_initialized', appId: existing, appDir, env: envName ?? null },
+        data: {
+          status: 'already_initialized',
+          appId: existing,
+          appDir,
+          env: DEEPSPACE_ENV,
+          wranglerEnv: envName ?? null,
+        },
       }
     }
     const token = await ensureToken()
@@ -160,9 +194,16 @@ export default defineDeepspaceCommand({
         : ' — commit wrangler.toml.'
       if (existing) {
         console.log(`Forked: ${existing} → ${appId}${envSuffix}${commitNote}`)
-        console.log('Registered as a NEW app under your account; the original is untouched.')
+        console.log(
+          `Registered on ${DEEPSPACE_ENV} as a NEW app under your account; the original is untouched.`,
+        )
       } else {
-        console.log(`Registered ${appId}${envSuffix} to your account${commitNote}`)
+        console.log(`Registered ${appId}${envSuffix} on ${DEEPSPACE_ENV} to your account${commitNote}`)
+        if (replacedMalformed !== null) {
+          console.log(
+            `Replaced the malformed DEEPSPACE_APP_ID ${JSON.stringify(replacedMalformed)} — it was never a registered id.`,
+          )
+        }
         console.log('The first deploy claims the `name` subdomain.')
       }
       console.log(`App dir: ${appDir}`)
@@ -172,9 +213,14 @@ export default defineDeepspaceCommand({
         status: existing ? 'forked' : 'registered',
         appId,
         ...(existing ? { previousAppId: existing } : {}),
+        ...(replacedMalformed !== null ? { replacedMalformed } : {}),
         committedScaffold,
         appDir,
-        env: envName ?? null,
+        // The plane this registration lives on — `env` is what `status --json`
+        // calls it too; the wrangler [env.<name>] slot is `wranglerEnv` there
+        // and here.
+        env: DEEPSPACE_ENV,
+        wranglerEnv: envName ?? null,
       },
       // The one follow-up when the id was written into an existing history:
       // rendered as the `Next:` line and carried in `--json`, so a machine

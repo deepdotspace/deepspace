@@ -1,8 +1,8 @@
 /** CronRoom Durable Object state, execution, and authorization tests. */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import Database from 'better-sqlite3'
-import { CronRoom, type CronRoomConfig } from '../cron-room'
+import { CronRoom, armCronRoom, CRON_TASKS_INTERNAL_PATH, type CronRoomConfig } from '../cron-room'
 import { MSG } from '../../../shared/protocol/constants'
 import { ROLES } from '../../../shared/roles'
 import type { UserAttachment } from '../base-room'
@@ -587,5 +587,134 @@ describe('CronRoom read-only operations remain open', () => {
     const tasksReply = room.sent.find((m) => m.type === MSG.CRON_TASKS)
     expect(tasksReply).toBeDefined()
     expect(room.sent.some((m) => m.type === MSG.ERROR)).toBe(false)
+  })
+})
+
+describe('armCronRoom wakes the room from the app worker', () => {
+  // A namespace whose stub routes straight into a real CronRoom's fetch, so the
+  // test proves the wake reaches ensureInitialized (which arms the alarm) and
+  // is answered by the internal tasks route rather than a 404.
+  function makeNamespace(room: CronRoom) {
+    const fetches: string[] = []
+    const namespace = {
+      idFromName: (name: string) => name,
+      get: () => ({
+        fetch: (url: string) => {
+          fetches.push(url)
+          return room.fetch(new Request(url))
+        },
+      }),
+    } as unknown as DurableObjectNamespace
+    return { namespace, fetches }
+  }
+
+  function makeCtx() {
+    const pending: Promise<unknown>[] = []
+    const ctx = { waitUntil: (p: Promise<unknown>) => pending.push(p) } as unknown as ExecutionContext
+    return { ctx, pending }
+  }
+
+  it('arms the alarm through the internal tasks route, once per isolate', async () => {
+    const db = new Database(':memory:')
+    const { state, alarms } = makeState(db)
+    const room = new TestCronRoom(state, {}, { tasks: [{ name: 'heartbeat', intervalMinutes: 1 }] })
+    const { namespace, fetches } = makeNamespace(room)
+    const { ctx, pending } = makeCtx()
+
+    expect(alarms).toEqual([])
+    armCronRoom(ctx, namespace, 'app:arm-once', [{ name: 'heartbeat', intervalMinutes: 1 }])
+    const [response] = (await Promise.all(pending)) as Response[]
+
+    expect(fetches).toEqual([`https://internal${CRON_TASKS_INTERNAL_PATH}`])
+    expect(alarms.length).toBe(1)
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as { tasks: { name: string }[] }
+    expect(body.tasks.map((t) => t.name)).toEqual(['heartbeat'])
+
+    // Idempotent per isolate: the second request from the same worker sends nothing.
+    armCronRoom(ctx, namespace, 'app:arm-once', [{ name: 'heartbeat', intervalMinutes: 1 }])
+    expect(fetches.length).toBe(1)
+  })
+
+  it('does nothing when the app declares no tasks', () => {
+    const db = new Database(':memory:')
+    const { state } = makeState(db)
+    const room = new TestCronRoom(state, {}, { tasks: [] })
+    const { namespace, fetches } = makeNamespace(room)
+    const { ctx, pending } = makeCtx()
+
+    armCronRoom(ctx, namespace, 'app:no-tasks', [])
+    expect(fetches).toEqual([])
+    expect(pending).toEqual([])
+  })
+
+  it('retries after both a non-2xx response and a rejected fetch', async () => {
+    let fetches = 0
+    const namespace = {
+      idFromName: (name: string) => name,
+      get: () => ({
+        fetch: async () => {
+          fetches++
+          if (fetches === 1) return new Response('not armed', { status: 503 })
+          if (fetches === 2) throw new Error('transport failed')
+          return Response.json({ tasks: [] })
+        },
+      }),
+    } as unknown as DurableObjectNamespace
+    const { ctx, pending } = makeCtx()
+    const tasks = [{ name: 'heartbeat', intervalMinutes: 1 }]
+    const roomId = 'app:retry-failed-wake'
+
+    armCronRoom(ctx, namespace, roomId, tasks)
+    await pending.at(-1)
+    armCronRoom(ctx, namespace, roomId, tasks)
+    await pending.at(-1)
+    armCronRoom(ctx, namespace, roomId, tasks)
+    await pending.at(-1)
+    expect(fetches).toBe(3)
+
+    // The successful wake remains armed; only failures reopen the retry path.
+    armCronRoom(ctx, namespace, roomId, tasks)
+    expect(fetches).toBe(3)
+  })
+})
+
+describe('CronRoom logs one structured line per run', () => {
+  it('logs `[cron] <task> ok <ms>ms` on success', async () => {
+    const { state } = makeState(new Database(':memory:'))
+    const room = new TestCronRoom(state, {}, { tasks: [{ name: 'heartbeat', intervalMinutes: 1 }] })
+    room.init()
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await room.dispatch({ type: MSG.CRON_TRIGGER, payload: { taskName: 'heartbeat' } })
+      expect(log.mock.calls.map((c) => c[0])).toEqual([
+        expect.stringMatching(/^\[cron\] heartbeat ok \d+ms$/),
+      ])
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it('logs the failure message in the line and the stack as a string, never the Error object', async () => {
+    const db = new Database(':memory:')
+    const { state } = makeState(db)
+    class FailingCronRoom extends TestCronRoom {
+      protected onTask(): void {
+        throw new Error('task exploded')
+      }
+    }
+    const room = new FailingCronRoom(state, {}, { tasks: [{ name: 'heartbeat', intervalMinutes: 1 }] })
+    room.init()
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await room.dispatch({ type: MSG.CRON_TRIGGER, payload: { taskName: 'heartbeat' } })
+      expect(error).toHaveBeenCalledTimes(1)
+      const [line, stack] = error.mock.calls[0]
+      expect(line).toMatch(/^\[cron\] heartbeat failed \d+ms: task exploded$/)
+      expect(typeof stack).toBe('string')
+      expect(stack).toContain('task exploded')
+    } finally {
+      error.mockRestore()
+    }
   })
 })

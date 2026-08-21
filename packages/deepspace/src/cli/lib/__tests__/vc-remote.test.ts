@@ -1,5 +1,6 @@
 /** Remote URL, environment-only auth, and credential-helper behavior. */
 
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,6 +11,7 @@ import { initRepo } from '../git/repository'
 import {
   credentialHelperCommand,
   ensureSpaceRemote,
+  removeSpaceRemote,
   gitAuthEnv,
   gitSourceImportEnv,
   repoUrl,
@@ -306,5 +308,25 @@ describe('ensureSpaceRemote against a real repository', () => {
     )
     expect(miss.status).not.toBe(0)
     expect(miss.stdout.toString('utf-8').trim()).toBe('')
+  })
+})
+
+describe('removeSpaceRemote against a real repository', () => {
+  let repo: string
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), 'deepspace-remove-remote-'))
+    execFileSync('git', ['init', '-q'], { cwd: repo })
+  })
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true })
+  })
+
+  it('distinguishes an absent remote from one it removed', () => {
+    expect(removeSpaceRemote(repo)).toBe(false)
+    execFileSync('git', ['remote', 'add', SPACE_REMOTE, 'https://example.test/repo'], { cwd: repo })
+    expect(removeSpaceRemote(repo)).toBe(true)
+    expect(removeSpaceRemote(repo)).toBe(false)
   })
 })

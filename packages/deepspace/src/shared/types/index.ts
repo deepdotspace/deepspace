@@ -77,7 +77,8 @@ export interface CollectionSchema {
   /**
    * `users` collection only: what the `user.list` roster shows a non-admin
    * whose `read` policy is row-scoped (`'own'`, `'team'`, …). Default
-   * `'public-identity'`: every registered user's id/name/imageUrl/role — the
+   * `'public-identity'`: every registered user's id/name/imageUrl/role/lastSeenAt
+   * (`lastSeenAt` is what `usePresence` reads) — the
    * row policy keeps guarding full-row reads on the records/query path.
    * `'read-policy'`: the roster contains only the rows the caller's read
    * policy grants (still projected to public identity) — for apps that scope

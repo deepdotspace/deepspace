@@ -50,7 +50,7 @@ function makeState(db: Database.Database): DurableObjectState {
     // Record room stubs are addressed with `idFromName(scopeId)`, so a real
     // state always carries the scope as `id.name`. Handlers read it to name
     // the room when a caller asks for a collection from another scope.
-    id: { name: 'workspace:default', toString: () => 'workspace:default' },
+    id: { name: 'conv:debug-gate-test', toString: () => 'conv:debug-gate-test' },
     storage: {
       sql: makeSql(db),
       setAlarm() {},
@@ -75,9 +75,9 @@ class ShieldedRoom extends RecordRoom {
 }
 
 const debugSql = () =>
-  new Request('https://do/api/debug/sql?scopeId=workspace:default', { method: 'GET' })
+  new Request('https://do/api/debug/sql?scopeId=conv:debug-gate-test', { method: 'GET' })
 const debugStatus = () =>
-  new Request('https://do/api/debug/status?scopeId=workspace:default', { method: 'GET' })
+  new Request('https://do/api/debug/status?scopeId=conv:debug-gate-test', { method: 'GET' })
 
 // ---------------------------------------------------------------------------
 
@@ -109,7 +109,7 @@ describe('RecordRoom: debug route gating', () => {
   it('leaves non-debug /api/ routes reachable (gate is debug-only)', async () => {
     // /api/tools/list is unauthenticated-safe and returns the tool catalog.
     const res = await makeRoom({}).fetch(
-      new Request('https://do/api/tools/list?scopeId=workspace:default', { method: 'GET' }),
+      new Request('https://do/api/tools/list?scopeId=conv:debug-gate-test', { method: 'GET' }),
     )
     expect(res.status).toBe(200)
   })

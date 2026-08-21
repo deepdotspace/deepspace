@@ -151,13 +151,18 @@ describe('system-managed columns on users', () => {
     expect(saved.name).toBe('Ada')
   })
 
-  it('treats absent, null and empty string as the one stored state they are', async () => {
+  it("treats absent and null as the one stored state they are, and '' as a value", async () => {
     const ctx = await makeContext()
 
     // `imageUrl` was never set, so it reads back as absent. `coerceValue` maps
-    // null and '' to the same NULL column, so none of these is a change.
+    // null and undefined to the same NULL column, so that is not a change.
     expect(serverActionUpdate(ctx, { imageUrl: null, bio: 'x' })).toMatchObject({ success: true })
-    expect(serverActionUpdate(ctx, { imageUrl: '', bio: 'y' })).toMatchObject({ success: true })
+
+    // '' is not one of them on a text column — clearing an unset system column
+    // to the empty string is a change the caller means and will not get, so it
+    // is refused rather than answered with a silent success.
+    const error = refusal(serverActionUpdate(ctx, { imageUrl: '', bio: 'y' }), "clearing to ''")
+    expect(error).toContain("'imageUrl' is system-managed")
   })
 
   it("accepts an echo of a '' system column the raw registerUser INSERT stored", async () => {
@@ -173,10 +178,10 @@ describe('system-managed columns on users', () => {
       putRecord(ctx, 'users', 'u2', { email: '', bio: 'x' }, 'u2', 'admin', true, false),
     ).toMatchObject({ success: true })
 
-    // The first heartbeat rewrites the column through coerceValue, turning ''
-    // into NULL. The client's pre-heartbeat copy must still round-trip.
+    // A system write of the same '' leaves it '' — the empty string survives
+    // the round trip through coerceValue — so the echo keeps working.
     putRecord(ctx, 'users', 'u2', { email: '' }, 'u2', 'admin', true, true)
-    expect(getRecord(ctx.sql, 'users', 'u2', usersSchema)!.data.email).toBeUndefined()
+    expect(getRecord(ctx.sql, 'users', 'u2', usersSchema)!.data.email).toBe('')
     expect(
       putRecord(ctx, 'users', 'u2', { email: '', bio: 'y' }, 'u2', 'admin', true, false),
     ).toMatchObject({ success: true })

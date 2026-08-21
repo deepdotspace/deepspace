@@ -130,13 +130,18 @@ function canonicalPath(path: string): string {
 
 /**
  * Is the detached install worker still running? Missing or malformed identity
- * fails closed; a valid pid is alive when signal 0 succeeds. EPERM means
- * "alive, not ours".
+ * fails closed; a valid pid is alive when signal 0 succeeds.
  */
 function installWorkerAlive(sentinelDir: string): boolean {
   const pidPath = join(sentinelDir, 'install.pid')
   if (!existsSync(pidPath)) return false
-  const pid = Number(readFileSync(pidPath, 'utf-8').trim())
+  return processAlive(Number(readFileSync(pidPath, 'utf-8').trim()))
+}
+
+/** Is a process with this pid alive? Signal 0 probes without delivering;
+ *  EPERM means "alive, not ours". Shared by every pid-carrying sentinel under
+ *  `.deepspace/` (the install worker, the deploy lock). */
+export function processAlive(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false
   try {
     process.kill(pid, 0)

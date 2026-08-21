@@ -8,6 +8,7 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import {
+  armCronRoom,
   CanvasRoom,
   CronRoom,
   JobRoom,
@@ -119,6 +120,13 @@ export type AppContext = { Bindings: Env }
 
 const app = new Hono<AppContext>()
 app.use('/api/*', cors())
+// A Durable Object exists only once something fetches it, and the CronRoom
+// arms its alarm in that first fetch — so wake it from the request path, or a
+// deployed schedule waits for a visitor. Once per isolate; no-op without tasks.
+app.use('*', async (c, next) => {
+  armCronRoom(c.executionCtx, c.env.CRON_ROOMS, `app:${c.env.DEEPSPACE_APP_ID}`, cronTasks)
+  await next()
+})
 
 // Registration order is part of the worker contract. The wildcard auth route
 // follows its special cases, AI precedes platform proxies, and static is last.
@@ -132,5 +140,13 @@ registerActionRoutes(app, resolveAuth)
 if (schemas.some((schema) => schema.name === AI_CHATS_SCHEMA.name)) registerAiChatRoutes(app, resolveAuth)
 registerPlatformProxyRoutes(app)
 registerStaticRoutes(app)
+
+// Hono's default handler logs a thrown Error as `console.error(err)`, which
+// the runtime renders as its stack frames only — the message never reaches
+// `deepspace logs`. Log the message as text, then answer 500 as before.
+app.onError((err, c) => {
+  console.error(`[error] ${c.req.method} ${new URL(c.req.url).pathname}: ${err.message}`, err.stack ?? '')
+  return c.text('Internal Server Error', 500)
+})
 
 export default app

@@ -3,6 +3,9 @@ import { execSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+// The retrofit text is shared with the read-only `app update` guidance, so a
+// refusal here and the upgrade checklist say the same thing.
+import { APP_ID_ADOPTION_STEPS } from '../../../build/app-id'
 // One implementation, two lifetimes: the plugin sweeps every `vite build`,
 // this deploy path guards the artifact that actually ships. See the function's
 // header and docs/migrations/build-preview-secrets.md.
@@ -322,20 +325,6 @@ const APP_ID_LITERAL = /app_[0-9A-HJKMNP-TV-Z]{26}/g
  *  did. */
 const APP_ID_DEFINE = '__DEEPSPACE_APP_ID__'
 
-/** How an app gets from either broken state to the correct one. Stated once
- *  so the two refusals below cannot disagree about what the change is. The SDK
- *  supplies the machinery (`deepspace/build`), so adoption is three small edits
- *  with no new file, no dependency, and no migration. */
-const APP_ID_ADOPTION_STEPS =
-  `Point the client at the build-injected id — the SDK's \`deepspace/build\` supplies it:\n` +
-  `  • vite.config.ts: import { deepspaceBuild } from 'deepspace/build' and add\n` +
-  `    deepspaceBuild({ appDir: fileURLToPath(new URL('.', import.meta.url)) }) to plugins\n` +
-  `  • vitest.config.ts: import { appIdDefine } and set define: appIdDefine({ appDir })\n` +
-  `  • src/constants.ts: declare const __DEEPSPACE_APP_ID__: string; export it as APP_ID\n` +
-  `    (drop the frozen literal)\n` +
-  `Apply all three together: src/constants.ts on its own builds clean and then throws ` +
-  `in the browser. A newly scaffolded app already has this.`
-
 export interface ClientAppIdRefusal {
   message: string
   code: string
@@ -353,7 +342,9 @@ export interface ClientAppIdRefusal {
  * time, so `deploy --env staging` builds a browser bundle keyed to the DEFAULT
  * env's rooms while the worker writes the staging env's — reported as
  * `ok:true, serving:confirmed`, with the two halves reading different data
- * stores.
+ * stores. `app update` guides those apps through the
+ * `2026-08-build-injected-app-id` migration; this guard is for apps that have
+ * not completed it.
  *
  * The second check exists because adopting the fix is a multi-file change, and
  * applying only the `src/constants.ts` part is silent: Vite leaves an unmatched

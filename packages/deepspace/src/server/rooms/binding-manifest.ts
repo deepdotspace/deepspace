@@ -29,6 +29,13 @@
  */
 export type CustomBinding =
   | {
+      /** Managed by DeepSpace; never forwarded into the customer Worker env. */
+      type: 'ai_search'
+      name: string
+      /** Only the untrusted `auto` sentinel is accepted from wrangler.toml. */
+      instance_name: string
+    }
+  | {
       type: 'vectorize'
       name: string
       /** Either a pre-existing index name or the literal `"auto"`. */
@@ -89,6 +96,7 @@ export const AUTO_PROVISIONABLE_TYPES = new Set([
   'vectorize',
   'r2_bucket',
   'queue',
+  'ai_search',
 ])
 
 /** Vectorize metric values accepted by CF when creating an index. */
@@ -111,6 +119,8 @@ export function isAutoProvision(b: CustomBinding): boolean {
       return b.bucket_name === AUTO_PROVISION_SENTINEL
     case 'queue':
       return b.queue_name === AUTO_PROVISION_SENTINEL
+    case 'ai_search':
+      return b.instance_name === AUTO_PROVISION_SENTINEL
     default:
       return false
   }
@@ -128,6 +138,7 @@ export const ALLOWED_BINDING_TYPES = new Set([
   'analytics_engine',
   'hyperdrive',
   'ratelimit',
+  'ai_search',
 ])
 
 /**
@@ -182,6 +193,7 @@ export function validateBindingManifest(
   }
   const errors: ValidationError[] = []
   const seenNames = new Set<string>()
+  let aiSearchCount = 0
   for (const entry of manifest) {
     if (!entry || typeof entry !== 'object') {
       errors.push({
@@ -213,8 +225,12 @@ export function validateBindingManifest(
     seenNames.add(name)
     // Now safely typed: type is in ALLOWED_BINDING_TYPES + name is a string.
     const binding = entry as CustomBinding
+    if (binding.type === 'ai_search') aiSearchCount++
     const fieldErr = requiredFieldError(binding)
     if (fieldErr) errors.push({ binding, reason: fieldErr })
+  }
+  if (aiSearchCount > 1) {
+    errors.push({ reason: 'Only one ai_search binding may be declared per app' })
   }
   if (errors.length) return { valid: false, errors }
   return { valid: true, bindings: manifest as CustomBindingManifest }
@@ -222,6 +238,11 @@ export function validateBindingManifest(
 
 function requiredFieldError(b: CustomBinding): string | null {
   switch (b.type) {
+    case 'ai_search':
+      if (b.instance_name !== AUTO_PROVISION_SENTINEL) {
+        return `ai_search binding "${b.name}" must set instance_name = "auto"; managed instances cannot be selected directly`
+      }
+      return null
     case 'vectorize': {
       if (!b.index_name) return `vectorize binding "${b.name}" missing index_name (or "auto")`
       if (b.index_name === AUTO_PROVISION_SENTINEL) {
@@ -299,6 +320,18 @@ function requiredFieldError(b: CustomBinding): string | null {
 export function bindingManifestFromOutputConfig(
   outputConfig: Record<string, unknown>,
 ): CustomBindingManifest {
+  // Let Wrangler finish resolving the selected named environment first, then
+  // reject this capability explicitly. Namespace access would let customer
+  // runtime code address sibling instances and breaks managed isolation.
+  const aiSearchNamespaces = outputConfig.ai_search_namespaces
+  const declaresAiSearchNamespace = Array.isArray(aiSearchNamespaces)
+    ? aiSearchNamespaces.length > 0
+    : aiSearchNamespaces !== undefined && aiSearchNamespaces !== null
+  if (declaresAiSearchNamespace) {
+    throw new Error(
+      'ai_search_namespaces is not supported by DeepSpace; declare one [[ai_search]] instance_name = "auto" instead',
+    )
+  }
   const out: CustomBindingManifest = []
 
   // ai: single object
@@ -323,6 +356,15 @@ export function bindingManifestFromOutputConfig(
       ...(metric &&
         (metric === 'cosine' || metric === 'euclidean' || metric === 'dot-product') && { metric }),
     })
+  }
+
+  // ai_search: Wrangler's array form. `ai_search_namespaces` deliberately
+  // remains unextracted: it grants runtime code access to arbitrary sibling
+  // instances and is forbidden for managed knowledge.
+  for (const a of asObjectArray(outputConfig.ai_search)) {
+    const name = pluckString(a, 'binding')
+    const instance_name = pluckString(a, 'instance_name')
+    if (name && instance_name) out.push({ type: 'ai_search', name, instance_name })
   }
 
   // r2_buckets: array of { binding, bucket_name }

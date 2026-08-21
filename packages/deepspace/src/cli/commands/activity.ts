@@ -23,7 +23,7 @@ import * as p from '@clack/prompts'
 import { ensureToken } from '../auth'
 import { resolveAppTarget, assertAppTargetResolvable } from '../lib/app-target'
 import { deployBaseUrl } from '../lib/vc-remote'
-import { repoApi, type RemoteActivityEvent } from '../lib/repo-api'
+import { releaseSourceLabel, repoApi, type RemoteActivityEvent } from '../lib/repo-api'
 import { actorLabels } from '../lib/actor-labels'
 import { parseLimitArg, parseCursorArg } from '../lib/citty-args'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
@@ -84,7 +84,18 @@ export function formatEvent(
       break
     case 'release.deploy':
     case 'release.rollback':
-      detail = `#${Number(s.seq ?? 0)} ${short(s.commitOid)}`
+      // The feed event carries the same source the release row does, so a
+      // GitHub-source release reads as its repository instead of the bare `?`
+      // a null commitOid used to print.
+      detail = `#${Number(s.seq ?? 0)} ${releaseSourceLabel({
+        commitOid: typeof s.commitOid === 'string' ? s.commitOid : null,
+        source:
+          s.sourceProvider === 'github' && typeof s.sourceRepository === 'string'
+            ? { provider: 'github', repository: s.sourceRepository }
+            : s.sourceProvider === 'deepspace'
+              ? { provider: 'deepspace' }
+              : null,
+      })}`
       break
     // Unknown kinds still print their kind + actor — never crash the feed.
     default:

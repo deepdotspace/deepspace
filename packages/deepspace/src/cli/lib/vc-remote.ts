@@ -207,6 +207,22 @@ export function ensureSpaceRemote(cwd: string, appId: string, remote = SPACE_REM
 }
 
 /**
+ * Drop the platform source remote if the checkout has one — `ensureSpaceRemote`'s
+ * counterpart, for when source authority LEAVES DeepSpace. A remote written
+ * while DeepSpace owned source survives the flip, and a plain `git push space`
+ * through it walks around `deepspace push`'s preflight straight into the deploy
+ * worker's bodiless 422. Returns whether a remote was actually removed.
+ */
+export function removeSpaceRemote(cwd: string, remote = SPACE_REMOTE): boolean {
+  const current = runGit(cwd, ['remote', 'get-url', remote], { allowFail: true })
+  if (current.status !== 0) return false
+  // Once presence is established, a failed removal is a failed source
+  // reconciliation — never collapse it into the successful "absent" state.
+  runGit(cwd, ['remote', 'remove', remote])
+  return true
+}
+
+/**
  * Fill in whichever half of the checkout's Git identity is missing, from the
  * caller's session token. A checkout on a machine with no global identity —
  * or a half-configured one (a global user.name and no email dies on the same

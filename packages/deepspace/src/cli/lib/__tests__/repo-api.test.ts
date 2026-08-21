@@ -9,8 +9,10 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { repoApi } from '../repo-api'
+import { releaseSourceLabel, repoApi } from '../repo-api'
 import { ApiError } from '../api'
+import { Refusal } from '../command'
+import { githubSourceRefusal } from '../source-api'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -168,5 +170,123 @@ describe('repo-api shape guard', () => {
     // presence-only field, unlike the non-null `view`/`releases` above.
     stub200('{"release":null}')
     await expect(api().latestRelease()).resolves.toEqual({ release: null })
+  })
+})
+
+describe('the GitHub-source refusal is one refusal', () => {
+  const APP = 'app_01ARZ3NDEKTSV4RRFFQ69G5FAV'
+  const REPOSITORY = 'donalddellapietra/changelog-c4'
+
+  function stub422() {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: `This app uses GitHub source (${REPOSITORY}). Use normal Git/GitHub for source operations. \`deepspace deploy\` ships the local working tree without changing Git.`,
+              code: 'source_managed_by_github',
+              repository: REPOSITORY,
+            }),
+            { status: 422, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    )
+  }
+
+  it('translates the repo API 422 — the read `pull`/`clone` both start with — into it', async () => {
+    // `pull` and `clone` used to surface the server's ApiError verbatim, so
+    // their envelopes named the repository only in prose while `push` (which
+    // refuses from its own /source read) carried `appId`/`repository` as
+    // fields. An agent's parser had to special-case two of three sibling verbs.
+    stub422()
+    const err = (await api()
+      .getRefs()
+      .catch((e) => e)) as Refusal
+    expect(err).toBeInstanceOf(Refusal)
+    expect(err.code).toBe('source_managed_by_github')
+    expect(err.extra).toEqual({ appId: APP, repository: REPOSITORY })
+    // No executable action: which command comes next depends on whether the
+    // caller wanted to clone, fetch or push, and the CLI holds `owner/repo`,
+    // never the clone URL's protocol.
+    expect(err.action).toBeUndefined()
+  })
+
+  it('is byte-identical to the one `push` raises from its own /source read', async () => {
+    stub422()
+    const fromRepoApi = (await api()
+      .getRefs()
+      .catch((e) => e)) as Refusal
+    const fromPush = githubSourceRefusal(APP, REPOSITORY)
+    expect(fromRepoApi.message).toBe(fromPush.message)
+    expect(fromRepoApi.code).toBe(fromPush.code)
+    expect(fromRepoApi.extra).toEqual(fromPush.extra)
+    expect(fromRepoApi.message).toContain(REPOSITORY)
+  })
+
+  it('keeps the server ApiError when the 422 names no repository to unify on', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ error: 'This app uses GitHub source.', code: 'source_managed_by_github' }),
+            { status: 422, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    )
+    const err = (await api()
+      .getRefs()
+      .catch((e) => e)) as ApiError
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.code).toBe('source_managed_by_github')
+  })
+
+  it('keeps every other field a server refusal computed, instead of dropping it into prose', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: 'Storage limit reached.',
+              code: 'storage_limit',
+              usedBytes: 12,
+              limitBytes: 10,
+            }),
+            { status: 409, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    )
+    const err = (await api()
+      .getRefs()
+      .catch((e) => e)) as ApiError
+    expect(err.details).toEqual({ usedBytes: 12, limitBytes: 10 })
+  })
+})
+
+describe('releaseSourceLabel', () => {
+  // A GitHub-source release records NO commit — deploy ships the working tree
+  // without touching Git — so `releases`, `status`'s Live line and `activity`
+  // each rendered it as "(no source recorded)" / "unknown source" / "?", two
+  // lines under a `Source  GitHub · owner/repo` line and contradicting the
+  // `source` the same release carries in --json. Three passes, one formatter.
+  it('names the source when the release records one but no commit', () => {
+    expect(
+      releaseSourceLabel({
+        commitOid: null,
+        source: { provider: 'github', repository: 'donalddellapietra/changelog-c4' },
+      }),
+    ).toBe('GitHub · donalddellapietra/changelog-c4')
+    expect(releaseSourceLabel({ commitOid: null, source: { provider: 'deepspace' } })).toBe(
+      'DeepSpace source, no commit recorded',
+    )
+  })
+
+  it('still prefers the commit, and still admits when there is nothing at all', () => {
+    expect(
+      releaseSourceLabel({ commitOid: 'd47e3551eb9c0f', source: { provider: 'deepspace' } }),
+    ).toBe('commit d47e3551eb')
+    expect(releaseSourceLabel({ commitOid: null, source: null })).toBe('no source recorded')
   })
 })

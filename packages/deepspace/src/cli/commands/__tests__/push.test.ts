@@ -51,6 +51,26 @@ function makeRepo(branch = 'main'): string {
   return dir
 }
 
+/** A repo stopped inside an unresolved merge: `MERGE_HEAD` present, one path conflicted. */
+function conflictRepo(): string {
+  const dir = makeRepo()
+  git(dir, ['switch', '-q', '-c', 'sideA'])
+  writeFileSync(join(dir, 'C.md'), 'A\n')
+  git(dir, ['add', '-A'])
+  git(dir, ['commit', '-q', '-m', 'A'])
+  git(dir, ['switch', '-q', 'main'])
+  git(dir, ['switch', '-q', '-c', 'sideB'])
+  writeFileSync(join(dir, 'C.md'), 'B\n')
+  git(dir, ['add', '-A'])
+  git(dir, ['commit', '-q', '-m', 'B'])
+  try {
+    execFileSync('git', ['merge', 'sideA'], { cwd: dir, stdio: 'pipe' })
+  } catch {
+    // The conflict is the point.
+  }
+  return dir
+}
+
 async function runPushJson(args: Record<string, unknown>, appDir = process.cwd()) {
   const logs: string[] = []
   vi.spyOn(appContext, 'findAppDir').mockReturnValue(appDir)
@@ -127,10 +147,14 @@ describe('unborn scaffold', () => {
     expect(output).toMatchObject({
       ok: false,
       code: 'no_commits',
+      // Same remedy as deploy's `app_not_initialized`, so the same tier: an
+      // agent branching on `actionRequired` (or on exit 2) must not silently
+      // drop this case while handling deploy's identical one.
+      actionRequired: true,
       action: { cwd: repo, argv: ['deepspace', 'app', 'init'] },
     })
     expect(output.error).toContain('__APP_ID__')
-    expect(exits).toEqual([1])
+    expect(exits).toEqual([2])
   })
 
   it('says only "commit first" when wrangler.toml already carries a real id', async () => {
@@ -323,5 +347,21 @@ describe('forcePushOrphansWork (--force lost-update guard)', () => {
 
   it('REFUSES from a fresh checkout with no push record when the peer tip is unintegrated', () => {
     expect(forcePushOrphansWork(null, PEER, TIP, false)).toBe(true)
+  })
+})
+
+describe('push mid-merge', () => {
+  it('refuses merge_in_progress before touching the network (HEAD is the pre-merge commit)', async () => {
+    repo = conflictRepo()
+    const ensure = vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    const { output, exits } = await runPushJson({}, repo)
+    expect(output).toMatchObject({ ok: false, code: 'merge_in_progress' })
+    expect(String(output.error)).toMatch(/git merge --continue/)
+    expect(String(output.error)).toMatch(/git merge --abort/)
+    expect(output.action).toBeUndefined()
+    expect(exits).toEqual([1])
+    expect(ensure).not.toHaveBeenCalled()
+    // Nothing was resolved for the caller: the merge is still theirs to finish.
+    expect(execFileSync('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd: repo, encoding: 'utf-8' })).toMatch(/^[0-9a-f]{40}/)
   })
 })

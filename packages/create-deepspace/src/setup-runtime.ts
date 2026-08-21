@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import * as p from '@clack/prompts'
 import spawn from 'cross-spawn'
@@ -260,7 +260,26 @@ function installDependencies(appDir: string): void {
     throw new Error(message)
   } else {
     writeFileSync(join(sentinelDirectory, 'install.done'), new Date().toISOString() + '\n')
-    p.log.success('Dependencies installed')
+    const sdkVersion = installedSdkVersion(appDir)
+    // Name the SDK this app actually runs on, read off disk after the install.
+    // The manifest asks for the creator's own version exactly, so this is
+    // normally that number — and when it isn't (a `--local` tarball, a
+    // resolution the package manager overrode) the scaffold says so instead of
+    // leaving the runtime version to be guessed from the creator's.
+    p.log.success(`Dependencies installed${sdkVersion ? ` — deepspace ${sdkVersion}` : ''}`)
+  }
+}
+
+/** The `deepspace` version this scaffold ended up with, straight from the
+ *  installed package. Null only if the install left no manifest to read. */
+export function installedSdkVersion(appDir: string): string | null {
+  const manifest = join(appDir, 'node_modules', 'deepspace', 'package.json')
+  if (!existsSync(manifest)) return null
+  try {
+    const parsed = JSON.parse(readFileSync(manifest, 'utf-8')) as { version?: unknown }
+    return typeof parsed.version === 'string' ? parsed.version : null
+  } catch {
+    return null // an unreadable manifest is "unknown", and the outro says so
   }
 }
 
@@ -275,10 +294,15 @@ export function nextStepsLines(
   project: Pick<PreparedProject, 'appName' | 'isInPlace'>,
   identity: IdentityOutcome,
 ): string[] {
-  // `auth login` is the recovery only when the failure WAS a missing login
-  // (or registration was skipped and the shell may not be signed in); a
+  // `auth login` is the recovery only when the failure WAS a missing login; a
   // quota, network, or ownership refusal is fixed by its own remedy, after
   // which `app init` alone registers the app.
+  //
+  // `--no-register` keeps the pair even in a signed-in shell, deliberately:
+  // the flag exists to keep the app OFF whatever login this shell holds, so
+  // "sign in (as the intended owner), then init" is the sequence it was asked
+  // for. Probing `auth whoami` here would cost a CLI subprocess to answer a
+  // question the flag already said not to trust.
   const recovery =
     identity.status === 'registered'
       ? []

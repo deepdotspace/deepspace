@@ -9,7 +9,7 @@ import { readFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
-import { PLATFORM_URLS } from './env'
+import { DEEPSPACE_ENV, PLANE_AUTH_URLS, PLATFORM_URLS } from './env'
 import { decodeJwtPayload } from '../shared/jwt'
 import { exchangeSession } from './session'
 import { registerAuthRefresh } from './lib/api'
@@ -18,7 +18,7 @@ import { writeSecretFileSync } from './lib/secure-file'
 
 const AUTH_URL = process.env.DEEPSPACE_AUTH_URL ?? PLATFORM_URLS.auth
 /** The plane whose credentials keep the historical un-suffixed filenames. */
-const PROD_AUTH_URL = 'https://auth.deep.space'
+const PROD_AUTH_URL = PLANE_AUTH_URLS.production
 
 const DIR = join(homedir(), '.deepspace')
 
@@ -73,28 +73,64 @@ export async function ensureToken(): Promise<string> {
     }
   }
 
-  if (!existsSync(SESSION_PATH)) {
-    throw new Refusal('Not logged in. Run `deepspace auth login` first.', 'not_authenticated', {
-      action: cliAction('deepspace', 'auth', 'login'),
-    })
-  }
+  if (!existsSync(SESSION_PATH)) throw notAuthenticated('Not logged in')
 
   const sessionToken = readFileSync(SESSION_PATH, 'utf-8').trim()
 
   // Refresh from session
   const token = await exchangeSession(AUTH_URL, sessionToken)
-  if (!token) {
-    throw new Refusal(
-      'Session expired. Run `deepspace auth login` to re-authenticate.',
-      'not_authenticated',
-      { action: cliAction('deepspace', 'auth', 'login') },
-    )
-  }
+  if (!token) throw notAuthenticated('The stored session is no longer valid (expired or unreadable)')
 
   mkdirSync(DIR, { recursive: true, mode: 0o700 })
   writeSecretFileSync(TOKEN_PATH, token)
 
   return token
+}
+
+/**
+ * The ONE `not_authenticated` refusal. Credentials are per auth plane, so
+ * "not logged in" is only half the truth whenever the selected plane is not
+ * the one a stored session belongs to: `DEEPSPACE_ENV=staging` (or a
+ * `DEEPSPACE_AUTH_URL` override) against a production login used to read
+ * exactly like a plain logout — and the advertised recovery, `auth login`,
+ * then logged the caller in on the WRONG plane. The sentence names the plane
+ * this command selected, what selected it, and any other plane that does
+ * hold a session; and it names the headless login form up front, because the
+ * bare `auth login` action refuses `interactive_required` without a TTY.
+ */
+function notAuthenticated(state: string): Refusal {
+  const selected =
+    process.env.DEEPSPACE_AUTH_URL !== undefined
+      ? `the auth service at ${AUTH_URL} (selected by DEEPSPACE_AUTH_URL)`
+      : DEEPSPACE_ENV === 'production' && process.env.DEEPSPACE_ENV === undefined
+        ? 'production'
+        : `${DEEPSPACE_ENV} (selected by DEEPSPACE_ENV=${process.env.DEEPSPACE_ENV})`
+  const elsewhere = Object.entries(PLANE_AUTH_URLS)
+    .filter(([, url]) => url !== AUTH_URL && existsSync(credentialPaths(url).sessionPath))
+    .map(([plane]) => plane)
+  // How to select the plane that does hold a session: production is the
+  // default (unset DEEPSPACE_ENV), any other plane is DEEPSPACE_ENV=<plane>,
+  // and a URL override must go either way.
+  const select = [
+    ...(elsewhere[0] === 'production'
+      ? process.env.DEEPSPACE_ENV !== undefined
+        ? ['unset DEEPSPACE_ENV']
+        : []
+      : elsewhere[0]
+        ? [`DEEPSPACE_ENV=${elsewhere[0]}`]
+        : []),
+    ...(process.env.DEEPSPACE_AUTH_URL !== undefined ? ['unset DEEPSPACE_AUTH_URL'] : []),
+  ]
+  const other =
+    elsewhere.length > 0
+      ? ` You are signed in on ${elsewhere.join(' and ')} — select that plane (${select.join(' and ')}), or log in here.`
+      : ''
+  return new Refusal(
+    `${state} on ${selected}.${other} Run \`deepspace auth login\` (headless: ` +
+      '`deepspace auth login --email you@example.com --password-stdin`, or set DEEPSPACE_EMAIL and DEEPSPACE_PASSWORD).',
+    'not_authenticated',
+    { action: cliAction('deepspace', 'auth', 'login') },
+  )
 }
 
 /** Check if a JWT has at least 30 seconds of validity remaining. */

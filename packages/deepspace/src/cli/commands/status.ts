@@ -26,7 +26,12 @@ import { currentBranch, isAncestor, resolveCommit } from '../lib/git/repository'
 import { statusFiles } from '../lib/git/safety'
 import { workspaceIdFromBranch } from '../lib/workspace-id'
 import { deployBaseUrl } from '../lib/vc-remote'
-import { repoApi, type RemoteRelease, type RemoteWorkspaceView } from '../lib/repo-api'
+import {
+  releaseSourceLabel,
+  repoApi,
+  type RemoteRelease,
+  type RemoteWorkspaceView,
+} from '../lib/repo-api'
 import { errorCode } from '../lib/cli-errors'
 import { installState } from '../lib/install-status'
 import { installCommand } from '../lib/package-manager'
@@ -74,19 +79,31 @@ export function statusRemoteFailure(error: unknown): {
 export function resolveStatusApp(
   appDir: string,
   wranglerEnv?: string,
-): { appName: string; appId: string | null } {
+): { appName: string; appId: string | null; appIdError?: string } {
+  let appName: string
   if (!wranglerEnv) {
-    return { appName: detectAppName(appDir) ?? '(unnamed)', appId: readAppId(appDir) }
+    appName = detectAppName(appDir) ?? '(unnamed)'
+  } else {
+    const resolved = resolveAppNameForEnv(readWranglerConfig(appDir), wranglerEnv)
+    if (!resolved.ok) throw new InputError(resolved.reason, 'invalid_env')
+    appName = resolved.name
   }
-  const resolved = resolveAppNameForEnv(readWranglerConfig(appDir), wranglerEnv)
-  if (!resolved.ok) throw new InputError(resolved.reason, 'invalid_env')
-  return { appName: resolved.name, appId: readAppId(appDir, wranglerEnv) }
+  // `status` is the command you run to find out what is wrong, so a
+  // malformed id (`invalid_app_id` from readAppId) is the App line's
+  // diagnostic, not the end of the report.
+  try {
+    return { appName, appId: readAppId(appDir, wranglerEnv) }
+  } catch (err) {
+    if ((err as { code?: string }).code !== 'invalid_app_id') throw err
+    return { appName, appId: null, appIdError: (err as Error).message }
+  }
 }
 
 export default defineCommand({
   meta: {
     name: 'status',
-    description: 'One screenful of current state: session, app, workspace, and live release',
+    description:
+      'One screenful of current state — always names the platform plane (env, services) — plus session, app, workspace, and live release',
   },
   args: {
     json: {
@@ -174,14 +191,21 @@ export default defineCommand({
       lines.push(['App', 'not inside a DeepSpace app directory'])
       json.inApp = false
     } else {
-      const { appName, appId } = resolveStatusApp(appDir, wranglerEnv)
+      const { appName, appId, appIdError } = resolveStatusApp(appDir, wranglerEnv)
       lines.push([
         'App',
-        `${appName}${wranglerEnv ? ` [env.${wranglerEnv}]` : ''}${appId ? ` (${appId})` : ' — no DEEPSPACE_APP_ID; run `deepspace app init`'}`,
+        `${appName}${wranglerEnv ? ` [env.${wranglerEnv}]` : ''}${
+          appId
+            ? ` (${appId})`
+            : appIdError
+              ? ` — ${appIdError}`
+              : ' — no DEEPSPACE_APP_ID; run `deepspace app init`'
+        }`,
       ])
       json.inApp = true
       json.appName = appName
       json.appId = appId
+      if (appIdError) json.appIdError = appIdError
       if (wranglerEnv) json.wranglerEnv = wranglerEnv
 
       const deps = installState(appDir)
@@ -377,7 +401,7 @@ export default defineCommand({
             }
             const byYou = userId !== null && rel.actor === userId
             const release =
-              `release #${rel.seq} (${rel.kind} of ${rel.commitOid?.slice(0, 10) ?? 'unknown source'}, ` +
+              `release #${rel.seq} (${rel.kind} of ${releaseSourceLabel(rel)}, ` +
               `${timeAgo(rel.createdAt)}${byYou ? ', by you' : ''})`
             const details = {
               seq: rel.seq,

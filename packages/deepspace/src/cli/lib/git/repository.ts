@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { InputError } from '../cli-errors'
 import { gitLine, gitMeetsFloor, parseGitVersion, runGit, splitNulFields } from './process'
@@ -51,6 +51,36 @@ function gitTooOld(versionOutput: string): InputError {
   return new InputError(
     `DeepSpace version control needs git ≥ 2.29 — found ${versionOutput || 'an unknown git version'}. Upgrade git and retry.`,
     'git_too_old',
+  )
+}
+
+/**
+ * Refuse a worktree that is in the middle of a merge, rebase, cherry-pick or
+ * revert. HEAD is the PRE-operation commit then, so `push` would publish a
+ * commit that carries none of the in-flight work and report success, and
+ * `pull` would report `up_to_date` having touched nothing while `MERGE_HEAD`
+ * stays behind. Deploy's dirty-tree guard happened to catch this state (the
+ * conflicted paths are unstaged); push and pull, which deliberately allow a
+ * dirty tree, had no guard at all. Two remedies exist (finish or abort), so
+ * the refusal names both and ships no single action.
+ */
+export function assertNoOperationInProgress(cwd: string): void {
+  const gitDir = gitLine(cwd, ['rev-parse', '--git-dir'])
+  const inProgress = (
+    [
+      ['MERGE_HEAD', 'merge', 'git merge --continue', 'git merge --abort'],
+      ['CHERRY_PICK_HEAD', 'cherry-pick', 'git cherry-pick --continue', 'git cherry-pick --abort'],
+      ['REVERT_HEAD', 'revert', 'git revert --continue', 'git revert --abort'],
+      ['rebase-merge', 'rebase', 'git rebase --continue', 'git rebase --abort'],
+      ['rebase-apply', 'rebase', 'git rebase --continue', 'git rebase --abort'],
+    ] as const
+  ).find(([marker]) => existsSync(join(resolve(cwd, gitDir), marker)))
+  if (!inProgress) return
+  const [, kind, finish, abort] = inProgress
+  throw new InputError(
+    `A ${kind} is in progress in this worktree, so HEAD is the pre-${kind} commit and none of the ` +
+      `in-flight work is committed yet. Resolve it and \`${finish}\`, or \`${abort}\`, then retry.`,
+    'merge_in_progress',
   )
 }
 

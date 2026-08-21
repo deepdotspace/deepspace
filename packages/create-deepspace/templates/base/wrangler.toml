@@ -44,13 +44,22 @@ bindings = [
   { name = "JOB_ROOMS", class_name = "AppJobRoom" },
 ]
 
-# For per-app resources (D1, KV, Vectorize, R2, Queues), set the id field to
-# "auto" — DeepSpace provisions and tears down with the deploy. Example:
+# For per-app resources (D1, KV, Vectorize, R2, Queues, AI Search), set the id
+# field to "auto" — DeepSpace provisions and tears down with the deploy.
+# Example:
 #
 # [[d1_databases]]
 # binding = "MY_DB"
 # database_name = "my-app-db"
 # database_id = "auto"
+#
+# One managed knowledge base per app — upload documents, then search them with
+# `knowledge(env)` from deepspace/worker. The instance is never exposed on env;
+# the binding name is only the provisioning key:
+#
+# [[ai_search]]
+# binding = "KNOWLEDGE"
+# instance_name = "auto"
 #
 # Full reference (all binding types + companion fields):
 #   https://docs.deep.space

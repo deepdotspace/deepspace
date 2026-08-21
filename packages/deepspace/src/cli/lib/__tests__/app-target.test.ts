@@ -159,6 +159,85 @@ describe('named-environment app targets', () => {
   })
 })
 
+describe('"which app?" — one failure per state', () => {
+  const validId = 'app_01ARZ3NDEKTSV4RRFFQ69G5FAV'
+
+  async function inDir<T>(wranglerToml: string | null, run: () => Promise<T> | T): Promise<T> {
+    const originalCwd = process.cwd()
+    const dir = mkdtempSync(join(tmpdir(), 'deepspace-app-target-state-'))
+    if (wranglerToml !== null) writeFileSync(join(dir, 'wrangler.toml'), wranglerToml)
+    process.chdir(dir)
+    try {
+      return await run()
+    } finally {
+      process.chdir(originalCwd)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('outside any app: not_in_app_repo, naming the missing wrangler.toml and --app', async () => {
+    await inDir(null, () => {
+      let thrown: unknown
+      try {
+        assertAppTargetResolvable(undefined)
+      } catch (e) {
+        thrown = e
+      }
+      expect(thrown).toMatchObject({ code: 'not_in_app_repo' })
+      expect((thrown as Error).message).toMatch(/No wrangler.toml at/)
+      expect((thrown as Error).message).toMatch(/--app/)
+    })
+  })
+
+  it('inside an app with no id yet: app_not_initialized with the executable `app init` action (exit-2 tier)', async () => {
+    await inDir('name = "my-app"\n[vars]\nDEEPSPACE_APP_ID = "__APP_ID__"\n', () => {
+      let thrown: unknown
+      try {
+        assertAppTargetResolvable(undefined)
+      } catch (e) {
+        thrown = e
+      }
+      expect(thrown).toMatchObject({
+        code: 'app_not_initialized',
+        actionRequired: true,
+        action: { cwd: process.cwd(), argv: ['deepspace', 'app', 'init'] },
+      })
+    })
+    // A missing [vars] block is the same state.
+    await inDir('name = "my-app"\n', () => {
+      expect(thrownCode(() => assertAppTargetResolvable(undefined))).toBe('app_not_initialized')
+    })
+  })
+
+  it('inside an app with a MALFORMED id: invalid_app_id naming the value, never "no app id"', async () => {
+    await inDir('name = "my-app"\n[vars]\nDEEPSPACE_APP_ID = "not-an-app-id"\n', async () => {
+      let thrown: unknown
+      try {
+        assertAppTargetResolvable(undefined)
+      } catch (e) {
+        thrown = e
+      }
+      expect(thrown).toMatchObject({ code: 'invalid_app_id' })
+      const message = (thrown as Error).message
+      expect(message).toContain('"not-an-app-id"')
+      expect(message).toMatch(/server-minted/)
+      // No `app init` action: that is what mints a fresh id over the top of
+      // this one and orphans the app the directory belonged to.
+      expect((thrown as { action?: unknown }).action).toBeUndefined()
+      await expect(resolveAppTarget('https://deploy.test', 'token', undefined)).rejects.toMatchObject({
+        code: 'invalid_app_id',
+      })
+    })
+  })
+
+  it('a valid id resolves', async () => {
+    await inDir(`name = "my-app"\n[vars]\nDEEPSPACE_APP_ID = "${validId}"\n`, async () => {
+      expect(() => assertAppTargetResolvable(undefined)).not.toThrow()
+      await expect(resolveAppTarget('https://deploy.test', 'token', undefined)).resolves.toBe(validId)
+    })
+  })
+})
+
 describe('matchAppSelector', () => {
   const apps = [
     { appId: 'app_00000000000000000000000001', name: 'coolapp' },

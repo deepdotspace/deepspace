@@ -16,6 +16,7 @@ import { findAppDir } from '../lib/app-context'
 import { noWranglerConfigMessage } from '../lib/wrangler-env'
 import { resolveAppTarget, assertAppTargetResolvable } from '../lib/app-target'
 import {
+  assertNoOperationInProgress,
   assertSyncableRepo,
   checkoutHead,
   currentBranch,
@@ -171,6 +172,7 @@ export default defineDeepspaceCommand({
         throw new Refusal(`--branch "${b}" is not a valid git branch name.`, 'invalid_branch')
     }
     assertSyncableRepo(appDir)
+    assertNoOperationInProgress(appDir)
     const branch = branchArg?.trim() || currentBranch(appDir)
     if (!branch)
       throw new Refusal(

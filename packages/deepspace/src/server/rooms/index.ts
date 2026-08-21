@@ -3,7 +3,7 @@ export { RecordRoom, type RecordRoomConfig } from './record-room'
 export { YjsRoom } from './yjs-room'
 export { CanvasRoom, type CanvasShape, type Viewport } from './canvas-room'
 export { PresenceRoom, type PresencePeer } from './presence-room'
-export { CronRoom, type CronRoomConfig, type CronExecution } from './cron-room'
+export { CronRoom, armCronRoom, type CronRoomConfig, type CronExecution } from './cron-room'
 export { type CronTask } from './cron-schedule'
 export {
   JobRoom,

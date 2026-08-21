@@ -32,7 +32,7 @@ import {
   readRecord,
   type RecordContext,
 } from './records'
-import { getUser, getAllUsers, registerUser } from './users'
+import { getUser, getAllUsers, registerUser, rosterForCaller } from './users'
 import {
   getOrCreateYjsDoc,
   unloadYjsDocIfUnused,
@@ -187,19 +187,14 @@ async function executeTool(
       if (!resolved.ok) return { success: false, error: resolved.error }
       // A `where` key that names no field is refused, not dropped: dropped, it
       // returned the whole readable collection as if filtered (the same class
-      // `records.deleteWhere` refuses). Schemaless system collections have no
-      // filterable fields, so a `where` on them is refused the same way.
-      const where = params.where as Record<string, unknown> | undefined
-      if (where && typeof where === 'object' && Object.keys(where).length > 0) {
-        if (!resolved.schema) {
-          return {
-            success: false,
-            error: `records.query: collection "${collection}" has no schema, so it has no filterable fields — query it without \`where\``,
-          }
-        }
-        const refusal = refuseUnknownWhere(collection, resolved.schema, where)
+      // `records.deleteWhere` refuses). `refuseUnknownWhere` is the one place
+      // that decides what a `where` may be — shape included.
+      if (params.where !== undefined) {
+        const refusal = refuseUnknownWhere(collection, resolved.schema, params.where)
         if (refusal) return refusal
       }
+      // Validated above: a plain object of field=value pairs, or absent.
+      const where = params.where as Record<string, unknown> | undefined
       // No default `limit` here: this dispatch is the SDK's general record-read
       // path (chat history, cron, app `actions.query`), which must return every
       // row. The assistant's page-size default is applied upstream in the AI
@@ -322,8 +317,18 @@ async function executeTool(
       return { success: true, data: { user } }
     }
 
+    // The same roster the socket's `user.list` returns, for the same caller.
+    // Reading the users table directly here handed any member every peer's
+    // email regardless of the room's users policy, while their own socket
+    // roster and `useQuery('users')` obeyed it.
+    //
+    // An app action (`X-App-Action`) is the app's own server-side code, which
+    // is already the trust boundary and reads every other collection RBAC-off;
+    // it keeps the full rows.
     case 'user.list': {
-      const users = getAllUsers(ctx.sql, ctx.schemaRegistry)
+      const users = skipUserRbac
+        ? getAllUsers(ctx.sql, ctx.schemaRegistry)
+        : rosterForCaller(ctx, userId, userRole)
       return { success: true, data: { users } }
     }
 

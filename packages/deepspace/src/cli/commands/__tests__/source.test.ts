@@ -59,21 +59,21 @@ async function runSourceJson(provider: 'github' | 'deepspace') {
   }
 }
 
-function arrangeGitHubClaim(oid: string | null) {
+function arrangeGitHubClaim() {
   vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
   vi.spyOn(appTarget, 'resolveAppTarget').mockResolvedValue(APP_ID)
   vi.spyOn(sourceApi, 'getAppSource').mockResolvedValue({
     appId: APP_ID,
     source: null,
     revision: 0,
-    registered: false,
+    registered: true,
   })
   vi.spyOn(sourceControl, 'selectGitHubRemote').mockReturnValue({
     name: 'origin',
     repository: 'deepspacerepos/source-test',
     url: 'git@github.com:deepspacerepos/source-test.git',
   })
-  vi.spyOn(sourceControl, 'remoteBranchOid').mockReturnValue(oid)
+  return vi.spyOn(sourceControl, 'remotePublicRefs').mockReturnValue([])
 }
 
 function arrangeDeepSpaceTransfer(activeWorkspaces: number, oid: string) {
@@ -103,32 +103,13 @@ function arrangeDeepSpaceTransfer(activeWorkspaces: number, oid: string) {
 }
 
 describe('app source GitHub ownership', () => {
-  it('returns the exact manual push and does not claim source when HEAD is unpublished', async () => {
+  it('claims GitHub without DeepSpace sync, clean-worktree, or published-HEAD gates', async () => {
     const made = makeRepo()
     repo = made.dir
+    writeFileSync(join(repo, 'landing-page.txt'), 'uncommitted deploy bytes\n')
+    writeFileSync(join(repo, '.git', 'shallow'), `${made.oid}\n`)
     vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
-    arrangeGitHubClaim(null)
-    const setSource = vi.spyOn(sourceApi, 'setAppSource')
-
-    const { output, exits } = await runSourceJson('github')
-    expect(output).toMatchObject({
-      ok: false,
-      code: 'github_push_required',
-      actionRequired: true,
-      repository: 'deepspacerepos/source-test',
-      branch: 'main',
-      oid: made.oid,
-      action: { cwd: repo, argv: ['git', 'push', 'origin', 'main'] },
-    })
-    expect(setSource).not.toHaveBeenCalled()
-    expect(exits).toEqual([2])
-  })
-
-  it('claims GitHub only after read-only verification finds exact remote HEAD', async () => {
-    const made = makeRepo()
-    repo = made.dir
-    vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
-    arrangeGitHubClaim(made.oid)
+    const verifyRemote = arrangeGitHubClaim()
     const setSource = vi.spyOn(sourceApi, 'setAppSource').mockResolvedValue({
       appId: APP_ID,
       source: { provider: 'github', repository: 'deepspacerepos/source-test' },
@@ -140,10 +121,66 @@ describe('app source GitHub ownership', () => {
       source: { provider: 'github', repository: 'deepspacerepos/source-test' },
       expectedRevision: 0,
     })
+    expect(verifyRemote).toHaveBeenCalledWith(repo, 'origin')
     expect(output).toMatchObject({
       ok: true,
       source: { provider: 'github', repository: 'deepspacerepos/source-test' },
       revision: 1,
+    })
+    expect(exits).toEqual([0])
+  })
+
+  it('does not persist an initial GitHub source when the selected remote is unreachable', async () => {
+    const made = makeRepo()
+    repo = made.dir
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
+    arrangeGitHubClaim().mockImplementation(() => {
+      throw new gitProcess.GitError('git ls-remote exited 128: repository not found')
+    })
+    const setSource = vi.spyOn(sourceApi, 'setAppSource')
+
+    const { output, exits } = await runSourceJson('github')
+
+    expect(output).toMatchObject({ ok: false, code: 'git_error' })
+    expect(setSource).not.toHaveBeenCalled()
+    expect(exits).toEqual([1])
+  })
+
+  it('changes GitHub repositories after one read-only reachability check', async () => {
+    const made = makeRepo()
+    repo = made.dir
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    vi.spyOn(appTarget, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    vi.spyOn(sourceApi, 'getAppSource').mockResolvedValue({
+      appId: APP_ID,
+      source: { provider: 'github', repository: 'deepspacerepos/old-source' },
+      revision: 3,
+      registered: true,
+    })
+    vi.spyOn(sourceControl, 'selectGitHubRemote').mockReturnValue({
+      name: 'origin',
+      repository: 'deepspacerepos/new-source',
+      url: 'git@github.com:deepspacerepos/new-source.git',
+    })
+    const verifyRemote = vi.spyOn(sourceControl, 'remotePublicRefs').mockReturnValue([])
+    const setSource = vi.spyOn(sourceApi, 'setAppSource').mockResolvedValue({
+      appId: APP_ID,
+      source: { provider: 'github', repository: 'deepspacerepos/new-source' },
+      revision: 4,
+    })
+
+    const { output, exits } = await runSourceJson('github')
+
+    expect(verifyRemote).toHaveBeenCalledWith(repo, 'origin')
+    expect(setSource).toHaveBeenCalledWith(expect.any(String), 'token', APP_ID, {
+      source: { provider: 'github', repository: 'deepspacerepos/new-source' },
+      expectedRevision: 3,
+    })
+    expect(output).toMatchObject({
+      ok: true,
+      source: { provider: 'github', repository: 'deepspacerepos/new-source' },
+      revision: 4,
     })
     expect(exits).toEqual([0])
   })
@@ -163,9 +200,10 @@ describe('app source GitHub ownership', () => {
     expect(exits).toEqual([1])
   })
 
-  it('flips DeepSpace to GitHub only after the full public ref set is verified', async () => {
+  it('flips DeepSpace to GitHub with local edits after the full public ref set is verified', async () => {
     const made = makeRepo()
     repo = made.dir
+    writeFileSync(join(repo, 'app.txt'), 'dirty transfer\n')
     execFileSync('git', ['update-ref', 'refs/deepspace/source-transfer/heads/main', made.oid], {
       cwd: repo,
     })
@@ -198,9 +236,14 @@ describe('app source GitHub ownership', () => {
     expect(exits).toEqual([0])
   })
 
-  it('mirrors and prunes GitHub public refs before flipping back to DeepSpace', async () => {
+  it('mirrors GitHub refs from a detached checkout with unpublished local work', async () => {
     const made = makeRepo()
     repo = made.dir
+    writeFileSync(join(repo, 'app.txt'), 'unpublished local commit\n')
+    execFileSync('git', ['add', 'app.txt'], { cwd: repo })
+    execFileSync('git', ['commit', '-q', '-m', 'local only'], { cwd: repo })
+    execFileSync('git', ['checkout', '--detach', '-q'], { cwd: repo })
+    writeFileSync(join(repo, 'app.txt'), 'dirty transfer\n')
     execFileSync('git', ['update-ref', 'refs/deepspace/source-transfer/heads/main', made.oid], {
       cwd: repo,
     })
@@ -218,11 +261,12 @@ describe('app source GitHub ownership', () => {
       repository: 'deepspacerepos/source-test',
       url: 'git@github.com:deepspacerepos/source-test.git',
     })
-    vi.spyOn(sourceControl, 'remoteBranchOid').mockReturnValue(made.oid)
     vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
       latestRelease: vi.fn(async () => ({ release: null })),
     } as never)
-    vi.spyOn(vcRemote, 'ensureSpaceRemote').mockReturnValue('https://deploy.test/repo')
+    vi.spyOn(sourceControl, 'remotePublicRefs').mockReturnValue([
+      { name: 'refs/heads/main', oid: made.oid },
+    ])
     const originalRunGit = gitProcess.runGit
     const pushCalls: string[][] = []
     vi.spyOn(gitProcess, 'runGit').mockImplementation((cwd, args, options) => {
@@ -247,7 +291,7 @@ describe('app source GitHub ownership', () => {
         '--force',
         '--atomic',
         '--prune',
-        'space',
+        vcRemote.repoUrl(APP_ID, vcRemote.deployBaseUrl()),
         'refs/deepspace/source-transfer/heads/*:refs/heads/*',
         'refs/deepspace/source-transfer/tags/*:refs/tags/*',
       ],
@@ -255,13 +299,168 @@ describe('app source GitHub ownership', () => {
     expect(setSource).toHaveBeenCalledWith(expect.any(String), 'token', APP_ID, {
       source: { provider: 'deepspace' },
       expectedRevision: 3,
-      branch: 'main',
-      commitOid: made.oid,
       refs: [{ name: 'refs/heads/main', oid: made.oid }],
       expectedReleaseId: null,
       expectedReleaseCommitOid: null,
     })
-    expect(output).toMatchObject({ ok: true, revision: 4 })
+    expect(output).toMatchObject({ ok: true, revision: 4, spaceRemote: 'present' })
     expect(exits).toEqual([0])
+  })
+
+  it('refuses to flip when GitHub advances during the import push', async () => {
+    const made = makeRepo()
+    repo = made.dir
+    execFileSync('git', ['update-ref', 'refs/deepspace/source-transfer/heads/main', made.oid], {
+      cwd: repo,
+    })
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    vi.spyOn(appTarget, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    vi.spyOn(sourceApi, 'getAppSource').mockResolvedValue({
+      appId: APP_ID,
+      source: { provider: 'github', repository: 'deepspacerepos/source-test' },
+      revision: 3,
+      registered: true,
+    })
+    vi.spyOn(sourceControl, 'selectGitHubRemote').mockReturnValue({
+      name: 'origin',
+      repository: 'deepspacerepos/source-test',
+      url: 'git@github.com:deepspacerepos/source-test.git',
+    })
+    vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
+      latestRelease: vi.fn(async () => ({ release: null })),
+    } as never)
+    const originalRunGit = gitProcess.runGit
+    vi.spyOn(gitProcess, 'runGit').mockImplementation((cwd, args, options) => {
+      if (args[0] === 'fetch' || args[0] === 'push') {
+        return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), status: 0 }
+      }
+      return originalRunGit(cwd, args, options)
+    })
+    vi.spyOn(sourceControl, 'remotePublicRefs').mockReturnValue([
+      { name: 'refs/heads/main', oid: 'b'.repeat(40) },
+    ])
+    const setSource = vi.spyOn(sourceApi, 'setAppSource')
+
+    const { output, exits } = await runSourceJson('deepspace')
+
+    expect(output).toMatchObject({ ok: false, code: 'source_changed' })
+    expect(setSource).not.toHaveBeenCalled()
+    expect(exits).toEqual([1])
+  })
+})
+
+describe('the `space` remote follows source authority', () => {
+  it('removes a pre-existing `space` remote when authority moves to GitHub', async () => {
+    // 0.23.2 stopped `pull` from CREATING the remote, but one written before
+    // the flip (an unclaimed-app pull, or a DeepSpace-era `deepspace clone`)
+    // survived it — and `git push space` through it still reached the deploy
+    // worker's bodiless 422, walking around `push`'s own preflight.
+    const made = makeRepo()
+    repo = made.dir
+    execFileSync('git', ['remote', 'add', 'space', 'https://deploy.test/api/repo/' + APP_ID], {
+      cwd: repo,
+    })
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
+    arrangeGitHubClaim()
+    vi.spyOn(sourceApi, 'setAppSource').mockResolvedValue({
+      appId: APP_ID,
+      source: { provider: 'github', repository: 'deepspacerepos/source-test' },
+      revision: 1,
+    })
+
+    const { output, exits } = await runSourceJson('github')
+
+    expect(output).toMatchObject({ ok: true, spaceRemote: 'removed' })
+    expect(
+      execFileSync('git', ['remote'], { cwd: repo, encoding: 'utf-8' }).split('\n'),
+    ).not.toContain('space')
+    expect(exits).toEqual([0])
+  })
+
+  it('reports `absent` when a GitHub flip finds no `space` remote to remove', async () => {
+    const made = makeRepo()
+    repo = made.dir
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
+    arrangeGitHubClaim()
+    vi.spyOn(sourceApi, 'setAppSource').mockResolvedValue({
+      appId: APP_ID,
+      source: { provider: 'github', repository: 'deepspacerepos/source-test' },
+      revision: 1,
+    })
+
+    const { output, exits } = await runSourceJson('github')
+
+    expect(output).toMatchObject({ ok: true, spaceRemote: 'absent' })
+    expect(exits).toEqual([0])
+  })
+
+  it('keeps the successful authority result when local remote cleanup fails', async () => {
+    const made = makeRepo()
+    repo = made.dir
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
+    arrangeGitHubClaim()
+    vi.spyOn(sourceApi, 'setAppSource').mockResolvedValue({
+      appId: APP_ID,
+      source: { provider: 'github', repository: 'deepspacerepos/source-test' },
+      revision: 1,
+    })
+    vi.spyOn(vcRemote, 'removeSpaceRemote').mockImplementation(() => {
+      throw new gitProcess.GitError('git remote remove space exited 1: config is locked')
+    })
+
+    const { output, exits } = await runSourceJson('github')
+
+    expect(output).toMatchObject({
+      ok: true,
+      source: { provider: 'github', repository: 'deepspacerepos/source-test' },
+      revision: 1,
+      spaceRemote: 'repair_required',
+      localReconciliation: {
+        required: true,
+        code: 'git_remote_reconciliation_failed',
+      },
+    })
+    expect(exits).toEqual([0])
+  })
+
+  it('does not add the DeepSpace remote when the source flip fails', async () => {
+    const made = makeRepo()
+    repo = made.dir
+    execFileSync('git', ['update-ref', 'refs/deepspace/source-transfer/heads/main', made.oid], {
+      cwd: repo,
+    })
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    vi.spyOn(appTarget, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    vi.spyOn(sourceApi, 'getAppSource').mockResolvedValue({
+      appId: APP_ID,
+      source: { provider: 'github', repository: 'deepspacerepos/source-test' },
+      revision: 3,
+      registered: true,
+    })
+    vi.spyOn(sourceControl, 'selectGitHubRemote').mockReturnValue({
+      name: 'origin',
+      repository: 'deepspacerepos/source-test',
+      url: 'git@github.com:deepspacerepos/source-test.git',
+    })
+    vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
+      latestRelease: vi.fn(async () => ({ release: null })),
+    } as never)
+    const originalRunGit = gitProcess.runGit
+    vi.spyOn(gitProcess, 'runGit').mockImplementation((cwd, args, options) => {
+      if (args[0] === 'fetch' || args[0] === 'push') {
+        return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), status: 0 }
+      }
+      return originalRunGit(cwd, args, options)
+    })
+    const ensureRemote = vi.spyOn(vcRemote, 'ensureSpaceRemote')
+    vi.spyOn(sourceApi, 'setAppSource').mockRejectedValue(new Error('revision conflict'))
+
+    const { output, exits } = await runSourceJson('deepspace')
+
+    expect(output).toMatchObject({ ok: false })
+    expect(ensureRemote).not.toHaveBeenCalled()
+    expect(exits).toEqual([1])
   })
 })

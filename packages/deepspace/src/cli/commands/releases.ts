@@ -13,7 +13,7 @@ import * as p from '@clack/prompts'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { resolveAppTarget, assertAppTargetResolvable, parseWranglerEnvArg } from '../lib/app-target'
-import { repoApi } from '../lib/repo-api'
+import { releaseSourceLabel, repoApi } from '../lib/repo-api'
 import { actorLabels } from '../lib/actor-labels'
 import { parseLimitArg } from '../lib/citty-args'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
@@ -69,7 +69,7 @@ export default defineDeepspaceCommand({
         // names an email is readable, a row that names Kr7JX… is not.
         const actors = await actorLabels(token, appId)
         for (const r of releases) {
-          const source = r.commitOid ? `commit ${r.commitOid.slice(0, 10)}` : '(no source recorded)'
+          const source = releaseSourceLabel(r)
           const rollback = r.rollbackAvailable ? 'rollback available' : 'rollback unavailable'
           console.log(
             `#${r.seq}  ${r.id}  ${r.kind.padEnd(8)}  ${r.createdAt}  ${actors.get(r.actor) ?? r.actor}  ${source}  ${rollback}`,

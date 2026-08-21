@@ -113,3 +113,20 @@ function getOnFreshConnection(url: URL, timeoutMs = 5_000): Promise<string | nul
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
+
+/**
+ * Wake the app's worker once the edge serves the release. The serving probe
+ * reads a static asset (the release stamp), which never enters the worker —
+ * and a Durable Object exists only once something fetches it, so a deployed
+ * cron schedule would otherwise wait for its first visitor. `/api/auth/ok`
+ * is the template's own health route (its tests use it), worker-first by
+ * routing. Best effort: if this request fails, the first real request arms
+ * the schedule instead, exactly as before.
+ */
+export async function wakeWorker(url: string): Promise<void> {
+  try {
+    await fetch(new URL('/api/auth/ok', url), { signal: AbortSignal.timeout(5_000) })
+  } catch {
+    // Nothing to report: the wake is a courtesy, not a contract.
+  }
+}

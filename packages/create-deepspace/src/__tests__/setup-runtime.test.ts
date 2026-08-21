@@ -14,8 +14,31 @@ import {
   agentSkillInstallerCommand,
   assertClaudeSkillLinkAvailable,
   ensureClaudeSkillLink,
+  installedSdkVersion,
   nextStepsLines,
 } from '../setup-runtime'
+
+/**
+ * The scaffold names the SDK version it installed, read off disk rather than
+ * assumed from the creator's own version — a `--local` tarball or an overridden
+ * resolution is exactly the case where the two differ.
+ */
+describe('installedSdkVersion', () => {
+  it('reads the version out of the installed package', () => {
+    const appDir = mkdtempSync(join(tmpdir(), 'create-deepspace-sdk-version-'))
+    try {
+      expect(installedSdkVersion(appDir)).toBeNull()
+      mkdirSync(join(appDir, 'node_modules', 'deepspace'), { recursive: true })
+      writeFileSync(
+        join(appDir, 'node_modules', 'deepspace', 'package.json'),
+        JSON.stringify({ name: 'deepspace', version: '0.23.2' }),
+      )
+      expect(installedSdkVersion(appDir)).toBe('0.23.2')
+    } finally {
+      rmSync(appDir, { recursive: true, force: true })
+    }
+  })
+})
 
 describe('nextStepsLines', () => {
   const project = { appName: 'demo', isInPlace: false }

@@ -98,6 +98,26 @@ function remoteRefs(branch: string, oid: string, head = 'main'): RemoteRefsResul
   }
 }
 
+/** A repo stopped inside an unresolved merge: `MERGE_HEAD` present, one path conflicted. */
+function conflictRepo(): string {
+  const dir = makeRepo()
+  git(dir, ['switch', '-q', '-c', 'sideA'])
+  writeFileSync(join(dir, 'C.md'), 'A\n')
+  git(dir, ['add', '-A'])
+  git(dir, ['commit', '-q', '-m', 'A'])
+  git(dir, ['switch', '-q', 'main'])
+  git(dir, ['switch', '-q', '-c', 'sideB'])
+  writeFileSync(join(dir, 'C.md'), 'B\n')
+  git(dir, ['add', '-A'])
+  git(dir, ['commit', '-q', '-m', 'B'])
+  try {
+    execFileSync('git', ['merge', 'sideA'], { cwd: dir, stdio: 'pipe' })
+  } catch {
+    // The conflict is the point.
+  }
+  return dir
+}
+
 async function runPullJson(args: Record<string, unknown>, appDir = process.cwd()) {
   const logs: string[] = []
   vi.spyOn(appContext, 'findAppDir').mockReturnValue(appDir)
@@ -407,5 +427,19 @@ describe('pull recovery target and checkout', () => {
     expect(output).not.toHaveProperty('actionRequired')
     expect(output.error).toContain('is dirty')
     expect(exits).toEqual([1])
+  })
+})
+
+describe('pull mid-merge', () => {
+  it('refuses merge_in_progress — including `--branch main` from a conflicted other branch', async () => {
+    repo = conflictRepo()
+    const ensure = vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    for (const args of [{}, { branch: 'main' }]) {
+      const { output, exits } = await runPullJson(args, repo)
+      expect(output).toMatchObject({ ok: false, code: 'merge_in_progress' })
+      expect(exits).toEqual([1])
+    }
+    expect(ensure).not.toHaveBeenCalled()
+    expect(execFileSync('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd: repo, encoding: 'utf-8' })).toMatch(/^[0-9a-f]{40}/)
   })
 })

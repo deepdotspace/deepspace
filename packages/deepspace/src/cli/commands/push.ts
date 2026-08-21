@@ -20,12 +20,13 @@
 import * as p from '@clack/prompts'
 import { ensureToken } from '../auth'
 import { ApiError } from '../lib/api'
-import { getAppSource } from '../lib/source-api'
+import { getAppSource, githubSourceRefusal } from '../lib/source-api'
 import { findAppDir } from '../lib/app-context'
 import { readAppId } from '../lib/app-identity'
 import { hasWranglerConfig, noWranglerConfigMessage } from '../lib/wrangler-env'
 import { resolveAppTarget, warnIfPhantomApp, assertAppTargetResolvable } from '../lib/app-target'
 import {
+  assertNoOperationInProgress,
   assertSyncableRepo,
   currentBranch,
   isAncestor,
@@ -146,6 +147,7 @@ export default defineDeepspaceCommand({
       if (!appDir) throw new Refusal(noWranglerConfigMessage(process.cwd()), 'not_in_app_repo')
 
       assertSyncableRepo(appDir)
+      assertNoOperationInProgress(appDir)
       // An explicitly-blank --branch must not silently fall back to the current
       // branch (an unset `--branch "$VAR"` would push the wrong ref).
       if (branchArg !== undefined) {
@@ -192,7 +194,18 @@ export default defineDeepspaceCommand({
                 'initial commit (committing first would put the unregistered placeholder in history).'
             : `Branch "${branch}" has no commits yet — commit first, then push.`,
           'no_commits',
-          uninitialized ? { action: { cwd: appDir, argv: ['deepspace', 'app', 'init'] } } : {},
+          // Same remedy as deploy's `app_not_initialized`, so it gets the same
+          // tier: an executable `app init` is the action-required contract
+          // (`actionRequired: true`, exit 2). Without the flag an agent that
+          // branches on the documented signal silently dropped this case while
+          // handling deploy's identical one. "Commit first" ships no action and
+          // stays an ordinary exit 1 — there is no one command to run.
+          uninitialized
+            ? {
+                action: { cwd: appDir, argv: ['deepspace', 'app', 'init'] },
+                actionRequired: true,
+              }
+            : {},
         )
       }
 
@@ -297,12 +310,7 @@ export default defineDeepspaceCommand({
       // could only ever reconstruct a repository-less sentence from the bare
       // status. This is the best-informed site, and it refuses before git runs.
       if (sourceState.source?.provider === 'github') {
-        throw new Refusal(
-          `This app uses GitHub source (${sourceState.source.repository}). Manage commits with ` +
-            'normal Git/GitHub; `deepspace deploy` ships the local working tree without changing Git.',
-          'source_managed_by_github',
-          { extra: { appId, repository: sourceState.source.repository } },
-        )
+        throw githubSourceRefusal(appId, sourceState.source.repository)
       }
       const pullRecoveryCwd = selectedBranchCheckout(appDir, branch) ?? appDir
       ensureSpaceRemote(appDir, appId)

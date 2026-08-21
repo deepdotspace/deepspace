@@ -162,7 +162,13 @@ export const BUILT_IN_TOOLS: ToolSchema[] = [
   },
   {
     name: 'user.list',
-    description: 'List all users in this room',
+    description:
+      'List the users this caller may see, exactly as the room\'s roster does: an admin gets whole rows ' +
+      '(including email and any app-defined column) through the users collection\'s read policy; everyone ' +
+      'else gets the public identity projection (id, name, imageUrl, role, lastSeenAt) of the roster the ' +
+      'users policy allows them — nothing if that policy denies reads, and only their own scope if the ' +
+      'schema sets `roster: \'read-policy\'`. A caller with no identity gets an empty list. ' +
+      'Called from a server action (X-App-Action), it returns whole rows like the other RBAC-off tools.',
     params: {}
   },
   // Yjs tools (collaborative document access)

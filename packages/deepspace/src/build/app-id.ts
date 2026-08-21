@@ -106,3 +106,32 @@ export function resolveAppId({ appDir, env = process.env }: ResolveAppIdOptions)
 export function appIdDefine(options: ResolveAppIdOptions): Record<string, string> {
   return { __DEEPSPACE_APP_ID__: JSON.stringify(resolveAppId(options)) }
 }
+
+/**
+ * How an app scaffolded before the build-injected id adopts it: one edit per
+ * file, stated ONCE so the deploy refusals (`app_id_env_mismatch`,
+ * `app_id_define_unsubstituted`) and `app update` guidance cannot disagree
+ * about what it is. Keyed by the file each manual edit lands in.
+ */
+export const APP_ID_ADOPTION_EDITS = {
+  'vite.config.ts':
+    `import { deepspaceBuild } from 'deepspace/build' and add\n` +
+    `    deepspaceBuild({ appDir: fileURLToPath(new URL('.', import.meta.url)) }) to plugins`,
+  'vitest.config.ts': `import { appIdDefine } and set define: appIdDefine({ appDir })`,
+  'src/constants.ts':
+    `declare const __DEEPSPACE_APP_ID__: string; export it as APP_ID\n` +
+    `    (drop the frozen literal)`,
+} as const
+
+/** The three edits are one change; this is the sentence that says so. */
+export const APP_ID_ADOPTION_TOGETHER =
+  `Apply all three together: src/constants.ts on its own builds clean and then throws ` +
+  `in the browser. A newly scaffolded app already has this.`
+
+/** The full retrofit as the deploy refusals print it. */
+export const APP_ID_ADOPTION_STEPS =
+  `Point the client at the build-injected id — the SDK's \`deepspace/build\` supplies it:\n` +
+  Object.entries(APP_ID_ADOPTION_EDITS)
+    .map(([file, edit]) => `  • ${file}: ${edit}\n`)
+    .join('') +
+  APP_ID_ADOPTION_TOGETHER

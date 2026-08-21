@@ -35,9 +35,24 @@ export interface AppLogEvent {
    * branch on `source === 'client'`, never on a truthy/other check.
    */
   source?: 'client'
-  /** Invocation outcome (`ok`, `exception`, `exceededCpu`, …) when present. */
+  /**
+   * The runtime's verdict on the invocation (`ok`, `exception`, `exceededCpu`,
+   * `canceled`, …) — present on `request` and other invocation-summary events
+   * only, never on a `log` line. It says whether the Worker RETURNED, not
+   * whether the app succeeded: an action that throws inside the app's own
+   * error handling and answers 500 is `ok` here. Triage failures on
+   * `request.status`, `level`, and `eventType === 'exception'` (an exception
+   * that escaped the Worker), not on `outcome !== 'ok'` alone.
+   */
   outcome?: string
   request?: { method: string; path: string; status?: number }
+  /**
+   * The exception that ESCAPED the Worker (`eventType: 'exception'`), or a
+   * browser-reported one (`source: 'client'`). An error the app catches and
+   * `console.error`s is a plain `log` line — and the Workers runtime renders a
+   * logged Error object as its stack frames without the message, so log the
+   * message text yourself (`console.error(\`… ${err.message}\`, err.stack)`).
+   */
   exception?: { name: string; message: string; stack?: string }
 }
 

@@ -18,22 +18,50 @@
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { hasWranglerConfig, readAppIdVar, readWranglerConfig } from './wrangler-env'
+import {
+  hasWranglerConfig,
+  readAppIdVar,
+  readWranglerConfig,
+  WranglerConfigError,
+} from './wrangler-env'
 
 // Single source: the shared registry client owns the id shape. Import-then-
 // re-export (not a bare `export from`) because readAppId uses it locally too.
 import { APP_ID_RE } from '../../server/utils/registry-client'
 export { APP_ID_RE }
 
-/** Read DEEPSPACE_APP_ID for the given wrangler env (top-level when omitted).
- *  `null` when there is no app here or the section carries no valid id; a
- *  wrangler.toml that exists but is unreadable, malformed, or gives one id to
- *  two sections throws `WranglerConfigError` from the shared reader. */
+/** The value a fresh scaffold carries until `deepspace app init` registers it. */
+export const APP_ID_PLACEHOLDER = '__APP_ID__'
+
+/**
+ * Read DEEPSPACE_APP_ID for the given wrangler env (top-level when omitted).
+ *
+ * `null` means ABSENT: no app here, no `DEEPSPACE_APP_ID` in the section, or
+ * the scaffold's `__APP_ID__` placeholder — the states `deepspace app init`
+ * heals. A value that is present but is not an app id THROWS (`invalid_app_id`)
+ * instead: ids are server-minted, so a malformed one was hand-edited or
+ * corrupted, and reporting it as "no id" sent every command's recovery
+ * (`app init`) off to mint a fresh id over the top of it — orphaning the app
+ * the directory belonged to and burning a quota slot. A wrangler.toml that is
+ * unreadable, malformed TOML, or gives one id to two sections throws
+ * `WranglerConfigError` from the shared reader in the same way.
+ */
 export function readAppId(cwd: string = process.cwd(), wranglerEnv?: string): string | null {
   const appDir = resolve(cwd)
   if (!hasWranglerConfig(appDir)) return null
   const id = readAppIdVar(readWranglerConfig(appDir), wranglerEnv)
-  return typeof id === 'string' && APP_ID_RE.test(id) ? id : null
+  if (id === undefined || id === APP_ID_PLACEHOLDER) return null
+  if (typeof id === 'string' && APP_ID_RE.test(id)) return id
+  const section = wranglerEnv ? `[env.${wranglerEnv}.vars]` : '[vars]'
+  throw new WranglerConfigError(
+    join(appDir, 'wrangler.toml'),
+    `wrangler.toml: ${section} DEEPSPACE_APP_ID = ${JSON.stringify(id)} is not an app id ` +
+      `(expected app_ followed by 26 characters). Ids are server-minted at \`deepspace app init\` ` +
+      `and never hand-written — restore the id this app was registered under (\`deepspace app list\` ` +
+      `shows your apps' ids), or run \`deepspace app init --new-id\` to register this directory as a ` +
+      `separate app (new data, secrets, and registration).`,
+    'invalid_app_id',
+  )
 }
 
 /**
@@ -51,12 +79,16 @@ export function writeAppId(
   if (!existsSync(wranglerPath)) {
     throw new Error(`No wrangler.toml in ${resolve(cwd)}`)
   }
-  const existing = readAppId(cwd, opts.wranglerEnv)
-  if (existing && !opts.force) {
+  // `force` (--new-id) replaces whatever is there — a registered id or a
+  // malformed value alike; only an unforced write reads what it would overwrite.
+  if (!opts.force) {
+    const existing = readAppId(cwd, opts.wranglerEnv)
     if (existing === appId) return
-    throw new Error(
-      `wrangler.toml already carries ${existing}. The app id is immutable — use --new-id only to fork this repo as a separate app.`,
-    )
+    if (existing) {
+      throw new Error(
+        `wrangler.toml already carries ${existing}. The app id is immutable — use --new-id only to fork this repo as a separate app.`,
+      )
+    }
   }
 
   let src = readFileSync(wranglerPath, 'utf-8')

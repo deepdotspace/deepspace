@@ -14,7 +14,7 @@ import { createSpinner } from '../lib/spinner'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { resolveAppSelector } from '../lib/app-target'
-import { hasWranglerConfig } from '../lib/wrangler-env'
+import { hasWranglerConfig, readWranglerConfig } from '../lib/wrangler-env'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
@@ -63,12 +63,18 @@ export default defineDeepspaceCommand({
     // resolveAppSelector's own InputErrors already carry codes (app_not_found,
     // invalid_app, invalid_response); let them escape rather than re-wrap.
     let appId: string | undefined
+    // What the operator recognizes: the name they typed, else the wrangler
+    // `name`, else the id.
+    let label: string | undefined
     const positional =
       typeof args.name === 'string' && args.name.trim() ? args.name.trim() : undefined
     if (positional) {
       appId = await resolveAppSelector(DEPLOY_URL, token, positional)
+      label = positional
     } else if (hasWranglerConfig(process.cwd())) {
       appId = readAppId(process.cwd(), envName) ?? undefined
+      const config = readWranglerConfig(process.cwd())
+      label = (envName ? config.env?.[envName]?.name : undefined) ?? config.name
     }
     if (!appId) {
       throw new Refusal(
@@ -81,17 +87,21 @@ export default defineDeepspaceCommand({
     // before the live URL goes dark. Scripts, agents and `--json` callers are
     // never prompted (a paused piped stdin would hang the exit; the command
     // is their consent) — matching how the rest of the CLI treats consent.
+    // The sentence must match what undeploy does (docs: app-identity guide):
+    // the worker and its Durable Objects go, so the app's data goes with
+    // them; secrets and the registration stay.
+    const target = label && label !== appId ? `${label} (${appId})` : appId
     if (!args.json && !args.yes && process.stdin.isTTY) {
-      p.intro(`Undeploying ${appId}`)
+      p.intro(`Undeploying ${target}`)
       const confirmed = await p.confirm({
-        message: `Take ${appId} offline now? Its URL stops serving immediately; data, secrets, and the registration stay (the name is reserved for you for 30 days).`,
+        message: `Take ${target} offline now? Its URL stops serving immediately and its data — records, messages, canvas state, cron history — is destroyed with the worker. Secrets and the registration stay (the name is reserved for you for 30 days).`,
         initialValue: false,
       })
       if (p.isCancel(confirmed) || !confirmed) {
         throw new Refusal('Undeploy cancelled.', 'undeploy_declined')
       }
     } else if (!args.json) {
-      p.intro(`Undeploying ${appId}`)
+      p.intro(`Undeploying ${target}`)
     }
     const s = args.json ? null : createSpinner()
     s?.start('Removing...')
@@ -127,15 +137,20 @@ export default defineDeepspaceCommand({
       )
     }
 
-    s?.stop('Removed')
     const hosts = body.releasedHosts ?? []
+    // The registry released no route: nothing was serving — the app was
+    // already undeployed (or never deployed). Say so, the way `auth logout`
+    // reports `alreadyLoggedOut`, instead of claiming a takedown that did not
+    // happen; the exit code alone could not tell success from no-op.
+    const alreadyUndeployed = hosts.length === 0
+    s?.stop(alreadyUndeployed ? 'Nothing to remove' : 'Removed')
     if (!args.json) {
       p.outro(
-        hosts.length
-          ? `${hosts.join(', ')} taken down. The app keeps its id — redeploy to bring it back.`
-          : `App ${appId} taken down.`,
+        alreadyUndeployed
+          ? `${target} was already offline — no URL was serving, so nothing changed. The app keeps its id; redeploy to bring it back.`
+          : `${hosts.join(', ')} taken down. The app keeps its id — redeploy to bring it back.`,
       )
     }
-    return { data: { appId, releasedHosts: hosts } }
+    return { data: { appId, releasedHosts: hosts, alreadyUndeployed } }
   },
 })

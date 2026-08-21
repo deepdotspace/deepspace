@@ -2,8 +2,9 @@
 
 import { APP_ID_RE, readAppId } from './app-identity'
 import { apiFetch } from './api'
-import { InputError } from './cli-errors'
+import { InputError, Refusal } from './cli-errors'
 import { findAppDir } from './app-context'
+import { noWranglerConfigMessage } from './wrangler-env'
 import { resolveAppIdByName } from './repo-api'
 import { STRICT_APP_ID_RE } from '../../server/utils/registry-client'
 import { APP_NAME_RULES } from '../../server/rooms/app-name'
@@ -155,7 +156,7 @@ export async function resolveAppTarget(
   const id = appDir ? readAppId(appDir, wranglerEnv) : null
   // `assertAppTargetResolvable` already produced the precise failure. Keeping
   // this guard makes the filesystem race explicit without weakening the type.
-  if (!id) throw appTargetMissingError(wranglerEnv)
+  if (!id) throw appTargetMissingError(appDir, wranglerEnv)
   return id
 }
 
@@ -201,16 +202,37 @@ export function parseWranglerEnvArg(raw: string | undefined): {
   return { wranglerEnv }
 }
 
-function appTargetMissingError(wranglerEnv: string | undefined): InputError {
+/**
+ * The one "which app?" failure for every command that reads the local app.
+ * Three states, three codes — an agent branching on `code` must be able to
+ * tell them apart, and each has a different remedy:
+ *   - not in an app directory at all → `not_in_app_repo` (cd or scaffold, or --app)
+ *   - in an app whose wrangler.toml has no id yet → `app_not_initialized`, with
+ *     the one command that heals it as the action (same tier as deploy's)
+ *   - an --env slot with no id of its own → `no_app_id_for_env`
+ * A malformed id never reaches here: `readAppId` refuses it (`invalid_app_id`).
+ */
+export function appTargetMissingError(
+  appDir: string | null,
+  wranglerEnv: string | undefined,
+): InputError | Refusal {
+  if (!appDir) {
+    return new InputError(
+      `${noWranglerConfigMessage(process.cwd())} Or pass --app <id or name> to target an app from anywhere.`,
+      'not_in_app_repo',
+    )
+  }
   if (wranglerEnv) {
     return new InputError(
-      `No app id for env "${wranglerEnv}" — wrangler.toml has no [env.${wranglerEnv}] block with its own DEEPSPACE_APP_ID.`,
+      `No app id for env "${wranglerEnv}" — wrangler.toml has no [env.${wranglerEnv}] block with its own DEEPSPACE_APP_ID. ` +
+        `Each environment is its own app: run \`deepspace app init --env ${wranglerEnv}\` to register one, or omit --env for the top-level app.`,
       'no_app_id_for_env',
     )
   }
-  return new InputError(
-    'No app id. Run from an app directory whose wrangler.toml carries DEEPSPACE_APP_ID, or pass --app <id or name>.',
-    'not_in_app_repo',
+  return new Refusal(
+    `No app id in ${appDir}/wrangler.toml. Run \`deepspace app init\` to register this app, then retry (or pass --app <id or name>).`,
+    'app_not_initialized',
+    { action: { cwd: appDir, argv: ['deepspace', 'app', 'init'] }, actionRequired: true },
   )
 }
 
@@ -232,7 +254,7 @@ export function assertAppTargetResolvable(
   if (app !== undefined) return
 
   const appDir = findAppDir()
-  if (!appDir || !readAppId(appDir, wranglerEnv)) throw appTargetMissingError(wranglerEnv)
+  if (!appDir || !readAppId(appDir, wranglerEnv)) throw appTargetMissingError(appDir, wranglerEnv)
 }
 
 /** Warn before an explicit unknown id can be registered by push or deploy. */

@@ -1,5 +1,8 @@
 [
   "2026-08-canonical-app-identity-wire",
   "2026-08-worker-owned-not-found",
-  "2026-08-secure-room-boundaries"
+  "2026-08-secure-room-boundaries",
+  "2026-08-action-tools-delete-where",
+  "2026-08-build-injected-app-id",
+  "2026-08-action-routes-bearer-guard"
 ]

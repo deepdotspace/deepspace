@@ -148,6 +148,23 @@ describe('bindingManifestFromOutputConfig', () => {
     ).toEqual([{ type: 'vectorize', name: 'VECTORS', index_name: 'candidates' }])
   })
 
+  it('extracts one managed AI Search binding', () => {
+    expect(
+      bindingManifestFromOutputConfig({
+        ai_search_namespaces: [],
+        ai_search: [{ binding: 'KNOWLEDGE', instance_name: 'auto' }],
+      }),
+    ).toEqual([{ type: 'ai_search', name: 'KNOWLEDGE', instance_name: 'auto' }])
+  })
+
+  it('refuses namespace-level AI Search access', () => {
+    expect(() =>
+      bindingManifestFromOutputConfig({
+        ai_search_namespaces: [{ binding: 'SEARCH_NAMESPACE', namespace: 'shared' }],
+      }),
+    ).toThrow(/ai_search_namespaces is not supported/)
+  })
+
   it('extracts r2 + kv + d1 + queue + browser + AE + hyperdrive together with full shapes', () => {
     const out = bindingManifestFromOutputConfig({
       r2_buckets: [{ binding: 'FILES', bucket_name: 'b' }],
@@ -360,5 +377,31 @@ describe('AUTO_PROVISION_SENTINEL + validator', () => {
       }),
     ).toBe(true)
     expect(isAutoProvision({ type: 'r2_bucket', name: 'F', bucket_name: 'auto' })).toBe(true)
+    expect(isAutoProvision({ type: 'ai_search', name: 'KNOWLEDGE', instance_name: 'auto' })).toBe(
+      true,
+    )
+  })
+
+  it('accepts exactly one auto-managed AI Search binding', () => {
+    expect(
+      validateBindingManifest([{ type: 'ai_search', name: 'KNOWLEDGE', instance_name: 'auto' }])
+        .valid,
+    ).toBe(true)
+  })
+
+  it('rejects caller-selected and multiple AI Search instances', () => {
+    const selected = validateBindingManifest([
+      { type: 'ai_search', name: 'KNOWLEDGE', instance_name: 'another-app' },
+    ])
+    expect(selected.valid).toBe(false)
+    if (!selected.valid)
+      expect(selected.errors[0].reason).toMatch(/must set instance_name = "auto"/)
+
+    const multiple = validateBindingManifest([
+      { type: 'ai_search', name: 'KNOWLEDGE', instance_name: 'auto' },
+      { type: 'ai_search', name: 'SECOND', instance_name: 'auto' },
+    ])
+    expect(multiple.valid).toBe(false)
+    if (!multiple.valid) expect(multiple.errors.at(-1)?.reason).toMatch(/Only one ai_search/)
   })
 })

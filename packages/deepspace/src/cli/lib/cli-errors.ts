@@ -12,7 +12,7 @@
 
 import type { CommandDef } from 'citty'
 import { stopActiveSpinner } from './spinner'
-import { withSlug } from './output'
+import { executableAction, printAction, withSlug, type CliAction } from './output'
 import { ApiError } from './api'
 
 /**
@@ -31,6 +31,89 @@ export class InputError extends Error {
   ) {
     super(message)
   }
+}
+
+/**
+ * A refusal the caller can act on: carries the machine slug that appears both
+ * in `--json` as `code` and at the end of the human line, plus at most one
+ * executable action that resolves it.
+ *
+ * `actionRequired` marks the third exit state — the operation did what it
+ * could and a LOCAL step remains (merge the tip, commit the tree). It exits 2,
+ * which is the difference between "this failed" and "your turn", and is the
+ * single most useful signal an agent gets from this CLI.
+ *
+ * Lives here (not in the command runtime) so that {@link errorCode} and
+ * {@link renderCliError} — the path a plain citty command's escaped error
+ * takes — read it exactly like the runtime does. Before, a Refusal thrown by a
+ * shared helper (`ensureToken`, the app-target resolver) lost its code and its
+ * action the moment it crossed into a command that renders through here.
+ */
+export class Refusal extends Error {
+  readonly code: string
+  readonly action: CliAction | undefined
+  readonly actionRequired: boolean
+  readonly extra: Record<string, unknown>
+
+  constructor(
+    message: string,
+    code: string,
+    opts: { action?: CliAction; actionRequired?: boolean; extra?: Record<string, unknown> } = {},
+  ) {
+    super(message)
+    this.name = 'Refusal'
+    this.code = code
+    // Actions built as object literals get the same executable-argv treatment
+    // `cliAction` applies, so no refusal can hand out a bare `deepspace` that
+    // its own `cwd` cannot run.
+    this.action = opts.action ? executableAction(opts.action) : undefined
+    this.actionRequired = opts.actionRequired ?? false
+    this.extra = opts.extra ?? {}
+  }
+}
+
+/**
+ * Strip the envelope's reserved keys from a payload before it is spread into
+ * the envelope. `data`/`extra` can carry raw server JSON (`integrations
+ * invoke` forwards the response body verbatim), and a payload containing
+ * `ok`, `action`, or `actionRequired` must not be able to flip a failure to
+ * success or hand an agent an unvalidated recovery action.
+ */
+export function withoutReservedKeys(payload: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(payload).filter(
+      ([key]) =>
+        !['ok', 'code', 'error', 'action', 'actionRequired', 'next', 'nextAction', 'resume'].includes(
+          key,
+        ),
+    ),
+  )
+}
+
+/**
+ * The one `--json` failure envelope: `{ ok:false, code?, actionRequired?, error,
+ * action?, …details }`. Details are a Refusal's `extra`, else the structured
+ * fields a server refusal carried (an {@link ApiError}'s `details`) — without
+ * them the envelope kept only the sentence, and an agent had to read numbers
+ * like remaining storage back out of prose the API had already quantified.
+ */
+export function failureEnvelope(err: unknown): Record<string, unknown> {
+  const refusal = err instanceof Refusal ? err : null
+  const code = errorCode(err)
+  const details = refusal?.extra ?? (err instanceof ApiError ? err.details : undefined) ?? {}
+  return {
+    ok: false,
+    ...(code ? { code } : {}),
+    ...(refusal?.actionRequired ? { actionRequired: true } : {}),
+    error: formatCliError(err),
+    ...(refusal?.action ? { action: refusal.action } : {}),
+    ...withoutReservedKeys(details),
+  }
+}
+
+/** 2 = "it worked, but a local step remains"; 1 = it failed. */
+export function failureExitCode(err: unknown): 1 | 2 {
+  return err instanceof Refusal && err.actionRequired ? 2 : 1
 }
 
 /**
@@ -56,7 +139,7 @@ export class CliExit extends Error {
  * `ENOENT` fs error must not leak into the machine contract as a `code`).
  */
 export function errorCode(err: unknown): string | undefined {
-  if (err instanceof ApiError || err instanceof InputError) return err.code
+  if (err instanceof ApiError || err instanceof InputError || err instanceof Refusal) return err.code
   // GitError (raw git operation/transport failure) — duck-typed by `name` to
   // avoid a cli-errors↔git import cycle. Give it a generic `git_error` (or its
   // own slug, if set) so a --json caller can branch on "a git op failed"
@@ -141,20 +224,21 @@ export function renderCliError(err: unknown): void {
   // nothing to parse. Commands that catch their own errors are unaffected;
   // this is the fallback for the ~15 that don't.
   if (process.argv.includes('--json')) {
-    console.log(JSON.stringify({ ok: false, ...(slug ? { code: slug } : {}), error: message }))
-    process.exitCode = 1
+    console.log(JSON.stringify(failureEnvelope(err)))
+    process.exitCode = failureExitCode(err)
     return
   }
   // Human path: the last line carries the machine slug, per the output
-  // contract (lib/output.ts).
+  // contract (lib/output.ts), and a Refusal's one executable follow-up.
   console.error(slug ? withSlug(message, slug) : message)
+  if (err instanceof Refusal && err.action) printAction(err.action)
   if (process.env.DEBUG) {
-    // ApiError/secretsApi keep the internal REST path off the message; show it here.
+    // ApiError keeps the internal REST path off the message; show it here.
     const { apiPath, status } = err as { apiPath?: string; status?: number }
     if (apiPath) console.error(`\nAPI ${apiPath}${status ? ` (${status})` : ''}`)
     if (err instanceof Error && err.stack) console.error('\n' + err.stack)
   }
-  process.exitCode = 1
+  process.exitCode = failureExitCode(err)
 }
 
 type RunFn = NonNullable<CommandDef['run']>

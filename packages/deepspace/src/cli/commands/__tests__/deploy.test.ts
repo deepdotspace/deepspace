@@ -6,14 +6,17 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import * as p from '@clack/prompts'
 import {
   blankSelectorRefusal,
+  forbiddenDeployMessage,
   ownerJwtMissingRefusal,
   pendingRename,
   renamePromptMessage,
   renameRefusalMessage,
   staleBaseGuardFields,
 } from '../deploy'
+import { acquireDeployLock, deployLockPath } from '../deploy/lock'
 import { MAX_DEPLOY_ASSET_FILE_BYTES } from '../../../shared/app-files'
 import {
   collectAssets,
@@ -27,9 +30,11 @@ import {
 } from '../deploy/build'
 import {
   assetManifest,
+  deployBuiltBundle,
   formatDeployWorkerError,
   isDeployServiceResourceLimit,
   postWithRetry,
+  STALE_DISPLAY_NAME_LOCATIONS,
   uploadDeployAssets,
 } from '../deploy/request'
 import {
@@ -42,13 +47,35 @@ import {
   syncDeployRepository,
   workspaceDeployLineage,
 } from '../deploy/repository'
-import type { DeployOutput } from '../deploy/output'
+import { deployFailureEnvelope, type DeployOutput } from '../deploy/output'
 import type { PushRefResult } from '../../lib/vc-push'
 import { GitError } from '../../lib/git/process'
 import { loadDeploySecrets, prepareDeploySecrets } from '../deploy/secrets'
 import { writeDevVars } from '../../lib/dev-vars'
 
 vi.mock('../../lib/dev-vars', () => ({ writeDevVars: vi.fn(async () => undefined) }))
+
+describe('deploy failure JSON envelope', () => {
+  it('keeps refusal details from overriding reserved control fields', () => {
+    expect(
+      deployFailureEnvelope('locked', 'deploy_in_progress', {
+        actionRequired: true,
+        extra: {
+          ok: true,
+          code: 'wrong',
+          action: { cwd: '/tmp', argv: ['evil'] },
+          lockPath: '/app/.deepspace/deploy.lock',
+        },
+      }),
+    ).toEqual({
+      ok: false,
+      code: 'deploy_in_progress',
+      error: 'locked',
+      actionRequired: true,
+      lockPath: '/app/.deepspace/deploy.lock',
+    })
+  })
+})
 
 describe('extractRunWorkerFirst', () => {
   it('forwards documentation routes only when the app declares them', () => {
@@ -164,6 +191,183 @@ describe('pre-build deploy refusals', () => {
       expect(message).toContain('deepspace app init --new-id')
     }
     expect(renameRefusalMessage(rename)).toContain('--rename')
+  })
+
+  it('tells BOTH surfaces that the display name does not travel, naming every stale location', () => {
+    // The non-TTY refusal is the only rename sentence an unattended agent ever
+    // reads; it used to be the one that omitted this. Both must name both
+    // files, or a renamed app keeps serving its old name in its own nav and in
+    // the worker's env.APP_NAME with nothing saying so.
+    const rename = { fromHost: 'old-name.app.space', toHost: 'new-name.app.space' }
+    expect(STALE_DISPLAY_NAME_LOCATIONS).toEqual([
+      'src/constants.ts:APP_NAME',
+      'wrangler.toml:[vars].APP_NAME',
+    ])
+    for (const message of [renameRefusalMessage(rename), renamePromptMessage(rename)]) {
+      expect(message).toContain('display name')
+      for (const location of STALE_DISPLAY_NAME_LOCATIONS) expect(message).toContain(location)
+    }
+  })
+})
+
+describe('on-behalf deploy attribution', () => {
+  const SILENT_SPINNER = { start: vi.fn(), stop: vi.fn(), message: vi.fn() }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('says nothing about attribution: the ledger records the COLLABORATOR as actor', async () => {
+    // The deploy worker keeps `identity.userId` as the caller and overrides
+    // only `ownerUserId`, so the release's `actor` — and `status`'s `byYou` —
+    // are the collaborator's. The old warning claimed the opposite.
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {})
+    vi.spyOn(p.log, 'info').mockImplementation(() => {})
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith('/api/health')) {
+          return Response.json({ capabilities: { assetTransport: 'content-addressed-v1' } })
+        }
+        if (String(url).endsWith('/asset-plan')) return Response.json({ missing: [] })
+        return Response.json({
+          success: true,
+          url: 'https://app.example.invalid',
+          releaseId: 'rel_1',
+          onBehalfOfOwner: 'usr_owner',
+        })
+      }),
+    )
+
+    const body = await deployBuiltBundle({
+      deployUrl: 'https://deploy.test',
+      appDir: '/tmp',
+      appId: 'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
+      appName: 'example',
+      token: 'tok',
+      rename: false,
+      claimReleased: false,
+      ignoreStale: false,
+      bundle: {
+        assets: [],
+        assetConfig: {},
+        workerJs: 'export default {}',
+        appMigrations: [],
+        doManifest: undefined,
+        customBindings: [],
+        extraRoutes: [],
+        compatibilityDate: null,
+        compatibilityFlags: [],
+        notFoundHandling: null,
+      },
+      secrets: { authoritative: false, values: {}, names: [] },
+      repository: {
+        commitOid: null,
+        recoverable: false,
+        deployKey: 'key',
+        source: null,
+        sourceRevision: 0,
+        baseReleaseId: null,
+        branch: 'main',
+        dirty: false,
+      },
+      output: {
+        json: true,
+        nonInteractive: true,
+        emitJson: vi.fn(),
+        showIntro: vi.fn(),
+        die(message, code): never {
+          throw new Error(`${code}: ${message}`)
+        },
+      },
+      spinner: SILENT_SPINNER,
+    })
+
+    expect(body.success).toBe(true)
+    for (const call of warn.mock.calls) {
+      expect(String(call[0])).not.toContain('attributed')
+    }
+  })
+
+  it('release_in_progress is the "retry" tier: advice sentence, exit 2, the same deploy as the action', async () => {
+    vi.spyOn(p.log, 'info').mockImplementation(() => {})
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith('/api/health')) {
+          return Response.json({ capabilities: { assetTransport: 'content-addressed-v1' } })
+        }
+        if (String(url).endsWith('/asset-plan')) return Response.json({ missing: [] })
+        return Response.json(
+          { error: 'Another deploy is already prepared for this app', code: 'release_in_progress' },
+          { status: 409 },
+        )
+      }),
+    )
+    const emitJson = vi.fn()
+    const argv = process.argv
+    process.argv = [argv[0], argv[1], 'deploy', '--json']
+    let thrown: unknown
+    try {
+      await deployBuiltBundle({
+        deployUrl: 'https://deploy.test',
+        appDir: '/tmp',
+        appId: 'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
+        appName: 'example',
+        token: 'tok',
+        rename: false,
+        claimReleased: false,
+        ignoreStale: false,
+        bundle: {
+          assets: [],
+          assetConfig: {},
+          workerJs: 'export default {}',
+          appMigrations: [],
+          doManifest: undefined,
+          customBindings: [],
+          extraRoutes: [],
+          compatibilityDate: null,
+          compatibilityFlags: [],
+          notFoundHandling: null,
+        },
+        secrets: { authoritative: false, values: {}, names: [] },
+        repository: {
+          commitOid: null,
+          recoverable: false,
+          deployKey: 'key',
+          source: null,
+          sourceRevision: 0,
+          baseReleaseId: null,
+          branch: 'main',
+          dirty: false,
+        },
+        output: {
+          json: true,
+          nonInteractive: true,
+          emitJson,
+          showIntro: vi.fn(),
+          die(message, code): never {
+            throw new Error(`${code}: ${message}`)
+          },
+        },
+        spinner: SILENT_SPINNER,
+      })
+    } catch (e) {
+      thrown = e
+    } finally {
+      process.argv = argv
+    }
+    expect(thrown).toMatchObject({ exitCode: 2 })
+    expect(emitJson).toHaveBeenCalledTimes(1)
+    const envelope = emitJson.mock.calls[0][0] as Record<string, unknown>
+    expect(envelope).toMatchObject({
+      ok: false,
+      code: 'release_in_progress',
+      actionRequired: true,
+      action: { cwd: process.cwd(), argv: ['deepspace', 'deploy', '--json'] },
+    })
+    expect(String(envelope.error)).toMatch(/Wait a moment and run the same deploy again/)
   })
 })
 
@@ -1005,6 +1209,32 @@ describe('preflightDeployRepository', () => {
     }
   })
 
+  it('refuses merge_in_progress (not dirty_worktree) inside an unresolved merge — the same guard push/pull use', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ds-deploy-preflight-'))
+    const run = (args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' })
+    try {
+      run(['init', '-q', '-b', 'main'])
+      run(['config', 'user.email', 'test@example.com'])
+      run(['config', 'user.name', 'Test'])
+      writeFileSync(join(repo, 'C.md'), 'base\n')
+      run(['add', '-A'])
+      run(['commit', '-q', '-m', 'base'])
+      run(['switch', '-q', '-c', 'sideA'])
+      writeFileSync(join(repo, 'C.md'), 'A\n')
+      run(['commit', '-q', '-am', 'A'])
+      run(['switch', '-q', 'main'])
+      writeFileSync(join(repo, 'C.md'), 'B\n')
+      run(['commit', '-q', '-am', 'B'])
+      expect(() => run(['merge', 'sideA'])).toThrow()
+
+      expect(
+        preflightDeployRepository({ appDir: repo, push: true, source: { provider: 'deepspace' } }),
+      ).toMatchObject({ code: 'merge_in_progress' })
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
   it('does not impose commit-first rules on GitHub source or --no-push', () => {
     const missingRepo = join(tmpdir(), 'not-a-repository')
     expect(
@@ -1065,6 +1295,9 @@ describe('manual GitHub deploy', () => {
         source: { provider: 'github', repository: 'deepdotspace/example' },
         sourceRevision: 3,
         baseReleaseId: null,
+        // With no commit recorded, these two ARE the record of what shipped.
+        branch: 'main',
+        dirty: true,
       })
       expect(shouldSendLineage(result.commitOid, result.recoverable)).toBe(false)
       expect(
@@ -1077,6 +1310,63 @@ describe('manual GitHub deploy', () => {
       rmSync(repo, { recursive: true, force: true })
     }
   })
+
+  it('warns on the human stream that an uncommitted tree is going live untraceably', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ds-deploy-github-dirty-'))
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {})
+    const info = vi.spyOn(p.log, 'info').mockImplementation(() => {})
+    try {
+      execFileSync('git', ['init', '-q', '-b', 'feature/probe'], { cwd: repo })
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo })
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo })
+      writeFileSync(join(repo, 'app.txt'), 'committed\n')
+      execFileSync('git', ['add', 'app.txt'], { cwd: repo })
+      execFileSync('git', ['commit', '-q', '-m', 'source'], { cwd: repo })
+      writeFileSync(join(repo, 'app.txt'), 'uncommitted\n')
+
+      const githubDeploy = (): Promise<unknown> =>
+        syncDeployRepository({
+          deployUrl: 'https://deploy.test',
+          appDir: repo,
+          appId: 'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
+          token: 'test-token',
+          push: true,
+          ignoreStale: false,
+          output: {
+            json: true,
+            nonInteractive: true,
+            emitJson: vi.fn(),
+            showIntro: vi.fn(),
+            die(message, code): never {
+              throw new Error(`${code}: ${message}`)
+            },
+          },
+          sourceState: {
+            appId: 'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
+            source: { provider: 'github', repository: 'deepdotspace/example' },
+            revision: 1,
+            registered: true,
+          },
+        })
+
+      await githubDeploy()
+      const dirtyWarning = warn.mock.calls.map((call) => String(call[0])).join('\n')
+      expect(dirtyWarning).toContain('feature/probe')
+      expect(dirtyWarning).toContain('uncommitted changes')
+
+      // Clean tree: still says which branch shipped — the release records no
+      // commit either way — but nothing to warn about.
+      execFileSync('git', ['checkout', '-q', '--', 'app.txt'], { cwd: repo })
+      warn.mockClear()
+      const clean = (await githubDeploy()) as { branch: string; dirty: boolean }
+      expect(clean).toMatchObject({ branch: 'feature/probe', dirty: false })
+      expect(warn).not.toHaveBeenCalled()
+      expect(info.mock.calls.map((call) => String(call[0])).join('\n')).toContain('feature/probe')
+    } finally {
+      vi.restoreAllMocks()
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('detachedHeadRefusal', () => {
@@ -1086,5 +1376,101 @@ describe('detachedHeadRefusal', () => {
     expect(refusal.error).toContain('detached')
     expect(refusal.error).toContain('branch')
     expect(refusal.error).toContain('--no-push')
+  })
+})
+
+describe("forbiddenDeployMessage (deploy `forbidden` = another account's app)", () => {
+  const token = (payload: object) =>
+    `x.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.y`
+
+  it('names the signed-in account and the app, and the two recoveries', () => {
+    const msg = forbiddenDeployMessage(
+      'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
+      token({ email: 'me@x.test' }),
+    )
+    expect(msg).toContain('app_01ABCDEFGHJKMNPQRSTVWXYZ00 belongs to another account')
+    expect(msg).toContain('signed in as me@x.test')
+    expect(msg).toContain('deepspace app collaborators add me@x.test')
+    expect(msg).toContain('deepspace app init --new-id')
+  })
+
+  it('degrades to the user id, then to a generic account, without throwing', () => {
+    expect(forbiddenDeployMessage('app_x', token({ sub: 'user_1' }))).toContain(
+      'signed in as user_1',
+    )
+    expect(forbiddenDeployMessage('app_x', 'garbage')).toContain('signed in as this account')
+  })
+})
+
+describe('deploy lock (one deploy per checkout)', () => {
+  let dir: string
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'ds-deploy-lock-'))
+  })
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('takes, then releases, the lock; a second run while held refuses deploy_in_progress naming the holder', () => {
+    const release = acquireDeployLock(dir)
+    const record = JSON.parse(readFileSync(deployLockPath(dir), 'utf-8')) as {
+      pid: number
+      startedAt: string
+      token: string
+    }
+    expect(record.pid).toBe(process.pid)
+    expect(record.token).toEqual(expect.any(String))
+    let thrown: unknown
+    try {
+      acquireDeployLock(dir)
+    } catch (e) {
+      thrown = e
+    }
+    expect(thrown).toMatchObject({
+      code: 'deploy_in_progress',
+      extra: { lockPath: deployLockPath(dir), holder: { pid: process.pid } },
+    })
+    expect((thrown as Error).message).toContain(`pid ${process.pid}`)
+    expect((thrown as Error).message).toContain(record.startedAt)
+    release()
+    expect(() => readFileSync(deployLockPath(dir))).toThrow()
+  })
+
+  it('refuses a stale-looking lock instead of racing another acquirer to reclaim it', () => {
+    mkdirSync(join(dir, '.deepspace'), { recursive: true })
+    const stale = { pid: 2 ** 22 + 1, startedAt: 'yesterday', token: 'stale-token' }
+    writeFileSync(deployLockPath(dir), JSON.stringify(stale))
+
+    expect(() => acquireDeployLock(dir)).toThrow(
+      expect.objectContaining({ code: 'deploy_in_progress' }),
+    )
+    expect(JSON.parse(readFileSync(deployLockPath(dir), 'utf-8'))).toEqual(stale)
+  })
+
+  it('an old release callback cannot delete a replacement holder', () => {
+    const releaseOld = acquireDeployLock(dir)
+    rmSync(deployLockPath(dir))
+    const releaseCurrent = acquireDeployLock(dir)
+    const current = readFileSync(deployLockPath(dir), 'utf-8')
+
+    releaseOld()
+    expect(readFileSync(deployLockPath(dir), 'utf-8')).toBe(current)
+
+    releaseCurrent()
+    expect(() => readFileSync(deployLockPath(dir))).toThrow()
+  })
+
+  it('refuses an unreadable lock file rather than guessing it stale', () => {
+    mkdirSync(join(dir, '.deepspace'), { recursive: true })
+    writeFileSync(deployLockPath(dir), 'not json')
+    let thrown: unknown
+    try {
+      acquireDeployLock(dir)
+    } catch (e) {
+      thrown = e
+    }
+    expect(thrown).toMatchObject({ code: 'deploy_in_progress' })
+    expect((thrown as Error).message).toContain('unreadable')
+    expect(readFileSync(deployLockPath(dir), 'utf-8')).toBe('not json')
   })
 })

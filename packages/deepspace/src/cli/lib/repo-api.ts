@@ -13,6 +13,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { apiFetch, ApiError } from './api'
+import { githubSourceRefusal } from './source-api'
 
 export interface RemoteRef {
   name: string
@@ -39,6 +40,25 @@ export interface RemoteRelease {
   createdAt: string
   source: { provider: 'deepspace' } | { provider: 'github'; repository: string } | null
   sourceRevision: number | null
+}
+
+/**
+ * How a release names the code it shipped, on the HUMAN surfaces —
+ * `releases`, `status`'s Live line, and `activity`. A GitHub-source release
+ * records no commit at all (deploy ships the working tree without touching
+ * Git), so those three each rendered `commitOid === null` as "no source
+ * recorded" / "unknown source" / "?" — directly contradicting the `source` the
+ * same release carries in `--json` and the `Source` line printed above it.
+ * One formatter so the three cannot disagree about one release again.
+ */
+export function releaseSourceLabel(release: {
+  commitOid: string | null
+  source: RemoteRelease['source']
+}): string {
+  if (release.commitOid) return `commit ${release.commitOid.slice(0, 10)}`
+  if (release.source?.provider === 'github') return `GitHub · ${release.source.repository}`
+  if (release.source?.provider === 'deepspace') return 'DeepSpace source, no commit recorded'
+  return 'no source recorded'
 }
 
 export interface RemoteWorkspace {
@@ -174,6 +194,13 @@ export function repoApi(deployUrl: string, token: string, appId: string) {
         return await getShape<RemoteRefsResult>('/refs', { refs: 'array', head: 'present' })
       } catch (err) {
         if (err instanceof ApiError && err.code === 'app_not_found') return null
+        // The cloud-repo read every source verb starts with, so this is where
+        // `pull`/`clone`/`workspace` all meet a GitHub-source app — translate
+        // once, into the same refusal `push` raises from its own /source read.
+        if (err instanceof ApiError && err.code === 'source_managed_by_github') {
+          const repository = err.details?.repository
+          if (typeof repository === 'string') throw githubSourceRefusal(appId, repository)
+        }
         throw err
       }
     },

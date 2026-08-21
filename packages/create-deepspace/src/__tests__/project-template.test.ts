@@ -2,12 +2,44 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { writeGitignoreIfMissing } from '../project-template'
+import { configurePackageJson, writeGitignoreIfMissing } from '../project-template'
 
 const tempDirs: string[] = []
 
 afterEach(() => {
   while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true })
+})
+
+describe('configurePackageJson', () => {
+  const noProgress = { start: () => {}, stop: () => {} }
+
+  /**
+   * `create-deepspace@X` scaffolds files generated for exactly X, so it must
+   * ask for exactly X. A caret let a pinned scaffolder install a newer SDK —
+   * scaffold and runtime disagreed on day one, and nothing said so.
+   */
+  it('pins the SDK to the creator version exactly, not to a caret range', () => {
+    const appDir = mkdtempSync(join(tmpdir(), 'create-deepspace-pkg-'))
+    tempDirs.push(appDir)
+    writeFileSync(
+      join(appDir, 'package.json'),
+      JSON.stringify({
+        name: '@deepspace/base',
+        version: '0.1.0',
+        files: ['dist'],
+        dependencies: { deepspace: 'workspace:*', react: '^19.0.0' },
+      }),
+    )
+
+    configurePackageJson(appDir, 'my-app', { name: 'starter', description: '' }, '0.23.2', undefined, noProgress)
+
+    expect(JSON.parse(readFileSync(join(appDir, 'package.json'), 'utf8'))).toMatchObject({
+      name: 'my-app',
+      version: '0.0.1',
+      private: true,
+      dependencies: { deepspace: '0.23.2', react: '^19.0.0' },
+    })
+  })
 })
 
 describe('writeGitignoreIfMissing', () => {

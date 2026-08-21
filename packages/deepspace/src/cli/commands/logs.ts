@@ -25,7 +25,9 @@ import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { apiFetch, ApiError } from '../lib/api'
 import { InputError } from '../lib/cli-errors'
-import { resolveAppTarget, assertAppTargetResolvable } from '../lib/app-target'
+import { resolveAppTarget, assertAppTargetResolvable, listApps } from '../lib/app-target'
+import { Refusal } from '../lib/command'
+import { findAppDir } from '../lib/app-context'
 // Whitelisted wire DTO + level set — shared with the platform reader and the
 // dashboard (packages/deepspace/src/shared/log-events.ts) so they can't drift.
 import { LOG_LEVELS, type AppLogEvent, type AppLogsResponse } from '../../shared/log-events'
@@ -277,6 +279,25 @@ export default defineCommand({
 
     const initialSince = args.since ? parseSince(args.since) : Date.now() - DEFAULT_WINDOW_MS
     const windowLabel = args.since?.trim() || '15m'
+
+    // An app that has never been deployed has no logs and never will until it
+    // is: "no logs in the last 15m" would be true and useless. The registry
+    // row (`deployedAt`) is the same fact `status` reports; an app the listing
+    // cannot see (an admin acting on another account's app) is not evidence
+    // of anything, so only a visible never-deployed row refuses.
+    const registryRow = (await listApps(DEPLOY_URL, token)).find((app) => app.appId === appId)
+    if (registryRow && registryRow.deployedAt === null) {
+      // The deploy is executable only from the app's own checkout — which is
+      // where we are exactly when the id came from the surrounding wrangler.toml.
+      const appDir = args.app === undefined ? findAppDir() : null
+      throw new Refusal(
+        `${appId} has never been deployed, so it has no logs. Deploy it first (\`deepspace deploy\`), then read its logs.`,
+        'app_not_deployed',
+        appDir
+          ? { action: { cwd: appDir, argv: ['deepspace', 'deploy', ...(envArg ? ['--env', envArg] : [])] } }
+          : {},
+      )
+    }
 
     // Server clamp; used as the follow-mode default so a burst between polls is
     // less likely to overflow one page (see the truncation note below).

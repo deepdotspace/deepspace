@@ -12,7 +12,7 @@
  *     roomId="app:my-app"
  *     schemas={appSchemas}
  *     sharedScopes={[
- *       { roomId: 'workspace:default', schemas: workspaceSchemas },
+ *       { roomId: 'dir:app_01ARZ3NDEKTSV4RRFFQ69G5FAV', schemas: DIRECTORY_SCHEMAS },
  *     ]}
  *   >
  *     <App />

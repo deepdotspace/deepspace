@@ -9,14 +9,22 @@
  * checks. The tools handed to an action (`createActionTools`) reach the record
  * room with `X-App-Action: 'true'`, which turns **per-record RBAC off**: the
  * `userId` they carry is the identity they act *as*, not a permission the room
- * enforces. `tools.query`/`tools.update`/`tools.remove` will therefore read and
- * write any collection, including other users' rows.
+ * enforces. `tools.query`/`tools.update`/`tools.remove`/`tools.deleteWhere`
+ * will therefore read and write any collection, including other users' rows.
  *
  * So an action that takes a record id from `params` and passes it to `tools.*`
  * has authorized nothing. Check ownership yourself — load the record and
  * compare it against `userId` before writing (`chat-history.ts`'s `getChat` is
  * the SDK's worked example) — or the action is an open door with a login page
  * in front of it.
+ *
+ * `tools.deleteWhere(collection, where, limit?)` is the batch delete behind
+ * cascades: it removes at most `limit` matching records (default 100, max 500)
+ * and answers `{ deleted }`, so a drain loop repeats the same call until
+ * `deleted` is below the limit. `where` must be non-empty and every key must
+ * name a real field, so it can never truncate a collection by accident — but
+ * with RBAC off it does not care who owns the rows, so scope `where` to the
+ * caller yourself.
  */
 
 import type { Hono } from 'hono'
@@ -40,6 +48,10 @@ export function registerActionRoutes(app: Hono<AppContext>, resolveAuth: Resolve
     const authHeader = c.req.header('Authorization') ?? ''
     const callerJwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
     if (!callerJwt) return c.json({ error: 'Unauthorized' }, 401)
+    // Who called: actions run RBAC-off and can bill the owner, and the
+    // platform's request log carries no user — this line is the attribution.
+    // The name is a decoded path segment, so it is quoted, never interpolated raw.
+    console.info(`[action] ${JSON.stringify(c.req.param('name'))} caller=${auth.userId}`)
     const name = c.req.param('name')
     const action = actions[name]
     if (!action) return c.json({ error: 'Action not found' }, 404)
@@ -98,6 +110,8 @@ function createActionTools(env: Env, userId: string, callerJwt: string): ActionT
     update: (collection, recordId, data) =>
       execTool('records.update', { collection, recordId, data }),
     remove: (collection, recordId) => execTool('records.delete', { collection, recordId }),
+    deleteWhere: (collection, where, limit) =>
+      execTool('records.deleteWhere', { collection, where, limit }),
     get: (collection, recordId) => execTool('records.get', { collection, recordId }),
     query: (collection, options) => execTool('records.query', { collection, ...options }),
     integration: callIntegration,

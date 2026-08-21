@@ -10,7 +10,7 @@
  */
 
 import { RESERVED_BINDING_NAMES } from '../../server/rooms/binding-manifest'
-import { ApiError } from './api'
+import { ApiError, apiFetch } from './api'
 
 /**
  * Names a user may not set as an app secret. `RESERVED_BINDING_NAMES` covers
@@ -98,31 +98,19 @@ export function defaultConfigNameForEnv(wranglerEnv?: string): string {
 
 // ── HTTP plumbing ────────────────────────────────────────────────────────────
 
-export async function secretsApi<T>(
+/** The secrets routes on the deploy worker, through the ONE authenticated
+ *  fetch every other platform call uses — so a transport failure is a coded
+ *  `network_error` naming the service, its URL and DEEPSPACE_DEPLOY_URL, a
+ *  server refusal keeps its `code`, and a rejected bearer gets the same
+ *  silent refresh-and-retry (a hand-rolled fetch here surfaced a bare
+ *  `fetch failed` with no code at all). */
+export function secretsApi<T>(
   deployUrl: string,
   token: string,
   path: string,
-  init: RequestInit = {},
+  init?: RequestInit,
 ): Promise<T> {
-  const res = await fetch(`${deployUrl}/api/secrets${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      ...(init.headers ?? {}),
-    },
-  })
-  const body = (await res.json().catch(() => ({}))) as T & { error?: string; code?: string }
-  if (!res.ok) {
-    // Surface the server's sentence, not the internal `/api/secrets/app_…/…`
-    // slug — that path is an implementation detail and reads like a bug to
-    // users. An `ApiError` (not a plain Error with ad-hoc fields) is what
-    // `errorCode` reads, so the server's machine code (e.g.
-    // not_app_owner_or_collaborator) reaches the renderer and the --json
-    // envelope; `apiPath` stays off the message (DEBUG-only rendering).
-    throw new ApiError(body.error ?? `Secrets request failed (${res.status})`, res.status, body.code, path)
-  }
-  return body
+  return apiFetch<T>(deployUrl, token, `/api/secrets${path}`, init)
 }
 
 export function listSecrets(

@@ -5,8 +5,12 @@
  * tests/e2e/tests/logs.spec.ts.
  */
 
-import { describe, expect, it } from 'vitest'
-import { parseSince, SeenEvents, formatEvent, followInitialLimit, nextPollSince } from '../logs'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import logs, { parseSince, SeenEvents, formatEvent, followInitialLimit, nextPollSince } from '../logs'
+import * as authModule from '../../auth'
+import * as appTargetModule from '../../lib/app-target'
+import * as appContext from '../../lib/app-context'
+import { renderCliError } from '../../lib/cli-errors'
 
 const NOW = new Date('2026-07-13T12:00:00.000Z').getTime()
 
@@ -191,5 +195,60 @@ describe('formatEvent (color off)', () => {
     )
     expect(line).toContain('at a (x:1:1)')
     expect(line).toContain('at b (y:2:2)')
+  })
+})
+
+describe('logs on a never-deployed app', () => {
+  const APP_ID = 'app_01JG8QK4M2N7P9RSTVWXYZ0123'
+  let argv: string[]
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    process.exitCode = undefined
+    process.argv = argv
+  })
+
+  async function run(args: Record<string, unknown>) {
+    argv = process.argv
+    process.argv = [...argv, '--json']
+    const lines: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const command = logs as unknown as { run: (ctx: { args: Record<string, unknown> }) => Promise<unknown> }
+    // A plain citty command: cli.ts wraps it so escaped errors reach the
+    // shared renderer — do the same here.
+    await command.run({ args: { json: true, ...args } }).catch(renderCliError)
+    return JSON.parse(lines[0]) as Record<string, unknown>
+  }
+
+  it('refuses app_not_deployed with a `deepspace deploy` action instead of "no logs in the last 15m"', async () => {
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('tok')
+    vi.spyOn(appTargetModule, 'assertAppTargetResolvable').mockImplementation(() => {})
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    vi.spyOn(appTargetModule, 'listApps').mockResolvedValue([
+      { appId: APP_ID, status: 'registered', createdAt: 'x', deployedAt: null, name: null, url: null },
+    ])
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue('/apps/demo')
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    expect(await run({})).toMatchObject({
+      ok: false,
+      code: 'app_not_deployed',
+      action: { cwd: '/apps/demo', argv: ['deepspace', 'deploy'] },
+    })
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(process.exitCode).toBe(1)
+  })
+
+  it('ships no action when the app came from --app (the deploy must run from its own checkout)', async () => {
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('tok')
+    vi.spyOn(appTargetModule, 'assertAppTargetResolvable').mockImplementation(() => {})
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    vi.spyOn(appTargetModule, 'listApps').mockResolvedValue([
+      { appId: APP_ID, status: 'registered', createdAt: 'x', deployedAt: null, name: null, url: null },
+    ])
+    const out = await run({ app: APP_ID })
+    expect(out).toMatchObject({ ok: false, code: 'app_not_deployed' })
+    expect(out.action).toBeUndefined()
   })
 })

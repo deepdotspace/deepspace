@@ -1,213 +1,210 @@
-import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
-import updateCommand, {
-  buildPreviewSecretsUpgradeInstruction,
-  pinSdkVersion,
-  usersSchemaVisibilityUpgradeInstruction,
-} from '../update'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import sdkPackage from '../../../../package.json'
+import updateCommand, {
+  gapIsTooWide,
+  parseVersion,
+  planDependencyGuidance,
+  readAppSdkSpec,
+} from '../update'
 import { APP_MIGRATION_DEFINITIONS } from '../update/app-migrations'
 
-describe('app update dependency pinning', () => {
-  it('pins an existing direct AI SDK dependency with deepspace', () => {
-    const appDir = mkdtempSync(join(tmpdir(), 'deepspace-update-'))
-    const packagePath = join(appDir, 'package.json')
-    writeFileSync(
-      packagePath,
-      JSON.stringify({ dependencies: { ai: '^5.0.0', deepspace: '^0.19.0', react: '^19.0.0' } }),
-    )
+const made: string[] = []
 
-    expect(pinSdkVersion(appDir, '0.19.1')).toBe(true)
-    expect(JSON.parse(readFileSync(packagePath, 'utf8')).dependencies).toEqual({
-      ai: '5.0.222',
-      deepspace: '^0.19.1',
-      react: '^19.0.0',
-    })
-    expect(pinSdkVersion(appDir, '0.19.1')).toBe(false)
+afterEach(() => {
+  process.exitCode = undefined
+  vi.restoreAllMocks()
+  for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
+
+function makeApp(
+  options: {
+    deepspace?: string
+    ai?: string
+    migrations?: string[]
+    packageManager?: string
+  } = {},
+): string {
+  const dir = mkdtempSync(join(tmpdir(), 'deepspace-update-guidance-'))
+  made.push(dir)
+  const dependencies: Record<string, string> = {
+    deepspace: options.deepspace ?? '0.22.0',
+  }
+  if (options.ai) dependencies.ai = options.ai
+  writeFileSync(
+    join(dir, 'package.json'),
+    JSON.stringify({ packageManager: options.packageManager, dependencies }, null, 2) + '\n',
+  )
+  writeFileSync(join(dir, 'wrangler.toml'), 'name = "update-test"\n')
+  if (options.migrations) {
+    writeFileSync(join(dir, 'deepspace.migrations.json'), JSON.stringify(options.migrations) + '\n')
+  }
+  return dir
+}
+
+async function runUpdate(appDir: string): Promise<Record<string, unknown>> {
+  const logs: string[] = []
+  vi.spyOn(process, 'cwd').mockReturnValue(appDir)
+  vi.spyOn(console, 'log').mockImplementation((line?: unknown) => logs.push(String(line)))
+  const command = updateCommand as unknown as {
+    run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+  }
+  await command.run({ args: { json: true } })
+  return JSON.parse(logs[0]) as Record<string, unknown>
+}
+
+describe('app update version authority', () => {
+  it('parses ordinary dependency specs and only calls an older forward gap wide', () => {
+    expect(parseVersion('^0.22.1')).toEqual({ major: 0, minor: 22, patch: 1 })
+    expect(gapIsTooWide(parseVersion('0.11.0')!, parseVersion('0.23.2')!)).toBe(true)
+    expect(gapIsTooWide(parseVersion('0.24.0')!, parseVersion('0.23.2')!)).toBe(false)
   })
 
-  it('leaves a non-registry deepspace spec alone (a file: tarball is a deliberate pin)', () => {
-    const appDir = mkdtempSync(join(tmpdir(), 'deepspace-update-'))
-    const packagePath = join(appDir, 'package.json')
-    writeFileSync(
-      packagePath,
-      JSON.stringify({ dependencies: { deepspace: 'file:../deepspace-0.23.0.tgz' } }),
-    )
+  it('uses package.json as current state and this CLI package as the only target', () => {
+    const dir = makeApp({ deepspace: '^0.22.1', ai: '^5.0.0' })
 
-    expect(pinSdkVersion(appDir, '0.23.0')).toBe(false)
-    expect(JSON.parse(readFileSync(packagePath, 'utf8')).dependencies.deepspace).toBe(
-      'file:../deepspace-0.23.0.tgz',
-    )
+    expect(readAppSdkSpec(dir)).toBe('^0.22.1')
+    expect(planDependencyGuidance(dir)).toEqual([
+      { dependency: 'deepspace', from: '^0.22.1', to: sdkPackage.version },
+      { dependency: 'ai', from: '^5.0.0', to: sdkPackage.dependencies.ai },
+    ])
   })
 
-  it('does not add AI when the app does not use it directly', () => {
-    const appDir = mkdtempSync(join(tmpdir(), 'deepspace-update-'))
-    const packagePath = join(appDir, 'package.json')
-    writeFileSync(packagePath, JSON.stringify({ dependencies: { deepspace: '^0.19.0' } }))
-
-    expect(pinSdkVersion(appDir, '0.19.1')).toBe(true)
-    expect(JSON.parse(readFileSync(packagePath, 'utf8')).dependencies).toEqual({
-      deepspace: '^0.19.1',
-    })
+  it("leaves a local SDK and its AI compatibility under the developer's control", () => {
+    const dir = makeApp({ deepspace: 'file:../deepspace.tgz', ai: '^99.0.0' })
+    expect(planDependencyGuidance(dir)).toEqual([])
   })
 
-  it('ignores earlier unrelated ai keys and pins only the direct dependency', () => {
-    const appDir = mkdtempSync(join(tmpdir(), 'deepspace-update-'))
-    const packagePath = join(appDir, 'package.json')
-    writeFileSync(
-      packagePath,
-      JSON.stringify({
-        ai: 'app-metadata',
-        config: { ai: 'nested-metadata' },
-        devDependencies: { ai: '^6.0.0' },
-        dependencies: { deepspace: '^0.19.0', ai: '^5.0.0' },
-      }),
-    )
-
-    expect(pinSdkVersion(appDir, '0.19.1')).toBe(true)
-    expect(JSON.parse(readFileSync(packagePath, 'utf8'))).toEqual({
-      ai: 'app-metadata',
-      config: { ai: 'nested-metadata' },
-      devDependencies: { ai: '^6.0.0' },
-      dependencies: { deepspace: '^0.19.1', ai: '5.0.222' },
-    })
-  })
-
-  it('leaves unrelated ai keys untouched when there is no direct dependency', () => {
-    const appDir = mkdtempSync(join(tmpdir(), 'deepspace-update-'))
-    const packagePath = join(appDir, 'package.json')
-    writeFileSync(
-      packagePath,
-      JSON.stringify({ ai: 'app-metadata', dependencies: { deepspace: '^0.19.0' } }),
-    )
-
-    expect(pinSdkVersion(appDir, '0.19.1')).toBe(true)
-    expect(JSON.parse(readFileSync(packagePath, 'utf8'))).toEqual({
-      ai: 'app-metadata',
-      dependencies: { deepspace: '^0.19.1' },
-    })
-  })
-
-  it('preserves common indentation, CRLF, and final-newline formatting', () => {
-    const appDir = mkdtempSync(join(tmpdir(), 'deepspace-update-'))
-    const packagePath = join(appDir, 'package.json')
-    const source = `${JSON.stringify(
-      { dependencies: { deepspace: '^0.19.0', ai: '^5.0.0' } },
-      null,
-      4,
-    ).replaceAll('\n', '\r\n')}\r\n`
-    writeFileSync(packagePath, source)
-
-    expect(pinSdkVersion(appDir, '0.19.1')).toBe(true)
-    const updated = readFileSync(packagePath, 'utf8')
-    expect(updated).toContain('\r\n    "dependencies"')
-    expect(updated.replaceAll('\r\n', '')).not.toContain('\n')
-    expect(updated.endsWith('\r\n')).toBe(true)
+  it('guides published SDK ranges to the exact running CLI version', () => {
+    const dir = makeApp({ deepspace: `^${sdkPackage.version}` })
+    expect(planDependencyGuidance(dir)).toEqual([
+      { dependency: 'deepspace', from: `^${sdkPackage.version}`, to: sdkPackage.version },
+    ])
   })
 })
 
-describe('app update build-preview guidance', () => {
-  it('reports the manual upgrade without rewriting an existing Vite config', () => {
-    const appDir = mkdtempSync(join(tmpdir(), 'deepspace-update-'))
-    const configPath = join(appDir, 'vite.config.ts')
-    const source = `export default { plugins: [] }\n`
-    writeFileSync(configPath, source)
+describe('app update guidance', () => {
+  it('is read-only, requires no Git repository, and names the detected package manager', async () => {
+    const dir = makeApp({ packageManager: 'pnpm@11.18.0' })
+    mkdirSync(join(dir, 'nested', 'src'), { recursive: true })
+    writeFileSync(join(dir, 'nested', 'src', 'constants.ts'), 'legacy unrelated package\n')
+    writeFileSync(join(dir, 'src.ts'), 'const untouched = true\n')
+    const beforePackage = readFileSync(join(dir, 'package.json'), 'utf8')
 
-    expect(buildPreviewSecretsUpgradeInstruction(appDir)).toContain(
-      `https://github.com/deepdotspace/deepspace/blob/v${sdkPackage.version}/docs/migrations/build-preview-secrets.md`,
+    const result = await runUpdate(dir)
+
+    expect(process.exitCode).toBe(0)
+    expect(result).toMatchObject({
+      ok: true,
+      ready: false,
+      status: 'guidance_available',
+      targetVersion: sdkPackage.version,
+      packageManager: 'pnpm',
+      writes: [],
+    })
+    expect(result.action).toBeUndefined()
+    expect((result.steps as string[]).some((step) => step === 'Run pnpm install.')).toBe(true)
+    expect(readFileSync(join(dir, 'package.json'), 'utf8')).toBe(beforePackage)
+    expect(readFileSync(join(dir, 'nested', 'src', 'constants.ts'), 'utf8')).toBe(
+      'legacy unrelated package\n',
     )
-    expect(readFileSync(configPath, 'utf8')).toBe(source)
+    expect(() => readFileSync(join(dir, 'deepspace.migrations.json'))).toThrow()
   })
 
-  it('exits with action required when an app-owned retrofit remains', async () => {
-    const appDir = mkdtempSync(join(tmpdir(), 'deepspace-update-'))
-    const logs: string[] = []
-    try {
-      writeFileSync(
-        join(appDir, 'package.json'),
-        JSON.stringify({ dependencies: { deepspace: '^0.19.1' } }),
-      )
-      writeFileSync(join(appDir, 'wrangler.toml'), 'name = "update-test"\n')
-      writeFileSync(join(appDir, 'vite.config.ts'), 'export default { plugins: [] }\n')
-      writeFileSync(
-        join(appDir, 'deepspace.migrations.json'),
-        `${JSON.stringify(
-          APP_MIGRATION_DEFINITIONS.map(({ id }) => id),
-          null,
-          2,
-        )}\n`,
-      )
-      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: appDir })
-      execFileSync('git', ['config', 'user.email', 'update-test@example.com'], { cwd: appDir })
-      execFileSync('git', ['config', 'user.name', 'Update Test'], { cwd: appDir })
-      execFileSync('git', ['add', '-A'], { cwd: appDir })
-      execFileSync('git', ['commit', '-q', '-m', 'fixture'], { cwd: appDir })
-
-      vi.spyOn(process, 'cwd').mockReturnValue(appDir)
-      vi.spyOn(console, 'log').mockImplementation((line?: unknown) => logs.push(String(line)))
-      process.exitCode = undefined
-      const command = updateCommand as unknown as {
-        run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
-      }
-      await command.run({ args: { json: true, to: '0.19.2', 'dry-run': false } })
-
-      expect(process.exitCode).toBe(2)
-      expect(JSON.parse(logs[0])).toMatchObject({
-        ok: false,
-        code: 'manual_changes_required',
-        actionRequired: true,
-        currentVersion: '^0.19.1',
-        targetVersion: '0.19.2',
-        manualInstructions: [expect.stringContaining('build-preview-secrets.md')],
-        action: { cwd: appDir, argv: ['npm', 'install'] },
-      })
-      expect(JSON.parse(readFileSync(join(appDir, 'package.json'), 'utf8'))).toMatchObject({
-        dependencies: { deepspace: '^0.19.2' },
-      })
-    } finally {
-      process.exitCode = undefined
-      vi.restoreAllMocks()
-      rmSync(appDir, { recursive: true, force: true })
-    }
-  // Five git subprocesses plus the real updater run: comfortably fast alone,
-  // but the release gate runs every package's suite concurrently and the
-  // default 5s budget flakes under that load.
-  }, 20_000)
-
-  it('does not report a fresh config that already owns the cleanup', () => {
-    const appDir = mkdtempSync(join(tmpdir(), 'deepspace-update-'))
+  it('does not stamp a partial app-id adoption as complete', async () => {
+    const dir = makeApp({ deepspace: sdkPackage.version })
+    mkdirSync(join(dir, 'src'), { recursive: true })
     writeFileSync(
-      join(appDir, 'vite.config.ts'),
-      `const plugin = { name: 'deepspace-remove-build-preview-secrets' }\n`,
+      join(dir, 'src', 'constants.ts'),
+      'declare const __DEEPSPACE_APP_ID__: string\nexport const APP_ID = __DEEPSPACE_APP_ID__\n',
     )
 
-    expect(buildPreviewSecretsUpgradeInstruction(appDir)).toBeNull()
+    const result = await runUpdate(dir)
+
+    expect(result).toMatchObject({
+      ok: true,
+      ready: false,
+      status: 'guidance_available',
+      writes: [],
+    })
+    expect((result.migrations as Array<{ id: string }>).map(({ id }) => id)).toContain(
+      '2026-08-build-injected-app-id',
+    )
+    expect(() => readFileSync(join(dir, 'deepspace.migrations.json'))).toThrow()
   })
 
-  it('reports broad member user-row visibility without rewriting the schema', () => {
-    const appDir = mkdtempSync(join(tmpdir(), 'deepspace-update-'))
-    const schemaPath = join(appDir, 'src/schemas/users-schema.ts')
-    const source = `export const usersSchema = {\n  permissions: {\n    member: { read: true, create: false },\n  },\n}\n`
-    mkdirSync(join(appDir, 'src/schemas'), { recursive: true })
-    writeFileSync(schemaPath, source)
+  it('reports ready only when dependencies and the migration ledger are aligned', async () => {
+    const dir = makeApp({
+      deepspace: sdkPackage.version,
+      ai: sdkPackage.dependencies.ai,
+      migrations: APP_MIGRATION_DEFINITIONS.map(({ id }) => id),
+    })
 
-    expect(usersSchemaVisibilityUpgradeInstruction(appDir)).toContain(
-      `https://github.com/deepdotspace/deepspace/blob/v${sdkPackage.version}/docs/migrations/users-schema-member-visibility.md`,
-    )
-    expect(readFileSync(schemaPath, 'utf8')).toBe(source)
+    const result = await runUpdate(dir)
+
+    expect(process.exitCode).toBe(0)
+    expect(result).toMatchObject({
+      ok: true,
+      ready: true,
+      status: 'aligned',
+      targetVersion: sdkPackage.version,
+      dependencies: [],
+      migrations: [],
+      steps: [],
+      writes: [],
+    })
   })
 
-  it("does not report a users schema whose member reads are already 'own'", () => {
-    const appDir = mkdtempSync(join(tmpdir(), 'deepspace-update-'))
-    mkdirSync(join(appDir, 'src/schemas'), { recursive: true })
-    writeFileSync(
-      join(appDir, 'src/schemas/users-schema.ts'),
-      `export const usersSchema = { permissions: { member: { read: 'own' } } }\n`,
-    )
+  it('reports a local or VCS SDK as unverified instead of aligned', async () => {
+    const dir = makeApp({
+      deepspace: 'workspace:*',
+      ai: '^99.0.0',
+      migrations: APP_MIGRATION_DEFINITIONS.map(({ id }) => id),
+    })
 
-    expect(usersSchemaVisibilityUpgradeInstruction(appDir)).toBeNull()
+    const result = await runUpdate(dir)
+
+    expect(result).toMatchObject({
+      ok: true,
+      ready: false,
+      status: 'dependency_unverified',
+      dependencies: [],
+      migrations: [],
+      manualInstructions: [expect.stringContaining('cannot verify which SDK version')],
+      steps: [expect.stringContaining('cannot verify which SDK version')],
+      writes: [],
+    })
+    expect(process.exitCode).toBe(0)
+  })
+
+  it('gives a malformed migration ledger a stable refusal code', async () => {
+    const dir = makeApp({ deepspace: sdkPackage.version })
+    writeFileSync(join(dir, 'deepspace.migrations.json'), '{not json}\n')
+
+    const result = await runUpdate(dir)
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'invalid_migration_manifest',
+      error: expect.stringContaining('must contain valid JSON'),
+    })
+    expect(process.exitCode).toBe(1)
+  })
+
+  it('guides without failing when the app is newer than the running CLI', async () => {
+    const dir = makeApp({ deepspace: '99.0.0' })
+    const result = await runUpdate(dir)
+    expect(result).toMatchObject({ ok: true, ready: false, status: 'cli_version_behind' })
+    expect(process.exitCode).toBe(0)
+  })
+
+  it('guides release-by-release without failing on a wide version gap', async () => {
+    const dir = makeApp({ deepspace: '0.11.0' })
+    const result = await runUpdate(dir)
+    expect(result).toMatchObject({ ok: true, ready: false, status: 'version_gap_too_wide' })
+    expect(result.steps).toEqual([expect.stringContaining('one at a time')])
+    expect(process.exitCode).toBe(0)
   })
 })

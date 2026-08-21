@@ -1,7 +1,29 @@
 import { apiFetch, ApiError } from './api'
+import { Refusal } from './command'
 import type { GitRef } from './source-control'
 
 export type AppSource = { provider: 'deepspace' } | { provider: 'github'; repository: string }
+
+/**
+ * THE GitHub-source refusal, for every source verb. `push` reaches it from its
+ * own `/source` read, `pull`/`clone`/`workspace` from the repo API's 422 — one
+ * sentence and one set of machine fields either way, so an agent's parser never
+ * has to special-case which verb it ran (it used to get `appId`/`repository`
+ * from `push` and prose-only from the other two).
+ *
+ * Deliberately no executable `action`: which command comes next depends on
+ * whether the caller wanted to clone, fetch or push, and the CLI knows only
+ * `owner/repo` — never the clone URL's protocol — so any `git clone` it printed
+ * would be a guess.
+ */
+export function githubSourceRefusal(appId: string, repository: string): Refusal {
+  return new Refusal(
+    `This app uses GitHub source (${repository}). Use normal Git/GitHub for source operations ` +
+      '(clone, fetch, push); `deepspace deploy` ships the local working tree without changing Git.',
+    'source_managed_by_github',
+    { extra: { appId, repository } },
+  )
+}
 
 export interface AppSourceState {
   appId: string
@@ -56,8 +78,6 @@ export function setAppSource(
   input: {
     source: AppSource
     expectedRevision: number
-    branch?: string
-    commitOid?: string
     refs?: GitRef[]
     expectedReleaseId?: string | null
     expectedReleaseCommitOid?: string | null

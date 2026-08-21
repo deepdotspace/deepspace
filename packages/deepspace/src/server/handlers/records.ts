@@ -28,13 +28,12 @@ import {
   rowToData,
   dataToColumnValues,
   buildTableSelect,
+  epochSeconds,
 } from '../schemas/registry'
 import {
   broadcastChange,
   executeQuery,
   resolveCollection,
-  MAX_FILTERED_SCAN_ROWS,
-  type QueryScanState,
   type SubscriptionContext,
 } from './subscriptions'
 
@@ -47,6 +46,20 @@ export interface RecordContext extends SubscriptionContext {
  */
 function getResolvedColumns(schema: CollectionSchema): ResolvedColumn[] {
   return (schema.columns ?? []).map(resolveColumn)
+}
+
+/**
+ * "Now", in the representation this column's own `storage` declares: epoch
+ * seconds for a `number` column, an ISO string for a `text` one.
+ *
+ * The trigger used to write ISO whatever the storage was, and `coerceValue`
+ * then ran `parseFloat('2026-08-18T…')` over it — so a `storage: 'number'`
+ * column silently stored the year, `2026`, with tsc, eslint and the schema
+ * lint all clean. Writing the declared representation removes the failure
+ * mode instead of warning about it.
+ */
+function triggerTimestamp(col: ResolvedColumn): string | number {
+  return col.storage === 'number' ? epochSeconds() : new Date().toISOString()
 }
 
 /** Refusal text for a record write that tries to set a system-assigned column. */
@@ -307,7 +320,7 @@ export function putRecord(
         // CREATE: set timestamp if trigger field is present and matches value (if specified)
         if (mergedData[triggerField] !== undefined && mergedData[triggerField] !== null) {
           if (triggerValue === undefined || mergedData[triggerField] === triggerValue) {
-            mergedData[col.name] = new Date().toISOString()
+            mergedData[col.name] = triggerTimestamp(col)
           }
         }
       } else {
@@ -316,7 +329,7 @@ export function putRecord(
         const newVal = mergedData[triggerField]
         if (newVal !== oldVal) {
           if (triggerValue === undefined || newVal === triggerValue) {
-            mergedData[col.name] = new Date().toISOString()
+            mergedData[col.name] = triggerTimestamp(col)
           }
         }
       }
@@ -374,9 +387,11 @@ export function putRecord(
   //    read-modify-write, not an attempted change. Preserve silently.
   //
   // "Different" means different *once written*: `coerceValue` is what decides
-  // the stored column, and it maps undefined, null and '' alike to NULL. Those
-  // three spellings are one state, so comparing anything but the coerced values
-  // refuses writes that would not change a byte.
+  // the stored column, and it maps undefined and null alike to NULL — the two
+  // spellings of "absent" are one state, so comparing anything but the coerced
+  // values refuses writes that would not change a byte. `''` is not one of
+  // them on a text column: it is a value, and setting a system-assigned column
+  // to it is a change the caller means and will not get.
   if (!systemUpdate && schema.name === 'users') {
     for (const col of columns) {
       if (!SYSTEM_MANAGED_COLUMNS.has(col.name)) continue
@@ -389,7 +404,8 @@ export function putRecord(
       ) {
         return { success: false, error: systemManagedColumnError(col.name, isUpdate) }
       }
-      if (current !== undefined) finalData[col.name] = current // preserve existing
+      if (current !== undefined)
+        finalData[col.name] = current // preserve existing
       else delete finalData[col.name]
     }
   }
@@ -398,21 +414,22 @@ export function putRecord(
   const now = new Date().toISOString()
   const tbl = collectionTableName(collection)
 
-  // Enforce uniqueOn constraint before INSERT
-  if (!isUpdate && schema.uniqueOn && schema.uniqueOn.length > 0) {
-    const uniqueWhere = schema.uniqueOn.map((fieldName) => {
-      const colSqlId = columnId(fieldName)
-      return `"${colSqlId}" = ?`
+  // Check the same resolved columns and coerced values as the UNIQUE index so
+  // every write path returns a normal ToolResult instead of leaking a SQLite
+  // constraint exception. Updates exclude the row being written.
+  if (schema.uniqueOn && schema.uniqueOn.length > 0) {
+    const uniqueColumns = schema.uniqueOn.map((fieldName) => {
+      const id = columns.find((column) => column.name === fieldName)?.id ?? columnId(fieldName)
+      return { id, value: colValues[id] ?? null }
     })
-    const uniqueParams = schema.uniqueOn.map((fieldName) => {
-      const val = finalData[fieldName]
-      return val !== undefined ? val : null
-    })
-    const existing = ctx.sql.exec(
-      `SELECT _row_id FROM "${tbl}" WHERE ${uniqueWhere.join(' AND ')} LIMIT 1`,
+    const uniqueWhere = uniqueColumns.map(({ id }) => `"${id}" = ?`)
+    const uniqueParams = uniqueColumns.map(({ value }) => value)
+    if (isUpdate) uniqueParams.push(recordId)
+    const conflict = ctx.sql.exec(
+      `SELECT _row_id FROM "${tbl}" WHERE ${uniqueWhere.join(' AND ')}${isUpdate ? ' AND _row_id <> ?' : ''} LIMIT 1`,
       ...uniqueParams,
     )
-    if (existing.toArray().length > 0) {
+    if (conflict.toArray().length > 0) {
       const fields = schema.uniqueOn.map((f) => `${f}=${finalData[f] ?? 'null'}`).join(', ')
       return {
         success: false,
@@ -511,17 +528,43 @@ export function deleteRecord(
  * `executeQuery` is lenient — a key that names no column is silently dropped
  * — which for a delete truncates and for a read over-returns (a typo'd
  * filter hands the whole readable collection back with `success: true`, and
- * an assistant or action then reasons over it as the filtered set). Every key
- * must be `recordId`, `createdBy`, or a schema column, and every value a
- * primitive (equality only). `null` = nothing to refuse.
+ * an assistant or action then reasons over it as the filtered set). A `where`
+ * must be a plain object; every key must be `recordId`, `createdBy`, or a
+ * schema column; every value a primitive (equality only). `null` = nothing to
+ * refuse.
+ *
+ * The shape check lives here rather than at each caller because an array
+ * `where` degrades differently at every one of them: `[]` passed the query
+ * path's emptiness test and filtered nothing, `['a']` was reported as an
+ * unknown field named "0", and only `deleteWhere` named the real problem.
+ *
+ * `schema` is undefined only for a schemaless system collection — and its
+ * query path (`executeSystemQuery`) ignores `where` entirely, so ANY filter
+ * there would over-return the whole collection as if filtered. Refuse every
+ * non-empty `where` on it and say why.
  */
 export function refuseUnknownWhere(
   collection: string,
-  schema: CollectionSchema,
-  where: Record<string, unknown>,
+  schema: CollectionSchema | undefined,
+  where: unknown,
 ): ToolResult | null {
-  const columns = (schema.columns ?? []).map(resolveColumn)
+  const columns = (schema?.columns ?? []).map(resolveColumn)
   const filterable = ['recordId', 'createdBy', ...columns.map((c) => c.name)]
+  if (typeof where !== 'object' || where === null || Array.isArray(where)) {
+    const got = where === null ? 'null' : Array.isArray(where) ? 'an array' : typeof where
+    return {
+      success: false,
+      error:
+        `where for "${collection}" must be an object of field=value pairs, not ${got} — ` +
+        `filterable fields: ${filterable.join(', ')}`,
+    }
+  }
+  if (!schema && Object.keys(where).length > 0) {
+    return {
+      success: false,
+      error: `"${collection}" has no schema, so it has no filterable fields — query it without \`where\``,
+    }
+  }
   const unknown = Object.keys(where).filter(
     (key) =>
       key !== 'recordId' &&
@@ -586,11 +629,14 @@ export function deleteWhere(
     }
   }
 
-  if (!where || typeof where !== 'object' || Array.isArray(where) || Object.keys(where).length === 0) {
-    return { success: false, error: 'Missing required param: where (must match at least one field)' }
-  }
-  const whereRefusal = refuseUnknownWhere(collection, schema, where as Record<string, unknown>)
+  const whereRefusal = refuseUnknownWhere(collection, schema, where)
   if (whereRefusal) return whereRefusal
+  if (Object.keys(where as Record<string, unknown>).length === 0) {
+    return {
+      success: false,
+      error: 'Missing required param: where (must match at least one field)',
+    }
+  }
 
   if (limit !== undefined && !(typeof limit === 'number' && Number.isFinite(limit))) {
     return { success: false, error: 'limit must be a finite number' }
@@ -599,40 +645,34 @@ export function deleteWhere(
     Math.max(1, Math.floor(limit ?? DEFAULT_DELETE_WHERE_LIMIT)),
     MAX_DELETE_WHERE_LIMIT,
   )
-  // `executeQuery`'s limit counts readable records (it scans past rows a
-  // per-row filter hides, up to its scan cap), so a short page means "no more
-  // matches" — the contract the caller's drain loop depends on — unless the
-  // scan was capped, which must refuse rather than masquerade as exhaustion.
-  const scan: QueryScanState = { capped: false }
+  // Candidate selection is storage-only. A delete permission must not inherit
+  // the role's read permission; every candidate is authorized exactly once by
+  // canDelete below, matching records.delete.
   const matched = executeQuery(
     ctx,
     { collection, where: where as Record<string, unknown>, limit: page },
     userId,
     userRole,
-    skipUserRbac,
-    scan,
+    true,
   )
-  if (scan.capped && matched.length < page) {
-    return {
-      success: false,
-      error:
-        `records.deleteWhere scanned ${MAX_FILTERED_SCAN_ROWS} rows without filling a page of ` +
-        `readable matches in "${collection}" — narrow \`where\` (or delete by recordId) and retry`,
-    }
-  }
 
-  if (!skipUserRbac && schema) {
+  if (!skipUserRbac) {
     const permCtx = ctx.getPermissionContext()
     for (const record of matched) {
       if (!canDelete(schema, userRole, record, userId, permCtx)) {
-        return { success: false, error: `DELETE DENIED: role=${userRole}, collection=${collection}` }
+        return {
+          success: false,
+          error: `DELETE DENIED: role=${userRole}, collection=${collection}`,
+        }
       }
     }
   }
 
   let deleted = 0
   for (const record of matched) {
-    if (deleteRecord(ctx, collection, record.recordId, userId, userRole, skipUserRbac).success) {
+    // Authorization for the whole page completed above. Do not run read or
+    // delete policy a second time while applying the already-approved set.
+    if (deleteRecord(ctx, collection, record.recordId, userId, userRole, true).success) {
       deleted++
     }
   }

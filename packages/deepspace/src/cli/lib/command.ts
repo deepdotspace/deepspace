@@ -8,43 +8,20 @@ import { defineCommand, parseArgs, type ArgsDef, type CommandDef } from 'citty'
 import * as p from '@clack/prompts'
 import { stopActiveSpinner } from './spinner'
 import { executableAction, printAction, withSlug, type CliAction } from './output'
-import { errorCode } from './cli-errors'
-import { ApiError } from './api'
+import {
+  Refusal,
+  errorCode,
+  failureEnvelope,
+  failureExitCode,
+  formatCliError,
+  withoutReservedKeys,
+} from './cli-errors'
 
 export { cliAction } from './output'
-
-/**
- * A refusal the caller can act on: carries the machine slug that appears both
- * in `--json` as `code` and at the end of the human line, plus at most one
- * executable action that resolves it.
- *
- * `actionRequired` marks the third exit state — the operation did what it
- * could and a LOCAL step remains (merge the tip, commit the tree). It exits 2,
- * which is the difference between "this failed" and "your turn", and is the
- * single most useful signal an agent gets from this CLI.
- */
-export class Refusal extends Error {
-  readonly code: string
-  readonly action: CliAction | undefined
-  readonly actionRequired: boolean
-  readonly extra: Record<string, unknown>
-
-  constructor(
-    message: string,
-    code: string,
-    opts: { action?: CliAction; actionRequired?: boolean; extra?: Record<string, unknown> } = {},
-  ) {
-    super(message)
-    this.name = 'Refusal'
-    this.code = code
-    // Actions built as object literals get the same executable-argv treatment
-    // `cliAction` applies, so no refusal can hand out a bare `deepspace` that
-    // its own `cwd` cannot run.
-    this.action = opts.action ? executableAction(opts.action) : undefined
-    this.actionRequired = opts.actionRequired ?? false
-    this.extra = opts.extra ?? {}
-  }
-}
+// The refusal class lives with the error renderer (lib/cli-errors) so a plain
+// citty command's escaped Refusal renders identically; re-exported here because
+// every command imports it from the runtime.
+export { Refusal }
 
 /** What a command body returns: the machine payload plus its follow-ups. */
 export interface CommandResult {
@@ -52,42 +29,6 @@ export interface CommandResult {
   data?: Record<string, unknown>
   /** One executable follow-up: the `Next:` line and envelope's `action`. */
   action?: CliAction
-}
-
-/**
- * Structured fields a server refusal carried, for commands that surface an
- * {@link ApiError} directly rather than translating it into a {@link Refusal}.
- * Without this the envelope kept only the sentence, so an agent had to read
- * numbers like remaining storage back out of prose the API had already
- * quantified.
- */
-function apiErrorDetails(err: unknown): Record<string, unknown> | undefined {
-  return err instanceof ApiError ? err.details : undefined
-}
-
-/**
- * Strip the envelope's reserved keys from a payload before it is spread into
- * the envelope. `data`/`extra` can carry raw server JSON (`integrations
- * invoke` forwards the response body verbatim), and a payload containing
- * `ok`, `action`, or `actionRequired` must not be able to flip a failure to
- * success or hand an agent an unvalidated recovery action.
- */
-function withoutReservedKeys(payload: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(payload).filter(
-      ([key]) =>
-        ![
-          'ok',
-          'code',
-          'error',
-          'action',
-          'actionRequired',
-          'next',
-          'nextAction',
-          'resume',
-        ].includes(key),
-    ),
-  )
 }
 
 /**
@@ -244,27 +185,17 @@ export function defineDeepspaceCommand<A extends ArgsDef>(def: DeepspaceCommandD
       } catch (err) {
         stopActiveSpinner()
         const refusal = err instanceof Refusal ? err : null
-        const code = refusal?.code ?? errorCode(err)
-        const message = err instanceof Error ? err.message : String(err)
+        const code = errorCode(err)
         if (json) {
-          console.log(
-            JSON.stringify({
-              ok: false,
-              ...(code ? { code } : {}),
-              ...(refusal?.actionRequired ? { actionRequired: true } : {}),
-              error: message,
-              ...(refusal?.action ? { action: refusal.action } : {}),
-              ...withoutReservedKeys(refusal?.extra ?? apiErrorDetails(err) ?? {}),
-            }),
-          )
+          console.log(JSON.stringify(failureEnvelope(err)))
         } else {
+          const message = formatCliError(err)
           const line = code ? withSlug(message, code) : message
           if (refusal?.actionRequired) p.log.warn(line)
           else p.log.error(line)
           if (refusal?.action) printAction(refusal.action)
         }
-        // 2 = "it worked, but a local step remains"; 1 = it failed.
-        finishCommand(refusal?.actionRequired ? 2 : 1)
+        finishCommand(failureExitCode(err))
       }
       // `succeeded` gates the fall-through from the catch above: a failure
       // has already recorded its 1/2 exit code and must not be overwritten

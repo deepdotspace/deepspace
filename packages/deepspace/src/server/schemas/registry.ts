@@ -113,7 +113,14 @@ export function coerceValue(
   storage: 'number' | 'text',
   interpretation: ColumnInterpretation,
 ): unknown {
-  if (value === null || value === undefined || value === '') return null
+  if (value === null || value === undefined) return null
+  // An empty string is a value on a text column, not an absence. Folding it
+  // into NULL destroyed it on the way in — `rowToData` then dropped the key on
+  // the way out — so a field written as `''` read back `undefined` and a
+  // `column.default = ''` never materialized at all (it is applied at create
+  // and was coerced away one line later). A `number` column has nothing to
+  // store for `''`, so there it stays NULL.
+  if (value === '') return storage === 'text' ? '' : null
 
   if (storage === 'text') {
     if (interpretation.kind === 'json') {
@@ -154,7 +161,7 @@ export function coerceValue(
 
   if (interpretation.kind === 'date' || interpretation.kind === 'datetime') {
     const d = new Date(s)
-    if (!isNaN(d.getTime())) return Math.floor(d.getTime() / 1000)
+    if (!isNaN(d.getTime())) return epochSeconds(d)
     return s
   }
 
@@ -163,6 +170,11 @@ export function coerceValue(
   if (!isNaN(n) && isFinite(n)) return n
 
   return s
+}
+
+/** Canonical numeric representation for date/datetime storage and triggers. */
+export function epochSeconds(date: Date = new Date()): number {
+  return Math.floor(date.getTime() / 1000)
 }
 
 export function buildTableSelect(collectionName: string, columns: ResolvedColumn[]): string {

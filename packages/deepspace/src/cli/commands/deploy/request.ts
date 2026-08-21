@@ -8,6 +8,26 @@ import type { DeployOutput } from './output'
 import { shouldSendLineage, type DeployRepositoryState } from './repository'
 
 /**
+ * Every place a rename leaves the OLD display name behind. The rename moves the
+ * host and everything keyed to the app id; these two files still spell the
+ * previous name and no deploy rewrites them, so a renamed app serves its old
+ * name in its own nav (`src/constants.ts`) and in `env.APP_NAME` (wrangler's
+ * `[vars]`) until someone edits them. Both sentences below and the `--rename`
+ * success envelope are built from this list, so none of them can drift.
+ */
+export const STALE_DISPLAY_NAME_LOCATIONS = [
+  'src/constants.ts:APP_NAME',
+  'wrangler.toml:[vars].APP_NAME',
+] as const
+
+/** What a rename does and does not carry. Both sentences below say it — the
+ *  half an agent reads used to omit it entirely. */
+const RENAME_CONSEQUENCES =
+  'The URL changes and the old one stops serving right away; data, secrets, and collaborators ' +
+  'travel with it — the display name does NOT: update it yourself in ' +
+  `${STALE_DISPLAY_NAME_LOCATIONS.join(' and ')}.`
+
+/**
  * The two rename sentences — ONE source for the pre-build check in deploy.ts
  * and the commit-time 409 path below, so an agent meets the same text either
  * way. Non-interactive refusal:
@@ -15,6 +35,7 @@ import { shouldSendLineage, type DeployRepositoryState } from './repository'
 export function renameRefusalMessage(rename: { fromHost: string; toHost: string }): string {
   return (
     `This deploy renames the app: ${rename.fromHost} → ${rename.toHost}. ` +
+    `${RENAME_CONSEQUENCES} ` +
     'Confirmation needs an interactive terminal — re-run with --rename to approve the ' +
     'rename, or `deepspace app init --new-id` if you meant a separate app.'
   )
@@ -24,9 +45,8 @@ export function renameRefusalMessage(rename: { fromHost: string; toHost: string 
 export function renamePromptMessage(rename: { fromHost: string; toHost: string }): string {
   return (
     `This deploy renames the app: ${rename.fromHost} → ${rename.toHost}. ` +
-    'The URL changes and the old one stops serving right away; data, secrets, and ' +
-    'collaborators travel with it — the display name in `src/constants.ts` (`APP_NAME`) does not, ' +
-    'update it yourself. (Meant a separate app? Run `deepspace app init --new-id` instead.) Rename?'
+    `${RENAME_CONSEQUENCES} ` +
+    '(Meant a separate app? Run `deepspace app init --new-id` instead.) Rename?'
   )
 }
 import type { DeploySecretsPayload } from './secrets'
@@ -67,7 +87,12 @@ export interface DeployCommitResponse {
   code?: string
   fromHost?: string
   toHost?: string
-  onBehalfOfOwner?: string
+  /** Client-observed, not from the wire: the host this call renamed away from,
+   *  set only when the rename was settled by the commit-time 409 below (an
+   *  older platform that sends no `registeredHost`, so deploy's pre-build check
+   *  could not see it coming). deploy.ts reports the rename from whichever of
+   *  the two paths fired. */
+  renamedFrom?: string
   staleBaseGuard?: string
   releaseId?: string
   bundleRetained?: boolean
@@ -226,6 +251,7 @@ export async function deployBuiltBundle(options: {
   }
 
   let body = (await response.json().catch(() => ({}))) as DeployCommitResponse
+  let renamedFrom: string | undefined
 
   if (response.status === 409 && body.code === 'rename_required' && !confirmRename) {
     spinner.stop('Rename confirmation needed')
@@ -237,6 +263,7 @@ export async function deployBuiltBundle(options: {
     if (p.isCancel(confirmed) || !confirmed) await bail('Deploy cancelled.', null)
 
     confirmRename = true
+    renamedFrom = rename.fromHost
     spinner.start(`Deploying ${appName}...`)
     response = await postCommit()
     body = (await response.json().catch(() => ({}))) as DeployCommitResponse
@@ -252,6 +279,22 @@ export async function deployBuiltBundle(options: {
       { cwd: appDir, argv: ['deepspace', 'pull'] },
     )
   }
+  // Another deploy of this app (from another checkout — the local lock rules
+  // out this one) is between prepared and live. Nothing here is wrong and
+  // nothing needs changing: retrying once it lands is the whole remedy, so
+  // this is the "your turn" tier (exit 2) with the retry as the action, not
+  // a hard failure that tells an agent to stop retrying.
+  if (response.status === 409 && body.code === 'release_in_progress') {
+    await bail(
+      `${body.error ?? 'Another deploy of this app is already in progress'}. It is committing now — ` +
+        'this run built and uploaded fine but did not release. Wait a moment and run the same deploy ' +
+        'again; if it keeps refusing for more than a couple of minutes, check `deepspace releases`.',
+      'Deploy failed',
+      'release_in_progress',
+      true,
+      { cwd: process.cwd(), argv: ['deepspace', ...process.argv.slice(2)] },
+    )
+  }
   if (!response.ok || !body.success) {
     await bail(
       formatDeployWorkerError(response.status, body.error, body.code),
@@ -262,12 +305,12 @@ export async function deployBuiltBundle(options: {
 
   p.log.info(`Platform commit: ${Math.round((Date.now() - commitStarted) / 1000)}s`)
 
-  if (body.onBehalfOfOwner) {
-    // The owner's id is the only identity on the wire here, and a collaborator
-    // cannot read the owner roster to resolve it — so say the thing that
-    // matters (attribution, not you) and leave the id to --json.
-    p.log.warn("This release is attributed to the app's owner, not to your account.")
-  }
+  // No on-behalf attribution warning: it claimed the release was attributed to
+  // the owner, and the ledger records the opposite — the deploy worker writes
+  // the release `actor` from the CALLER's user id (routes/deploy/preflight.ts
+  // keeps `userId` as the caller and only `ownerUserId` is overridden), which
+  // is why `releases --json` names the collaborator and `status --json` reads
+  // `byYou: true` for them. The warning was simply false.
   if (body.staleBaseGuard === 'skipped') {
     p.log.warn(
       'The stale-base guard was skipped (repo store unavailable) — this deploy was NOT ' +
@@ -279,7 +322,7 @@ export async function deployBuiltBundle(options: {
       'This deploy is live, but its rollback bundle was not retained because the app storage quota is full.',
     )
   }
-  return body
+  return renamedFrom ? { ...body, renamedFrom } : body
 }
 
 export function assetManifest(

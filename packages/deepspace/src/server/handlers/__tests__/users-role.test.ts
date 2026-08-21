@@ -224,18 +224,18 @@ describe('user list visibility', () => {
     })
     const memberUsers = send.mock.calls.at(-1)?.[1].payload.users as Array<Record<string, unknown>>
     expect(byId(memberUsers)).toEqual([
-      { id: 'admin', name: 'Admin', role: 'admin' },
+      { id: 'admin', name: 'Admin', role: 'admin', lastSeenAt: expect.any(String) },
       {
         id: 'member',
         name: 'Member',
         imageUrl: 'https://example.test/member.png',
         role: 'member',
+        lastSeenAt: expect.any(String),
       },
     ])
     for (const user of memberUsers) {
       expect(user).not.toHaveProperty('email')
       expect(user).not.toHaveProperty('createdAt')
-      expect(user).not.toHaveProperty('lastSeenAt')
       expect(user).not.toHaveProperty('privateNote')
     }
 
@@ -312,15 +312,60 @@ describe('user list visibility', () => {
 
     const users = send.mock.calls.at(-1)?.[1].payload.users as Array<Record<string, unknown>>
     expect(byId(users)).toEqual([
-      { id: 'alice', name: 'Alice', role: 'member' },
-      { id: 'bob', name: 'Bob', imageUrl: 'https://example.test/bob.png', role: 'member' },
+      { id: 'alice', name: 'Alice', role: 'member', lastSeenAt: expect.any(String) },
+      {
+        id: 'bob',
+        name: 'Bob',
+        imageUrl: 'https://example.test/bob.png',
+        role: 'member',
+        lastSeenAt: expect.any(String),
+      },
     ])
     for (const user of users) {
       expect(user).not.toHaveProperty('email')
       expect(user).not.toHaveProperty('createdAt')
-      expect(user).not.toHaveProperty('lastSeenAt')
     }
     expect(JSON.stringify(users)).not.toContain('@example.test')
+
+    db.close()
+  })
+
+  it('projects the live lastSeenAt, the one field usePresence derives from', async () => {
+    // `usePresence().isOnline` is `Date.now() - new Date(u.lastSeenAt) < timeout`
+    // over `useUsers()`. Dropping the field from the projection did not make
+    // presence approximate — it made it unconditionally false for every
+    // non-admin, silently, while the app owner (an admin) saw it working.
+    const db = new Database(':memory:')
+    const sql = makeSql(db)
+    const schemaRegistry = new SchemaRegistry([BASE_USERS_SCHEMA])
+    ensureCollectionTable(sql, BASE_USERS_SCHEMA)
+    await registerUser(sql, 'alice', 'Alice', 'alice@example.test', undefined, false, 'member', schemaRegistry)
+    await registerUser(sql, 'bob', 'Bob', 'bob@example.test', undefined, false, 'member', schemaRegistry)
+
+    const send = vi.fn()
+    const ctx: UserContext = {
+      sql,
+      schemaRegistry,
+      state: { getWebSockets: () => [] } as unknown as DurableObjectState,
+      getPermissionContext: () => noopPermissionContext,
+      send,
+    }
+    handleUserList(ctx, {} as WebSocket, {
+      userId: 'alice',
+      userName: 'Alice',
+      userEmail: 'alice@example.test',
+      role: 'member',
+      subscriptions: [],
+      yjsSubscriptions: [],
+    })
+
+    const users = send.mock.calls.at(-1)?.[1].payload.users as Array<Record<string, unknown>>
+    const isOnline = (id: string) => {
+      const seen = users.find((user) => user.id === id)?.lastSeenAt as string | undefined
+      return !!seen && Date.now() - new Date(seen).getTime() < 5 * 60 * 1000
+    }
+    expect(isOnline('alice')).toBe(true)
+    expect(isOnline('bob')).toBe(true)
 
     db.close()
   })
@@ -406,7 +451,9 @@ describe('user list visibility', () => {
     const users = send.mock.calls.at(-1)?.[1].payload.users as Array<Record<string, unknown>>
     // read: 'own' + read-policy roster → only the caller's own row, still
     // projected to public identity.
-    expect(users).toEqual([{ id: 'alice', name: 'Alice', role: 'member' }])
+    expect(users).toEqual([
+      { id: 'alice', name: 'Alice', role: 'member', lastSeenAt: expect.any(String) },
+    ])
 
     db.close()
   })

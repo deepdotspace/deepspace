@@ -46,6 +46,13 @@ interface CronAttachment extends UserAttachment {
   canWrite: boolean
 }
 
+/**
+ * `GET /internal/cron/tasks` on the room's stub — the request `armCronRoom`
+ * sends. Reachable only by DO-stub fetch from the app worker (see the security
+ * note on `BaseRoom.fetch`); answers `{ tasks }` in the `cron.tasks` shape.
+ */
+export const CRON_TASKS_INTERNAL_PATH = '/internal/cron/tasks'
+
 // Cron commands that mutate scheduler state. Read-only messages
 // (CRON_TASKS, CRON_HISTORY) are allowed for any connected client per the
 // SDK contract that viewers can observe but not write.
@@ -148,6 +155,13 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
   async fetch(request: Request): Promise<Response> {
     this.ensureInitialized()
     return super.fetch(request)
+  }
+
+  protected async handleInternalRequest(request: Request, url: URL): Promise<Response | null> {
+    if (request.method === 'GET' && url.pathname === CRON_TASKS_INTERNAL_PATH) {
+      return Response.json({ tasks: this.getTaskStates() })
+    }
+    return super.handleInternalRequest(request, url)
   }
 
   protected onConnect(ws: WebSocket, user: UserAttachment): CronAttachment {
@@ -356,16 +370,29 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
     let success = true
     let error: string | undefined
 
+    let thrown: unknown
     try {
       await this.onTask(taskName)
     } catch (e) {
       success = false
+      thrown = e
       error = e instanceof Error ? e.message : String(e)
-      console.error(`[CronRoom] Task "${taskName}" failed:`, e)
     }
 
     const durationMs = Date.now() - start
     const completedAt = new Date().toISOString()
+
+    // One line per run, so `deepspace logs --search cron` finds every run by
+    // task name. Workers Logs renders an Error object passed to console.* as
+    // its stack frames only — the message never arrives (verified against
+    // production rows, 2026-08-18) — so the message goes in the line itself
+    // and the stack rides along as a plain string.
+    if (success) {
+      console.log(`[cron] ${taskName} ok ${durationMs}ms`)
+    } else {
+      const stack = thrown instanceof Error ? thrown.stack : undefined
+      console.error(`[cron] ${taskName} failed ${durationMs}ms: ${error}`, ...(stack ? [stack] : []))
+    }
 
     // Record execution
     this.sql.exec(
@@ -529,6 +556,47 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
    * Called both by the alarm scheduler and manual trigger.
    */
   protected abstract onTask(taskName: string): void | Promise<void>
+}
+
+/** Rooms this isolate has already woken — the wake is idempotent, so once is enough. */
+const armedCronRooms = new Set<string>()
+
+/**
+ * Wake the app's CronRoom so its alarm is armed.
+ *
+ * A Durable Object does not exist until something fetches it, and CronRoom
+ * arms its alarm inside that first fetch — so a deployed schedule that no
+ * client has opened yet runs nothing, and nothing reports it. The app worker
+ * calls this from its request path (once per isolate is enough); the first
+ * request the worker handles after a deploy then arms the schedule. A no-op
+ * when the app declares no tasks. The wake runs under `ctx.waitUntil`, so it
+ * never delays the response.
+ */
+export function armCronRoom(
+  // Structural on purpose: Hono's `c.executionCtx` and workers-types'
+  // `ExecutionContext` disagree on members the wake never uses.
+  ctx: { waitUntil(promise: Promise<unknown>): void },
+  namespace: DurableObjectNamespace,
+  roomId: string,
+  tasks: readonly CronTask[],
+): void {
+  if (tasks.length === 0 || armedCronRooms.has(roomId)) return
+  armedCronRooms.add(roomId)
+  ctx.waitUntil(
+    namespace
+      .get(namespace.idFromName(roomId))
+      .fetch(`https://internal${CRON_TASKS_INTERNAL_PATH}`)
+      .then((response) => {
+        // `fetch` resolves for HTTP failures. Only a successful internal route
+        // proves initialization ran far enough to arm the room.
+        if (!response.ok) armedCronRooms.delete(roomId)
+        return response
+      })
+      // A transport failure is not "armed" either: let the next request retry.
+      .catch(() => {
+        armedCronRooms.delete(roomId)
+      }),
+  )
 }
 
 /**

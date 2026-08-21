@@ -81,10 +81,21 @@ export async function apiFetch<T>(
   if (!res.ok) {
     let msg = text
     let code: string | undefined
+    // Everything the refusal carried BESIDES its sentence and slug — e.g. the
+    // GitHub-source 422's `repository`, a storage refusal's byte counts. The
+    // server already computed them; dropping them here is what forced callers
+    // to read numbers and names back out of the prose.
+    let details: Record<string, unknown> | undefined
     try {
-      const body = JSON.parse(text) as { error?: string; code?: string }
-      msg = body.error ?? text
-      code = body.code
+      const body = JSON.parse(text) as Record<string, unknown>
+      if (body !== null && typeof body === 'object' && !Array.isArray(body)) {
+        msg = typeof body.error === 'string' ? body.error : text
+        code = typeof body.code === 'string' ? body.code : undefined
+        const rest = Object.fromEntries(
+          Object.entries(body).filter(([key]) => key !== 'error' && key !== 'code'),
+        )
+        if (Object.keys(rest).length > 0) details = rest
+      }
     } catch {
       // not JSON
     }
@@ -102,7 +113,7 @@ export async function apiFetch<T>(
     // Message = the server's sentence only. The internal REST path and raw
     // status read like a stack trace to users (same treatment as secretsApi);
     // they stay on the error's fields for DEBUG rendering and branching.
-    throw new ApiError(msg || `Request failed (${res.status})`, res.status, code, path)
+    throw new ApiError(msg || `Request failed (${res.status})`, res.status, code, path, details)
   }
   if (!text) return {} as T
   let parsed: unknown

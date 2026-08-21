@@ -14,7 +14,7 @@
  *     GET is a 404), so the internal route can't be reached by accident.
  */
 
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import { BaseRoom, connectionAttachmentFromRequest } from '../base-room'
 import { encodeRoomIdentityHeader } from '../../../shared/room-identity-headers'
 ;(globalThis as { WebSocketRequestResponsePair?: unknown }).WebSocketRequestResponsePair ??= class {
@@ -111,6 +111,8 @@ describe('BaseRoom.disconnectAllSockets', () => {
 })
 
 describe('connectionAttachmentFromRequest', () => {
+  afterEach(() => vi.restoreAllMocks())
+
   it('uses verified internal headers for identity', () => {
     const attachment = connectionAttachmentFromRequest(
       new Request('https://internal/ws/room', {
@@ -144,6 +146,28 @@ describe('connectionAttachmentFromRequest', () => {
     expect(attachment.userName).toBe('Anonymous')
     expect(attachment.userEmail).toBe('')
     expect(attachment.role).toBeUndefined()
+  })
+
+  it('warns when identity arrives only in the URL (a pre-0.19 app proxy)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    connectionAttachmentFromRequest(new Request('https://internal/ws/room?userId=alice'))
+
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0][0]).toContain('authenticatedRoomRequest()')
+  })
+
+  it('stays quiet for header identity and for a plain anonymous connection', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    connectionAttachmentFromRequest(
+      new Request('https://internal/ws/room?userId=alice', {
+        headers: { 'x-user-id': encodeRoomIdentityHeader('alice') },
+      }),
+    )
+    connectionAttachmentFromRequest(new Request('https://internal/ws/room?token=abc'))
+
+    expect(warn).not.toHaveBeenCalled()
   })
 })
 

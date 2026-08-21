@@ -106,8 +106,12 @@ installed binary:
 npx deepspace@latest app update
 ```
 
-The target CLI owns the source migrations required by the SDK version it
-installs. Review and commit its source changes before deploying.
+The target CLI is the sole version authority. The command is read-only: it
+reports dependency edits, app-owned source migrations, and validation steps,
+but never rewrites or stamps the checkout. Apply the guidance, run the app's
+checks, review the diff, and commit it before deploying. The inspection exits
+successfully even when work remains; `ready` in `--json` reports whether the
+app is already aligned.
 
 The hierarchy shown by `deepspace --help` keeps durable app lifecycle under
 `deepspace app`, while checkout-oriented Git, workspace, release, and deploy

@@ -1,9 +1,16 @@
 /**
  * INT-1 (per-token pricing label) and FEAT-13 (paid-invoke confirmation gate).
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import type { CommandDef } from 'citty'
-import { billingUnit, shouldConfirmCost, isInteractive } from '../_invoke-impl'
+import {
+  billingUnit,
+  costGate,
+  exampleBody,
+  isInteractive,
+  priceLabel,
+  runInvoke,
+} from '../_invoke-impl'
 import integrations from '../integrations'
 
 describe('integrations command surface', () => {
@@ -37,23 +44,103 @@ describe('billingUnit (INT-1)', () => {
   })
 })
 
-describe('shouldConfirmCost (FEAT-13)', () => {
-  const base = { json: false, yes: false, isTTY: true, baseCost: 0.01 }
+describe('priceLabel', () => {
+  it('calls an input-dependent figure a base rate, not a floor', () => {
+    expect(
+      priceLabel({
+        model: 'per_token',
+        baseCost: 0.000052,
+        currency: 'USD',
+        variesWithInput: true,
+      }),
+    ).toBe('base $0.000052 per token (some inputs cost less or more)')
+  })
+})
 
-  it('confirms a paid call on an interactive terminal', () => {
-    expect(shouldConfirmCost(base)).toBe(true)
+describe('costGate (FEAT-13 — nothing paid is ever billed silently)', () => {
+  const base = { json: false, interactive: true, baseCost: 0.01 as number | null }
+
+  it('asks a person at an interactive terminal', () => {
+    expect(costGate(base)).toBe('confirm')
   })
-  it('does not confirm in --json (machine) mode', () => {
-    expect(shouldConfirmCost({ ...base, json: true })).toBe(false)
+  it('refuses a piped / CI caller without --yes', () => {
+    expect(costGate({ ...base, interactive: false })).toBe('refuse')
   })
-  it('does not confirm when --yes pre-approves', () => {
-    expect(shouldConfirmCost({ ...base, yes: true })).toBe(false)
+  it('refuses --json (an agent) without --yes, even at a terminal', () => {
+    expect(costGate({ ...base, json: true })).toBe('refuse')
   })
-  it('does not confirm on a non-interactive stdin (piped/CI)', () => {
-    expect(shouldConfirmCost({ ...base, isTTY: false })).toBe(false)
+  it('treats a metered (null) price as paid — --yes skips the gate entirely', () => {
+    expect(costGate({ ...base, baseCost: null, interactive: false })).toBe('refuse')
+    expect(costGate({ ...base, baseCost: null, json: true })).toBe('refuse')
   })
-  it('does not confirm a free endpoint (baseCost 0)', () => {
-    expect(shouldConfirmCost({ ...base, baseCost: 0 })).toBe(false)
+  it('proceeds on a free endpoint (baseCost 0) without asking', () => {
+    expect(costGate({ ...base, baseCost: 0, interactive: false })).toBe('proceed')
+  })
+})
+
+describe('runInvoke refuses a paid call outside a terminal', () => {
+  it('names the price and --yes, and never POSTs', async () => {
+    const calls: string[] = []
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      calls.push(String(input))
+      return Response.json({
+        integrations: {
+          wikipedia: [
+            {
+              endpoint: 'get-page-summary',
+              billing: { model: 'per_request', baseCost: 0.001, currency: 'USD' },
+              inputSchema: null,
+              example: null,
+            },
+          ],
+        },
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const stdin = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY')
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true })
+    try {
+      await expect(
+        runInvoke({ target: 'wikipedia/get-page-summary', body: '{"title":"Cheese"}', json: true }),
+      ).rejects.toMatchObject({
+        code: 'cost_confirmation_required',
+        message: expect.stringMatching(/\$0\.001 per request.*--yes/s),
+      })
+    } finally {
+      vi.unstubAllGlobals()
+      if (stdin) Object.defineProperty(process.stdin, 'isTTY', stdin)
+      else delete (process.stdin as { isTTY?: boolean }).isTTY
+    }
+    // Only the catalog was read; the billed endpoint was never called.
+    expect(calls.every((url) => !url.includes('/api/integrations/wikipedia/'))).toBe(true)
+  })
+})
+
+describe('exampleBody (info never shows `{}` for an endpoint that rejects it)', () => {
+  it('keeps the catalog example when it has fields', () => {
+    expect(exampleBody({ example: { title: 'Cheese' }, inputSchema: null })).toEqual({ title: 'Cheese' })
+  })
+  it('synthesizes required keys from the schema, preferring its own example/default/enum', () => {
+    expect(
+      exampleBody({
+        example: {},
+        inputSchema: {
+          type: 'object',
+          required: ['title', 'lang', 'mode', 'limit', 'exact'],
+          properties: {
+            title: { type: 'string' },
+            lang: { type: 'string', default: 'en' },
+            mode: { type: 'string', enum: ['summary', 'full'] },
+            limit: { type: 'integer', example: 5 },
+            exact: { type: 'boolean' },
+          },
+        },
+      }),
+    ).toEqual({ title: '<string>', lang: 'en', mode: 'summary', limit: 5, exact: false })
+  })
+  it('passes the catalog value through when the schema requires nothing', () => {
+    expect(exampleBody({ example: null, inputSchema: { type: 'object' } })).toBeNull()
+    expect(exampleBody({ example: {}, inputSchema: null })).toEqual({})
   })
 })
 

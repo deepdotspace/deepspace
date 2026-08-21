@@ -5,18 +5,11 @@ import { ensureToken } from '../auth'
 import { findAppDir } from '../lib/app-context'
 import { resolveAppTarget } from '../lib/app-target'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
-import {
-  assertSyncableRepo,
-  currentBranch,
-  isAncestor,
-  isWorkTreeClean,
-  resolveCommit,
-} from '../lib/git/repository'
+import { assertSyncableRepo, isAncestor, resolveCommit } from '../lib/git/repository'
 import { runGit } from '../lib/git/process'
 import { repoApi, type RemoteRelease } from '../lib/repo-api'
 import {
   localTransferRefs,
-  remoteBranchOid,
   remotePublicRefs,
   selectGitHubRemote,
   type GitHubRemote,
@@ -27,6 +20,8 @@ import {
   deployBaseUrl,
   ensureSpaceRemote,
   gitSourceImportEnv,
+  removeSpaceRemote,
+  repoUrl,
   runGitRemote,
   SPACE_REMOTE,
   spacePrivateRef,
@@ -83,20 +78,49 @@ export default defineDeepspaceCommand({
         'not_in_app_repo',
       )
     }
-    assertSyncableRepo(appDir)
     const remoteArg = typeof args.remote === 'string' ? args.remote.trim() : undefined
     const result =
       requested === 'github'
         ? await moveToGitHub({ appDir, appId, token, deployUrl, state, remoteArg })
         : await moveToDeepSpace({ appDir, appId, token, deployUrl, state, remoteArg })
+    // One authority, one remote — reconciled HERE, after the flip settled, so
+    // every path through both moves lands on the same rule instead of each
+    // arranging its own. Under GitHub the `space` remote must not survive: a
+    // stale one (written by an earlier unclaimed-app `pull`, or inherited from
+    // a DeepSpace-era `deepspace clone`) still accepts `git push space` and
+    // gets the deploy worker's bodiless 422.
+    const reconciliation = reconcileSpaceRemote(appDir, appId, result.source)
+    const spaceRemote = reconciliation.spaceRemote
     if (!args.json) {
       p.log.success(
         result.source.provider === 'github'
           ? `Source: GitHub · ${result.source.repository} (revision ${result.revision})`
           : `Source: DeepSpace (revision ${result.revision})`,
       )
+      p.log.info(
+        spaceRemote === 'removed'
+          ? `Removed the \`${SPACE_REMOTE}\` git remote — DeepSpace no longer owns this repo.`
+          : spaceRemote === 'absent'
+            ? `No \`${SPACE_REMOTE}\` git remote to remove — source operations go through GitHub.`
+            : spaceRemote === 'present'
+              ? `The \`${SPACE_REMOTE}\` git remote points at this app's cloud repo.`
+              : `The local \`${SPACE_REMOTE}\` git remote still needs reconciliation.`,
+      )
+      if (reconciliation.localReconciliation) {
+        p.log.warn(reconciliation.localReconciliation.message)
+      }
     }
-    return { data: { appId, source: result.source, revision: result.revision } }
+    return {
+      data: {
+        appId,
+        source: result.source,
+        revision: result.revision,
+        spaceRemote,
+        ...(reconciliation.localReconciliation
+          ? { localReconciliation: reconciliation.localReconciliation }
+          : {}),
+      },
+    }
   },
 })
 
@@ -136,7 +160,7 @@ async function moveToGitHub(input: {
   if (sameSource(state.source, target)) return { source: target, revision: state.revision }
 
   if (state.source?.provider === 'deepspace') {
-    requireLocalHead(appDir)
+    assertSyncableRepo(appDir)
     const api = repoApi(deployUrl, token, appId)
     const { views } = await api.listWorkspaces()
     if (views.length > 0) {
@@ -197,9 +221,11 @@ async function moveToGitHub(input: {
     })
   }
 
-  // An initial GitHub claim has no DeepSpace ref inventory; exact HEAD is the
-  // minimum proof that deploy can subsequently verify without writing GitHub.
-  requirePublishedHead(appDir, selected, appId)
+  // Prove the selected repository is reachable before persisting it. The ref
+  // inventory may be empty. Initial claims and GitHub repository changes do
+  // not transfer refs: GitHub-source deploys intentionally accept empty
+  // remotes, dirty trees, and unpushed commits because they ship local bytes.
+  remotePublicRefs(appDir, selected.name)
   return setAppSource(deployUrl, token, appId, {
     source: target,
     expectedRevision: state.revision,
@@ -217,6 +243,7 @@ async function moveToDeepSpace(input: {
   const { appDir, appId, token, deployUrl, state, remoteArg } = input
   const target: AppSource = { provider: 'deepspace' }
   if (sameSource(state.source, target)) return { source: target, revision: state.revision }
+  assertSyncableRepo(appDir)
   if (state.source?.provider !== 'github') {
     return setAppSource(deployUrl, token, appId, {
       source: target,
@@ -225,17 +252,15 @@ async function moveToDeepSpace(input: {
   }
 
   const selected = requireGitHubRemote(appDir, remoteArg, state.source.repository)
-  const { branch, oid } = requirePublishedHead(appDir, selected)
   fetchGitHubTransferRefs(appDir, selected.name)
   const refs = transferRefs(appDir)
+  if (refs.length === 0) {
+    throw new Refusal('GitHub has no branches or tags to import.', 'source_empty')
+  }
   const latest = await repoApi(deployUrl, token, appId)
     .latestRelease()
     .then((value) => value.release)
   requireReleaseReachable(appDir, latest, refs)
-  ensureSpaceRemote(appDir, appId)
-  if (refs.length === 0) {
-    throw new Refusal('GitHub has no branches or tags to import.', 'source_empty')
-  }
   const pushed = runGit(
     appDir,
     [
@@ -243,7 +268,7 @@ async function moveToDeepSpace(input: {
       '--force',
       '--atomic',
       '--prune',
-      SPACE_REMOTE,
+      repoUrl(appId, deployUrl),
       `${TRANSFER_PREFIX}/heads/*:refs/heads/*`,
       `${TRANSFER_PREFIX}/tags/*:refs/tags/*`,
     ],
@@ -255,14 +280,62 @@ async function moveToDeepSpace(input: {
       'source_import_failed',
     )
   }
+  // The push can be long. Re-read the authoritative GitHub refs after it
+  // finishes so a branch/tag advance during the import cannot be omitted from
+  // the proof used to flip authority.
+  const latestGitHubRefs = remotePublicRefs(appDir, selected.name)
+  if (!sameRefs(latestGitHubRefs, refs)) {
+    throw new Refusal(
+      'GitHub branches or tags changed while they were being imported. Retry the transfer from fresh refs.',
+      'source_changed',
+    )
+  }
   return setAppSource(deployUrl, token, appId, {
     source: target,
     expectedRevision: state.revision,
-    branch,
-    commitOid: oid,
     refs,
     ...releaseExpectation(latest),
   })
+}
+
+type SpaceRemoteReconciliation =
+  | { spaceRemote: 'removed' | 'absent' | 'present'; localReconciliation?: never }
+  | {
+      spaceRemote: 'repair_required'
+      localReconciliation: {
+        required: true
+        code: 'git_remote_reconciliation_failed'
+        message: string
+      }
+    }
+
+/**
+ * The authority flip is the commit point. Local Git config is follow-up state:
+ * if it cannot be reconciled, preserve the successful server result and say
+ * exactly what remains instead of relabelling the entire transfer as failed.
+ */
+function reconcileSpaceRemote(
+  appDir: string,
+  appId: string,
+  source: AppSource,
+): SpaceRemoteReconciliation {
+  try {
+    if (source.provider === 'github') {
+      return { spaceRemote: removeSpaceRemote(appDir) ? 'removed' : 'absent' }
+    }
+    ensureSpaceRemote(appDir, appId)
+    return { spaceRemote: 'present' }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return {
+      spaceRemote: 'repair_required',
+      localReconciliation: {
+        required: true,
+        code: 'git_remote_reconciliation_failed',
+        message: `Source authority is ${source.provider}, but the local \`${SPACE_REMOTE}\` remote could not be reconciled: ${detail}`,
+      },
+    }
+  }
 }
 
 function requireGitHubRemote(
@@ -279,47 +352,6 @@ function requireGitHubRemote(
         ? `No local GitHub remote points at ${repository}. Add one or pass --remote <name>.`
         : 'No unambiguous GitHub remote was found. Add `origin` or pass --remote <name>.',
     'github_remote_required',
-  )
-}
-
-function requirePublishedHead(
-  appDir: string,
-  remote: GitHubRemote,
-  appId = '',
-): { branch: string; oid: string } {
-  const head = requireLocalHead(appDir)
-  if (remoteBranchOid(appDir, remote.name, head.branch) !== head.oid) {
-    throw githubPushRequired(appDir, appId, remote, head.branch, head.oid)
-  }
-  return head
-}
-
-function requireLocalHead(appDir: string): { branch: string; oid: string } {
-  if (!isWorkTreeClean(appDir)) {
-    throw new Refusal('Commit or discard local changes before changing source.', 'dirty_worktree')
-  }
-  const branch = currentBranch(appDir)
-  if (!branch) throw new Refusal('HEAD is detached; switch to a branch first.', 'detached_head')
-  const oid = resolveCommit(appDir, 'HEAD')
-  if (!oid) throw new Refusal('The repository has no commit to publish.', 'no_commits')
-  return { branch, oid }
-}
-
-function githubPushRequired(
-  appDir: string,
-  appId: string,
-  remote: GitHubRemote,
-  branch: string,
-  oid: string,
-): Refusal {
-  return new Refusal(
-    `GitHub ${remote.repository} does not have ${branch} at ${oid.slice(0, 10)}. Push it manually, then rerun.`,
-    'github_push_required',
-    {
-      actionRequired: true,
-      action: { cwd: appDir, argv: ['git', 'push', remote.name, branch] },
-      extra: { ...(appId ? { appId } : {}), repository: remote.repository, branch, oid },
-    },
   )
 }
 

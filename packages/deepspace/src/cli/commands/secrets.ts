@@ -25,9 +25,8 @@ import { decodeJwtPayload } from '../../shared/jwt'
 import { PLATFORM_URLS } from '../env'
 import { findAppDir } from '../lib/app-context'
 import { writeDevVars } from '../lib/dev-vars'
-import { parseAppArg } from '../lib/app-target'
+import { assertAppTargetResolvable, parseWranglerEnvArg, resolveAppTarget } from '../lib/app-target'
 import { InputError, renderCliError } from '../lib/cli-errors'
-import { readAppId, APP_ID_RE } from '../lib/app-identity'
 import { dedupePositionals } from '../lib/citty-args'
 import {
   createConfig,
@@ -83,42 +82,24 @@ interface Target {
   token: string
 }
 
+/**
+ * Which app, which config, as whom. The app comes from the shared resolver
+ * every other app-scoped command uses (`--app <id or name>`, else the
+ * surrounding wrangler.toml — with the same `not_in_app_repo` /
+ * `app_not_initialized` / `invalid_app_id` refusals as deploy), checked
+ * BEFORE the token read so a missing target never surfaces as
+ * `not_authenticated`.
+ */
 async function resolveTarget(args: {
   app?: string
   config?: string
   env?: string
 }): Promise<Target> {
-  const wranglerEnv = args.env?.trim() || undefined
-  // An explicit blank --app must not silently fall back to the current dir's app
-  // — secrets are written to the target app, so a wrong target leaks/overwrites.
-  const { error: appErr } = parseAppArg(args.app)
-  if (appErr) throw new InputError(appErr, 'invalid_app')
-  let appId = args.app?.trim()
-  if (appId && !APP_ID_RE.test(appId)) {
-    throw new InputError(`Invalid app id "${appId}" — expected app_<26 chars>.`, 'invalid_app_id')
-  }
-  if (!appId) {
-    const appDir = findAppDir()
-    appId = (appDir && readAppId(appDir, wranglerEnv)) || undefined
-    if (!appId) {
-      // `--env <name>` selects a wrangler [env.<name>] slot with its OWN app id.
-      // If the slot is missing but a top-level app id exists, the user almost
-      // certainly wanted to pick a *config*, not an env — point them at `-c`.
-      if (wranglerEnv && appDir && readAppId(appDir, undefined)) {
-        throw new InputError(
-          `No app id for env "${wranglerEnv}" — wrangler.toml has no [env.${wranglerEnv}] block with its own DEEPSPACE_APP_ID. ` +
-            `To target the "${wranglerEnv}" config on this app, use \`-c ${wranglerEnv}\` instead of \`--env ${wranglerEnv}\`.`,
-          'no_app_id_for_env',
-        )
-      }
-      throw new InputError(
-        'No app id. Run from an app directory whose wrangler.toml carries DEEPSPACE_APP_ID (`deepspace app init` mints one), or pass --app <appId>.',
-        'not_in_app_repo',
-      )
-    }
-  }
+  assertAppTargetResolvable(args.app, { wranglerEnv: args.env })
+  const { wranglerEnv } = parseWranglerEnvArg(args.env)
   const configName = validateConfigName(args.config?.trim() || defaultConfigNameForEnv(wranglerEnv))
   const token = await ensureToken()
+  const appId = await resolveAppTarget(DEPLOY_URL, token, args.app, { wranglerEnv })
   return { appId, configName, token }
 }
 
@@ -345,9 +326,7 @@ const upload = defineCommand({
   async run({ args }) {
     try {
       const t = await resolveTarget(args)
-      const content =
-        args.file === '-' ? readFileSync(0, 'utf-8') : readFileSync(args.file, 'utf-8')
-      const secrets = parseSecretsUpload(content)
+      const secrets = parseSecretsUpload(readUploadSource(args.file))
       if (Object.keys(secrets).length === 0)
         throw new InputError('No secrets found in the input.', 'empty_input')
       await uploadSecrets(DEPLOY_URL, t.token, t.appId, t.configName, secrets, args.replace)
@@ -366,6 +345,22 @@ const upload = defineCommand({
     }
   },
 })
+
+/** The dotenv/JSON source of an upload: a path, or `-` for stdin. A path
+ *  that does not exist is the caller's mistake, coded as such — not a raw
+ *  ENOENT with the file's own basename mistaken for a secret name. */
+function readUploadSource(file: string): string {
+  if (file === '-') return readFileSync(0, 'utf-8')
+  try {
+    return readFileSync(file, 'utf-8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+    throw new InputError(
+      `No such file: ${file}. Pass the path of a dotenv or JSON file to upload, or \`-\` to read it from stdin.`,
+      'file_not_found',
+    )
+  }
+}
 
 const download = defineCommand({
   meta: { name: 'download', description: 'Download a config’s secrets (dotenv/json/shell)' },

@@ -137,3 +137,37 @@ describe('one-shot activity pagination', () => {
     expect(listActivity).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('a GitHub-source release in the feed', () => {
+  it('names its repository instead of the bare `?` a null commitOid printed', () => {
+    // The feed event carries `sourceProvider`/`sourceRepository` exactly as the
+    // release row does; only the human rendering keyed on `commitOid === null`,
+    // so `activity` printed `#3 ?` for a release whose --json records its
+    // source — the same break `releases` and `status` had.
+    const line = formatEvent(
+      ev({
+        seq: 3,
+        kind: 'release.deploy',
+        summary: {
+          seq: 3,
+          commitOid: null,
+          sourceProvider: 'github',
+          sourceRepository: 'donalddellapietra/changelog-c4',
+        },
+      }),
+    )
+    expect(line).toContain('#3 GitHub · donalddellapietra/changelog-c4')
+    expect(line).not.toContain('?')
+  })
+
+  it('still prints the commit when the release recorded one', () => {
+    const line = formatEvent(
+      ev({
+        seq: 4,
+        kind: 'release.deploy',
+        summary: { seq: 4, commitOid: OID, sourceProvider: 'deepspace' },
+      }),
+    )
+    expect(line).toContain(`#4 commit ${OID.slice(0, 10)}`)
+  })
+})

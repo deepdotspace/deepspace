@@ -181,6 +181,13 @@ export const COST_RATES = {
     /** USD per stored dimension per month. */
     storedPerDimPerMonth: VECTORIZE_STORED_USD_PER_100M_DIMS / 100_000_000,
   },
+  aiSearch: {
+    ingestPerToken: 0.75 / 1_000_000,
+    ingestImagePerToken: 0.5 / 1_000_000,
+    storagePerByteMonth: 2 / 1_000_000_000,
+    hybridOrSemanticPerQuery: 0.75 / 1_000,
+    fulltextPerQuery: 0.1 / 1_000,
+  },
 } as const
 
 /**
@@ -197,11 +204,26 @@ export const COST_RATES = {
  *     monthly snapshots, so a windowed SUM isn't meaningful here.
  */
 export function priceBindingUsageEvent(kind: string, op: string, units: number): number {
+  // A non-finite or negative unit count is a corrupt meter row or a corrupt
+  // provider response. Price it at zero rather than letting NaN reach a cost
+  // column, where it would be unrecoverable.
+  if (!Number.isFinite(units) || units < 0) return 0
   if (kind === 'ai' && op === 'input') {
     return units * COST_RATES.ai.embedInputPerChar
   }
   if (kind === 'vectorize' && op === 'query') {
     return units * COST_RATES.vectorize.queriedPerDim
+  }
+  // Managed AI Search is billed server-side by the API worker. These raw
+  // preview rates are the one published rate source; the ledger derives its
+  // distinct binding markup from the row's `source`.
+  if (kind === 'ai_search') {
+    if (op === 'ingest') return units * COST_RATES.aiSearch.ingestPerToken
+    if (op === 'ingest-image') return units * COST_RATES.aiSearch.ingestImagePerToken
+    if (op === 'storage') return units * COST_RATES.aiSearch.storagePerByteMonth
+    if (op === 'search-hybrid' || op === 'search-semantic')
+      return units * COST_RATES.aiSearch.hybridOrSemanticPerQuery
+    if (op === 'search-fulltext') return units * COST_RATES.aiSearch.fulltextPerQuery
   }
   return 0
 }

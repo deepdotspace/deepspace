@@ -38,13 +38,13 @@ import { readdirSync, type Dirent } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
 import { sync as spawnSync } from 'cross-spawn'
 import { ensureToken } from '../auth'
-import { findAppDir, findChildApps } from '../lib/app-context'
+import { findAppDir } from '../lib/app-context'
 import { resolveWorktreePort } from '../lib/launch-config'
 import { PLATFORM_URLS } from '../env'
 import { writeDevVars } from '../lib/dev-vars'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { ensureInstallReady } from '../lib/install-status'
-import { ensurePlaywright } from '../lib/playwright'
+import { childStdio, ensurePlaywright, routeChildStdoutToStderr } from '../lib/playwright'
 import { preflightNodeVersion, preflightWindowsWorkerd } from '../lib/preflight'
 import { refreshSecretsCache } from '../lib/secrets'
 import { DEFAULT_PORT, resolvePort } from '../lib/port'
@@ -56,7 +56,7 @@ import {
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 import { syncTestAccountStore } from '../lib/test-account-service'
 // Same refusal text `dev` uses — one source so the two can't drift.
-import { noAppDirMessage } from './dev'
+import { noAppDirRefusal } from './dev'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 export const PLAYWRIGHT_OUTPUT_DIR = '.deepspace/test-results'
@@ -165,7 +165,9 @@ export default defineDeepspaceCommand({
     },
   },
   async run({ args }) {
-    suiteOutputToStderr = args.json === true
+    // One switch for every child this run spawns — the dependency preflight
+    // and the suite runner alike.
+    routeChildStdoutToStderr(args.json === true)
     const say = (line: string) => {
       if (!args.json) console.log(line)
     }
@@ -183,7 +185,7 @@ export default defineDeepspaceCommand({
     const start = resolve('.')
     const appDir = findAppDir(start)
     if (!appDir) {
-      throw new Refusal(noAppDirMessage(start, findChildApps(start)), 'no_app_dir')
+      throw noAppDirRefusal(start)
     }
 
     // Inside any linked Git worktree the default port must match that
@@ -295,8 +297,14 @@ export default defineDeepspaceCommand({
         if (suite.endsWith('.spec.ts')) {
           exitCode = runPlaywright(appDir, [suite], port, wranglerEnv, forwarded)
         } else {
+          // Whoever typed a name that is not a suite usually wanted one part
+          // of one, so the refusal names both narrowing tools it has: a spec
+          // path, and --grep. Without them the reader's next move is moving
+          // spec files out of tests/ to isolate one.
           throw new Refusal(
-            `Unknown test suite: ${suite}\nAvailable: smoke, api, e2e, unit, all`,
+            `Unknown test suite: ${suite}\n` +
+              `Available: smoke, api, e2e, unit, all — or a path to one spec file ` +
+              `(tests/<name>.spec.ts). To run part of a suite, add --grep <pattern>.`,
             'unknown_suite',
           )
         }
@@ -324,10 +332,6 @@ export default defineDeepspaceCommand({
  * app id while its Playwright half used staging's — the two halves of one
  * command disagreeing about which app they were testing.
  */
-/** Set once per invocation by `run`: `--json` moves the spawned suite's
- *  stdout to stderr so the envelope is stdout's only line. */
-let suiteOutputToStderr = false
-
 function runSuite(
   appDir: string,
   argv: string[],
@@ -346,7 +350,7 @@ function runSuite(
       cwd: appDir,
       // Under --json the child's stdout is routed to our stderr: the live
       // suite output stays visible and stdout stays a single JSON line.
-      stdio: suiteOutputToStderr ? ['inherit', 2, 2] : 'inherit',
+      stdio: childStdio(),
       env: wranglerViteEnv(process.env, wranglerConfig, extraEnv),
     })
     return result.status ?? 1

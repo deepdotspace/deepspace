@@ -17,6 +17,7 @@
 
 import { PLATFORM_URLS } from '../env'
 import { readAppId } from './app-identity'
+import { appTargetMissingError } from './app-target'
 import { fetchAppIdentityToken, fetchPublicKey, mintAppOwnerJwt } from './app-tokens'
 import { writeSecretFileSync } from './secure-file'
 import { devVarsPathFor } from './wrangler-env'
@@ -36,11 +37,9 @@ const HEADER = [
 function requireAppIdFor(appDir: string, wranglerEnv?: string): string {
   const id = readAppId(appDir, wranglerEnv)
   if (id) return id
-  throw new Error(
-    'wrangler.toml has no DEEPSPACE_APP_ID' +
-      (wranglerEnv ? ` for [env.${wranglerEnv}]` : '') +
-      '. Run `deepspace app init` (or `deepspace app init --env <name>`) and retry.',
-  )
+  // The same coded refusal (`app_not_initialized` / `no_app_id_for_env`) every
+  // other command gives for this state — dev/test used to throw a bare Error.
+  throw appTargetMissingError(appDir, wranglerEnv)
 }
 
 /** Write the whole file from platform truth + the store cache. */

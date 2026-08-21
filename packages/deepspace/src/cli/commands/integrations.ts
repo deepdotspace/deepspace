@@ -85,7 +85,8 @@ const invoke = defineDeepspaceCommand({
     yes: {
       type: 'boolean',
       alias: 'y',
-      description: 'Skip the paid-call cost confirmation',
+      description:
+        'Confirm the spend on a paid endpoint up front. Required when not at an interactive terminal (piped, CI, --json); at a terminal it skips the prompt',
       default: false,
     },
   },

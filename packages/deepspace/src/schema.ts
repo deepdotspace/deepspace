@@ -23,4 +23,3 @@ export {
 } from './server/schemas/messaging'
 export { CONVERSATION_SCHEMAS, VOTING_SCHEMAS } from './server/schemas/conversation'
 export { DIRECTORY_SCHEMAS } from './server/schemas/directory'
-export { WORKSPACE_SCHEMAS } from './server/schemas/workspace'

@@ -29,17 +29,29 @@ export interface CliAction {
  * An action naming `deepspace` is only runnable where a `deepspace` binary is
  * on PATH — which a linked worktree (a checkout with no `node_modules` of its
  * own), a bare clone directory, or any agent that invokes us through
- * `npx deepspace` is not. When we can identify the CLI entry we are running
- * from, pin it together with its interpreter — the same reasoning as the git
- * credential helper in vc-remote.ts, though that one deliberately pins the
- * RAW argv[1] (its literal path feeds the transient-entry heuristic) while
- * actions resolve symlinks and verify package ownership. Anywhere the entry
- * is unidentifiable (embedded, tests), the plain name is left alone.
+ * `npx deepspace` is not. Prefer the SDK installed at the action's cwd: a
+ * command such as `workspace land` may remove the checkout containing the
+ * running CLI before its follow-up executes. Otherwise pin the CLI entry we
+ * are running from. Both paths resolve symlinks and verify package ownership.
+ * Anywhere the entry is unidentifiable (embedded, tests), the plain name is
+ * left alone.
  */
-export function resolveActionArgv(argv: string[]): string[] {
+export function resolveActionArgv(argv: string[], cwd?: string): string[] {
   if (argv[0] !== 'deepspace') return argv
-  const entry = cliEntryPath()
+  const entry = (cwd ? installedCliEntry(cwd) : null) ?? cliEntryPath()
   return entry ? [process.execPath, entry, ...argv.slice(1)] : argv
+}
+
+/** Find the nearest ordinary node_modules install visible from a target cwd. */
+function installedCliEntry(cwd: string): string | null {
+  let dir = resolve(cwd)
+  while (true) {
+    const entry = verifiedCliEntry(resolve(dir, 'node_modules', 'deepspace', 'dist', 'cli.js'))
+    if (entry) return entry
+    const parent = dirname(dir)
+    if (parent === dir) return null
+    dir = parent
+  }
 }
 
 /**
@@ -53,6 +65,10 @@ export function resolveActionArgv(argv: string[]): string[] {
 function cliEntryPath(): string | null {
   const entry = process.argv[1]
   if (!entry || !isAbsolute(entry)) return null
+  return verifiedCliEntry(entry)
+}
+
+function verifiedCliEntry(entry: string): string | null {
   let real: string
   try {
     real = realpathSync(entry)
@@ -76,7 +92,7 @@ function cliEntryPath(): string | null {
  *  Idempotent — a pinned argv starts with the interpreter, not `deepspace`,
  *  so re-applying it is a no-op. */
 export function executableAction(action: CliAction): CliAction {
-  const pinned = { ...action, argv: resolveActionArgv(action.argv) }
+  const pinned = { ...action, argv: resolveActionArgv(action.argv, action.cwd) }
   assertExecutableAction(pinned)
   return pinned
 }

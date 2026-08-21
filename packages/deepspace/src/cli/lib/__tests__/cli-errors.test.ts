@@ -3,10 +3,24 @@
  * message (with known API slugs translated), never a raw stack dump.
  */
 
-import { describe, it, expect } from 'vitest'
-import { formatCliError, wrapCommandErrors, errorCode, InputError } from '../cli-errors'
+import { afterEach, describe, it, expect, vi } from 'vitest'
+import {
+  formatCliError,
+  wrapCommandErrors,
+  errorCode,
+  failureEnvelope,
+  failureExitCode,
+  renderCliError,
+  InputError,
+  Refusal,
+} from '../cli-errors'
 import { ApiError } from '../api'
 import type { CommandDef } from 'citty'
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  process.exitCode = undefined
+})
 
 describe('formatCliError', () => {
   it('passes plain error messages through untouched', () => {
@@ -93,5 +107,66 @@ describe('errorCode', () => {
     // A Node fs error carries a string .code (ENOENT) but must NOT leak into the
     // machine contract as though it were a documented code.
     expect(errorCode(Object.assign(new Error('nope'), { code: 'ENOENT' }))).toBeUndefined()
+  })
+})
+
+describe('Refusal through the escaped-error renderer', () => {
+  const refusal = () =>
+    new Refusal('No app id in /app/wrangler.toml. Run `deepspace app init`.', 'app_not_initialized', {
+      action: { cwd: '/app', argv: ['deepspace', 'app', 'init'] },
+      actionRequired: true,
+      extra: { appDir: '/app' },
+    })
+
+  it('errorCode reads a Refusal\'s code, so shared helpers may throw one into any command', () => {
+    expect(errorCode(refusal())).toBe('app_not_initialized')
+  })
+
+  it('failureEnvelope carries code, actionRequired, action and extra — the runtime envelope', () => {
+    expect(failureEnvelope(refusal())).toEqual({
+      ok: false,
+      code: 'app_not_initialized',
+      actionRequired: true,
+      error: 'No app id in /app/wrangler.toml. Run `deepspace app init`.',
+      action: { cwd: '/app', argv: ['deepspace', 'app', 'init'] },
+      appDir: '/app',
+    })
+    expect(failureExitCode(refusal())).toBe(2)
+    expect(failureExitCode(new InputError('x', 'y'))).toBe(1)
+  })
+
+  it('renderCliError --json emits that envelope and exit 2 (a citty command loses nothing)', () => {
+    const lines: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
+    const argv = process.argv
+    process.argv = [...argv, '--json']
+    try {
+      renderCliError(refusal())
+    } finally {
+      process.argv = argv
+    }
+    expect(JSON.parse(lines[0])).toMatchObject({
+      ok: false,
+      code: 'app_not_initialized',
+      actionRequired: true,
+      action: { cwd: '/app', argv: ['deepspace', 'app', 'init'] },
+    })
+    expect(process.exitCode).toBe(2)
+  })
+
+  it('renderCliError (human) prints the slugged line and the Next: action', () => {
+    const errs: string[] = []
+    vi.spyOn(console, 'error').mockImplementation((line?: unknown) => errs.push(String(line)))
+    const argv = process.argv
+    process.argv = argv.filter((a) => a !== '--json')
+    try {
+      renderCliError(new Refusal('Not logged in.', 'not_authenticated', {
+        action: { cwd: '/app', argv: ['deepspace', 'auth', 'login'] },
+      }))
+    } finally {
+      process.argv = argv
+    }
+    expect(errs[0]).toBe('Not logged in. [not_authenticated]')
+    expect(process.exitCode).toBe(1)
   })
 })

@@ -200,7 +200,7 @@ describe('test accounts list local-record merge', () => {
     expect(lines.join('\n')).toContain('Password: Secret123!')
   })
 
-  it('emits name and usableByFixture in --json, password left as is', async () => {
+  it('emits name and usableByFixture in --json, and no password without --reveal', async () => {
     const lines = captureLog()
 
     await list.run({ args: { json: true, usable: false, reveal: false } })
@@ -213,15 +213,26 @@ describe('test accounts list local-record merge', () => {
     expect(envelope.accounts[0]).toMatchObject({
       email: 'alpha@deepspace.test',
       name: 'Alpha',
-      password: 'Secret123!',
       usableByFixture: true,
     })
+    expect(envelope.accounts[0]).not.toHaveProperty('password')
+    expect(lines[0]).not.toContain('Secret123!')
     expect(envelope.accounts[1]).toMatchObject({
       email: 'ghost@deepspace.test',
       name: null,
-      password: null,
       usableByFixture: false,
     })
+    expect(envelope.accounts[1]).not.toHaveProperty('password')
+  })
+
+  it('--reveal carries the saved password in --json (null when none is saved)', async () => {
+    const lines = captureLog()
+
+    await list.run({ args: { json: true, usable: false, reveal: true } })
+
+    const envelope = JSON.parse(lines[0]) as { accounts: Array<Record<string, unknown>> }
+    expect(envelope.accounts[0]).toMatchObject({ password: 'Secret123!' })
+    expect(envelope.accounts[1]).toMatchObject({ password: null })
   })
 
   it('--usable drops rows without a locally saved password', async () => {
@@ -256,6 +267,28 @@ describe('test accounts create selector default', () => {
     )
     expect(mocks.upsertTestAccount).toHaveBeenCalledWith(expect.objectContaining({ name: 'bot' }))
     expect(JSON.parse(lines[0])).toMatchObject({ ok: true, name: 'bot' })
+  })
+
+  /**
+   * The caller passed the password in; echoing it back only puts a live
+   * credential into whatever captures this command's output.
+   */
+  it('never echoes the password back, on either surface', async () => {
+    const machine = captureLog()
+    await create.run({ args: { json: true, email: 'bot@deepspace.test', password: 'Password1!' } })
+    const envelope = JSON.parse(machine[0]) as Record<string, unknown>
+    expect(envelope).not.toHaveProperty('password')
+    // The credential is stored, and the envelope says where.
+    expect(mocks.upsertTestAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ password: 'Password1!' }),
+    )
+    expect(envelope.savedTo).toBe('/tmp/test-accounts.json')
+
+    vi.restoreAllMocks()
+    const human = captureLog()
+    await create.run({ args: { json: false, email: 'bot@deepspace.test', password: 'Password1!' } })
+    expect(human.join('\n')).not.toContain('Password1!')
+    expect(human.join('\n')).toContain('/tmp/test-accounts.json')
   })
 
   it('keeps an explicit --name', async () => {

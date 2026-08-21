@@ -275,10 +275,18 @@ export async function registerUser(
 }
 
 type UserRow = { recordId: string; data: UserRecord; createdBy: string }
-type PublicIdentity = { id: string; name: string; imageUrl?: string; role: string }
+type PublicIdentity = {
+  id: string
+  name: string
+  imageUrl?: string
+  role: string
+  /** Presence is a public fact — `usePresence().isOnline` derives from it, so
+   *  dropping it from the projection left presence dead for every non-admin. */
+  lastSeenAt: string
+}
 
 /**
- * What one socket may see of the roster. Anonymous sockets and roles whose
+ * What one caller may see of the roster. Anonymous callers and roles whose
  * users policy is switched off (`read: false`, or no `read` at all — the same
  * "deny" `canRead` uses) get nothing: that is a policy statement, not a row
  * filter. Admins get whole rows — email and any app-defined column — so their
@@ -295,23 +303,26 @@ function rosterFor(
   schema: CollectionSchema,
   records: UserRow[],
   publicRoster: PublicIdentity[],
-  attachment: ConnectionAttachment,
+  userId: string,
+  role: string,
 ): Array<Record<string, unknown>> {
-  if (isAnonymousUserId(attachment.userId)) return []
-  if (attachment.role === 'admin') {
+  // No identity at all (the tools API without `X-User-Id`) is the same
+  // statement as an anonymous socket: not someone the directory is for.
+  if (!userId || isAnonymousUserId(userId)) return []
+  if (role === 'admin') {
     const permissionContext = ctx.getPermissionContext()
     return records
-      .filter((record) => canRead(schema, 'admin', record, attachment.userId, permissionContext))
+      .filter((record) => canRead(schema, 'admin', record, userId, permissionContext))
       .map((record) => ({ id: record.recordId, ...record.data }))
   }
-  if (!getRolePermissions(schema, attachment.role).read) return []
+  if (!getRolePermissions(schema, role).read) return []
   // `roster: 'read-policy'` opts a tenant/team-scoped app out of the shared
   // roster: only the rows the caller's read policy grants, still projected.
   if (schema.roster === 'read-policy') {
     const permissionContext = ctx.getPermissionContext()
     const readable = new Set(
       records
-        .filter((record) => canRead(schema, attachment.role, record, attachment.userId, permissionContext))
+        .filter((record) => canRead(schema, role, record, userId, permissionContext))
         .map((record) => record.recordId),
     )
     return publicRoster.filter((user) => readable.has(user.id))
@@ -325,7 +336,30 @@ function publicIdentities(records: UserRow[]): PublicIdentity[] {
     name: data.name,
     ...(data.imageUrl ? { imageUrl: data.imageUrl } : {}),
     role: data.role,
+    lastSeenAt: data.lastSeenAt,
   }))
+}
+
+/**
+ * The roster this caller may see, read fresh.
+ *
+ * The socket's `user.list` request and the `user.list` tool are one question
+ * asked over two transports, so both answer from here. A tool that read the
+ * users table directly handed every member the directory the room's users
+ * policy — `read: false`, `roster: 'read-policy'` — exists to withhold.
+ *
+ * Public rooms support anonymous sockets, but that must not turn the users
+ * table into a public directory; a room with no users schema has none.
+ */
+export function rosterForCaller(
+  ctx: UserContext,
+  userId: string,
+  role: string,
+): Array<Record<string, unknown>> {
+  const schema = ctx.schemaRegistry.get('users')
+  if (!schema) return []
+  const records = getAllUserRecords(ctx.sql, ctx.schemaRegistry)
+  return rosterFor(ctx, schema, records, publicIdentities(records), userId, role)
 }
 
 /** Handle user list requests without bypassing the users collection's privacy boundary. */
@@ -334,15 +368,7 @@ export function handleUserList(
   ws: WebSocket,
   attachment: ConnectionAttachment
 ): void {
-  // Public rooms support anonymous sockets, but that must not turn the users
-  // table into a public directory; a room with no users schema has none.
-  const schema = ctx.schemaRegistry.get('users')
-  if (!schema) {
-    ctx.send(ws, { type: MSG.USER_LIST, payload: { users: [] } })
-    return
-  }
-  const records = getAllUserRecords(ctx.sql, ctx.schemaRegistry)
-  const users = rosterFor(ctx, schema, records, publicIdentities(records), attachment)
+  const users = rosterForCaller(ctx, attachment.userId, attachment.role)
   ctx.send(ws, { type: MSG.USER_LIST, payload: { users } })
 }
 
@@ -369,7 +395,9 @@ export function broadcastUserList(
     if (!attachment) continue
     ctx.send(other, {
       type: MSG.USER_LIST,
-      payload: { users: rosterFor(ctx, schema, records, publicRoster, attachment) },
+      payload: {
+        users: rosterFor(ctx, schema, records, publicRoster, attachment.userId, attachment.role),
+      },
     })
   }
 }

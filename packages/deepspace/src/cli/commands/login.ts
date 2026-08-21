@@ -368,19 +368,25 @@ async function doEmailLogin(
 
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { message?: string }
-    throw new Error(body.message ?? `Authentication failed (${res.status})`)
+    // The commonest auth failure of all carries a code like every other
+    // refusal: a 401 is the credentials (wrong email or password); anything
+    // else is the auth service refusing for its own stated reason.
+    throw new Refusal(
+      body.message ?? `Authentication failed (${res.status})`,
+      res.status === 401 ? 'invalid_credentials' : 'login_failed',
+    )
   }
 
   const setCookie = res.headers.get('set-cookie') ?? ''
   const cookieMatch = setCookie.match(new RegExp(`${SESSION_COOKIE}=([^;]+)`))
   if (!cookieMatch) {
-    throw new Error('No session cookie returned')
+    throw new Refusal('The auth service returned no session cookie.', 'login_failed')
   }
   const sessionToken = decodeURIComponent(cookieMatch[1])
 
   const jwt = await exchangeSession(AUTH_URL, sessionToken)
   if (!jwt) {
-    throw new Error('JWT issuance failed')
+    throw new Refusal('Signed in, but the auth service issued no token for the session.', 'login_failed')
   }
 
   storeCredentials(sessionToken, jwt)

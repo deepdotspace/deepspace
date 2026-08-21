@@ -74,10 +74,14 @@ export function parseServerError(error: string): ServerErrorInfo {
     }
   }
 
-  const fieldMatch = error.match(/^FIELD ERROR: Cannot update field '(\w+)'.*role '(\w+)'/)
+  // The shape `checkFieldPermissions` actually emits for a `writableFields`
+  // refusal. This branch spelled it "Cannot update field '<f>' … role '<r>'",
+  // a sentence the server has never sent, so every one of those refusals fell
+  // through to the fieldless "Field not editable" below.
+  const fieldMatch = error.match(/^FIELD ERROR: Role '(\w+)' cannot modify field '(\w+)'/)
   if (fieldMatch) {
     return {
-      title: `${humanizeRole(fieldMatch[2])}s can't edit "${fieldMatch[1]}"`,
+      title: `${humanizeRole(fieldMatch[1])}s can't edit "${fieldMatch[2]}"`,
       detail: '',
       isPermissionError: true,
     }

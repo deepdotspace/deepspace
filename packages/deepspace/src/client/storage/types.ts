@@ -80,7 +80,7 @@ export interface RoomUser {
   role: string
   /** Present only in the admin user-management view. */
   createdAt?: string
-  /** Present only in the admin user-management view. */
+  /** In every roster projection: `usePresence` derives online state from it. */
   lastSeenAt?: string
 }
 

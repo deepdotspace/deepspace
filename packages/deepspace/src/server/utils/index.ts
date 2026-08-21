@@ -46,4 +46,5 @@ export {
 } from './chat-context'
 export * from './chat-history'
 export { meterUsage, meterAi, meterVectorize, COST_RATES, priceBindingUsageEvent } from './metering'
+export * from './knowledge-base'
 export { runMigrations, type RunMigrationsResult } from './d1-migrations'

@@ -1,13 +1,42 @@
 import * as p from '@clack/prompts'
-import { CliExit } from '../../lib/cli-errors'
+import { CliExit, withoutReservedKeys } from '../../lib/cli-errors'
 import { executableAction, printAction, withSlug, type CliAction } from '../../lib/output'
+
+type DeployFailureOptions = {
+  action?: CliAction
+  actionRequired?: boolean
+  extra?: Record<string, unknown>
+}
 
 export interface DeployOutput {
   readonly json: boolean
   readonly nonInteractive: boolean
   emitJson(value: unknown): void
   showIntro(): void
-  die(message: string, code: string, opts?: { action?: CliAction; actionRequired?: boolean }): never
+  die(
+    message: string,
+    code: string,
+    opts?: DeployFailureOptions,
+  ): never
+}
+
+/** Deploy's JSON refusal, with the same reserved-field boundary as every
+ * other CLI failure envelope. Server/refusal details are data; they cannot
+ * turn a failure into success or inject an executable action. */
+export function deployFailureEnvelope(
+  message: string,
+  code: string,
+  opts: DeployFailureOptions = {},
+): Record<string, unknown> {
+  const action = opts.action ? executableAction(opts.action) : undefined
+  return {
+    ok: false,
+    ...withoutReservedKeys(opts.extra ?? {}),
+    code,
+    error: message,
+    ...(opts.actionRequired ? { actionRequired: true } : {}),
+    ...(action ? { action } : {}),
+  }
 }
 
 /** Owns deploy's human/JSON output contract and its single pre-upload exit door. */
@@ -57,13 +86,7 @@ export function createDeployOutput(json: boolean): DeployOutput {
       // applies elsewhere — a bare `deepspace` argv must never leave here.
       const action = opts.action ? executableAction(opts.action) : undefined
       if (json) {
-        emitJson({
-          ok: false,
-          code,
-          error: message,
-          ...(opts.actionRequired ? { actionRequired: true } : {}),
-          ...(action ? { action } : {}),
-        })
+        emitJson(deployFailureEnvelope(message, code, { ...opts, action }))
       } else {
         if (introShown && opts.actionRequired) p.log.warn(withSlug(message, code))
         else if (introShown) p.cancel(withSlug(message, code))

@@ -402,22 +402,28 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
     expect(pullAfterLandAction(main, 'main', head)).toBeNull()
   })
 
-  it('pins the pull action before cleanup removes the CLI that emitted it', () => {
+  it('pins the pull action to the surviving primary checkout before cleanup', () => {
     const main = initRepoWithCommit()
     const workspaceDir = addWorktree(main)
-    const packageDir = join(workspaceDir, 'node_modules', 'deepspace')
-    const entry = join(packageDir, 'dist', 'cli.js')
-    mkdirSync(join(packageDir, 'dist'), { recursive: true })
-    writeFileSync(join(packageDir, 'package.json'), JSON.stringify({ name: 'deepspace' }))
-    writeFileSync(entry, '#!/usr/bin/env node\n')
-    vi.spyOn(process, 'argv', 'get').mockReturnValue(['node', entry])
+    const makeEntry = (dir: string): string => {
+      const packageDir = join(dir, 'node_modules', 'deepspace')
+      const entry = join(packageDir, 'dist', 'cli.js')
+      mkdirSync(join(packageDir, 'dist'), { recursive: true })
+      writeFileSync(join(packageDir, 'package.json'), JSON.stringify({ name: 'deepspace' }))
+      writeFileSync(entry, '#!/usr/bin/env node\n')
+      return entry
+    }
+    const primaryEntry = makeEntry(main)
+    const workspaceEntry = makeEntry(workspaceDir)
+    vi.spyOn(process, 'argv', 'get').mockReturnValue(['node', workspaceEntry])
 
     const action = pullAfterLandAction(main, 'main', 'a'.repeat(40))
-    expect(action?.argv).toEqual([process.execPath, realpathSync(entry), 'pull'])
+    expect(action?.argv).toEqual([process.execPath, realpathSync(primaryEntry), 'pull'])
 
     const cleanup = cleanupWorkspaceLocal(main, ID, 'main')
     expect(cleanup.error).toBeUndefined()
-    expect(existsSync(entry)).toBe(false)
+    expect(existsSync(workspaceEntry)).toBe(false)
+    expect(existsSync(primaryEntry)).toBe(true)
     expect(action && executableAction(action)).toEqual(action)
   })
 

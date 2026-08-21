@@ -521,7 +521,10 @@ export abstract class JobRoom<
     } catch (e) {
       outcome = 'failed'
       errorMessage = e instanceof Error ? e.message : String(e)
-      console.error(`[JobRoom] Job "${row.type}" (${row.id}) failed:`, e)
+      // Message in the line, stack as a string: Workers Logs renders an Error
+      // object passed to console.* as its frames only (see CronRoom.executeTask).
+      const stack = e instanceof Error ? e.stack : undefined
+      console.error(`[jobs] ${row.type} (${row.id}) failed: ${errorMessage}`, ...(stack ? [stack] : []))
     } finally {
       this.inFlight.delete(row.id)
     }

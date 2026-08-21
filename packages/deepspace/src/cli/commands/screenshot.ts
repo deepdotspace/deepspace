@@ -1,5 +1,6 @@
 /**
- * deepspace test screenshot <url> <output> [--full-page] [--wait-for-timeout ms]
+ * deepspace test screenshot <url> <output> [--full-page] [--viewport WIDTHxHEIGHT]
+ *   [--wait-for-timeout ms]
  *
  * Takes a Playwright Chromium screenshot, installing the browser on demand.
  *
@@ -12,6 +13,26 @@ import { sync as spawnSync } from 'cross-spawn'
 import { resolve } from 'node:path'
 import { ensurePlaywright } from '../lib/playwright'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
+
+export function normalizeViewportSize(value: unknown): string | undefined {
+  if (value === undefined) return undefined
+  const match = /^(\d+)\s*[x,]\s*(\d+)$/i.exec(String(value).trim())
+  const width = Number(match?.[1] ?? Number.NaN)
+  const height = Number(match?.[2] ?? Number.NaN)
+  if (
+    !match ||
+    !Number.isSafeInteger(width) ||
+    !Number.isSafeInteger(height) ||
+    width < 1 ||
+    height < 1
+  ) {
+    throw new Refusal(
+      'Viewport must be positive WIDTHxHEIGHT dimensions, for example 390x844.',
+      'invalid_viewport',
+    )
+  }
+  return `${width},${height}`
+}
 
 export default defineDeepspaceCommand({
   meta: {
@@ -34,6 +55,11 @@ export default defineDeepspaceCommand({
       description: 'Capture the full scrollable page',
       required: false,
     },
+    viewport: {
+      type: 'string',
+      description: 'Browser viewport as WIDTHxHEIGHT, for example 390x844',
+      required: false,
+    },
     'wait-for-timeout': {
       type: 'string',
       description: 'Milliseconds to wait before capture',
@@ -41,6 +67,7 @@ export default defineDeepspaceCommand({
     },
   },
   async run({ args }) {
+    const viewport = normalizeViewportSize(args.viewport)
     const appDir = resolve('.')
     ensurePlaywright(appDir)
 
@@ -48,7 +75,8 @@ export default defineDeepspaceCommand({
     const output = String(args.output)
     const playwrightArgs = ['playwright', 'screenshot', url, output]
     if (args['full-page']) playwrightArgs.push('--full-page')
-    if (args['wait-for-timeout']) {
+    if (viewport) playwrightArgs.push('--viewport-size', viewport)
+    if (args['wait-for-timeout'] !== undefined) {
       playwrightArgs.push('--wait-for-timeout', String(args['wait-for-timeout']))
     }
 
@@ -67,6 +95,8 @@ export default defineDeepspaceCommand({
       )
     }
 
-    return { data: { url, output, fullPage: Boolean(args['full-page']) } }
+    return {
+      data: { url, output, fullPage: Boolean(args['full-page']), viewport: viewport ?? null },
+    }
   },
 })
