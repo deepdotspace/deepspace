@@ -60,30 +60,31 @@ export function credentialPaths(authUrl: string = AUTH_URL): {
 
 export const { sessionPath: SESSION_PATH, tokenPath: TOKEN_PATH } = credentialPaths()
 
+export interface EnsureTokenOptions {
+  /** Required remaining lifetime for a cached JWT. Defaults to 30 seconds. */
+  minimumValidityMs?: number
+}
+
 /**
- * Ensure a valid JWT exists. Refreshes from the session token if expired.
+ * Ensure a sufficiently long-lived JWT exists. Refreshes from the session
+ * token when the cached bearer cannot cover the caller's expected work.
  * Returns the JWT string or throws if not logged in / session expired.
  */
-export async function ensureToken(): Promise<string> {
+export async function ensureToken(options: EnsureTokenOptions = {}): Promise<string> {
+  const minimumValidityMs = options.minimumValidityMs ?? 30_000
   // Try existing token first — if it's still valid, skip the refresh
   if (existsSync(TOKEN_PATH)) {
     const existing = readFileSync(TOKEN_PATH, 'utf-8').trim()
-    if (isTokenValid(existing)) {
+    if (isTokenValid(existing, minimumValidityMs)) {
       return existing
     }
   }
 
   if (!existsSync(SESSION_PATH)) throw notAuthenticated('Not logged in')
 
-  const sessionToken = readFileSync(SESSION_PATH, 'utf-8').trim()
-
-  // Refresh from session
-  const token = await exchangeSession(AUTH_URL, sessionToken)
-  if (!token) throw notAuthenticated('The stored session is no longer valid (expired or unreadable)')
-
-  mkdirSync(DIR, { recursive: true, mode: 0o700 })
-  writeSecretFileSync(TOKEN_PATH, token)
-
+  const token = await exchangeStoredSession()
+  if (!token)
+    throw notAuthenticated('The stored session is no longer valid (expired or unreadable)')
   return token
 }
 
@@ -133,32 +134,38 @@ function notAuthenticated(state: string): Refusal {
   )
 }
 
-/** Check if a JWT has at least 30 seconds of validity remaining. */
-function isTokenValid(jwt: string): boolean {
+/** Check if a JWT covers the caller's required remaining lifetime. */
+function isTokenValid(jwt: string, minimumValidityMs: number): boolean {
   try {
     const payload = decodeJwtPayload<{ exp?: number }>(jwt)
-    return typeof payload.exp === 'number' && payload.exp * 1000 > Date.now() + 30_000
+    return typeof payload.exp === 'number' && payload.exp * 1000 > Date.now() + minimumValidityMs
   } catch {
     return false
   }
 }
 
 /**
- * Force-mint a fresh JWT from the stored session, ignoring the cached token
- * file — apiFetch's 401 recovery (see registerAuthRefresh). Never throws:
- * null means the session is gone/expired, and the caller's original 401
- * (with its own actionable message) is the right error to surface.
+ * Force-mint and persist a fresh JWT from the stored long-lived session.
+ * Null means there is no usable session. Auth-service failures retain their
+ * coded error so a rejected bearer is never misreported as an expired login.
  */
-registerAuthRefresh(async (): Promise<string | null> => {
-  try {
-    if (!existsSync(SESSION_PATH)) return null
-    const sessionToken = readFileSync(SESSION_PATH, 'utf-8').trim()
-    const token = await exchangeSession(AUTH_URL, sessionToken)
-    if (!token) return null
-    mkdirSync(DIR, { recursive: true, mode: 0o700 })
-    writeSecretFileSync(TOKEN_PATH, token)
-    return token
-  } catch {
-    return null
-  }
-})
+export async function refreshTokenFromSession(): Promise<string | null> {
+  return await exchangeStoredSession()
+}
+
+async function exchangeStoredSession(): Promise<string | null> {
+  if (!existsSync(SESSION_PATH)) return null
+  const sessionToken = readFileSync(SESSION_PATH, 'utf-8').trim()
+  const token = await exchangeSession(AUTH_URL, sessionToken)
+  if (!token) return null
+  mkdirSync(DIR, { recursive: true, mode: 0o700 })
+  writeSecretFileSync(TOKEN_PATH, token)
+  return token
+}
+
+/**
+ * Force-mint a fresh JWT from the stored session, ignoring the cached token
+ * file — apiFetch's 401 recovery (see registerAuthRefresh). Null means the
+ * session is confirmed gone/expired; service and transport errors throw.
+ */
+registerAuthRefresh(refreshTokenFromSession)

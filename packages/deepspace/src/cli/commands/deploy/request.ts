@@ -1,11 +1,16 @@
 import * as p from '@clack/prompts'
 import { readFileSync } from 'node:fs'
+import { ApiError } from '../../lib/api'
 import { CliExit } from '../../lib/cli-errors'
+import { fetchWithTransientRetry } from '../../lib/fetch-retry'
 import { executableAction, printAction, withSlug, type CliAction } from '../../lib/output'
 import type { Spinner } from '../../lib/spinner'
 import type { DeployAsset, DeployBundle } from './build'
 import type { DeployOutput } from './output'
 import { shouldSendLineage, type DeployRepositoryState } from './repository'
+
+// Kept as this module's public name for existing callers and tests.
+export const postWithRetry = fetchWithTransientRetry
 
 /**
  * Every place a rename leaves the OLD display name behind. The rename moves the
@@ -73,12 +78,68 @@ const DEPLOY_SERVICE_LIMIT_HINT =
  * one capability the upload path depends on.
  */
 const REQUIRED_ASSET_TRANSPORT = 'content-addressed-v1'
+const REQUIRED_WORKER_MODULE_TRANSPORT = 'multipart-v1'
 
 /** Parallel asset uploads. Small files pay a full round trip each, so the
  *  pool width — not bandwidth — dominates a many-file first deploy (474
  *  files at width 4 measured ~3 minutes; the bytes were 22 MiB). The asset
  *  PUT route applies no server-side rate limit. */
 const UPLOAD_CONCURRENCY = 16
+
+/**
+ * Asset bodies can legitimately spend minutes in flight on constrained links.
+ * Keep control-plane requests on the shared one-minute bound, but give each
+ * replayable content-addressed PUT a generous budget. Two 150-second attempts
+ * keep the complete failure bound near five minutes instead of multiplying a
+ * five-minute allowance by the shared four-attempt default.
+ */
+export const ASSET_UPLOAD_ATTEMPT_TIMEOUT_MS = 150_000
+export const ASSET_UPLOAD_ATTEMPTS = 2
+
+export type DeployTokenRefresh = () => Promise<string | null>
+
+interface DeployAuthSession {
+  request(run: (token: string) => Promise<Response>): Promise<Response>
+}
+
+/**
+ * Retry exactly one server-confirmed 401 with one freshly exchanged bearer.
+ * Concurrent asset requests share the refresh promise, so an expired token
+ * causes one session exchange rather than an authentication stampede.
+ */
+function createDeployAuthSession(
+  initialToken: string,
+  refreshToken: DeployTokenRefresh | undefined,
+): DeployAuthSession {
+  let currentToken = initialToken
+  let refreshInFlight: Promise<string | null> | null = null
+
+  const recover = async (rejectedToken: string): Promise<string | null> => {
+    if (currentToken !== rejectedToken) return currentToken
+    if (!refreshToken) return null
+    if (!refreshInFlight) {
+      refreshInFlight = refreshToken()
+        .then((freshToken) => {
+          if (freshToken && freshToken !== currentToken) currentToken = freshToken
+          return freshToken
+        })
+        .finally(() => {
+          refreshInFlight = null
+        })
+    }
+    return await refreshInFlight
+  }
+
+  return {
+    async request(run): Promise<Response> {
+      const rejectedToken = currentToken
+      const response = await run(rejectedToken)
+      if (response.status !== 401) return response
+      const freshToken = await recover(rejectedToken)
+      return freshToken && freshToken !== rejectedToken ? await run(freshToken) : response
+    },
+  }
+}
 
 export interface DeployCommitResponse {
   success?: boolean
@@ -107,6 +168,7 @@ export async function deployBuiltBundle(options: {
   appId: string
   appName: string
   token: string
+  refreshToken?: DeployTokenRefresh
   rename: boolean
   claimReleased: boolean
   ignoreStale: boolean
@@ -122,6 +184,7 @@ export async function deployBuiltBundle(options: {
     appId,
     appName,
     token,
+    refreshToken,
     claimReleased,
     ignoreStale,
     bundle,
@@ -130,6 +193,7 @@ export async function deployBuiltBundle(options: {
     output,
     spinner,
   } = options
+  const auth = createDeployAuthSession(token, refreshToken)
 
   spinner.start(`Deploying ${appName}...`)
   if (bundle.extraRoutes === true) {
@@ -138,8 +202,11 @@ export async function deployBuiltBundle(options: {
     p.log.info(`Custom worker-first routes: ${bundle.extraRoutes.join(', ')}`)
   }
 
-  await requireAssetTransport(deployUrl, spinner, output)
-  await uploadDeployAssets({ deployUrl, appId, token, assets: bundle.assets, output, spinner })
+  await requireDeployCapabilities(deployUrl, bundle.worker.modules.length > 1, spinner, output)
+  await uploadDeployAssetsWithAuth(
+    { deployUrl, appId, assets: bundle.assets, output, spinner },
+    auth,
+  )
   spinner.message(`Deploying ${appName}...`)
 
   let confirmRename = options.rename
@@ -174,11 +241,27 @@ export async function deployBuiltBundle(options: {
 
   const makeForm = (): FormData => {
     const form = new FormData()
+    const main = bundle.worker.modules.find((module) => module.name === bundle.worker.main)
+    if (!main) return output.die('Built Worker bundle has no main module.', 'build_output_invalid')
     form.append(
       'worker',
-      new Blob([bundle.workerJs], { type: 'application/javascript' }),
-      'worker.js',
+      new Blob([main.content], { type: 'application/javascript+module' }),
+      main.name,
     )
+    form.append('workerMain', bundle.worker.main)
+    const additionalModules = bundle.worker.modules.filter(
+      (module) => module.name !== bundle.worker.main,
+    )
+    if (additionalModules.length) {
+      form.append('workerModules', JSON.stringify(additionalModules.map((module) => module.name)))
+      for (const module of additionalModules) {
+        form.append(
+          'workerModule',
+          new Blob([module.content], { type: 'application/javascript+module' }),
+          module.name,
+        )
+      }
+    }
     form.append('assetManifest', JSON.stringify(assetManifest(bundle.assets)))
     form.append('appMigrations', JSON.stringify(bundle.appMigrations))
     if (bundle.doManifest) form.append('doManifest', JSON.stringify(bundle.doManifest))
@@ -227,14 +310,16 @@ export async function deployBuiltBundle(options: {
   let commitStarted = Date.now()
   const postCommit = async (): Promise<Response> => {
     commitStarted = Date.now()
-    return postWithRetry(
-      `${deployUrl}/api/deploy/${appId}`,
-      () => ({
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: makeForm(),
-      }),
-      { retryServerErrors: false, attempts: 2, timeoutMs: 240_000 },
+    return auth.request((bearer) =>
+      postWithRetry(
+        `${deployUrl}/api/deploy/${appId}`,
+        () => ({
+          method: 'POST',
+          headers: { Authorization: `Bearer ${bearer}` },
+          body: makeForm(),
+        }),
+        { retryServerErrors: false, attempts: 2, timeoutMs: 240_000 },
+      ),
     )
   }
 
@@ -243,9 +328,11 @@ export async function deployBuiltBundle(options: {
     response = await postCommit()
   } catch (error: unknown) {
     await bail(
-      `Deploy request failed: ${errorMessage(error)}`,
+      error instanceof ApiError
+        ? errorMessage(error)
+        : `Deploy request failed: ${errorMessage(error)}`,
       'Deploy failed',
-      'deploy_request_failed',
+      error instanceof ApiError ? error.code : 'deploy_request_failed',
     )
     throw error
   }
@@ -336,17 +423,20 @@ export function assetManifest(
  * Failing here costs nothing; failing halfway through an upload wastes the
  * user's bandwidth and leaves them guessing.
  */
-async function requireAssetTransport(
+async function requireDeployCapabilities(
   deployUrl: string,
+  needsWorkerModules: boolean,
   spinner: Spinner,
   output: DeployOutput,
 ): Promise<void> {
-  let advertised: unknown
+  let capabilities: { assetTransport?: unknown; workerModules?: unknown } | undefined
   try {
-    const response = await fetch(`${deployUrl}/api/health`)
+    const response = await postWithRetry(`${deployUrl}/api/health`, () => ({}), {
+      timeoutMs: 15_000,
+    })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const body = (await response.json()) as { capabilities?: { assetTransport?: unknown } }
-    advertised = body.capabilities?.assetTransport
+    const body = (await response.json()) as { capabilities?: typeof capabilities }
+    capabilities = body.capabilities
   } catch (error: unknown) {
     spinner.stop('Deploy failed')
     output.die(
@@ -355,28 +445,55 @@ async function requireAssetTransport(
       'deploy_service_unreachable',
     )
   }
-  if (advertised !== REQUIRED_ASSET_TRANSPORT) {
+  if (capabilities?.assetTransport !== REQUIRED_ASSET_TRANSPORT) {
     spinner.stop('Deploy failed')
     output.die(
       `The DeepSpace deploy service at ${deployUrl} does not support this CLI's asset ` +
         `transport (needs "${REQUIRED_ASSET_TRANSPORT}", found ` +
-        `${advertised === undefined ? 'none' : `"${String(advertised)}"`}). ` +
+        `${capabilities?.assetTransport === undefined ? 'none' : `"${String(capabilities.assetTransport)}"`}). ` +
         'Wait for the platform to finish updating, or pin an older deepspace CLI.',
       'asset_transport_unsupported',
+    )
+  }
+  if (needsWorkerModules && capabilities?.workerModules !== REQUIRED_WORKER_MODULE_TRANSPORT) {
+    spinner.stop('Deploy failed')
+    output.die(
+      `This build contains multiple Worker modules, but the DeepSpace deploy service at ` +
+        `${deployUrl} does not support their transport (needs ` +
+        `"${REQUIRED_WORKER_MODULE_TRANSPORT}", found ` +
+        `${capabilities?.workerModules === undefined ? 'none' : `"${String(capabilities.workerModules)}"`}). ` +
+        'Wait for the platform to finish updating before retrying this deploy.',
+      'worker_module_transport_unsupported',
     )
   }
 }
 
 /** Ask which content the platform is missing, then upload only that. */
-export async function uploadDeployAssets(options: {
+interface UploadDeployAssetsOptions {
   deployUrl: string
   appId: string
-  token: string
   assets: DeployAsset[]
   output: DeployOutput
   spinner: Spinner
-}): Promise<void> {
-  const { deployUrl, appId, token, assets, spinner } = options
+}
+
+export async function uploadDeployAssets(
+  options: UploadDeployAssetsOptions & {
+    token: string
+    refreshToken?: DeployTokenRefresh
+  },
+): Promise<void> {
+  return await uploadDeployAssetsWithAuth(
+    options,
+    createDeployAuthSession(options.token, options.refreshToken),
+  )
+}
+
+async function uploadDeployAssetsWithAuth(
+  options: UploadDeployAssetsOptions,
+  auth: DeployAuthSession,
+): Promise<void> {
+  const { deployUrl, appId, assets, spinner } = options
   // Annotated so `die`'s `never` return still ends control flow here.
   const output: DeployOutput = options.output
   const byHash = new Map(assets.map((asset) => [asset.hash, asset]))
@@ -384,15 +501,20 @@ export async function uploadDeployAssets(options: {
   spinner.message('Checking which assets are already uploaded...')
   let planResponse: Response
   try {
-    planResponse = await postWithRetry(`${deployUrl}/api/deploy/${appId}/asset-plan`, () => ({
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        assets: [...byHash.values()].map((asset) => ({ hash: asset.hash, size: asset.size })),
-      }),
-    }))
+    planResponse = await auth.request((bearer) =>
+      postWithRetry(`${deployUrl}/api/deploy/${appId}/asset-plan`, () => ({
+        method: 'POST',
+        headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          assets: [...byHash.values()].map((asset) => ({ hash: asset.hash, size: asset.size })),
+        }),
+      })),
+    )
   } catch (error: unknown) {
     spinner.stop('Deploy failed')
+    if (error instanceof ApiError) {
+      output.die(errorMessage(error), error.code ?? 'upload_failed')
+    }
     output.die(`Asset plan failed (network): ${errorMessage(error)}`, 'upload_failed')
   }
   const planBody = (await planResponse.json().catch(() => ({}))) as {
@@ -443,20 +565,23 @@ export async function uploadDeployAssets(options: {
   const next = (): DeployAsset | undefined => missing.pop()
   const worker = async (): Promise<void> => {
     for (let asset = next(); asset; asset = next()) {
-      const response = await postWithRetry(
-        `${deployUrl}/api/deploy/${appId}/assets/${asset.hash}`,
-        () => ({
-          method: 'PUT',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/octet-stream',
-          },
-          // Read whole, per attempt. The platform matches Content-Length
-          // against the plan before it touches storage, and a stream body
-          // would be sent chunked with no length at all; a retry also needs a
-          // body it can send again.
-          body: readFileSync(asset.sourcePath),
-        }),
+      const response = await auth.request((bearer) =>
+        postWithRetry(
+          `${deployUrl}/api/deploy/${appId}/assets/${asset.hash}`,
+          () => ({
+            method: 'PUT',
+            headers: {
+              Authorization: `Bearer ${bearer}`,
+              'Content-Type': 'application/octet-stream',
+            },
+            // Read whole, per attempt. The platform matches Content-Length
+            // against the plan before it touches storage, and a stream body
+            // would be sent chunked with no length at all; a retry also needs a
+            // body it can send again.
+            body: readFileSync(asset.sourcePath),
+          }),
+          { attempts: ASSET_UPLOAD_ATTEMPTS, timeoutMs: ASSET_UPLOAD_ATTEMPT_TIMEOUT_MS },
+        ),
       )
       if (!response.ok) {
         const body = (await response.json().catch(() => ({}))) as { error?: string; code?: string }
@@ -474,13 +599,14 @@ export async function uploadDeployAssets(options: {
   const uploadStarted = Date.now()
   try {
     await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, missing.length) }, worker))
-    p.log.info(
-      `Uploaded ${total} file(s) in ${Math.round((Date.now() - uploadStarted) / 1000)}s`,
-    )
+    p.log.info(`Uploaded ${total} file(s) in ${Math.round((Date.now() - uploadStarted) / 1000)}s`)
   } catch (error: unknown) {
     spinner.stop('Deploy failed')
     if (error instanceof AssetUploadError) {
       output.die(formatDeployWorkerError(error.status, error.message, error.code), error.code)
+    }
+    if (error instanceof ApiError) {
+      output.die(errorMessage(error), error.code ?? 'upload_failed')
     }
     output.die(`Asset upload failed (network): ${errorMessage(error)}`, 'upload_failed')
   }
@@ -536,38 +662,4 @@ export function formatDeployWorkerError(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-/** Retry rebuilt request bodies on network failures and eligible transient responses. */
-export async function postWithRetry(
-  url: string,
-  makeInit: () => RequestInit,
-  {
-    attempts = 4,
-    retryServerErrors = true,
-    timeoutMs = 60_000,
-  }: { attempts?: number; retryServerErrors?: boolean; timeoutMs?: number } = {},
-): Promise<Response> {
-  let lastResponse: Response | undefined
-  let lastError: unknown
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      // Every attempt is bounded: a hung service must surface as a fast,
-      // retryable failure, never a silent multi-minute stall (undici's
-      // default header timeout is ~5 minutes per attempt).
-      const response = await fetch(url, { ...makeInit(), signal: AbortSignal.timeout(timeoutMs) })
-      const transient =
-        retryServerErrors &&
-        (response.status >= 500 || response.status === 408 || response.status === 429)
-      if (!transient) return response
-      lastResponse = response
-    } catch (error) {
-      lastError = error
-    }
-    if (attempt < attempts) {
-      await new Promise((resolve) => setTimeout(resolve, Math.min(8_000, 500 * 2 ** (attempt - 1))))
-    }
-  }
-  if (lastResponse) return lastResponse
-  throw lastError instanceof Error ? lastError : new Error(String(lastError))
 }

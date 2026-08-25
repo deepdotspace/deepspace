@@ -21,8 +21,8 @@
  *
  * Each user gets a separate browser context with cached storageState
  * (per-account JSON in `~/.deepspace/playwright-states/`). Sign-in
- * happens once per account, not once per test, sidestepping Better
- * Auth's per-IP rate limit on `/api/auth/sign-in/email`.
+ * happens once per account, not once per test, staying below the auth
+ * worker's password sign-in limit.
  *
  * Contexts are auto-closed when the test finishes.
  */

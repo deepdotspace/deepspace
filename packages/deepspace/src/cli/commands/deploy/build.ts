@@ -2,7 +2,7 @@ import * as p from '@clack/prompts'
 import { execSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 // The retrofit text is shared with the read-only `app update` guidance, so a
 // refusal here and the upgrade checklist say the same thing.
 import { APP_ID_ADOPTION_STEPS } from '../../../build/app-id'
@@ -53,7 +53,7 @@ export interface DurableObjectManifestEntry {
 export interface DeployBundle {
   assets: DeployAsset[]
   assetConfig: DeployAssetConfig
-  workerJs: string
+  worker: DeployWorkerBundle
   appMigrations: string[]
   doManifest: DurableObjectManifestEntry[] | undefined
   customBindings: CustomBindingManifest
@@ -65,6 +65,17 @@ export interface DeployBundle {
   /** The app's declared `[assets] not_found_handling`; null when it declares
    *  none, and the platform applies Cloudflare's default. */
   notFoundHandling: string | null
+}
+
+export interface DeployWorkerModule {
+  /** POSIX path relative to the generated Worker output configuration. */
+  name: string
+  content: string
+}
+
+export interface DeployWorkerBundle {
+  main: string
+  modules: [DeployWorkerModule, ...DeployWorkerModule[]]
 }
 
 export interface DeployAssetConfig {
@@ -207,7 +218,13 @@ export async function buildDeployBundle(options: {
   const appIdRefusal = clientAppIdRefusal(assets, appId, envName)
   if (appIdRefusal) output.die(appIdRefusal.message, appIdRefusal.code)
 
-  const workerJs = readFileSync(workerBundlePath, 'utf-8')
+  const worker = (() => {
+    try {
+      return collectWorkerBundle(workerDir, workerBundlePath, clientDir)
+    } catch (error) {
+      return output.die(errorMessage(error), 'build_output_invalid')
+    }
+  })()
 
   const doBindings = outputConfig.durable_objects?.bindings
   const sqliteClasses = new Set(
@@ -249,7 +266,7 @@ export async function buildDeployBundle(options: {
   return {
     assets,
     assetConfig,
-    workerJs,
+    worker,
     appMigrations,
     doManifest,
     customBindings,
@@ -263,6 +280,59 @@ export async function buildDeployBundle(options: {
         ? outputConfig.assets.not_found_handling
         : null,
   }
+}
+
+const WORKER_ES_MODULE = /\.(?:js|mjs)$/i
+
+/**
+ * Collect every JavaScript module emitted beside the generated Wrangler
+ * configuration. The Cloudflare Vite plugin writes `no_bundle: true` and
+ * declares `**\/*.js` / `**\/*.mjs` as ES modules, so the output directory —
+ * not only `config.main` — is the deployable Worker graph.
+ */
+export function collectWorkerBundle(
+  workerDir: string,
+  mainPath: string,
+  clientDir?: string | null,
+): DeployWorkerBundle {
+  const root = resolve(workerDir)
+  const mainAbsolute = resolve(mainPath)
+  const excludedClient = clientDir ? resolve(clientDir) : null
+  const main = moduleName(root, mainAbsolute)
+  const modules: DeployWorkerModule[] = []
+
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    )) {
+      const fullPath = join(directory, entry.name)
+      if (excludedClient && isWithin(excludedClient, fullPath)) continue
+      if (entry.isDirectory()) {
+        walk(fullPath)
+      } else if (entry.isFile() && WORKER_ES_MODULE.test(entry.name)) {
+        modules.push({ name: moduleName(root, fullPath), content: readFileSync(fullPath, 'utf-8') })
+      }
+    }
+  }
+  walk(root)
+
+  const mainIndex = modules.findIndex((module) => module.name === main)
+  if (mainIndex < 0) throw new Error(`Worker main module not found in generated output: ${main}`)
+  const [mainModule] = modules.splice(mainIndex, 1)
+  return { main, modules: [mainModule, ...modules] }
+}
+
+function moduleName(root: string, path: string): string {
+  const name = relative(root, path)
+  if (!name || isAbsolute(name) || name === '..' || name.startsWith(`..${sep}`)) {
+    throw new Error(`Worker module is outside the generated output directory: ${path}`)
+  }
+  return name.split(sep).join('/')
+}
+
+function isWithin(root: string, path: string): boolean {
+  const name = relative(root, path)
+  return name === '' || (!isAbsolute(name) && name !== '..' && !name.startsWith(`..${sep}`))
 }
 
 type WorkerFirstConfig = { assets?: { run_worker_first?: unknown } }

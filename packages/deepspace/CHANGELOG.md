@@ -1,5 +1,12 @@
 # deepspace
 
+## 0.24.1
+
+### Patch Changes
+
+- Read piped CLI input asynchronously, refresh authentication and retry safe platform operations during long deploys, secrets setup, and log access, allow constrained links more time for replayable asset uploads, and preserve split Worker modules plus app-declared non-secret variables.
+- Report password sign-in throttling consistently in the test helper and CLI.
+
 ## 0.24.0
 
 ### Minor Changes

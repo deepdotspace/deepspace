@@ -23,7 +23,7 @@ import { defineCommand } from 'citty'
 import { setTimeout as delay } from 'node:timers/promises'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
-import { apiFetch, ApiError } from '../lib/api'
+import { apiFetch, apiFetchReadWithRetry, ApiError } from '../lib/api'
 import { InputError } from '../lib/cli-errors'
 import { resolveAppTarget, assertAppTargetResolvable, listApps } from '../lib/app-target'
 import { Refusal } from '../lib/command'
@@ -294,7 +294,12 @@ export default defineCommand({
         `${appId} has never been deployed, so it has no logs. Deploy it first (\`deepspace deploy\`), then read its logs.`,
         'app_not_deployed',
         appDir
-          ? { action: { cwd: appDir, argv: ['deepspace', 'deploy', ...(envArg ? ['--env', envArg] : [])] } }
+          ? {
+              action: {
+                cwd: appDir,
+                argv: ['deepspace', 'deploy', ...(envArg ? ['--env', envArg] : [])],
+              },
+            }
           : {},
       )
     }
@@ -314,12 +319,12 @@ export default defineCommand({
       if (pageLimit !== undefined) params.set('limit', String(pageLimit))
       if (args.level) params.set('level', args.level)
       if (args.search) params.set('search', args.search)
-      return apiFetch<AppLogsResponse>(
-        DEPLOY_URL,
-        token,
-        `/api/apps/${appId}/logs?${params}`,
-        signal ? { signal } : undefined,
-      )
+      const path = `/api/apps/${appId}/logs?${params}`
+      // One-shot/initial reads absorb brief edge outages. Follow mode owns its
+      // longer retry loop and abort signal below, so keep that request direct.
+      return signal
+        ? apiFetch<AppLogsResponse>(DEPLOY_URL, token, path, { signal })
+        : apiFetchReadWithRetry<AppLogsResponse>(DEPLOY_URL, token, path)
     }
 
     const print = (events: AppLogEvent[]) => {

@@ -25,7 +25,7 @@
  */
 
 import { credentialPaths } from '../auth'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomBytes, createHash } from 'node:crypto'
 import * as p from '@clack/prompts'
@@ -37,6 +37,8 @@ import { decodeJwtPayload } from '../../shared/jwt'
 import { openBrowser } from '../lib/open-browser'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 import { writeSecretFileSync } from '../lib/secure-file'
+import { MAX_STDIN_BYTES, readStreamText } from '../lib/stdio'
+import { fetchWithTransientRetry } from '../lib/fetch-retry'
 
 const AUTH_URL = process.env.DEEPSPACE_AUTH_URL ?? PLATFORM_URLS.auth
 const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
@@ -78,7 +80,7 @@ export default defineDeepspaceCommand({
       passwordArg: args.password as string | undefined,
       envEmail: interactive ? undefined : process.env.DEEPSPACE_EMAIL,
       envPassword: interactive ? undefined : process.env.DEEPSPACE_PASSWORD,
-      passwordStdin: args['password-stdin'] ? readPasswordFromStdin() : undefined,
+      passwordStdin: args['password-stdin'] ? await readPasswordFromStdin() : undefined,
     })
     const passwordIntent =
       Boolean(args['password-stdin']) || args.password !== undefined || password !== undefined
@@ -122,36 +124,7 @@ export default defineDeepspaceCommand({
     const codeChallenge = base64url(createHash('sha256').update(codeVerifier).digest())
 
     // 1. Create a CLI session
-    const sessionRes = await fetch(`${AUTH_URL}/api/auth/cli/session`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code_challenge: codeChallenge }),
-    })
-    // The runtime stops any live spinner before it renders a refusal, so these
-    // throws don't need to unwind the spinner themselves.
-    if (!sessionRes.ok) {
-      throw new Refusal(
-        `Could not create login session (${sessionRes.status})`,
-        'login_session_failed',
-        { action: cliAction('deepspace', 'auth', 'login') },
-      )
-    }
-    const sessionData = (await sessionRes.json()) as {
-      sessionId?: string
-      loginUrl?: string
-    }
-    if (!sessionData.sessionId || !sessionData.loginUrl) {
-      throw new Refusal(
-        'Could not create login session — the auth server returned no session id or login url.',
-        'login_session_failed',
-        { action: cliAction('deepspace', 'auth', 'login') },
-      )
-    }
-
-    const { sessionId, loginUrl } = sessionData as {
-      sessionId: string
-      loginUrl: string
-    }
+    const { sessionId, loginUrl } = await createCliLoginSession(codeChallenge)
 
     if (!json) {
       s.stop('Opening browser...')
@@ -258,14 +231,57 @@ export function loginModeDecision(opts: {
  * Read a password piped on stdin (one trailing newline stripped). Refuses on a
  * TTY, where reading stdin would block forever waiting for EOF.
  */
-function readPasswordFromStdin(): string {
+async function readPasswordFromStdin(): Promise<string> {
   if (process.stdin.isTTY) {
     throw new Refusal(
       '--password-stdin expects the password piped on stdin, e.g. `printf %s "$PW" | deepspace auth login --email you@x.com --password-stdin`.',
       'password_stdin_needs_pipe',
     )
   }
-  return readFileSync(0, 'utf-8').replace(/\r?\n$/, '')
+  return (await readStreamText(process.stdin, MAX_STDIN_BYTES)).replace(/\r?\n$/, '')
+}
+
+/** Create the browser authorization session across brief auth-edge outages. */
+export async function createCliLoginSession(
+  codeChallenge: string,
+): Promise<{ sessionId: string; loginUrl: string }> {
+  let sessionRes: Response
+  try {
+    sessionRes = await fetchWithTransientRetry(
+      `${AUTH_URL}/api/auth/cli/session`,
+      () => ({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code_challenge: codeChallenge }),
+      }),
+      { timeoutMs: 15_000 },
+    )
+  } catch (error) {
+    throw new Refusal(
+      `Could not reach the auth service to create a login session: ${error instanceof Error ? error.message : String(error)}`,
+      'login_session_unreachable',
+      { action: cliAction('deepspace', 'auth', 'login') },
+    )
+  }
+  if (!sessionRes.ok) {
+    throw new Refusal(
+      `Could not create login session (${sessionRes.status})`,
+      'login_session_failed',
+      { action: cliAction('deepspace', 'auth', 'login') },
+    )
+  }
+  const sessionData = (await sessionRes.json().catch(() => ({}))) as {
+    sessionId?: string
+    loginUrl?: string
+  }
+  if (!sessionData.sessionId || !sessionData.loginUrl) {
+    throw new Refusal(
+      'Could not create login session — the auth server returned no session id or login url.',
+      'login_session_failed',
+      { action: cliAction('deepspace', 'auth', 'login') },
+    )
+  }
+  return { sessionId: sessionData.sessionId, loginUrl: sessionData.loginUrl }
 }
 
 interface LoginResult {
@@ -373,7 +389,11 @@ async function doEmailLogin(
     // else is the auth service refusing for its own stated reason.
     throw new Refusal(
       body.message ?? `Authentication failed (${res.status})`,
-      res.status === 401 ? 'invalid_credentials' : 'login_failed',
+      res.status === 401
+        ? 'invalid_credentials'
+        : res.status === 429
+          ? 'rate_limited'
+          : 'login_failed',
     )
   }
 
@@ -386,7 +406,10 @@ async function doEmailLogin(
 
   const jwt = await exchangeSession(AUTH_URL, sessionToken)
   if (!jwt) {
-    throw new Refusal('Signed in, but the auth service issued no token for the session.', 'login_failed')
+    throw new Refusal(
+      'Signed in, but the auth service issued no token for the session.',
+      'login_failed',
+    )
   }
 
   storeCredentials(sessionToken, jwt)

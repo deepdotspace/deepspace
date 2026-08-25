@@ -23,9 +23,11 @@ export {
 export {
   type CustomBinding,
   type CustomBindingManifest,
+  type BindingJsonValue,
   type ValidationError,
   ALLOWED_BINDING_TYPES,
   RESERVED_BINDING_NAMES,
+  MAX_ENV_VAR_BYTES,
   AUTO_PROVISION_SENTINEL,
   AUTO_PROVISIONABLE_TYPES,
   validateBindingManifest,

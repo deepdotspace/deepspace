@@ -1,7 +1,8 @@
 /**
  * INT-1 (per-token pricing label) and FEAT-13 (paid-invoke confirmation gate).
  */
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
+import { Readable } from 'node:stream'
 import type { CommandDef } from 'citty'
 import {
   billingUnit,
@@ -78,6 +79,43 @@ describe('costGate (FEAT-13 — nothing paid is ever billed silently)', () => {
   })
 })
 
+describe('--body-file - streaming input', () => {
+  function stubStdin(chunks: string[]): void {
+    let index = 0
+    const stream = new Readable({
+      read() {
+        setTimeout(() => this.push(index < chunks.length ? chunks[index++] : null), 1)
+      },
+    })
+    vi.spyOn(process, 'stdin', 'get').mockReturnValue(stream as unknown as typeof process.stdin)
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('distinguishes an empty producer from malformed JSON before any billed call', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    stubStdin([])
+
+    await expect(
+      runInvoke({ target: 'stripe/charge', bodyFile: '-', json: true } as never),
+    ).rejects.toMatchObject({ code: 'empty_input' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('waits for malformed content before reporting the JSON error', async () => {
+    vi.stubGlobal('fetch', vi.fn())
+    stubStdin(['{"a":', 'not-json}'])
+
+    await expect(
+      runInvoke({ target: 'stripe/charge', bodyFile: '-', json: true } as never),
+    ).rejects.toMatchObject({ code: 'invalid_body_json' })
+  })
+})
+
 describe('runInvoke refuses a paid call outside a terminal', () => {
   it('names the price and --yes, and never POSTs', async () => {
     const calls: string[] = []
@@ -118,7 +156,9 @@ describe('runInvoke refuses a paid call outside a terminal', () => {
 
 describe('exampleBody (info never shows `{}` for an endpoint that rejects it)', () => {
   it('keeps the catalog example when it has fields', () => {
-    expect(exampleBody({ example: { title: 'Cheese' }, inputSchema: null })).toEqual({ title: 'Cheese' })
+    expect(exampleBody({ example: { title: 'Cheese' }, inputSchema: null })).toEqual({
+      title: 'Cheese',
+    })
   })
   it('synthesizes required keys from the schema, preferring its own example/default/enum', () => {
     expect(

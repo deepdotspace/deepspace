@@ -4,6 +4,7 @@ import {
   bindingManifestFromOutputConfig,
   RESERVED_BINDING_NAMES,
   AUTO_PROVISION_SENTINEL,
+  MAX_ENV_VAR_BYTES,
   isAutoProvision,
 } from '../binding-manifest'
 
@@ -16,6 +17,8 @@ describe('validateBindingManifest', () => {
 
   it('accepts known binding types with required fields', () => {
     const r = validateBindingManifest([
+      { type: 'plain_text', name: 'AWS_REGION', text: 'us-east-1' },
+      { type: 'json', name: 'AWS_RETRY', json: { attempts: 3, jitter: true } },
       { type: 'ai', name: 'AI' },
       { type: 'vectorize', name: 'VECTORS', index_name: 'unison-candidates' },
       { type: 'r2_bucket', name: 'FILES', bucket_name: 'unison-search-files' },
@@ -28,6 +31,28 @@ describe('validateBindingManifest', () => {
       },
     ])
     expect(r.valid).toBe(true)
+  })
+
+  it('validates text and JSON environment-variable values', () => {
+    expect(validateBindingManifest([{ type: 'plain_text', name: 'TEXT' }]).valid).toBe(false)
+    expect(validateBindingManifest([{ type: 'json', name: 'JSON' }]).valid).toBe(false)
+    expect(
+      validateBindingManifest([{ type: 'json', name: 'JSON', json: Number.POSITIVE_INFINITY }])
+        .valid,
+    ).toBe(false)
+  })
+
+  it('rejects environment-variable values over Cloudflare’s UTF-8 limit', () => {
+    const text = validateBindingManifest([
+      { type: 'plain_text', name: 'LARGE_TEXT', text: 'x'.repeat(MAX_ENV_VAR_BYTES + 1) },
+    ])
+    expect(text.valid).toBe(false)
+    if (!text.valid) expect(text.errors[0].reason).toMatch(/maximum is 5120/)
+
+    const json = validateBindingManifest([
+      { type: 'json', name: 'LARGE_JSON', json: { value: 'x'.repeat(MAX_ENV_VAR_BYTES) } },
+    ])
+    expect(json.valid).toBe(false)
   })
 
   it('rejects non-array input', () => {
@@ -138,6 +163,47 @@ describe('bindingManifestFromOutputConfig', () => {
     expect(bindingManifestFromOutputConfig({ ai: { binding: 'AI' } })).toEqual([
       { type: 'ai', name: 'AI' },
     ])
+  })
+
+  it('extracts resolved Wrangler vars as text and JSON bindings', () => {
+    expect(
+      bindingManifestFromOutputConfig({
+        vars: {
+          DEEPSPACE_APP_ID: 'app_build_value',
+          APP_NAME: 'build-name',
+          AWS_REGION: 'us-east-1',
+          AWS_RESOURCE_IDS: { machine: 'machine-1', securityGroup: 'sg-1' },
+          AWS_RETRY_COUNT: 3,
+          AWS_ENABLED: true,
+          AWS_FALLBACK: null,
+        },
+      }),
+    ).toEqual([
+      { type: 'plain_text', name: 'AWS_REGION', text: 'us-east-1' },
+      {
+        type: 'json',
+        name: 'AWS_RESOURCE_IDS',
+        json: { machine: 'machine-1', securityGroup: 'sg-1' },
+      },
+      { type: 'json', name: 'AWS_RETRY_COUNT', json: 3 },
+      { type: 'json', name: 'AWS_ENABLED', json: true },
+      { type: 'json', name: 'AWS_FALLBACK', json: null },
+    ])
+  })
+
+  it('keeps reserved app vars visible to validation instead of dropping them', () => {
+    const extracted = bindingManifestFromOutputConfig({
+      vars: { AUTH_WORKER_URL: 'https://unexpected.test' },
+    })
+    const result = validateBindingManifest(extracted)
+    expect(result.valid).toBe(false)
+    if (!result.valid) expect(result.errors[0].reason).toMatch(/reserved by the SDK/)
+  })
+
+  it('refuses a non-JSON Wrangler var instead of silently ignoring it', () => {
+    expect(() => bindingManifestFromOutputConfig({ vars: { BAD: undefined } })).toThrow(
+      /not a JSON-serializable value/,
+    )
   })
 
   it('extracts vectorize bindings (array)', () => {

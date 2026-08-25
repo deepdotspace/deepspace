@@ -28,6 +28,8 @@
  * ignored by WfP.
  */
 export type CustomBinding =
+  | { type: 'plain_text'; name: string; text: string }
+  | { type: 'json'; name: string; json: BindingJsonValue }
   | {
       /** Managed by DeepSpace; never forwarded into the customer Worker env. */
       type: 'ai_search'
@@ -86,6 +88,18 @@ export type CustomBinding =
 
 export type CustomBindingManifest = CustomBinding[]
 
+/** Values Wrangler accepts for JSON environment-variable bindings. */
+export type BindingJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | BindingJsonValue[]
+  | { [key: string]: BindingJsonValue }
+
+/** Cloudflare's maximum UTF-8 payload for one environment variable. */
+export const MAX_ENV_VAR_BYTES = 5 * 1024
+
 /** Sentinel string in an ID field that requests platform-side provisioning. */
 export const AUTO_PROVISION_SENTINEL = 'auto'
 
@@ -128,6 +142,8 @@ export function isAutoProvision(b: CustomBinding): boolean {
 
 /** Binding `type` values an app is allowed to declare. */
 export const ALLOWED_BINDING_TYPES = new Set([
+  'plain_text',
+  'json',
   'vectorize',
   'ai',
   'r2_bucket',
@@ -238,6 +254,17 @@ export function validateBindingManifest(
 
 function requiredFieldError(b: CustomBinding): string | null {
   switch (b.type) {
+    case 'plain_text':
+      if (typeof b.text !== 'string') {
+        return `plain_text binding "${b.name}" missing text (string)`
+      }
+      return envVarSizeError(b.name, b.text)
+    case 'json': {
+      if (!isBindingJsonValue(b.json)) {
+        return `json binding "${b.name}" must contain a JSON-serializable value`
+      }
+      return envVarSizeError(b.name, JSON.stringify(b.json))
+    }
     case 'ai_search':
       if (b.instance_name !== AUTO_PROVISION_SENTINEL) {
         return `ai_search binding "${b.name}" must set instance_name = "auto"; managed instances cannot be selected directly`
@@ -333,6 +360,24 @@ export function bindingManifestFromOutputConfig(
     )
   }
   const out: CustomBindingManifest = []
+
+  // Wrangler resolves top-level or selected-environment `vars` into one map.
+  // The two scaffold vars are authoritative platform bindings at runtime, so
+  // do not duplicate their build-time values in the custom manifest. Every
+  // other var is app-owned and must reach the live Worker exactly as Wrangler
+  // represents it: strings as plain_text, structured values as json.
+  const vars = isObject(outputConfig.vars) ? outputConfig.vars : null
+  for (const [name, value] of Object.entries(vars ?? {})) {
+    if (name === 'DEEPSPACE_APP_ID' || name === 'APP_NAME') continue
+    if (typeof value === 'string') {
+      out.push({ type: 'plain_text', name, text: value })
+      continue
+    }
+    if (!isBindingJsonValue(value)) {
+      throw new Error(`Wrangler var "${name}" is not a JSON-serializable value`)
+    }
+    out.push({ type: 'json', name, json: value })
+  }
 
   // ai: single object
   const aiBinding = pluckString(outputConfig.ai, 'binding')
@@ -451,6 +496,41 @@ export function bindingManifestFromOutputConfig(
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === 'object' && !Array.isArray(v)
+}
+
+function isBindingJsonValue(
+  value: unknown,
+  ancestors = new Set<object>(),
+): value is BindingJsonValue {
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    (typeof value === 'number' && Number.isFinite(value))
+  ) {
+    return true
+  }
+  if (typeof value !== 'object') return false
+  if (ancestors.has(value)) return false
+
+  if (!Array.isArray(value)) {
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) return false
+  }
+
+  ancestors.add(value)
+  const valid = Array.isArray(value)
+    ? value.every((entry) => isBindingJsonValue(entry, ancestors))
+    : Object.values(value).every((entry) => isBindingJsonValue(entry, ancestors))
+  ancestors.delete(value)
+  return valid
+}
+
+function envVarSizeError(name: string, serializedValue: string): string | null {
+  const size = new TextEncoder().encode(serializedValue).byteLength
+  return size <= MAX_ENV_VAR_BYTES
+    ? null
+    : `Environment variable binding "${name}" is ${size} bytes; maximum is ${MAX_ENV_VAR_BYTES}`
 }
 
 function pluckString(v: unknown, key: string): string | null {

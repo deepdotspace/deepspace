@@ -1,9 +1,9 @@
 /**
  * Per-account `storageState` cache for Playwright.
  *
- * Better Auth applies a per-IP rate limit on `/api/auth/sign-in/email`
- * (~5 sign-ins / 60s / endpoint). A multiplayer suite that spins up
- * 5+ users per spec would hit the limit and start failing in non-obvious
+ * The auth worker limits password sign-ins per account. A
+ * multiplayer suite that spins up
+ * many users per spec can hit the limit and start failing in non-obvious
  * ways. This module signs each account in *once*, persists the
  * resulting browser cookies + storage to disk, and reuses the file on
  * subsequent runs.
@@ -156,6 +156,9 @@ interface SignInFailure {
 
 /** Keep the server's safe status/code so auth failures remain actionable. */
 export function formatSignInFailure(email: string, failure: SignInFailure): string {
+  if (failure.status === 429) {
+    return `Sign-in rate-limited for ${email} (HTTP 429). Wait about 60 seconds and retry.`
+  }
   const code = failure.code ? ` ${failure.code}` : ''
   const detail = failure.message ? `: ${failure.message}` : ''
   const nextStep =

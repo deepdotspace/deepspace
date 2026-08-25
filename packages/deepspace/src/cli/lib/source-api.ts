@@ -1,4 +1,4 @@
-import { apiFetch, ApiError } from './api'
+import { apiFetch, apiFetchReadWithRetry, ApiError } from './api'
 import { Refusal } from './command'
 import type { GitRef } from './source-control'
 
@@ -57,7 +57,7 @@ export async function getAppSource(
   appId: string,
 ): Promise<AppSourceState> {
   try {
-    const state = await apiFetch<Omit<AppSourceState, 'registered'>>(
+    const state = await apiFetchReadWithRetry<Omit<AppSourceState, 'registered'>>(
       deployUrl,
       token,
       `/api/apps/${encodeURIComponent(appId)}/source`,

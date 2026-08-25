@@ -6,6 +6,18 @@ import {
 } from '../storage-state'
 
 describe('formatSignInFailure', () => {
+  it('identifies a throttle instead of blaming stored credentials', () => {
+    const message = formatSignInFailure('ada@example.com', {
+      status: 429,
+      code: null,
+      message: 'Too many requests',
+    })
+
+    expect(message).toContain('rate-limited')
+    expect(message).toContain('60 seconds')
+    expect(message).not.toContain('credential')
+  })
+
   it('preserves the status and INVALID_ORIGIN code without exposing credentials', () => {
     const message = formatSignInFailure('ada@example.com', {
       status: 403,

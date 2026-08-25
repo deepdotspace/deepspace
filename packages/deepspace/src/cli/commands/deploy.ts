@@ -3,7 +3,7 @@
 import * as p from '@clack/prompts'
 import { defineCommand } from 'citty'
 import { join, resolve } from 'node:path'
-import { ensureToken } from '../auth'
+import { ensureToken, refreshTokenFromSession } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { readAppId } from '../lib/app-identity'
@@ -38,6 +38,10 @@ import { loadDeploySecrets, prepareDeploySecrets } from './deploy/secrets'
 import { acquireDeployLock } from './deploy/lock'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
+/** Leave enough bearer lifetime for source sync + asset upload before the
+ * final commit's exact 401 recovery takes over. Fresh CLI JWTs last 15m. */
+const DEPLOY_TOKEN_MIN_VALIDITY_MS = 10 * 60 * 1000
+const POST_DEPLOY_TOKEN_MIN_VALIDITY_MS = 2 * 60 * 1000
 
 export default defineCommand({
   meta: {
@@ -284,11 +288,16 @@ async function runLockedDeploy(
     output.die(oversized, 'assets_too_large')
   }
 
+  // Building is the longest unauthenticated phase. The token captured before
+  // it may now be near expiry even though ensureToken accepted it at command
+  // start, so re-check against the work still ahead before mutating source.
+  const { token: deployToken } = await authenticate(appDir, output, DEPLOY_TOKEN_MIN_VALIDITY_MS)
+
   const repository = await syncDeployRepository({
     deployUrl: DEPLOY_URL,
     appDir,
     appId,
-    token,
+    token: deployToken,
     push: args.push !== false,
     ignoreStale: Boolean(args['ignore-stale']),
     output,
@@ -306,7 +315,8 @@ async function runLockedDeploy(
     appDir,
     appId,
     appName,
-    token,
+    token: deployToken,
+    refreshToken: refreshTokenFromSession,
     rename: confirmRename,
     claimReleased: args['claim-released'] === true,
     ignoreStale: Boolean(args['ignore-stale']),
@@ -360,7 +370,7 @@ async function runLockedDeploy(
               'CLI cannot tell which release the edge answers with.',
       )
       p.log.info(`URL: ${body.url}`)
-      await syncCommerce(appDir, appId, token, output.nonInteractive)
+      await syncPostDeployCommerce(appDir, appId, output.nonInteractive)
       if (output.json) {
         return output.emitJson({
           ok: true,
@@ -387,7 +397,7 @@ async function runLockedDeploy(
   // Verified from HERE: ten independent connections agreed. Other regions
   // may still be rolling over — see lib/edge-propagation.ts.
   p.log.success(`Live at: ${body.url}`)
-  await syncCommerce(appDir, appId, token, output.nonInteractive)
+  await syncPostDeployCommerce(appDir, appId, output.nonInteractive)
   if (output.json) {
     return output.emitJson({
       ok: true,
@@ -416,6 +426,21 @@ async function syncCommerce(
 ): Promise<void> {
   await syncSubscriptionPlans(appDir, appId, token, nonInteractive)
   await syncOneTimeProducts(appDir, appId, token)
+}
+
+/** Commerce metadata follows a successful release, so auth trouble here must
+ * never relabel an already-live deploy as failed or invite a duplicate retry. */
+async function syncPostDeployCommerce(
+  appDir: string,
+  appId: string,
+  nonInteractive: boolean,
+): Promise<void> {
+  try {
+    const token = await ensureToken({ minimumValidityMs: POST_DEPLOY_TOKEN_MIN_VALIDITY_MS })
+    await syncCommerce(appDir, appId, token, nonInteractive)
+  } catch (error) {
+    p.log.warn(`Deployed successfully, but commerce sync was skipped: ${errorMessage(error)}`)
+  }
 }
 
 /**
@@ -458,7 +483,6 @@ export function pendingRename(
   if (label === appName) return null
   return { fromHost: registeredHost, toHost: [appName, ...domain].join('.') }
 }
-
 
 /** Refuse explicit blank selectors before auth so they cannot fall back to production/cwd. */
 export function blankSelectorRefusal(args: {
@@ -519,11 +543,13 @@ export function forbiddenDeployMessage(appId: string, token: string): string {
 async function authenticate(
   appDir: string,
   output: DeployOutput,
+  minimumValidityMs?: number,
 ): Promise<{ token: string; ownerId: string }> {
   try {
-    const token = await ensureToken()
+    const token = await ensureToken({ minimumValidityMs })
     return { token, ownerId: decodeJwtPayload<{ sub: string }>(token).sub }
   } catch (error: unknown) {
+    if (errorCode(error) !== 'not_authenticated') throw error
     output.die(errorMessage(error), 'not_authenticated', {
       action: { cwd: appDir, argv: ['deepspace', 'auth', 'login'] },
     })

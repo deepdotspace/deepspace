@@ -1,7 +1,7 @@
 /** Resolve explicit or local app selectors to canonical app ids. */
 
 import { APP_ID_RE, readAppId } from './app-identity'
-import { apiFetch } from './api'
+import { apiFetchReadWithRetry } from './api'
 import { InputError, Refusal } from './cli-errors'
 import { findAppDir } from './app-context'
 import { noWranglerConfigMessage } from './wrangler-env'
@@ -81,7 +81,7 @@ export async function listAppsPage(
   deployUrl: string,
   token: string,
 ): Promise<{ apps: AppListEntry[]; pendingTransfers: PendingTransferOffer[] }> {
-  const body = await apiFetch<{
+  const body = await apiFetchReadWithRetry<{
     apps: AppListEntry[]
     pendingTransfers?: PendingTransferOffer[]
   }>(deployUrl, token, '/api/apps')

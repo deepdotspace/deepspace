@@ -1,11 +1,10 @@
 /**
  * Playwright global setup — warms up external services before tests run.
  *
- * The DeepSpace auth worker (deployed at deepspace-auth.*.workers.dev) is
- * the same one used by every environment — there is no separate dev/local
- * auth worker. `npx deepspace dev start` only runs Vite + the app worker
- * locally; auth requests are proxied through the app worker's /api/auth/*
- * route to the deployed auth worker.
+ * The DeepSpace auth worker runs on the selected hosted service plane; there
+ * is no separate dev/local auth worker. `npx deepspace dev start` only runs
+ * Vite + the app worker locally; auth requests are proxied through the app
+ * worker's /api/auth/* route to the hosted auth worker.
  *
  * Cold-start latency on that deployed worker can fail the first test, so
  * we ping it here to warm it up. Port comes from $DEEPSPACE_PORT to match

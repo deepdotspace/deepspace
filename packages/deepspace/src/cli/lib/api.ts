@@ -7,6 +7,8 @@
  * carrying the worker's `{ error, code }` — message for display, code for
  * branching — so callers never string-sniff error text.
  */
+import { retryTransient } from './fetch-retry'
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -58,21 +60,29 @@ export async function apiFetch<T>(
         ...(init?.headers ?? {}),
       },
     })
-    // One transparent recovery per request. Safe for mutations too: every
-    // repo-API mutation is idempotency-keyed, and the 401 means the server
-    // never acted. Requires a NEW token — retrying the same rejected bearer
-    // would just double the failure latency.
-    if (res.status === 401 && !isRetry && refreshAuthToken) {
-      const fresh = await refreshAuthToken()
-      if (fresh && fresh !== token) return apiFetch<T>(baseUrl, fresh, path, init, true)
-    }
-    text = await res.text()
   } catch (err) {
     // A network-level failure (connection refused, DNS, TLS, offline) throws a
     // TypeError('fetch failed'), not an HTTP status — give it a stable code so a
     // --json caller can classify the transport outage instead of scraping prose.
     throw new ApiError(
       `Could not reach the deploy service at ${baseUrl}: ${err instanceof Error ? err.message : String(err)}. Check your connection (and DEEPSPACE_DEPLOY_URL), then retry.`,
+      0,
+      'network_error',
+      path,
+    )
+  }
+  // One transparent recovery per request. Keep the exchange outside the
+  // deploy-service fetch catch: an auth-service outage is not evidence that
+  // this bearer or the stored session is invalid, and must retain its code.
+  if (res.status === 401 && !isRetry && refreshAuthToken) {
+    const fresh = await refreshAuthToken()
+    if (fresh && fresh !== token) return apiFetch<T>(baseUrl, fresh, path, init, true)
+  }
+  try {
+    text = await res.text()
+  } catch (err) {
+    throw new ApiError(
+      `Could not read the deploy service response at ${baseUrl}: ${err instanceof Error ? err.message : String(err)}. Check your connection (and DEEPSPACE_DEPLOY_URL), then retry.`,
       0,
       'network_error',
       path,
@@ -141,4 +151,41 @@ export async function apiFetch<T>(
     )
   }
   return parsed as T
+}
+
+/** Retry a platform request whose caller has established that replay is safe.
+ * Ordinary mutations keep using apiFetch directly; only read-only requests
+ * and operations with an explicit idempotency contract belong here. */
+export async function apiFetchWithTransientRetry<T>(
+  baseUrl: string,
+  token: string,
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  return retryTransient(
+    async () =>
+      await apiFetch<T>(baseUrl, token, path, {
+        ...init,
+        signal: AbortSignal.timeout(15_000),
+      }),
+    {
+      delaysMs: [250, 750, 1500],
+      // A 401 refresh owns its own bounded auth-service retry loop. Only retry
+      // failures produced by this deploy-service request, never multiply an
+      // exhausted /api/auth/token exchange by replaying the rejected bearer.
+      shouldRetryError: (error) => isTransientFailure(error) && error.apiPath === path,
+    },
+  )
+}
+
+/** Safe-by-construction GET variant for ordinary platform reads. */
+export function apiFetchReadWithRetry<T>(baseUrl: string, token: string, path: string): Promise<T> {
+  return apiFetchWithTransientRetry<T>(baseUrl, token, path)
+}
+
+function isTransientFailure(error: unknown): error is ApiError {
+  return (
+    error instanceof ApiError &&
+    (error.status === 0 || error.status === 408 || error.status === 429 || error.status >= 500)
+  )
 }

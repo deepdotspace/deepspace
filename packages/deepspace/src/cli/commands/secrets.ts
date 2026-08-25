@@ -28,6 +28,7 @@ import { writeDevVars } from '../lib/dev-vars'
 import { assertAppTargetResolvable, parseWranglerEnvArg, resolveAppTarget } from '../lib/app-target'
 import { InputError, renderCliError } from '../lib/cli-errors'
 import { dedupePositionals } from '../lib/citty-args'
+import { MAX_STDIN_BYTES, readStreamText } from '../lib/stdio'
 import {
   createConfig,
   defaultConfigNameForEnv,
@@ -286,8 +287,11 @@ const del = defineCommand({
       for (const key of keys) {
         const name = validateSecretName(key)
         try {
-          await deleteSecret(DEPLOY_URL, t.token, t.appId, t.configName, name)
-          deleted++
+          const result = await deleteSecret(DEPLOY_URL, t.token, t.appId, t.configName, name)
+          // New servers distinguish an idempotent replay/absent key. An older
+          // successful response has no field and remains a real deletion.
+          if (result.deleted === false) absent++
+          else deleted++
         } catch (err) {
           // An already-absent key is a completed delete, not a failure: don't
           // let one missing key abort the rest, and keep retries idempotent.
@@ -296,12 +300,16 @@ const del = defineCommand({
         }
       }
       const note = absent > 0 ? ` (${absent} already absent)` : ''
-      ok(args.json === true, { appId: t.appId, config: t.configName, deleted, absent, ...APPLIES_AT_DEPLOY }, () => {
-        console.log(
-          `Deleted ${deleted} secret${deleted === 1 ? '' : 's'} from ${t.configName}.${note}`,
-        )
-        if (deleted > 0) console.log(APPLY_HINT)
-      })
+      ok(
+        args.json === true,
+        { appId: t.appId, config: t.configName, deleted, absent, ...APPLIES_AT_DEPLOY },
+        () => {
+          console.log(
+            `Deleted ${deleted} secret${deleted === 1 ? '' : 's'} from ${t.configName}.${note}`,
+          )
+          if (deleted > 0) console.log(APPLY_HINT)
+        },
+      )
     } catch (err) {
       fail(err)
     }
@@ -326,14 +334,20 @@ const upload = defineCommand({
   async run({ args }) {
     try {
       const t = await resolveTarget(args)
-      const secrets = parseSecretsUpload(readUploadSource(args.file))
+      const secrets = parseSecretsUpload(await readUploadSource(args.file))
       if (Object.keys(secrets).length === 0)
         throw new InputError('No secrets found in the input.', 'empty_input')
       await uploadSecrets(DEPLOY_URL, t.token, t.appId, t.configName, secrets, args.replace)
       const uploaded = Object.keys(secrets)
       ok(
         args.json === true,
-        { appId: t.appId, config: t.configName, uploaded, replaced: args.replace === true, ...APPLIES_AT_DEPLOY },
+        {
+          appId: t.appId,
+          config: t.configName,
+          uploaded,
+          replaced: args.replace === true,
+          ...APPLIES_AT_DEPLOY,
+        },
         () => {
           console.log(`Uploaded ${uploaded.length} secrets to ${t.configName}.`)
           // A file can turn on the debug API just like `set` can — warn either way.
@@ -349,8 +363,16 @@ const upload = defineCommand({
 /** The dotenv/JSON source of an upload: a path, or `-` for stdin. A path
  *  that does not exist is the caller's mistake, coded as such — not a raw
  *  ENOENT with the file's own basename mistaken for a secret name. */
-function readUploadSource(file: string): string {
-  if (file === '-') return readFileSync(0, 'utf-8')
+async function readUploadSource(file: string): Promise<string> {
+  if (file === '-') {
+    if (process.stdin.isTTY) {
+      throw new InputError(
+        'Reading secrets from stdin ("-"), but stdin is a terminal — pipe dotenv or JSON input, or pass a file path.',
+        'no_stdin',
+      )
+    }
+    return readStreamText(process.stdin, MAX_STDIN_BYTES)
+  }
   try {
     return readFileSync(file, 'utf-8')
   } catch (err) {

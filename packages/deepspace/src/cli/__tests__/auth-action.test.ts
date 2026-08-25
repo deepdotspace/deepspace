@@ -37,6 +37,13 @@ const loginRefusal = {
   },
 }
 
+function jwtExpiringIn(milliseconds: number): string {
+  const payload = Buffer.from(
+    JSON.stringify({ exp: Math.floor((Date.now() + milliseconds) / 1000) }),
+  ).toString('base64url')
+  return `header.${payload}.signature`
+}
+
 describe('ensureToken recovery action', () => {
   it('carries an exact login action when no session exists', async () => {
     mocks.exists.mockReturnValue(false)
@@ -60,6 +67,33 @@ describe('ensureToken recovery action', () => {
     expect(mocks.write).toHaveBeenCalledWith(TOKEN_PATH, 'fresh-token', { mode: 0o600 })
     expect(mocks.chmod).toHaveBeenCalledWith(TOKEN_PATH, 0o600)
   })
+
+  it('refreshes a valid cached JWT that cannot cover the requested operation', async () => {
+    const cachedToken = jwtExpiringIn(5 * 60 * 1000)
+    mocks.exists.mockImplementation((path) => path === SESSION_PATH || path === TOKEN_PATH)
+    mocks.read.mockImplementation((path) => (path === SESSION_PATH ? 'session' : cachedToken))
+    mocks.exchange.mockResolvedValueOnce('fresh-token')
+
+    await expect(ensureToken({ minimumValidityMs: 10 * 60 * 1000 })).resolves.toBe('fresh-token')
+    expect(mocks.exchange).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the cached JWT when it covers the requested operation', async () => {
+    const cachedToken = jwtExpiringIn(12 * 60 * 1000)
+    mocks.exists.mockImplementation((path) => path === SESSION_PATH || path === TOKEN_PATH)
+    mocks.read.mockImplementation((path) => (path === SESSION_PATH ? 'session' : cachedToken))
+
+    await expect(ensureToken({ minimumValidityMs: 10 * 60 * 1000 })).resolves.toBe(cachedToken)
+    expect(mocks.exchange).not.toHaveBeenCalled()
+  })
+
+  it('does not relabel an auth-service outage as an expired session', async () => {
+    const serviceError = new Error('auth service unavailable')
+    mocks.exists.mockImplementation((path) => path === SESSION_PATH)
+    mocks.exchange.mockRejectedValueOnce(serviceError)
+
+    await expect(ensureToken({ minimumValidityMs: 10 * 60 * 1000 })).rejects.toBe(serviceError)
+  })
 })
 
 describe('ensureToken not_authenticated sentence', () => {
@@ -74,10 +108,13 @@ describe('ensureToken not_authenticated sentence', () => {
   it('names the plane the session belongs to when the selected plane has none', async () => {
     // Selected: production (no override in this process). Stored: a staging
     // session only — exactly what a `DEEPSPACE_ENV=staging` login leaves behind.
-    const stagingSession = '/tmp/deepspace-auth-action-test/.deepspace/session.auth-deepspacesites-com'
+    const stagingSession =
+      '/tmp/deepspace-auth-action-test/.deepspace/session.auth-deepspacesites-com'
     mocks.exists.mockImplementation((path) => path === stagingSession)
     const err = await ensureToken().catch((e: Error) => e)
-    expect((err as Error).message).toMatch(/Not logged in on production\. You are signed in on staging/)
+    expect((err as Error).message).toMatch(
+      /Not logged in on production\. You are signed in on staging/,
+    )
     expect((err as Error).message).toContain('DEEPSPACE_ENV=staging')
     expect(err).toMatchObject(loginRefusal)
   })
@@ -85,6 +122,8 @@ describe('ensureToken not_authenticated sentence', () => {
   it('says the session is invalid — not merely "expired" — when the refresh is refused', async () => {
     mocks.exists.mockImplementation((path) => path === SESSION_PATH)
     const err = await ensureToken().catch((e: Error) => e)
-    expect((err as Error).message).toMatch(/no longer valid \(expired or unreadable\) on production/)
+    expect((err as Error).message).toMatch(
+      /no longer valid \(expired or unreadable\) on production/,
+    )
   })
 })

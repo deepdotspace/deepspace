@@ -20,6 +20,7 @@ import { acquireDeployLock, deployLockPath } from '../deploy/lock'
 import { MAX_DEPLOY_ASSET_FILE_BYTES } from '../../../shared/app-files'
 import {
   collectAssets,
+  collectWorkerBundle,
   extractRunWorkerFirst,
   clientAppIdRefusal,
   isDeployAssetControlFile,
@@ -27,8 +28,11 @@ import {
   readDeployAssetConfig,
   resolveDeployRunWorkerFirst,
   type DeployAsset,
+  type DeployWorkerBundle,
 } from '../deploy/build'
 import {
+  ASSET_UPLOAD_ATTEMPTS,
+  ASSET_UPLOAD_ATTEMPT_TIMEOUT_MS,
   assetManifest,
   deployBuiltBundle,
   formatDeployWorkerError,
@@ -49,6 +53,7 @@ import {
 } from '../deploy/repository'
 import { deployFailureEnvelope, type DeployOutput } from '../deploy/output'
 import type { PushRefResult } from '../../lib/vc-push'
+import { ApiError } from '../../lib/api'
 import { GitError } from '../../lib/git/process'
 import { loadDeploySecrets, prepareDeploySecrets } from '../deploy/secrets'
 import { writeDevVars } from '../../lib/dev-vars'
@@ -218,6 +223,238 @@ describe('on-behalf deploy attribution', () => {
     vi.restoreAllMocks()
   })
 
+  it('sends every generated Worker module with its relative import path', async () => {
+    vi.spyOn(p.log, 'info').mockImplementation(() => {})
+    let commitForm: FormData | null = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/api/health')) {
+          return Response.json({
+            capabilities: {
+              assetTransport: 'content-addressed-v1',
+              workerModules: 'multipart-v1',
+            },
+          })
+        }
+        if (String(url).endsWith('/asset-plan')) return Response.json({ missing: [] })
+        commitForm = init?.body as FormData
+        return Response.json({ success: true, url: 'https://example.app.space' })
+      }),
+    )
+    const worker: DeployWorkerBundle = {
+      main: 'index.js',
+      modules: [
+        { name: 'index.js', content: 'import "./assets/rolldown-runtime.js"' },
+        { name: 'assets/rolldown-runtime.js', content: 'export const runtime = true' },
+      ],
+    }
+
+    await deployBuiltBundle({
+      deployUrl: 'https://deploy.test',
+      appDir: '/tmp',
+      appId: 'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
+      appName: 'example',
+      token: 'tok',
+      rename: false,
+      claimReleased: false,
+      ignoreStale: false,
+      bundle: {
+        assets: [],
+        assetConfig: {},
+        worker,
+        appMigrations: [],
+        doManifest: undefined,
+        customBindings: [],
+        extraRoutes: [],
+        compatibilityDate: null,
+        compatibilityFlags: [],
+        notFoundHandling: null,
+      },
+      secrets: { authoritative: false, values: {}, names: [] },
+      repository: {
+        commitOid: null,
+        recoverable: false,
+        deployKey: 'key',
+        source: null,
+        sourceRevision: 0,
+        baseReleaseId: null,
+        branch: 'main',
+        dirty: false,
+      },
+      output: {
+        json: true,
+        nonInteractive: true,
+        emitJson: vi.fn(),
+        showIntro: vi.fn(),
+        die(message, code): never {
+          throw new Error(`${code}: ${message}`)
+        },
+      },
+      spinner: SILENT_SPINNER,
+    })
+
+    expect(commitForm).not.toBeNull()
+    expect(commitForm!.get('workerMain')).toBe('index.js')
+    expect(commitForm!.get('workerModules')).toBe('["assets/rolldown-runtime.js"]')
+    expect(await (commitForm!.get('worker') as Blob).text()).toBe(worker.modules[0].content)
+    expect(await (commitForm!.get('workerModule') as Blob).text()).toBe(worker.modules[1].content)
+  })
+
+  it('refreshes an expired bearer and rebuilds the idempotent commit request once', async () => {
+    vi.spyOn(p.log, 'info').mockImplementation(() => {})
+    const refreshToken = vi.fn(async () => 'fresh-token')
+    const commitAuthorizations: string[] = []
+    const commitBodies: FormData[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/api/health')) {
+          return Response.json({ capabilities: { assetTransport: 'content-addressed-v1' } })
+        }
+        if (String(url).endsWith('/asset-plan')) return Response.json({ missing: [] })
+        commitAuthorizations.push(new Headers(init?.headers).get('Authorization') ?? '')
+        commitBodies.push(init?.body as FormData)
+        return commitAuthorizations.at(-1) === 'Bearer expired-token'
+          ? Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          : Response.json({ success: true, url: 'https://example.app.space' })
+      }),
+    )
+
+    const body = await deployBuiltBundle({
+      deployUrl: 'https://deploy.test',
+      appDir: '/tmp',
+      appId: 'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
+      appName: 'example',
+      token: 'expired-token',
+      refreshToken,
+      rename: false,
+      claimReleased: false,
+      ignoreStale: false,
+      bundle: {
+        assets: [],
+        assetConfig: {},
+        worker: {
+          main: 'index.js',
+          modules: [{ name: 'index.js', content: 'export default {}' }],
+        },
+        appMigrations: [],
+        doManifest: undefined,
+        customBindings: [],
+        extraRoutes: [],
+        compatibilityDate: null,
+        compatibilityFlags: [],
+        notFoundHandling: null,
+      },
+      secrets: { authoritative: false, values: {}, names: [] },
+      repository: {
+        commitOid: null,
+        recoverable: false,
+        deployKey: 'stable-deploy-key',
+        source: null,
+        sourceRevision: 0,
+        baseReleaseId: null,
+        branch: 'main',
+        dirty: false,
+      },
+      output: {
+        json: true,
+        nonInteractive: true,
+        emitJson: vi.fn(),
+        showIntro: vi.fn(),
+        die(message, code): never {
+          throw new Error(`${code}: ${message}`)
+        },
+      },
+      spinner: SILENT_SPINNER,
+    })
+
+    expect(body.success).toBe(true)
+    expect(refreshToken).toHaveBeenCalledOnce()
+    expect(commitAuthorizations).toEqual(['Bearer expired-token', 'Bearer fresh-token'])
+    expect(commitBodies).toHaveLength(2)
+    expect(commitBodies[0]).not.toBe(commitBodies[1])
+    expect(commitBodies.map((form) => form.get('deployKey'))).toEqual([
+      'stable-deploy-key',
+      'stable-deploy-key',
+    ])
+  })
+
+  it('preserves an auth-service outage after a commit rejects the bearer', async () => {
+    vi.spyOn(p.log, 'info').mockImplementation(() => {})
+    const authError = new ApiError('auth service unavailable', 503, 'auth_service_unavailable')
+    const emitJson = vi.fn()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith('/api/health')) {
+          return Response.json({ capabilities: { assetTransport: 'content-addressed-v1' } })
+        }
+        if (String(url).endsWith('/asset-plan')) return Response.json({ missing: [] })
+        return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+      }),
+    )
+
+    await expect(
+      deployBuiltBundle({
+        deployUrl: 'https://deploy.test',
+        appDir: '/tmp',
+        appId: 'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
+        appName: 'example',
+        token: 'expired-token',
+        refreshToken: async () => {
+          throw authError
+        },
+        rename: false,
+        claimReleased: false,
+        ignoreStale: false,
+        bundle: {
+          assets: [],
+          assetConfig: {},
+          worker: {
+            main: 'index.js',
+            modules: [{ name: 'index.js', content: 'export default {}' }],
+          },
+          appMigrations: [],
+          doManifest: undefined,
+          customBindings: [],
+          extraRoutes: [],
+          compatibilityDate: null,
+          compatibilityFlags: [],
+          notFoundHandling: null,
+        },
+        secrets: { authoritative: false, values: {}, names: [] },
+        repository: {
+          commitOid: null,
+          recoverable: false,
+          deployKey: 'stable-deploy-key',
+          source: null,
+          sourceRevision: 0,
+          baseReleaseId: null,
+          branch: 'main',
+          dirty: false,
+        },
+        output: {
+          json: true,
+          nonInteractive: true,
+          emitJson,
+          showIntro: vi.fn(),
+          die(message, code): never {
+            throw new Error(`${code}: ${message}`)
+          },
+        },
+        spinner: SILENT_SPINNER,
+      }),
+    ).rejects.toMatchObject({ exitCode: 1 })
+    expect(emitJson).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ok: false,
+        code: 'auth_service_unavailable',
+        error: 'auth service unavailable',
+      }),
+    )
+  })
+
   it('says nothing about attribution: the ledger records the COLLABORATOR as actor', async () => {
     // The deploy worker keeps `identity.userId` as the caller and overrides
     // only `ownerUserId`, so the release's `actor` — and `status`'s `byYou` —
@@ -252,7 +489,10 @@ describe('on-behalf deploy attribution', () => {
       bundle: {
         assets: [],
         assetConfig: {},
-        workerJs: 'export default {}',
+        worker: {
+          main: 'index.js',
+          modules: [{ name: 'index.js', content: 'export default {}' }],
+        },
         appMigrations: [],
         doManifest: undefined,
         customBindings: [],
@@ -322,7 +562,10 @@ describe('on-behalf deploy attribution', () => {
         bundle: {
           assets: [],
           assetConfig: {},
-          workerJs: 'export default {}',
+          worker: {
+            main: 'index.js',
+            modules: [{ name: 'index.js', content: 'export default {}' }],
+          },
           appMigrations: [],
           doManifest: undefined,
           customBindings: [],
@@ -451,6 +694,23 @@ describe('deploy secret authority', () => {
       prepareDeploySecrets({ cache, customBindings: [], doManifest: undefined, output: output() }),
     ).toEqual({ values: {}, names: [], authoritative: true })
   })
+
+  it('refuses a secret that collides with a non-secret Wrangler var', () => {
+    expect(() =>
+      prepareDeploySecrets({
+        cache: {
+          linked: {
+            appId,
+            configName: 'prd',
+            values: { AWS_REGION: 'secret-value' },
+          },
+        },
+        customBindings: [{ type: 'plain_text', name: 'AWS_REGION', text: 'us-east-1' }],
+        doManifest: undefined,
+        output: output(),
+      }),
+    ).toThrow(/collides with a binding declared in wrangler\.toml/)
+  })
 })
 
 describe('content-addressed asset collection', () => {
@@ -487,6 +747,43 @@ describe('content-addressed asset collection', () => {
       expect(JSON.stringify(manifest)).not.toMatch(/same bytes/)
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('Worker module collection', () => {
+  it('collects the entry and every emitted server chunk while excluding client assets', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'deepspace-worker-modules-'))
+    try {
+      mkdirSync(join(dir, 'assets'))
+      mkdirSync(join(dir, 'client'))
+      writeFileSync(join(dir, 'index.js'), 'import "./assets/rolldown-runtime.js"')
+      writeFileSync(join(dir, 'assets', 'rolldown-runtime.js'), 'export const runtime = true')
+      writeFileSync(join(dir, 'assets', 'ignored.css'), 'body {}')
+      writeFileSync(join(dir, 'client', 'browser.js'), 'console.log("client")')
+
+      expect(collectWorkerBundle(dir, join(dir, 'index.js'), join(dir, 'client'))).toEqual({
+        main: 'index.js',
+        modules: [
+          { name: 'index.js', content: 'import "./assets/rolldown-runtime.js"' },
+          { name: 'assets/rolldown-runtime.js', content: 'export const runtime = true' },
+        ],
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a main module outside the generated Worker directory', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'deepspace-worker-main-'))
+    const outside = `${dir}-outside.js`
+    try {
+      writeFileSync(join(dir, 'index.js'), 'export default {}')
+      writeFileSync(outside, 'export default {}')
+      expect(() => collectWorkerBundle(dir, outside)).toThrow(/outside the generated output/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(outside, { force: true })
     }
   })
 })
@@ -675,11 +972,16 @@ describe('uploadDeployAssets', () => {
     return { dir, assets: collectAssets(dir) }
   }
 
-  const run = (assets: ReturnType<typeof collectAssets>, output = testOutput()) =>
+  const run = (
+    assets: ReturnType<typeof collectAssets>,
+    output = testOutput(),
+    refreshToken?: () => Promise<string | null>,
+  ) =>
     uploadDeployAssets({
       deployUrl: 'https://deploy.test',
       appId: 'app_01ABCDEFGHJKMNPQRSTVWXYZ00',
       token: 'tok',
+      refreshToken,
       assets,
       output,
       spinner: SILENT_SPINNER,
@@ -721,6 +1023,128 @@ describe('uploadDeployAssets', () => {
         [...new Set(assets.map((asset) => asset.hash))].sort(),
       )
       expect(uploaded).toEqual([alpha.hash])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('gives replayable asset bodies a generous per-attempt timeout', async () => {
+    const { dir, assets } = buildAssets({ 'slow.bin': 'body' })
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+    try {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string) =>
+          String(url).endsWith('/asset-plan')
+            ? Response.json({ missing: [assets[0].hash] })
+            : Response.json({ ok: true }),
+        ),
+      )
+
+      await run(assets)
+
+      expect(timeoutSpy).toHaveBeenCalledWith(ASSET_UPLOAD_ATTEMPT_TIMEOUT_MS)
+      expect(ASSET_UPLOAD_ATTEMPTS * ASSET_UPLOAD_ATTEMPT_TIMEOUT_MS).toBe(5 * 60_000)
+    } finally {
+      timeoutSpy.mockRestore()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refreshes and retries when the asset plan rejects an expired bearer', async () => {
+    const authorizations: string[] = []
+    const refreshToken = vi.fn(async () => 'fresh-token')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        const authorization = new Headers(init?.headers).get('Authorization') ?? ''
+        authorizations.push(authorization)
+        return authorization === 'Bearer tok'
+          ? Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          : Response.json({ missing: [] })
+      }),
+    )
+
+    await run([], testOutput(), refreshToken)
+
+    expect(refreshToken).toHaveBeenCalledOnce()
+    expect(authorizations).toEqual(['Bearer tok', 'Bearer fresh-token'])
+  })
+
+  it('preserves an auth-service outage while refreshing the asset plan bearer', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ error: 'Invalid or expired token' }, { status: 401 })),
+    )
+    const authError = new ApiError('auth service unavailable', 503, 'auth_service_unavailable')
+
+    await expect(
+      run([], testOutput(), async () => {
+        throw authError
+      }),
+    ).rejects.toThrow('auth_service_unavailable: auth service unavailable')
+  })
+
+  it('preserves an auth-service outage while refreshing an asset upload bearer', async () => {
+    const { dir, assets } = buildAssets({ 'a.txt': 'alpha' })
+    try {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string) =>
+          String(url).endsWith('/asset-plan')
+            ? Response.json({ missing: [assets[0].hash] })
+            : Response.json({ error: 'Invalid or expired token' }, { status: 401 }),
+        ),
+      )
+      const authError = new ApiError('auth service unavailable', 503, 'auth_service_unavailable')
+
+      await expect(
+        run(assets, testOutput(), async () => {
+          throw authError
+        }),
+      ).rejects.toThrow('auth_service_unavailable: auth service unavailable')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('coalesces concurrent expired upload responses into one token refresh', async () => {
+    const files = Object.fromEntries(
+      Array.from({ length: 3 }, (_, index) => [`f${index}.txt`, `body-${index}`]),
+    )
+    const { dir, assets } = buildAssets(files)
+    let releaseRefresh!: (token: string) => void
+    const refreshToken = vi.fn(
+      async () => await new Promise<string>((resolve) => (releaseRefresh = resolve)),
+    )
+    const expiredUploads: string[] = []
+    const freshUploads: string[] = []
+    try {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string, init?: RequestInit) => {
+          if (String(url).endsWith('/asset-plan')) {
+            return Response.json({ missing: assets.map((asset) => asset.hash) })
+          }
+          const hash = String(url).split('/').pop()!
+          const authorization = new Headers(init?.headers).get('Authorization')
+          if (authorization === 'Bearer tok') {
+            expiredUploads.push(hash)
+            return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          }
+          freshUploads.push(hash)
+          return Response.json({ ok: true })
+        }),
+      )
+
+      const upload = run(assets, testOutput(), refreshToken)
+      await vi.waitFor(() => expect(expiredUploads).toHaveLength(3))
+      releaseRefresh('fresh-token')
+      await upload
+
+      expect(refreshToken).toHaveBeenCalledOnce()
+      expect(expiredUploads.sort()).toEqual(assets.map((asset) => asset.hash).sort())
+      expect(freshUploads.sort()).toEqual(assets.map((asset) => asset.hash).sort())
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -824,6 +1248,7 @@ describe('uploadDeployAssets', () => {
 
   it('reports a refused plan with the platform’s message and code', async () => {
     const { dir, assets } = buildAssets({ 'a.txt': 'alpha' })
+    const refreshToken = vi.fn(async () => 'must-not-be-used')
     try {
       vi.stubGlobal(
         'fetch',
@@ -834,7 +1259,10 @@ describe('uploadDeployAssets', () => {
           ),
         ),
       )
-      await expect(run(assets)).rejects.toThrow(/assets_too_large: This deploy’s assets total/)
+      await expect(run(assets, testOutput(), refreshToken)).rejects.toThrow(
+        /assets_too_large: This deploy’s assets total/,
+      )
+      expect(refreshToken).not.toHaveBeenCalled()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

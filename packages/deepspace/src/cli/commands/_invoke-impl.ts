@@ -23,6 +23,7 @@ import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { cliAction, Refusal, type CommandResult } from '../lib/command'
 import { normalizeApiError } from '../../shared/api-error'
+import { readStreamText } from '../lib/stdio'
 
 const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
 const DEFAULT_TIMEOUT_MS = 120_000
@@ -106,7 +107,7 @@ export function parseTimeout(raw: unknown): number | undefined {
  * Errors if both --body and --body-file are provided, or the body isn't
  * valid JSON.
  */
-function resolveBody(opts: { body?: string; bodyFile?: string }): string {
+async function resolveBody(opts: { body?: string; bodyFile?: string }): Promise<string> {
   if (opts.body != null && opts.bodyFile != null) {
     throw new Refusal('Pass either --body or --body-file, not both.', 'conflicting_body_args')
   }
@@ -115,7 +116,22 @@ function resolveBody(opts: { body?: string; bodyFile?: string }): string {
   if (opts.body != null) {
     raw = opts.body
   } else if (opts.bodyFile != null) {
-    raw = opts.bodyFile === '-' ? readFileSync(0, 'utf-8') : readFileSync(opts.bodyFile, 'utf-8')
+    if (opts.bodyFile === '-' && process.stdin.isTTY) {
+      throw new Refusal(
+        'Reading the body from stdin ("-"), but stdin is a terminal — pipe JSON in, or pass --body / a file path.',
+        'no_stdin',
+      )
+    }
+    raw =
+      opts.bodyFile === '-'
+        ? await readStreamText(process.stdin)
+        : readFileSync(opts.bodyFile, 'utf-8')
+    if (opts.bodyFile === '-' && raw.trim() === '') {
+      throw new Refusal(
+        'Nothing arrived on stdin — check the command feeding this one, or pass --body / a file path.',
+        'empty_input',
+      )
+    }
   } else {
     return '{}'
   }
@@ -357,7 +373,7 @@ export async function runInfo(args: InfoArgs): Promise<CommandResult> {
  */
 export async function runInvoke(args: InvokeArgs): Promise<CommandResult> {
   const { integration, endpoint } = parseTarget(args.target)
-  const body = resolveBody({ body: args.body, bodyFile: args.bodyFile })
+  const body = await resolveBody({ body: args.body, bodyFile: args.bodyFile })
   const timeoutMs = args.timeout ?? DEFAULT_TIMEOUT_MS
 
   // FEAT-13: this fires a PAID call billed to the logged-in user. Without

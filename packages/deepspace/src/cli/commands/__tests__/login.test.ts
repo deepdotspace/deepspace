@@ -3,7 +3,8 @@
  * ONB-7: `-e` alias parity for --env across dev/deploy/test.
  */
 import { afterEach, describe, it, expect, vi } from 'vitest'
-import login, { resolveLoginCredentials, loginModeDecision } from '../login'
+import { Readable } from 'node:stream'
+import login, { createCliLoginSession, resolveLoginCredentials, loginModeDecision } from '../login'
 import dev from '../dev'
 import deploy from '../deploy'
 import test from '../test'
@@ -71,6 +72,65 @@ describe('loginModeDecision (ONB-4 — no silent OAuth fall-through)', () => {
   })
 })
 
+describe('browser login session creation', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it('retries a transient connection failure before returning the authorization URL', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(
+        Response.json({ sessionId: 'session-id', loginUrl: 'https://auth.test/login' }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const session = createCliLoginSession('challenge')
+    await vi.runAllTimersAsync()
+
+    await expect(session).resolves.toEqual({
+      sessionId: 'session-id',
+      loginUrl: 'https://auth.test/login',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('--password-stdin streaming input', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    process.exitCode = undefined
+  })
+
+  it('reads a password arriving across ticks and strips one trailing newline', async () => {
+    let index = 0
+    const chunks = ['hunter', '2\n']
+    const stream = new Readable({
+      read() {
+        setTimeout(() => this.push(index < chunks.length ? chunks[index++] : null), 1)
+      },
+    })
+    vi.spyOn(process, 'stdin', 'get').mockReturnValue(stream as unknown as typeof process.stdin)
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({ message: 'nope' }, { status: 401 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await (
+      login as unknown as { run: (ctx: { args: Record<string, unknown> }) => Promise<unknown> }
+    ).run({ args: { email: 'a@x.com', 'password-stdin': true, json: true } })
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body))
+    expect(body).toMatchObject({ email: 'a@x.com', password: 'hunter2' })
+  })
+})
+
 describe('the command runtime supplies --json', () => {
   // login had NO machine surface at all before the runtime — it is the first
   // command an agent runs, so its --json flag is load-bearing.
@@ -100,7 +160,7 @@ describe('--env has the -e alias everywhere init does (ONB-7)', () => {
   })
 })
 
-describe('wrong password carries a code (the commonest auth failure of all)', () => {
+describe('email/password failures carry actionable codes', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
@@ -111,7 +171,10 @@ describe('wrong password carries a code (the commonest auth failure of all)', ()
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
-        Response.json({ code: 'INVALID_EMAIL_OR_PASSWORD', message: 'Invalid email or password' }, { status: 401 }),
+        Response.json(
+          { code: 'INVALID_EMAIL_OR_PASSWORD', message: 'Invalid email or password' },
+          { status: 401 },
+        ),
       ),
     )
     const lines: string[] = []
@@ -119,11 +182,42 @@ describe('wrong password carries a code (the commonest auth failure of all)', ()
     const command = login as unknown as {
       run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
     }
-    await command.run({ args: { json: true, email: 'me@x.test', password: 'wrong', 'password-stdin': false } })
+    await command.run({
+      args: { json: true, email: 'me@x.test', password: 'wrong', 'password-stdin': false },
+    })
     expect(JSON.parse(lines[0])).toEqual({
       ok: false,
       code: 'invalid_credentials',
       error: 'Invalid email or password',
+    })
+    expect(process.exitCode).toBe(1)
+  })
+
+  it('429 from the auth service → rate_limited and the retry guidance', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json(
+          {
+            code: 'TOO_MANY_SIGN_IN_ATTEMPTS',
+            message: 'Too many sign-in attempts. Try again shortly.',
+          },
+          { status: 429, headers: { 'Retry-After': '60' } },
+        ),
+      ),
+    )
+    const lines: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
+    const command = login as unknown as {
+      run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+    }
+    await command.run({
+      args: { json: true, email: 'me@x.test', password: 'wrong', 'password-stdin': false },
+    })
+    expect(JSON.parse(lines[0])).toEqual({
+      ok: false,
+      code: 'rate_limited',
+      error: 'Too many sign-in attempts. Try again shortly.',
     })
     expect(process.exitCode).toBe(1)
   })

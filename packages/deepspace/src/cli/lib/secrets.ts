@@ -10,7 +10,7 @@
  */
 
 import { RESERVED_BINDING_NAMES } from '../../server/rooms/binding-manifest'
-import { ApiError, apiFetch } from './api'
+import { ApiError, apiFetch, apiFetchReadWithRetry, apiFetchWithTransientRetry } from './api'
 
 /**
  * Names a user may not set as an app secret. `RESERVED_BINDING_NAMES` covers
@@ -113,13 +113,28 @@ export function secretsApi<T>(
   return apiFetch<T>(deployUrl, token, `/api/secrets${path}`, init)
 }
 
+function readSecretsApi<T>(deployUrl: string, token: string, path: string): Promise<T> {
+  return apiFetchReadWithRetry<T>(deployUrl, token, `/api/secrets${path}`)
+}
+
+/** The store makes these specific writes replay-safe by returning the current
+ * version for an unchanged value and treating an absent delete as success. */
+function retryingSecretsApi<T>(
+  deployUrl: string,
+  token: string,
+  path: string,
+  init: RequestInit,
+): Promise<T> {
+  return apiFetchWithTransientRetry<T>(deployUrl, token, `/api/secrets${path}`, init)
+}
+
 export function listSecrets(
   deployUrl: string,
   token: string,
   appId: string,
   configName: string,
 ): Promise<{ secrets: SecretListItem[] }> {
-  return secretsApi(deployUrl, token, `/${appId}/configs/${encodeURIComponent(configName)}`)
+  return readSecretsApi(deployUrl, token, `/${appId}/configs/${encodeURIComponent(configName)}`)
 }
 
 export function fetchSecretsValues(
@@ -128,7 +143,11 @@ export function fetchSecretsValues(
   appId: string,
   configName: string,
 ): Promise<{ secrets: Record<string, string> }> {
-  return secretsApi(deployUrl, token, `/${appId}/configs/${encodeURIComponent(configName)}/values`)
+  return readSecretsApi(
+    deployUrl,
+    token,
+    `/${appId}/configs/${encodeURIComponent(configName)}/values`,
+  )
 }
 
 export function getSecretPlain(
@@ -138,7 +157,7 @@ export function getSecretPlain(
   configName: string,
   key: string,
 ): Promise<{ key: string; value: string }> {
-  return secretsApi(
+  return readSecretsApi(
     deployUrl,
     token,
     `/${appId}/configs/${encodeURIComponent(configName)}/secrets/${encodeURIComponent(key)}?plain=true`,
@@ -153,7 +172,7 @@ export function setSecret(
   key: string,
   value: string,
 ): Promise<{ ok: boolean }> {
-  return secretsApi(
+  return retryingSecretsApi(
     deployUrl,
     token,
     `/${appId}/configs/${encodeURIComponent(configName)}/secrets/${encodeURIComponent(key)}`,
@@ -167,8 +186,8 @@ export function deleteSecret(
   appId: string,
   configName: string,
   key: string,
-): Promise<{ ok: boolean }> {
-  return secretsApi(
+): Promise<{ ok: boolean; deleted?: boolean }> {
+  return retryingSecretsApi(
     deployUrl,
     token,
     `/${appId}/configs/${encodeURIComponent(configName)}/secrets/${encodeURIComponent(key)}`,
@@ -184,7 +203,7 @@ export function uploadSecrets(
   secrets: Record<string, string>,
   replace: boolean,
 ): Promise<{ ok: boolean }> {
-  return secretsApi(
+  return retryingSecretsApi(
     deployUrl,
     token,
     `/${appId}/configs/${encodeURIComponent(configName)}/secrets`,
@@ -197,7 +216,7 @@ export function listConfigs(
   token: string,
   appId: string,
 ): Promise<{ configs: SecretsConfigInfo[] }> {
-  return secretsApi(deployUrl, token, `/${appId}/configs`)
+  return readSecretsApi(deployUrl, token, `/${appId}/configs`)
 }
 
 export function createConfig(
