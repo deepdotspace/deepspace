@@ -24,6 +24,11 @@ import * as authModule from '../../auth'
 import * as appTargetModule from '../../lib/app-target'
 import * as repoApiModule from '../../lib/repo-api'
 import * as vcRemoteModule from '../../lib/vc-remote'
+// The remote NAME is derived from DEEPSPACE_ENV at module load (`space` in
+// production, `space-staging` in staging), so asserting the production
+// literal fails for anyone with that variable set. Assert what the CLI
+// itself resolved.
+import { SPACE_REMOTE } from '../../lib/vc-remote'
 import type { RemoteRefsResult } from '../../lib/repo-api'
 
 // Real-git suite: every test shells out to git in scratch repos (~2s solo)
@@ -31,6 +36,7 @@ import type { RemoteRefsResult } from '../../lib/repo-api'
 // 18-24 failures in docs/audits/2026-08-06-e2e-0.13.0. Headroom, not a
 // license to hang.
 vi.setConfig({ testTimeout: 30_000 })
+
 
 const git = (cwd: string, args: string[]): string =>
   execFileSync('git', args, { cwd, encoding: 'utf-8' })
@@ -149,12 +155,14 @@ describe('divergedMergeAdvice', () => {
   // The interpolated branch is shell-quoted: a "run this" line is
   // human-facing, and Git allows branch names with $(), ;, &, and spaces.
   it('advises a bare merge when the pulled branch IS checked out', () => {
-    expect(divergedMergeAdvice('main', true)).toBe("git merge refs/remotes/space/'main'")
+    expect(divergedMergeAdvice('main', true)).toBe(
+      `git merge refs/remotes/${SPACE_REMOTE}/'main'`,
+    )
   })
 
   it('advises checkout-then-merge when the pulled branch has no checkout', () => {
     expect(divergedMergeAdvice('feature', false)).toBe(
-      "git checkout 'feature' && git merge refs/remotes/space/'feature'",
+      `git checkout 'feature' && git merge refs/remotes/${SPACE_REMOTE}/'feature'`,
     )
   })
 
@@ -162,12 +170,12 @@ describe('divergedMergeAdvice', () => {
     // A branch name Git accepts but a shell would otherwise expand/mis-parse.
     const nasty = '$(rm -rf ~);drop&'
     expect(divergedMergeAdvice(nasty, true)).toBe(
-      "git merge refs/remotes/space/'$(rm -rf ~);drop&'",
+      `git merge refs/remotes/${SPACE_REMOTE}/'$(rm -rf ~);drop&'`,
     )
     // An embedded single quote is escaped the POSIX way, so the command stays
     // one literal argument.
     expect(divergedMergeAdvice("a'b", false)).toBe(
-      "git checkout 'a'\\''b' && git merge refs/remotes/space/'a'\\''b'",
+      `git checkout 'a'\\''b' && git merge refs/remotes/${SPACE_REMOTE}/'a'\\''b'`,
     )
   })
 })
@@ -211,6 +219,73 @@ describe('worktreeHoldingBranch (pull cross-worktree guard)', () => {
   })
 })
 
+describe('pull gives a fresh clone an identity before handing back a merge', () => {
+  it('sets user.email from the login when the checkout has none', async () => {
+    // The diverged recovery is `git merge refs/remotes/space/<branch>`, which
+    // WRITES a commit. A clone with no global identity dies on `unable to
+    // auto-detect email address` exactly where we told the user to run it, so
+    // the token must reach `ensureSpaceRemote` — the identity seam.
+    const branch = 'main'
+    const dir = mkdtempSync(join(tmpdir(), 'ds-pull-ident-'))
+    repo = dir
+    git(dir, ['init', '-q', '-b', branch])
+    // Deliberately NO user.email/user.name, and no global fallback either.
+    writeFileSync(join(dir, 'f.txt'), 'initial\n')
+    git(dir, ['-c', 'user.email=seed@t', '-c', 'user.name=seed', 'add', '-A'])
+    git(dir, [
+      '-c',
+      'user.email=seed@t',
+      '-c',
+      'user.name=seed',
+      'commit',
+      '-q',
+      '-m',
+      'initial',
+    ])
+    // `config --get` exits non-zero when unset, which is the state we want.
+    const localEmail = (): string => {
+      try {
+        return execFileSync('git', ['config', '--local', '--get', 'user.email'], {
+          cwd: dir,
+          encoding: 'utf-8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim()
+      } catch {
+        return ''
+      }
+    }
+
+    const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url')
+    const token = `${b64({ alg: 'none' })}.${b64({ email: 'dev@example.com' })}.sig`
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue(token)
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
+      getRefs: vi.fn().mockResolvedValue(null),
+    } as never)
+    // The REAL ensureSpaceRemote runs here — that is the seam under test.
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    // `ensureGitIdentity` reads `git config user.email` unscoped, so a
+    // developer's own GLOBAL identity would satisfy it and this test would
+    // pass without the fix. Point git at empty global/system config so the
+    // checkout really has no identity, as a fresh CI clone does.
+    const priorGlobal = process.env.GIT_CONFIG_GLOBAL
+    const priorSystem = process.env.GIT_CONFIG_SYSTEM
+    process.env.GIT_CONFIG_GLOBAL = join(dir, 'no-such-gitconfig')
+    process.env.GIT_CONFIG_SYSTEM = join(dir, 'no-such-gitconfig')
+    try {
+      expect(localEmail()).toBe('')
+      await runPullJson({ app: 'selected-app', branch }, dir)
+      expect(localEmail()).toBe('dev@example.com')
+    } finally {
+      if (priorGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL
+      else process.env.GIT_CONFIG_GLOBAL = priorGlobal
+      if (priorSystem === undefined) delete process.env.GIT_CONFIG_SYSTEM
+      else process.env.GIT_CONFIG_SYSTEM = priorSystem
+    }
+  })
+})
+
 describe('pull recovery target and checkout', () => {
   it('preserves the resolved app and selected branch when the cloud repo is absent', async () => {
     const branch = 'feature/selected'
@@ -240,7 +315,7 @@ describe('pull recovery target and checkout', () => {
     git(worktree, ['commit', '-q', '-m', 'local'])
     const localOid = git(worktree, ['rev-parse', 'HEAD']).trim()
     const remoteOid = commitObject(repo, localOid, 'remote advance')
-    const trackingRef = `refs/remotes/space/${branch}`
+    const trackingRef = `refs/remotes/${SPACE_REMOTE}/${branch}`
     mockPullService(remoteRefs(branch, remoteOid), { [trackingRef]: remoteOid })
 
     const { output, exits } = await runPullJson({ app: 'selected-app', branch }, repo)
@@ -272,7 +347,7 @@ describe('pull recovery target and checkout', () => {
     writeFileSync(join(repo, 'local.txt'), 'local\n')
     git(repo, ['add', '-A'])
     git(repo, ['commit', '-q', '-m', 'unpushed local work'])
-    const trackingRef = 'refs/remotes/space/main'
+    const trackingRef = `refs/remotes/${SPACE_REMOTE}/main`
     // The cloud tip is the ancestor the local branch already contains.
     mockPullService(remoteRefs('main', baseOid), { [trackingRef]: baseOid })
 
@@ -304,7 +379,7 @@ describe('pull recovery target and checkout', () => {
     git(worktree, ['add', '-A'])
     git(worktree, ['commit', '-q', '-m', 'local'])
     const remoteOid = commitObject(repo, baseOid, 'remote divergence')
-    const trackingRef = `refs/remotes/space/${branch}`
+    const trackingRef = `refs/remotes/${SPACE_REMOTE}/${branch}`
     mockPullService(remoteRefs(branch, remoteOid), { [trackingRef]: remoteOid })
 
     const { output, exits } = await runPullJson({ app: 'selected-app', branch }, repo)
@@ -335,7 +410,7 @@ describe('pull recovery target and checkout', () => {
     git(worktree, ['commit', '-q', '-m', 'local'])
     writeFileSync(join(worktree, 'uncommitted.txt'), 'keep me\n')
     const remoteOid = commitObject(repo, baseOid, 'remote divergence')
-    const trackingRef = `refs/remotes/space/${branch}`
+    const trackingRef = `refs/remotes/${SPACE_REMOTE}/${branch}`
     mockPullService(remoteRefs(branch, remoteOid), { [trackingRef]: remoteOid })
 
     const { output, exits } = await runPullJson({ app: 'selected-app', branch }, repo)
@@ -364,7 +439,7 @@ describe('pull recovery target and checkout', () => {
     git(repo, ['commit', '-q', '-m', 'local'])
     git(repo, ['switch', '-q', 'main'])
     const remoteOid = commitObject(repo, baseOid, 'remote divergence')
-    const trackingRef = `refs/remotes/space/${branch}`
+    const trackingRef = `refs/remotes/${SPACE_REMOTE}/${branch}`
     mockPullService(remoteRefs(branch, remoteOid), { [trackingRef]: remoteOid })
 
     const { output, exits } = await runPullJson({ app: 'selected-app', branch }, repo)
@@ -386,7 +461,7 @@ describe('pull recovery target and checkout', () => {
     const trunkOid = git(repo, ['rev-parse', 'HEAD']).trim()
     const worktree = join(repo, 'wt-workspace')
     git(repo, ['worktree', 'add', '-q', '-b', WS_BRANCH, worktree])
-    const trackingRef = 'refs/remotes/space/main'
+    const trackingRef = `refs/remotes/${SPACE_REMOTE}/main`
     mockPullService(remoteRefs('main', trunkOid), { [trackingRef]: trunkOid })
 
     const { output, exits } = await runPullJson({ app: 'selected-app', branch: WS_BRANCH }, repo)
@@ -411,7 +486,7 @@ describe('pull recovery target and checkout', () => {
     const worktree = join(repo, 'wt-workspace')
     git(repo, ['worktree', 'add', '-q', '-b', WS_BRANCH, worktree])
     writeFileSync(join(worktree, 'uncommitted.txt'), 'keep me\n')
-    const trackingRef = 'refs/remotes/space/main'
+    const trackingRef = `refs/remotes/${SPACE_REMOTE}/main`
     mockPullService(remoteRefs('main', trunkOid), { [trackingRef]: trunkOid })
 
     const { output, exits } = await runPullJson({ app: 'selected-app', branch: WS_BRANCH }, repo)

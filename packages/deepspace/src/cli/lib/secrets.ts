@@ -11,6 +11,7 @@
 
 import { RESERVED_BINDING_NAMES } from '../../server/rooms/binding-manifest'
 import { ApiError, apiFetch, apiFetchReadWithRetry, apiFetchWithTransientRetry } from './api'
+import { InputError } from './cli-errors'
 
 /**
  * Names a user may not set as an app secret. `RESERVED_BINDING_NAMES` covers
@@ -60,10 +61,14 @@ export interface RefreshedSecretsCache {
 
 export type SecretsDownloadFormat = 'dotenv' | 'json' | 'shell'
 
+// Every refusal on this surface carries a stable `code` (the contract in
+// docs/platform/cli-contract.md): `InputError`, not a bare Error, is what
+// reaches `--json` as `{ ok:false, code, error }`.
 export function validateConfigName(configName: string): string {
   if (!CONFIG_NAME_RE.test(configName)) {
-    throw new Error(
+    throw new InputError(
       `Invalid config "${configName}". Use letters, numbers, underscores, or hyphens; start with a letter or number.`,
+      'invalid_config_name',
     )
   }
   return configName
@@ -71,14 +76,16 @@ export function validateConfigName(configName: string): string {
 
 export function validateSecretName(name: string): string {
   if (!SECRET_NAME_RE.test(name)) {
-    throw new Error(
+    throw new InputError(
       `Invalid secret name "${name}". Use letters, numbers, and underscores; start with a letter or underscore.`,
+      'invalid_secret_name',
     )
   }
   if (RESERVED_SECRET_NAMES.has(name)) {
-    throw new Error(
+    throw new InputError(
       `"${name}" is managed by the DeepSpace SDK and can't be set as an app secret — ` +
         'the platform injects it at deploy time.',
+      'reserved_secret_name',
     )
   }
   return name
@@ -86,7 +93,10 @@ export function validateSecretName(name: string): string {
 
 export function validateSecretValue(key: string, value: string): void {
   if (new TextEncoder().encode(value).byteLength > MAX_SECRET_VALUE_BYTES) {
-    throw new Error(`Secret "${key}" exceeds ${MAX_SECRET_VALUE_BYTES} bytes`)
+    throw new InputError(
+      `Secret "${key}" exceeds ${MAX_SECRET_VALUE_BYTES} bytes`,
+      'secret_too_large',
+    )
   }
 }
 
@@ -270,9 +280,13 @@ export async function pullAppSecretsCache(
     }
     return { appId, configName, values: secrets }
   } catch (err) {
-    // 404: no store yet, or no such config. Both mean "nothing to ship". Match
-    // on the status field, not the message (which no longer carries the code).
-    if ((err as { status?: number })?.status === 404) return null
+    // 404: no store yet, or no such config. Both mean "nothing to ship" — but
+    // NOT a bare router 404 (`unrecognized_service`, also status 404): that is
+    // DEEPSPACE_DEPLOY_URL pointing at a service without the secrets API, and
+    // swallowing it would ship a deploy silently missing every app secret.
+    if (err instanceof ApiError && err.status === 404 && err.code !== 'unrecognized_service') {
+      return null
+    }
     throw err
   }
 }
@@ -313,14 +327,30 @@ export function parseSecretsUpload(content: string): Record<string, string> {
   const trimmed = content.trim()
   if (!trimmed) return {}
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-    const parsed = JSON.parse(trimmed) as unknown
+    // The refusal is ours, not V8's: an uncaught `JSON.parse` failure would be
+    // the user-facing message ("Unexpected token } in JSON at position 41")
+    // and would carry no `code`.
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      throw new InputError(
+        'The input starts with { or [ but is not valid JSON. Pass a JSON object of KEY:value strings, or a dotenv file.',
+        'invalid_format',
+      )
+    }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('JSON upload must be an object of KEY=value strings.')
+      throw new InputError('JSON upload must be an object of KEY=value strings.', 'invalid_format')
     }
     const out: Record<string, string> = {}
     for (const [key, value] of Object.entries(parsed)) {
       validateSecretName(key)
-      if (typeof value !== 'string') throw new Error(`Secret "${key}" must be a string`)
+      if (typeof value !== 'string') {
+        throw new InputError(
+          `Secret "${key}" must be a string — got ${Array.isArray(value) ? 'an array' : typeof value}.`,
+          'invalid_format',
+        )
+      }
       validateSecretValue(key, value)
       out[key] = value
     }
@@ -372,9 +402,10 @@ export function parseSecretsUpload(content: string): Record<string, string> {
         parts.push(lines[i])
       }
       if (!closed) {
-        throw new Error(
+        throw new InputError(
           `Unterminated quoted value for "${key}" (opens on line ${startLine}). ` +
             `Close the ${quote === '"' ? 'double' : 'single'} quote, or escape newlines as \\n on one line.`,
+          'invalid_format',
         )
       }
       value = parts.join('\n')

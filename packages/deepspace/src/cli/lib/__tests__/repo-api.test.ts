@@ -30,6 +30,80 @@ function stub200(body: string) {
 
 const api = () => repoApi('https://deploy.test', 'tok', 'app_01ARZ3NDEKTSV4RRFFQ69G5FAV')
 
+describe('the router-404 version-skew slug', () => {
+  // The worker's notFound handler answers JSON `{"error":"Not found"}` with no
+  // `code` — the signal every version-skew fallback keys on. It must classify
+  // `unrecognized_service` in BOTH body shapes; matching only the plain-text
+  // form downgrades the real router 404 to the generic `http_error`, which
+  // every other 4xx also carries, so nothing can tell the cases apart.
+  for (const [label, body] of [
+    ['JSON', '{"error":"Not found"}'],
+    ['plain-text', 'Not found'],
+  ] as const) {
+    it(`codes a bare ${label} router 404 as unrecognized_service`, async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(body, { status: 404 })),
+      )
+      const err = await api()
+        .listWorkspaces()
+        .then(() => null)
+        .catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(ApiError)
+      expect((err as ApiError).code).toBe('unrecognized_service')
+    })
+  }
+
+  it('leaves a CODED 404 alone (a real refusal, not a missing route)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response('{"error":"No such workspace","code":"workspace_not_found"}', {
+            status: 404,
+          }),
+      ),
+    )
+    const err = await api()
+      .getWorkspace('ws_01ARZ3NDEKTSV4RRFFQ69G5FAV')
+      .then(() => null)
+      .catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).code).toBe('workspace_not_found')
+  })
+
+  it('keeps the structured fields on the error, not just the sentence', async () => {
+    // `ApiError.details` is what the failure envelope spreads into `--json`,
+    // so a caller reads the numbers the API computed instead of parsing them
+    // back out of the prose.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response('{"error":"Too big","code":"repo_full","usedBytes":41943040}', {
+            status: 413,
+          }),
+      ),
+    )
+    const err = (await api()
+      .listWorkspaces()
+      .catch((e: unknown) => e)) as ApiError
+    expect(err.details).toEqual({ usedBytes: 41943040 })
+  })
+})
+
+describe('listWorkspaces reports a capped page', () => {
+  it('passes the server truncated flag through', async () => {
+    // Without it a capped page is indistinguishable from the whole set, and a
+    // caller reading "3 workspaces" cannot tell that a fourth exists.
+    stub200('{"views":[],"truncated":true}')
+    await expect(api().listWorkspaces({ limit: 3 })).resolves.toEqual({
+      views: [],
+      truncated: true,
+    })
+  })
+})
+
 describe('repo-api shape guard', () => {
   const badShapes: Record<string, string> = {
     'empty object': '{}',
@@ -170,6 +244,80 @@ describe('repo-api shape guard', () => {
     // presence-only field, unlike the non-null `view`/`releases` above.
     stub200('{"release":null}')
     await expect(api().latestRelease()).resolves.toEqual({ release: null })
+  })
+})
+
+describe('a workspace is sanitised where it is parsed, not where it is printed', () => {
+  const RLO = String.fromCodePoint(0x202e)
+  const ESC = String.fromCodePoint(0x1b)
+  const CR = String.fromCodePoint(0x0d)
+
+  const view = (over: Record<string, unknown> = {}) => ({
+    workspace: {
+      id: 'ws_01ARZ3NDEKTSV4RRFFQ69G5FAV',
+      task: 'ship it',
+      baseOid: 'a'.repeat(40),
+      ref: 'refs/deepspace/ws/ws_01ARZ3NDEKTSV4RRFFQ69G5FAV',
+      status: 'active',
+      createdBy: 'usr_1',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+      landedOid: null,
+      ...over,
+    },
+    tipOid: null,
+    aheadOfBase: null,
+    behindTrunk: null,
+  })
+
+  it('escapes a peer-authored task on every workspace read', async () => {
+    // The task crosses seats: one agent writes it, another's `workspace
+    // list`/`attach`/`status` prints it. Escaping at the six print sites is
+    // what kept failing, so it happens once, here.
+    const hostile = `ship ${RLO}${ESC}[2K${CR}FAKE`
+    stub200(JSON.stringify({ views: [view({ task: hostile })] }))
+    const listed = await api().listWorkspaces()
+    const task = listed.views[0].workspace.task
+    expect(task).not.toContain(RLO)
+    expect(task).not.toContain(ESC)
+    expect(task).not.toContain(CR)
+    expect(task).toContain('FAKE')
+
+    // …and on the single-view endpoints, which are separate calls.
+    stub200(JSON.stringify({ view: view({ task: hostile }) }))
+    const one = await api().getWorkspace('ws_01ARZ3NDEKTSV4RRFFQ69G5FAV')
+    expect(one.view.workspace.task).not.toContain(RLO)
+  })
+
+  it('leaves an ordinary task exactly as written', async () => {
+    stub200(JSON.stringify({ view: view({ task: 'ship 日本語 😀 fix' }) }))
+    const one = await api().getWorkspace('ws_01ARZ3NDEKTSV4RRFFQ69G5FAV')
+    expect(one.view.workspace.task).toBe('ship 日本語 😀 fix')
+  })
+
+  it('refuses a workspace ref the server does not own', async () => {
+    // The ref reaches git argv and emitted `action.argv`. It is validated,
+    // not escaped: a server answering with another shape is broken, and there
+    // is no rendering fix for that.
+    for (const ref of [
+      'refs/heads/main',
+      '--upload-pack=touch /tmp/pwned',
+      'refs/deepspace/ws/../../heads/main',
+      'refs/deepspace/ws/not-a-ulid',
+      '',
+    ]) {
+      stub200(JSON.stringify({ view: view({ ref }) }))
+      const err = (await api()
+        .getWorkspace('ws_01ARZ3NDEKTSV4RRFFQ69G5FAV')
+        .catch((e: unknown) => e)) as ApiError
+      expect(err, ref).toBeInstanceOf(ApiError)
+      expect(err.code, ref).toBe('invalid_response')
+    }
+  })
+
+  it('accepts the ref shape the server does own', async () => {
+    stub200(JSON.stringify({ view: view() }))
+    await expect(api().getWorkspace('ws_01ARZ3NDEKTSV4RRFFQ69G5FAV')).resolves.toBeTruthy()
   })
 })
 

@@ -118,13 +118,6 @@ export function appDirInWorktree(appDir: string, worktreeRoot: string): string {
   return appRelative ? join(worktreeRoot, appRelative) : worktreeRoot
 }
 
-/** The same app directory inside the repository's primary checkout. */
-export function primaryAppDir(appDir: string): string {
-  const primary = listWorktrees(appDir)[0]
-  if (!primary) throw new Error('Git did not report a primary worktree')
-  return appDirInWorktree(appDir, primary.path)
-}
-
 /** Create a local workspace checkout and apply its standard local setup. */
 export function materializeWorkspaceWorktree(
   appDir: string,
@@ -413,6 +406,16 @@ export function cleanupWorkspaceLocal(
       deleteWsBranch(mainDir, branch, expectedBranchOid, out)
       return out
     }
+    // No linked checkout in the LIST is not the same as none REGISTERED:
+    // listWorktrees drops entries whose directory is gone, so a hand-deleted
+    // worktree (`rm -rf`, a synced folder that vanished) lands here rather
+    // than in the removal arm above. Prune before the branch goes, or git
+    // keeps an administrative registration for a checkout that no longer
+    // exists, still holding a branch that no longer exists — a phantom that
+    // makes `git worktree list` lie and blocks re-creating the path later.
+    // Best-effort like every other repair on this path: a prune that fails
+    // leaves exactly the state we already had.
+    runGit(mainDir, ['worktree', 'prune'], { allowFail: true })
     if (currentBranch(mainDir) === branch && !switchOffWsBranch(mainDir, trunkBranch)) {
       out.error = `could not switch off ${branch} to delete it`
       return out

@@ -16,7 +16,7 @@
 import * as p from '@clack/prompts'
 import { readFileSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, resolve } from 'node:path'
-import { shQuote } from './cli-format'
+import { displayText, shQuote } from './cli-format'
 
 /** One executable recovery step. Commands decide which action is appropriate;
  *  the runtime only transports and renders it. */
@@ -121,13 +121,18 @@ export function withSlug(msg: string, code: string): string {
   return msg.trimEnd().endsWith(tag) ? msg : `${msg.trimEnd()} ${tag}`
 }
 
+/** Shell-quote for the human line, and escape what quoting does not fix: a
+ *  branch name carrying U+202E reorders the printed `Next:` command while the
+ *  argv it renders is unchanged, so the line and the action disagree.
+ *  Sanitize FIRST, then quote for the target shell. */
 function displayArg(arg: string): string {
-  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(arg)) return arg
+  const safe = displayText(arg)
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(safe)) return safe
   // cmd.exe and PowerShell treat single quotes as literal characters, so the
   // POSIX quoting would render Windows paths un-pasteable; double quotes work
   // in both shells.
-  if (process.platform === 'win32') return `"${arg.replaceAll('"', '""')}"`
-  return shQuote(arg)
+  if (process.platform === 'win32') return `"${safe.replaceAll('"', '""')}"`
+  return shQuote(safe)
 }
 
 /** Render the same structured action exposed to agents as a copy-pasteable

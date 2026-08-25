@@ -59,10 +59,6 @@ export interface DeepspaceCommandDef<A extends ArgsDef> {
   run: (ctx: { args: Record<string, unknown> & { json: boolean } }) => Promise<CommandResult | void>
 }
 
-/**
- * Wrap a command body in the contract. Injects `--json`, renders both output
- * paths, and owns the exit codes — a body never calls process.exit itself.
- */
 /** Both spellings citty's parser can produce for one declared name. */
 function nameVariants(name: string): string[] {
   return [
@@ -129,6 +125,10 @@ export function unknownOptionMessage(
   )
 }
 
+/**
+ * Wrap a command body in the contract. Injects `--json`, renders both output
+ * paths, and owns the exit codes — a body never calls process.exit itself.
+ */
 export function defineDeepspaceCommand<A extends ArgsDef>(def: DeepspaceCommandDef<A>): CommandDef {
   // The injected `json` arg widens citty's inferred ArgsDef generic, which no
   // longer matches the bare `CommandDef` the registry holds. The runtime reads

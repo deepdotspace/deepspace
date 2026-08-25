@@ -13,6 +13,7 @@
 import type { CommandDef } from 'citty'
 import { stopActiveSpinner } from './spinner'
 import { executableAction, printAction, withSlug, type CliAction } from './output'
+import { displayLines } from './cli-format'
 import { ApiError } from './api'
 
 /**
@@ -29,8 +30,23 @@ export class InputError extends Error {
     message: string,
     readonly code: string,
   ) {
-    super(message)
+    // Same exit rule as `Refusal` (lib/command.ts): a refusal's text and its
+    // `--json` `error` are the same string, so it is escaped once, here.
+    super(displayLines(message))
   }
+}
+
+/** `uv_cwd` — the process's working directory no longer exists. Node reports
+ *  it as a bare ENOENT whose syscall/message names uv_cwd rather than a path. */
+export function isMissingCwdError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  const errno = err as NodeJS.ErrnoException & { syscall?: string }
+  if (errno.code !== 'ENOENT') return false
+  // `syscall` alone. Matching the MESSAGE for 'uv_cwd' also matched an
+  // ordinary missing FILE whose path happens to contain that string, and
+  // reported it as a vanished working directory — the genuine error always
+  // carries the syscall, so the substring bought nothing.
+  return errno.syscall === 'uv_cwd'
 }
 
 /**
@@ -60,7 +76,12 @@ export class Refusal extends Error {
     code: string,
     opts: { action?: CliAction; actionRequired?: boolean; extra?: Record<string, unknown> } = {},
   ) {
-    super(message)
+    // The exit every refusal passes through, human and `--json` alike —
+    // `Refusal.message` IS the envelope's `error`. Escaping it here rather than
+    // at each call site is the whole point: three rounds of sink-by-sink fixes
+    // closed a branch-list echo while leaving the `--into` argument raw in the
+    // same sentence, and left `push`, `pull` and `status` untouched.
+    super(displayLines(message))
     this.name = 'Refusal'
     this.code = code
     // Actions built as object literals get the same executable-argv treatment
@@ -140,6 +161,14 @@ export class CliExit extends Error {
  */
 export function errorCode(err: unknown): string | undefined {
   if (err instanceof ApiError || err instanceof InputError || err instanceof Refusal) return err.code
+  // The ONE Node errno that is not an internal detail: the process's own
+  // working directory is gone, which is what a deleted worktree looks like
+  // from inside it (`uv_cwd`). It throws at the first `process.cwd()` a
+  // command reaches — usually its opening line — so without this the whole
+  // CLI answers an uncoded `ENOENT: … uv_cwd` from every verb, and the
+  // `worktree_missing` diagnosis one layer down is unreachable exactly when
+  // it is needed.
+  if (isMissingCwdError(err)) return 'worktree_missing'
   // GitError (raw git operation/transport failure) — duck-typed by `name` to
   // avoid a cli-errors↔git import cycle. Give it a generic `git_error` (or its
   // own slug, if set) so a --json caller can branch on "a git op failed"
@@ -190,6 +219,23 @@ const API_ERROR_HINTS: Record<string, string> = {
 
 /** Exported for tests. One clean message for an escaped error. */
 export function formatCliError(err: unknown): string {
+  // `ENOENT: no such file or directory, uv_cwd` names neither the directory
+  // nor the fix. This is the message every command produces when the shell is
+  // sitting in a worktree that was landed, dropped, or merged away.
+  if (isMissingCwdError(err)) {
+    // The path is NOT knowable from the error (process.cwd() is what failed),
+    // but the shell exports PWD, so name it when it is there. And do not
+    // assert a cause: every verb answers this, including ones with nothing to
+    // do with version control, and "it was most likely a workspace worktree"
+    // is a guess dressed as a finding.
+    const pwd = process.env.PWD
+    return (
+      `The directory this command was run from no longer exists${pwd ? ` (${pwd})` : ''} — ` +
+      'it was deleted or moved while the shell was still in it. Move somewhere that exists ' +
+      '(`cd` to the main checkout). If it was a workspace worktree that a land, merge, or drop ' +
+      'removed, `deepspace workspace attach <ws_…>` re-materializes it there.'
+    )
+  }
   const message = err instanceof Error ? err.message : String(err)
   // The platform returns { error: <sentence>, code: <slug> }, and apiFetch
   // preserves that code on a typed error. Never infer machine state from prose.
@@ -206,16 +252,18 @@ export function formatCliError(err: unknown): string {
  * act of its command, so returning lets Node exit naturally.
  */
 export function renderCliError(err: unknown): void {
+  // A command may throw with its progress spinner still live; stop it FIRST,
+  // on every path including CliExit — its repaint interval would keep the
+  // naturally-exiting process alive, and its exit-time frame can abort on
+  // Windows (see spinner.ts). Idempotent, so an already-stopped spinner is
+  // free.
+  stopActiveSpinner()
   // A CliExit was already rendered by its thrower (deploy's die()/bail());
   // just record its code — a second rendering would double the output.
   if (err instanceof CliExit) {
     process.exitCode = err.exitCode
     return
   }
-  // A command may throw with its progress spinner still live; stop it — its
-  // repaint interval would keep the naturally-exiting process alive, and its
-  // exit-time frame can abort on Windows (see spinner.ts).
-  stopActiveSpinner()
   const message = formatCliError(err)
   const slug = errorCode(err)
   // `--json` callers get the envelope every other refusal path emits. Without

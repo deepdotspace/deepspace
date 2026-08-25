@@ -1,10 +1,13 @@
 import type { CommandDef } from 'citty'
-import { mkdtempSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { defineDeepspaceCommand, Refusal } from '../command'
 import { assertExecutableAction, cliAction, resolveActionArgv } from '../output'
+import { failureEnvelope, withoutReservedKeys } from '../cli-errors'
+import { listWorktrees } from '../git/repository'
+import { runGit } from '../git/process'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -165,5 +168,71 @@ describe('shared command output', () => {
       code: 'demo_slug',
       actionRequired: true,
     })
+  })
+})
+
+describe('listWorktrees drops entries git still lists but nobody can enter', () => {
+  it('omits a worktree whose directory was deleted (prunable), keeps the live ones', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'ds-wt-')))
+    const repo = join(root, 'repo')
+    mkdirSync(repo, { recursive: true })
+    runGit(repo, ['init', '--quiet', '-b', 'main'])
+    runGit(repo, ['config', 'user.email', 't@example.com'])
+    runGit(repo, ['config', 'user.name', 'T'])
+    writeFileSync(join(repo, 'f.txt'), 'x')
+    runGit(repo, ['add', '.'])
+    runGit(repo, ['commit', '--quiet', '-m', 'init'])
+
+    const live = join(root, 'live')
+    const dead = join(root, 'dead')
+    runGit(repo, ['worktree', 'add', '--quiet', '-b', 'live-branch', live])
+    runGit(repo, ['worktree', 'add', '--quiet', '-b', 'dead-branch', dead])
+    rmSync(dead, { recursive: true, force: true })
+
+    // git itself still advertises the deleted one until someone prunes.
+    expect(
+      runGit(repo, ['worktree', 'list', '--porcelain']).stdout.toString('utf-8'),
+    ).toContain('dead-branch')
+
+    const usable = listWorktrees(repo)
+    expect(usable.map((w) => w.branch)).toContain('live-branch')
+    expect(usable.map((w) => w.branch)).not.toContain('dead-branch')
+  })
+})
+
+describe('withoutReservedKeys guards the envelope', () => {
+  it('strips every key the envelope owns', () => {
+    // `data`/`extra` can carry raw server JSON, so a payload must never be
+    // able to flip a failure to success or inject an unvalidated action.
+    // Replacing this function with the identity used to leave the suite green.
+    const payload = {
+      ok: true,
+      code: 'not_the_real_code',
+      error: 'not the real error',
+      action: { cwd: '/tmp', argv: ['rm', '-rf', '/'] },
+      actionRequired: true,
+      next: 'x',
+      nextAction: 'y',
+      resume: 'z',
+      usedBytes: 41943040,
+      name: 'kept',
+    }
+    expect(withoutReservedKeys(payload)).toEqual({ usedBytes: 41943040, name: 'kept' })
+  })
+
+  it('is what stops a server body overwriting the refusal it is attached to', () => {
+    const refusal = new Refusal('The real refusal.', 'repo_full', {
+      extra: { ok: true, code: 'spoofed', action: { cwd: '/tmp', argv: ['sh'] }, usedBytes: 1 },
+    })
+    expect(failureEnvelope(refusal)).toEqual({
+      ok: false,
+      code: 'repo_full',
+      error: 'The real refusal.',
+      usedBytes: 1,
+    })
+  })
+
+  it('keeps an empty payload empty', () => {
+    expect(withoutReservedKeys({})).toEqual({})
   })
 })

@@ -12,7 +12,7 @@ import { Readable } from 'node:stream'
 import secrets from '../secrets'
 import * as authModule from '../../auth'
 import * as appContext from '../../lib/app-context'
-import { Refusal } from '../../lib/command'
+import { Refusal, renderCliError } from '../../lib/cli-errors'
 
 const APP_ID = 'app_01JG8QK4M2N7P9RSTVWXYZ0123'
 
@@ -50,7 +50,9 @@ async function runJson(
       { run: (ctx: { args: Record<string, unknown> }) => Promise<unknown> }
     >
   )[sub]
-  await command.run({ args: { json: true, ...args } })
+  // A plain citty command: cli.ts wraps it so escaped errors reach the
+  // shared renderer — do the same here.
+  await command.run({ args: { json: true, ...args } }).catch(renderCliError)
   return JSON.parse(lines[0]) as Record<string, unknown>
 }
 

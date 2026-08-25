@@ -1,4 +1,5 @@
 import * as p from '@clack/prompts'
+import { displayLines } from './cli-format'
 
 export interface Spinner {
   start: (msg?: string) => void
@@ -28,16 +29,22 @@ export function createSpinner(): Spinner {
         stop: (msg?: string) => { if (msg) console.log(msg) },
         message: (msg?: string) => { if (msg) console.log(msg) },
       }
+  // The other output exit. Progress lines were escaped at their call sites and
+  // OUTCOME lines were not — `Checking <branch> before push…` sanitised, then
+  // `Pushed <branch> → abc1234.` raw — so the split ran through push, pull,
+  // status, land and deploy. Every message this wrapper carries is a
+  // composed human line, and `displayLines` is idempotent, so the sites that
+  // already escape their fields are unaffected.
   const wrapper: Spinner = {
     start: (msg?: string) => {
       activeSpinner = wrapper
-      impl.start(msg)
+      impl.start(msg === undefined ? msg : displayLines(msg))
     },
     stop: (msg?: string) => {
-      impl.stop(msg)
+      impl.stop(msg === undefined ? msg : displayLines(msg))
       if (activeSpinner === wrapper) activeSpinner = null
     },
-    message: (msg?: string) => impl.message(msg),
+    message: (msg?: string) => impl.message(msg === undefined ? msg : displayLines(msg)),
   }
   return wrapper
 }

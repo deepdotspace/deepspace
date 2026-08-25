@@ -51,12 +51,13 @@ import {
   syncDeployRepository,
   workspaceDeployLineage,
 } from '../deploy/repository'
-import { deployFailureEnvelope, type DeployOutput } from '../deploy/output'
+import { createDeployOutput, deployFailureEnvelope, type DeployOutput } from '../deploy/output'
 import type { PushRefResult } from '../../lib/vc-push'
 import { ApiError } from '../../lib/api'
 import { GitError } from '../../lib/git/process'
 import { loadDeploySecrets, prepareDeploySecrets } from '../deploy/secrets'
 import { writeDevVars } from '../../lib/dev-vars'
+
 
 vi.mock('../../lib/dev-vars', () => ({ writeDevVars: vi.fn(async () => undefined) }))
 
@@ -1804,6 +1805,106 @@ describe('detachedHeadRefusal', () => {
     expect(refusal.error).toContain('detached')
     expect(refusal.error).toContain('branch')
     expect(refusal.error).toContain('--no-push')
+  })
+})
+
+/**
+ * The machine contract promises a stable `code` on every refusal, and a
+ * Cloudflare control-plane failure reaches the CLI as prose with none. This
+ * is the commonest failure an agent meets on this verb, so the phase name is
+ * the floor rather than an absent key.
+ */
+describe('deployBuiltBundle codes a codeless server failure', () => {
+  const APP_ID = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    process.exitCode = undefined
+  })
+
+  it('falls back to deploy_failed when the server sends no code of its own', async () => {
+    // The json-mode output captures process.stdout.write at CONSTRUCTION and
+    // emits the envelope through that captured reference, so the spy has to
+    // be installed before createDeployOutput runs.
+    const lines: string[] = []
+    const stdoutSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(((chunk: unknown) => {
+          lines.push(String(chunk))
+          return true
+        }) as never)
+    vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    // URL-aware: the capabilities preflight (`/api/health`) must succeed so
+    // the run reaches the commit POST, which is the refusal under test.
+    vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: unknown) => {
+      const url = String(input)
+      if (url.includes('/api/health')) {
+        return new Response(JSON.stringify({ capabilities: { assetTransport: 'content-addressed-v1' } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      if (url.includes('/asset-plan')) {
+        return new Response(JSON.stringify({ missing: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      // The commit POST: the ordinary "server refused, and said nothing
+      // machine-readable" — the refusal under test.
+      return new Response(JSON.stringify({ success: false, error: 'Cloudflare said no' }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as never    )
+
+    const output = createDeployOutput(true)
+    const spinner = { start: () => {}, stop: () => {}, message: () => {} }
+    const bundle = {
+      worker: {
+        main: 'index.js',
+        modules: [{ name: 'index.js', content: 'export default {}' }],
+      },
+      assets: [],
+      appMigrations: [],
+      doManifest: undefined,
+      customBindings: [],
+      extraRoutes: [],
+      assetConfig: {},
+      compatibilityDate: '',
+      compatibilityFlags: [],
+      notFoundHandling: '',
+    }
+
+    await expect(
+      deployBuiltBundle({
+        deployUrl: 'https://deploy.test',
+        appDir: '/tmp/none',
+        appId: APP_ID,
+        appName: 'example',
+        token: 'token',
+        rename: false,
+        claimReleased: false,
+        ignoreStale: false,
+        bundle: bundle as never,
+        secrets: { authoritative: false, values: {} } as never,
+        repository: { commitOid: null, recoverable: false } as never,
+        output,
+        spinner: spinner as never,
+      }),
+    ).rejects.toThrow()
+    stdoutSpy.mockRestore()
+
+    const envelope = JSON.parse(
+      lines
+        .join('')
+        .split('\n')
+        .filter((l) => l.trim().startsWith('{'))
+        .at(-1) as string,
+    ) as Record<string, unknown>
+    expect(envelope).toMatchObject({ ok: false, code: 'deploy_failed' })
+    expect(String(envelope.error)).toContain('Cloudflare said no')
   })
 })
 

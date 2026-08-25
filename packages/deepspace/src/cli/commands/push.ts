@@ -35,12 +35,18 @@ import {
   resolveCommit,
   updateRef,
 } from '../lib/git/repository'
-import { SECRET_IN_HISTORY_CODE, trackedSecretFiles } from '../lib/git/safety'
+import {
+  SECRET_IN_HISTORY_CODE,
+  secretFilesInPushRange,
+  secretRecoverySentence,
+} from '../lib/git/safety'
 import { workspaceIdFromBranch } from '../lib/workspace-id'
 import { shQuote } from '../lib/cli-format'
 import {
   classifyPushTransportFailure,
+  classifyRejection,
   isRecoverablePushFailure,
+  parseRefusalCode,
   PUSH_CEILINGS,
   pushFailureMessage,
   pushToSpace,
@@ -91,6 +97,27 @@ export function forcePushOrphansWork(
   return !tipContainsRemoteTip // else safe only if the tip already contains it
 }
 
+/**
+ * The cloud tip for `branch`, read through a `--refmap=` fetch that cannot
+ * advance any tracking ref (so this probe can never poison the `--force`
+ * guard's baseline). Null when unverifiable — every caller fails toward the
+ * generic pull advice rather than a wrong specific one.
+ */
+function fetchRemoteTip(appDir: string, token: string, branch: string): string | null {
+  try {
+    runGitRemote(appDir, token, [
+      'fetch',
+      '--quiet',
+      '--refmap=',
+      SPACE_REMOTE,
+      `refs/heads/${branch}`,
+    ])
+    return resolveCommit(appDir, 'FETCH_HEAD')
+  } catch {
+    return null
+  }
+}
+
 /** A `ws/<id>` branch is a workspace line: a plain push writes the visible
  *  `refs/heads/ws/<id>` while `workspace sync` publishes the hidden coordination
  *  ref AND records metadata. Pushing here looks successful yet leaves the
@@ -101,11 +128,18 @@ export function workspaceBranchPushRefusal(
   branch: string | null,
 ): { code: 'workspace_branch'; error: string } | null {
   const id = workspaceIdFromBranch(branch)
-  if (!id) return null
+  // The whole `ws/` prefix, not only well-formed ids: `ws/fakeid` passes no
+  // ULID check yet becomes a real branch that `land --into` then accepts as a
+  // landing target, stranding the work on it.
+  // Case-SENSITIVE, matching the server and git itself — with `/i` the CLI
+  // would be STRICTER than the server, refusing `WS/foo` (a legal branch the
+  // server accepts, and one `git push space WS/foo` publishes) and telling the
+  // agent to rename it.
+  if (!id && !branch?.startsWith('ws/')) return null
   return {
     code: 'workspace_branch',
     error:
-      `"${branch}" is a workspace branch (${id}). A plain push moves only the visible ref and ` +
+      `"${branch}" is in the workspace branch namespace${id ? ` (${id})` : ''}. A plain push moves only the visible ref and ` +
       `bypasses workspace coordination — the workspace tip, overlap warnings, and activity would go ` +
       `stale. Publish it with \`deepspace workspace sync\` instead.`,
   }
@@ -133,7 +167,7 @@ export default defineDeepspaceCommand({
     force: {
       type: 'boolean',
       description:
-        'Allow a non-fast-forward ref move to rewrite history you previously pushed with `deepspace push`. Guarded: refuses whenever the remote tip is a commit your branch does not contain, so no work is silently dropped (a first force from a fresh clone/pull is refused until you re-integrate that tip).',
+        "Allow a non-fast-forward ref move to rewrite history you previously pushed with `deepspace push`. Guarded by a per-checkout push record: allowed when THIS checkout published the cloud tip with `deepspace push` (your own amend/rebase), refused when the cloud tip is any other commit your branch does not contain — so a peer's work is never silently dropped. A plain `git push space` leaves no record, so a force over a tip published that way is refused until you re-integrate it, as is a first force from a fresh clone/pull.",
       default: false,
     },
   },
@@ -231,7 +265,17 @@ export default defineDeepspaceCommand({
         const { appId } = await resolveTarget()
         const checkoutPath = selectedBranchCheckout(appDir, branch)
         const workspaceId = workspaceIdFromBranch(branch)
-        if (!workspaceId) throw new Error(`Workspace branch did not contain an id: ${branch}`)
+        if (!workspaceId) {
+          // The predicate above covers the whole `ws/` prefix, so a malformed
+          // id reaches here. It has no workspace to sync, so its recovery is a
+          // different one: get out of the namespace.
+          spinner?.stop('Workspace branch.')
+          throw new Refusal(
+            `${wsRefusal.error} "${branch}" carries no workspace id, so nothing can publish it — rename it out of the \`ws/\` namespace (\`git branch -m ${shQuote(branch)} <name>\`) and push that.`,
+            wsRefusal.code,
+            { extra: { appId, branch } },
+          )
+        }
         const syncCommand =
           `deepspace workspace sync --app ${shQuote(appId)} ` +
           `--workspace ${shQuote(workspaceId)}`
@@ -257,23 +301,40 @@ export default defineDeepspaceCommand({
       // force-committed `.dev.vars` that .gitignore would normally keep out.
       // The push wrapper refuses them early; the server independently enforces
       // the same case-insensitive basename contract for raw Git clients.
-      const secretFiles = trackedSecretFiles(appDir, tipOid)
+      //
+      // Scanned over the whole RANGE being sent, which is what the server
+      // scans: a secret added in one commit and removed in a later one still
+      // rides the pack. The base is what the cloud already holds for this
+      // branch — its tracking ref, else this checkout's own push record —
+      // and null (scan the whole tip tree) when nothing here knows.
+      const secretFiles = secretFilesInPushRange(
+        appDir,
+        resolveCommit(appDir, `refs/remotes/${SPACE_REMOTE}/${branch}`) ??
+          resolveCommit(appDir, spacePrivateRef(`pushed/${branch}`)),
+        tipOid,
+      )
       if (secretFiles.length > 0) {
         const checkoutPath = selectedBranchCheckout(appDir, branch)
         const checkoutNote = checkoutPath
           ? ''
-          : ` Check out ${shQuote(branch)} in a clean worktree before untracking it.`
+          : ` Check out ${shQuote(branch)} in a clean worktree to do it.`
+        // NO action, deliberately: `git rm --cached <file>` does not resolve a
+        // refusal about the RANGE, so an agent following the "run the action,
+        // then retry" contract re-runs it against a byte-identical refusal.
+        // Rewriting history needs judgment about which commits are safe to
+        // rewrite — a refusal without an action, per the CLI contract.
         throw new Refusal(
-          `Refusing to push: the branch tracks secret file(s) — ${secretFiles.join(', ')}. ` +
-            `These hold local secrets and must not reach the cloud repo. Untrack with ` +
-            `\`git rm --cached ${shQuote(secretFiles[0])}\`, ensure it's .gitignored, commit, then push.` +
+          `Refusing to push: the commits being sent carry secret file(s) — ${secretFiles.join(', ')}. ` +
+            `These hold local secrets and must not reach the cloud repo. ` +
+            secretRecoverySentence(secretFiles, 'push') +
             checkoutNote,
           SECRET_IN_HISTORY_CODE,
           {
-            action: checkoutPath
-              ? { cwd: checkoutPath, argv: ['git', 'rm', '--cached', secretFiles[0]] }
-              : undefined,
-            extra: { branch, ...(checkoutPath ? { worktreePath: checkoutPath } : {}) },
+            extra: {
+              branch,
+              files: secretFiles,
+              ...(checkoutPath ? { worktreePath: checkoutPath } : {}),
+            },
           },
         )
       }
@@ -313,7 +374,11 @@ export default defineDeepspaceCommand({
         throw githubSourceRefusal(appId, sourceState.source.repository)
       }
       const pullRecoveryCwd = selectedBranchCheckout(appDir, branch) ?? appDir
-      ensureSpaceRemote(appDir, appId)
+      // The token goes in: every recovery this command hands back (`deepspace
+      // pull`, then a merge) writes a commit, and a fresh clone with no global
+      // git identity dies on `unable to auto-detect email address` where we
+      // told the user to run it. `ensureSpaceRemote` is the identity seam.
+      ensureSpaceRemote(appDir, appId, undefined, token)
 
       // A `--force` push moves the ref non-fast-forward. That's legitimate for
       // rewriting YOUR OWN line (amend/rebase), but it must NOT silently drop a
@@ -381,9 +446,35 @@ export default defineDeepspaceCommand({
           remoteTip &&
           forcePushOrphansWork(lastPushed, remoteTip, tipOid, isAncestor(appDir, remoteTip, tipOid))
         ) {
+          // Strictly BEHIND is its own state, not a divergence: the cloud tip
+          // CONTAINS this checkout's tip, so the force would publish nothing
+          // and only REWIND the branch. The commits it drops are provable
+          // here, not a hedge about a possible peer.
+          if (isAncestor(appDir, tipOid, remoteTip)) {
+            throw new Refusal(
+              `The cloud repo's ${branch} is at ${remoteTip.slice(0, 10)} and already contains ` +
+                `everything this checkout has — this checkout is strictly behind. Force-pushing ` +
+                `would REWIND the branch and drop the newer commit(s). Run ` +
+                `\`deepspace pull --app ${shQuote(appId)} --branch ${shQuote(branch)}\` to ` +
+                `fast-forward, then push normally if anything is left to publish.`,
+              'behind',
+              {
+                actionRequired: true,
+                action: pullRecoveryAction(pullRecoveryCwd, appId, branch),
+                extra: { appId, branch },
+              },
+            )
+          }
+          // The guard proves ownership from THIS checkout's own push record, so
+          // absent that record it cannot tell "a peer pushed" from "this
+          // checkout published the tip some other way" — a plain `git push
+          // space` writes no record. State the fact that holds rather than
+          // asserting a peer.
           const error =
-            `The cloud repo's ${branch} advanced since you last synced — a peer pushed commit(s) you don't have. ` +
-            `Force-pushing now would DROP that work. Run ` +
+            `The cloud repo's ${branch} is at ${remoteTip.slice(0, 10)}, and this checkout has no ` +
+            `record of publishing it (\`deepspace push\` records its own pushes; a plain ` +
+            `\`git push ${SPACE_REMOTE}\` does not), so a peer's work on top can't be ruled out. ` +
+            `Force-pushing now would DROP that line. Run ` +
             `\`deepspace pull --app ${shQuote(appId)} --branch ${shQuote(branch)}\` and merge ` +
             `(or rebase onto it), then push.`
           throw new Refusal(error, 'diverged', {
@@ -398,21 +489,19 @@ export default defineDeepspaceCommand({
       const result = pushToSpace(appDir, token, `refs/heads/${branch}:refs/heads/${branch}`, {
         force,
       })
-      spinner?.stop(
-        result.status === 'up_to_date'
-          ? `${branch} is already up to date at ${tipOid.slice(0, 10)}.`
-          : result.status === 'committed'
-            ? `Pushed ${branch} → ${tipOid.slice(0, 10)}.`
-            : `Push did not complete.`,
-      )
-
       const ok = result.status === 'up_to_date' || result.status === 'committed'
-      if (ok) {
-        // Record what THIS client just published, in a PRIVATE ref that only our
+      if (result.status === 'committed') {
+        // Record what THIS client just PUBLISHED, in a PRIVATE ref that only our
         // own successful push writes — the "last pushed by me" baseline the
         // --force orphan guard above reads. A bare `git fetch` / `deepspace pull`
         // never advances it (unlike the remote-tracking ref), so the guard
         // can't be poisoned into misreading a peer's tip as our own line.
+        //
+        // `up_to_date` is deliberately EXCLUDED: it says the cloud tip already
+        // equals ours, which is just as true right after pulling a PEER's
+        // commit. Recording it there claims ownership of work this checkout
+        // never published, and a later `--force` — waved through as "your own
+        // line" — then drops the peer's commit.
         updateRef(appDir, spacePrivateRef(`pushed/${branch}`), tipOid)
       }
       // A moved/diverged ref is a recovery state, not a dead end: nothing was
@@ -421,18 +510,63 @@ export default defineDeepspaceCommand({
       // server-side `rejected` — oversize, policy — is NOT self-recoverable).
       const recoverable = isRecoverablePushFailure(result.status)
       const rejectReason = result.reason ?? result.summary
+      // One probe answers both questions a rejected fast-forward raises. The
+      // probe FETCHES, so the spinner stays up across it and is stopped below:
+      // stopping on the push result first leaves a silent network wait after
+      // the last thing the user saw.
+      const rejectedFastForward = !ok && result.status === 'non_fast_forward' && !force
+      if (rejectedFastForward) spinner?.message(`Checking the cloud ${branch} tip…`)
+      const remoteTip = rejectedFastForward ? fetchRemoteTip(appDir, token, branch) : null
+      // A non-fast-forward onto a tip THIS checkout published is an amend or
+      // rebase of your own line — the one force the guard blesses. The blanket
+      // pull advice makes git resurrect the commit you just amended away, as a
+      // conflict against yourself.
+      const ownRewrite =
+        remoteTip !== null &&
+        remoteTip === resolveCommit(appDir, spacePrivateRef(`pushed/${branch}`))
+      // Strictly BEHIND is its own state, and the same classification the
+      // `--force` guard makes: the cloud tip CONTAINS ours, so there is nothing
+      // local to publish and a pull fast-forwards. `non_fast_forward` there
+      // tells an agent to reconcile a divergence that does not exist.
+      const strictlyBehind =
+        remoteTip !== null && !ownRewrite && isAncestor(appDir, tipOid, remoteTip)
+      spinner?.stop(
+        result.status === 'up_to_date'
+          ? `${branch} is already up to date at ${tipOid.slice(0, 10)}.`
+          : result.status === 'committed'
+            ? `Pushed ${branch} → ${tipOid.slice(0, 10)}.`
+            : `Push did not complete.`,
+      )
+      const pullNext =
+        `Run \`deepspace pull --app ${shQuote(appId)} --branch ${shQuote(branch)}\` ` +
+        `and merge (or rebase onto it), then push.`
       const errorMsg = ok
         ? null
         : result.status === 'ref_conflict'
-          ? `The cloud repo's ${branch} moved while you worked (${rejectReason}). ` +
+          ? // The machine token belongs in `code`, not mid-sentence: the reason
+            // arrives as `<code>: <sentence>`, and printing it raw put
+            // "stale_ref: stale ref, fetch first" inside human prose.
+            `The cloud repo's ${branch} moved while you worked (${parseRefusalCode(rejectReason)?.sentence ?? rejectReason}). ` +
             `Run \`deepspace pull --app ${shQuote(appId)} --branch ${shQuote(branch)}\` ` +
             `to integrate, then push again.`
           : result.status === 'rejected'
-            ? pushFailureMessage(`The cloud repo rejected ${branch}`, result, appDir ?? undefined)
-            : `The cloud repo's ${branch} has commit(s) your local ${branch} doesn't. ` +
-              `Run \`deepspace pull --app ${shQuote(appId)} --branch ${shQuote(branch)}\` ` +
-              `and merge (or rebase), then push. Avoid --force here — it's guarded and ` +
-              `will refuse rather than silently drop a peer's commits.`
+            ? pushFailureMessage(`The push of ${branch}`, result, appDir ?? undefined)
+            : ownRewrite
+              ? `The cloud repo's ${branch} is exactly the tip THIS checkout last pushed, and ` +
+                `your local ${branch} no longer contains it — you rewrote your own published ` +
+                `line (amend/rebase). Publish the rewrite with ` +
+                `\`deepspace push --force --branch ${shQuote(branch)}\`: the guard allows it ` +
+                `because it discards only your own superseded tip. (Pulling instead would ` +
+                `merge the commit you just amended away back in.)`
+              : strictlyBehind
+                ? `The cloud repo's ${branch} is at ${remoteTip!.slice(0, 10)} and already ` +
+                  `contains everything this checkout has — this checkout is just behind, with ` +
+                  `nothing of its own to publish. Run ` +
+                  `\`deepspace pull --app ${shQuote(appId)} --branch ${shQuote(branch)}\` to ` +
+                  `fast-forward, then push again if anything is left.`
+                : `The cloud repo's ${branch} has commit(s) your local ${branch} doesn't. ` +
+                  `${pullNext} Avoid --force here — it's guarded and ` +
+                  `will refuse rather than silently drop a peer's commits.`
 
       // Completeness: `appId` is the one --json fact the spinner line doesn't
       // already carry (branch + oid are in it), so the human surface names it too.
@@ -440,14 +574,31 @@ export default defineDeepspaceCommand({
       // A push that landed is terminal — whether to deploy or open a workspace is
       // the agent's call, and a `Next:` there would be filler. Only the recoverable
       // divergence has one true follow-up.
-      const action = recoverable ? pullRecoveryAction(pullRecoveryCwd, appId, branch) : undefined
+      const action: CliAction | undefined = ownRewrite
+        ? {
+            cwd: pullRecoveryCwd,
+            argv: ['deepspace', 'push', '--force', '--app', appId, '--branch', branch],
+          }
+        : recoverable
+          ? pullRecoveryAction(pullRecoveryCwd, appId, branch)
+          : undefined
       // A recoverable divergence (non_fast_forward / ref_conflict) is the
       // action-required tier — it already carries `actionRequired:true` + a
       // `action` above, so exit 2 like `push --force` diverged / `pull` diverged /
       // `workspace land` dirty. A non-recoverable rejection (oversize, policy)
       // stays an ordinary exit 1.
       if (!ok) {
-        throw new Refusal(errorMsg ?? `Push did not complete.`, result.status, {
+        // `rejected` is the server's catch-all; `classifyRejection` is the one
+        // place its reason text becomes a code, and `pushFailureMessage` (the
+        // sentence above) reads the same call — so the slug an agent branches
+        // on and the prose a human reads cannot describe different failures.
+        const code =
+          result.status === 'rejected'
+            ? classifyRejection(rejectReason, appDir ?? undefined).code
+            : strictlyBehind
+              ? 'behind'
+              : result.status
+        throw new Refusal(errorMsg ?? `Push did not complete.`, code, {
           actionRequired: recoverable,
           action,
           extra: { status: result.status, appId, branch, oid: tipOid },
@@ -458,7 +609,12 @@ export default defineDeepspaceCommand({
       if (err instanceof Refusal) throw err
       const transportFailure = classifyPushTransportFailure(err, appDir ?? undefined)
       if (transportFailure) {
-        throw new Refusal(transportFailure.error, transportFailure.code)
+        // Keep git's own text alongside our prose. The HTTP status is the ONLY
+        // diagnostic that survives a smart-HTTP failure (the response body is
+        // dropped), so it is the one thing that says which failure this was.
+        throw new Refusal(transportFailure.error, transportFailure.code, {
+          extra: { gitError: err instanceof Error ? err.message : String(err) },
+        })
       }
       throw err
     }

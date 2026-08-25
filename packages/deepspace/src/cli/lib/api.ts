@@ -7,6 +7,8 @@
  * carrying the worker's `{ error, code }` — message for display, code for
  * branching — so callers never string-sniff error text.
  */
+
+import { displayLines } from './cli-format'
 import { retryTransient } from './fetch-retry'
 
 export class ApiError extends Error {
@@ -18,13 +20,18 @@ export class ApiError extends Error {
     readonly apiPath?: string,
     /**
      * Structured fields the server sent alongside `error`/`code` — e.g. a
-     * storage refusal's `usedBytes`/`limitBytes`. The command runtime spreads
-     * these into the `--json` envelope, so a caller reads the numbers the API
-     * already computed instead of parsing them back out of the sentence.
+     * `merge_conflicted` path list, a storage refusal's `usedBytes`/
+     * `limitBytes`. The failure envelope spreads these into `--json`, so a
+     * caller reads the values the API already computed instead of parsing
+     * them back out of the sentence.
      */
     readonly details?: Record<string, unknown>,
   ) {
-    super(message)
+    // Server prose reaches the terminal and the `--json` envelope through
+    // `formatCliError`, which bypasses the Refusal/InputError exits entirely,
+    // so this is the seam that escapes it — server sentences name branches,
+    // paths and secret names that a peer chose.
+    super(displayLines(message))
   }
 }
 
@@ -110,10 +117,15 @@ export async function apiFetch<T>(
       // not JSON
     }
     // A bare router 404 ("Not found", no server code) means DEEPSPACE_DEPLOY_URL
-    // points at a service that doesn't host the repo API (wrong/old URL). Give it
-    // an actionable message + code UNIFORMLY for every caller (incl. rollback's
-    // direct endpoint), so a --json agent gets one stable slug for this case.
-    if (!code && res.status === 404 && text.trim() === 'Not found') {
+    // points at a service that doesn't host this route (wrong/old URL, or a
+    // worker predating it). Give it an actionable message + code UNIFORMLY for
+    // every caller (incl. rollback's direct endpoint), so a --json agent gets
+    // one stable slug for this case. Matched on `msg`, not the raw body: the
+    // worker's notFound handler answers JSON `{"error":"Not found"}`, so the
+    // plain-text form alone misses the ACTUAL router 404 and leaves it coded
+    // `http_error` — the generic slug every other 4xx already carries, so
+    // nothing keyed on `unrecognized_service` can tell the cases apart.
+    if (!code && res.status === 404 && msg.trim() === 'Not found') {
       code = 'unrecognized_service'
       msg = `The deploy service at ${baseUrl} doesn't recognize this request — check DEEPSPACE_DEPLOY_URL (is this the service the app lives on?); if it is, the server may be older than this CLI.`
     }

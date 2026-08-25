@@ -23,12 +23,43 @@ import {
   readAppIdVar,
   readWranglerConfig,
   WranglerConfigError,
+  type WranglerConfig,
 } from './wrangler-env'
 
 // Single source: the shared registry client owns the id shape. Import-then-
 // re-export (not a bare `export from`) because readAppId uses it locally too.
 import { APP_ID_RE } from '../../server/utils/registry-client'
 export { APP_ID_RE }
+
+/**
+ * EVERY app id this checkout declares — top-level and every `[env.<name>]`.
+ *
+ * A wrangler env is a separate app, and they share one working tree. Anything
+ * asking "does this checkout own that app?" has to consider all of them:
+ * comparing against the top-level id alone makes `deploy --env staging`
+ * structurally impossible, with advice ("run from that app's own checkout")
+ * that cannot be followed because the env has no separate checkout.
+ *
+ * Empty set when there is no readable config — callers read that as "cannot
+ * prove a mismatch", never as "mismatch".
+ */
+export function declaredAppIds(cwd: string = process.cwd()): Set<string> {
+  const appDir = resolve(cwd)
+  if (!hasWranglerConfig(appDir)) return new Set()
+  let cfg: WranglerConfig
+  try {
+    cfg = readWranglerConfig(appDir)
+  } catch {
+    // A half-edited wrangler.toml is not evidence of anything.
+    return new Set()
+  }
+  const sections = [cfg.vars, ...Object.values(cfg.env ?? {}).map((env) => env?.vars)]
+  return new Set(
+    sections
+      .map((vars) => vars?.DEEPSPACE_APP_ID)
+      .filter((id): id is string => typeof id === 'string' && APP_ID_RE.test(id)),
+  )
+}
 
 /** The value a fresh scaffold carries until `deepspace app init` registers it. */
 export const APP_ID_PLACEHOLDER = '__APP_ID__'

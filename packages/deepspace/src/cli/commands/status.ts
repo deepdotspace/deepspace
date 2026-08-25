@@ -15,6 +15,7 @@
  */
 
 import { defineCommand } from 'citty'
+import { displayLines } from '../lib/cli-format'
 import * as p from '@clack/prompts'
 import { existsSync, readFileSync } from 'node:fs'
 import { SESSION_PATH, TOKEN_PATH, ensureToken } from '../auth'
@@ -53,6 +54,12 @@ function timeAgo(iso: string): string {
 }
 
 const UNREACHABLE = '(unreachable)'
+
+/** An unusable session, in the shape every other unavailability in this file
+ *  reports — so a consumer branching on `code` (per the contract) sees one
+ *  thing whether the session was never there or has expired. */
+const sessionError = (error: string) =>
+  ({ state: 'unavailable', error, code: 'not_authenticated' }) as const
 
 type RemoteResult<T> = { ok: true; value: T } | { ok: false; error: unknown }
 
@@ -164,13 +171,19 @@ export default defineCommand({
     }
 
     // ── session (local only — never blocks on the network) ──────────────
-    facts.loggedIn = existsSync(SESSION_PATH)
+    // EITHER file is a usable session: the rest of the CLI mints a token from
+    // `session`, and `token` on its own is a live credential. Keying on
+    // `session` alone contradicts `auth whoami` in both directions, and an
+    // agent that reads `loggedIn: false` starts an interactive browser OAuth
+    // nobody is there to complete.
+    facts.loggedIn = existsSync(SESSION_PATH) || existsSync(TOKEN_PATH)
     let userId: string | null = null
     if (!facts.loggedIn) {
       lines.push(['Session', 'not logged in'])
       json.loggedIn = false
+      json.sessionError = sessionError('Not logged in. Run `deepspace auth login` first.')
     } else {
-      let who = 'logged in'
+      let who: string | null = null
       try {
         const payload = decodeJwtPayload<{ email?: string; sub?: string }>(
           readFileSync(TOKEN_PATH, 'utf-8').trim(),
@@ -180,9 +193,15 @@ export default defineCommand({
       } catch {
         // token file absent/stale — the session still mints on next use
       }
-      lines.push(['Session', `${who} · renews on use (re-login only after 30 idle days)`])
+      lines.push([
+        'Session',
+        `${who ?? 'logged in'} · renews on use (re-login only after 30 idle days)`,
+      ])
       json.loggedIn = true
-      json.user = who
+      // `user` is an email in every run that has an identity, so a placeholder
+      // string there would silently fail an identity comparison. Omit the key
+      // when the identity is genuinely unknown.
+      if (who) json.user = who
     }
 
     // ── app (local) ──────────────────────────────────────────────────────
@@ -264,6 +283,14 @@ export default defineCommand({
             lines.push(['Cloud', 'session expired — run `deepspace auth login`'])
             facts.loggedIn = false
             json.sessionExpired = true
+            // An expired session is not logged in, and the identity read from
+            // an expired token compares equal to a live one — so a consumer
+            // asking "am I still acting as X" must not find `user` here. This
+            // is the path where a session actually dies, so it carries the
+            // same coded shape as the never-logged-in one.
+            json.loggedIn = false
+            delete json.user
+            json.sessionError = sessionError('Session expired. Run `deepspace auth login`.')
           }
         }
         if (token) {
@@ -334,6 +361,11 @@ export default defineCommand({
             refs?.head && refs.head.startsWith('refs/heads/')
               ? refs.head.slice('refs/heads/'.length)
               : null
+          // Reported on every checkout, workspace ones included — that is
+          // exactly where "what does `workspace land` merge into?" is the
+          // question. Absent, rather than null, when the refs read failed or
+          // the source is external: unknown is not "there is no default".
+          if (!githubSource && refsResult.ok && defaultBranch) json.defaultBranch = defaultBranch
           if (!facts.workspaceId && branch) {
             // With the default branch unknown (GitHub-owned source, refs
             // unfetched, or a repo with no HEAD yet) `isTrunk` is null and
@@ -341,6 +373,14 @@ export default defineCommand({
             // actually derivable, so a machine caller can't read a guess.
             const isTrunk = defaultBranch === null ? null : branch === defaultBranch
             const label = isTrunk === false ? 'Branch sync' : 'Trunk'
+            // NAME the trunk when this checkout is not on it; the rows below
+            // only describe `branch`, so the human view otherwise never says
+            // what the default branch is. Not for GitHub-owned source, where
+            // `refs.head` is the DeepSpace repo's head rather than the
+            // authority — and where the arm below already prints a Trunk row.
+            if (isTrunk === false && defaultBranch && !githubSource) {
+              lines.push(['Trunk', `${defaultBranch} (this checkout is on ${branch})`])
+            }
             if (githubSource) {
               lines.push([label, `${branch} is owned through normal Git/GitHub`])
               json.trunk = { state: 'external', provider: 'github', branch, isTrunk }
@@ -438,6 +478,9 @@ export default defineCommand({
       return
     }
     const width = Math.max(...lines.map(([k]) => k.length))
-    for (const [k, v] of lines) p.log.message(`${k.padEnd(width)}  ${v}`)
+    // The one exit every row leaves by, so no row can be composed from remote
+    // text (a branch name, a workspace task) and printed unescaped — a bidi
+    // override in any of them reorders the rest of the line.
+    for (const [k, v] of lines) p.log.message(displayLines(`${k.padEnd(width)}  ${v}`))
   },
 })

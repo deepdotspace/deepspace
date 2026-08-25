@@ -19,6 +19,7 @@
  */
 
 import { defineCommand } from 'citty'
+import * as p from '@clack/prompts'
 import { readFileSync } from 'node:fs'
 import { ensureToken } from '../auth'
 import { decodeJwtPayload } from '../../shared/jwt'
@@ -26,7 +27,8 @@ import { PLATFORM_URLS } from '../env'
 import { findAppDir } from '../lib/app-context'
 import { writeDevVars } from '../lib/dev-vars'
 import { assertAppTargetResolvable, parseWranglerEnvArg, resolveAppTarget } from '../lib/app-target'
-import { InputError, renderCliError } from '../lib/cli-errors'
+import { ApiError } from '../lib/api'
+import { InputError } from '../lib/cli-errors'
 import { dedupePositionals } from '../lib/citty-args'
 import { MAX_STDIN_BYTES, readStreamText } from '../lib/stdio'
 import {
@@ -104,15 +106,15 @@ async function resolveTarget(args: {
   return { appId, configName, token }
 }
 
-function fail(err: unknown): void {
-  // Route through the shared renderer so `secrets` obeys the output contract
-  // like every other command: `--json` gets the {ok,code,error} envelope on
-  // stdout, the human path gets the message with its slug appended. The
-  // renderer records process.exitCode and RETURNS (see lib/command.ts for
-  // why never process.exit); every fail() is the last statement on its path,
-  // so mid-body refusals must THROW their InputError instead.
-  renderCliError(err)
-}
+/**
+ * Failures LEAVE these bodies. cli.ts wraps every leaf in `wrapCommandErrors`,
+ * whose catch is one `renderCliError` call: `--json` gets the {ok,code,error}
+ * envelope on stdout, the human path gets the message with its slug appended,
+ * and the exit code is recorded (never process.exit; see lib/command.ts).
+ * `renderCliError` RETURNS, so a refusal is only a refusal when it THROWS —
+ * rendering one mid-body leaves the body running on into the very operation it
+ * refused. There is no local helper here, so `throw` is the only spelling.
+ */
 
 /**
  * A success result on the contract. Under `--json` it is the single
@@ -159,22 +161,18 @@ const list = defineCommand({
     },
   },
   async run({ args }) {
-    try {
-      const t = await resolveTarget(args)
-      const { secrets } = await listSecrets(DEPLOY_URL, t.token, t.appId, t.configName)
-      if (args.json) {
-        console.log(JSON.stringify({ ok: true, appId: t.appId, config: t.configName, secrets }))
-        return
-      }
-      if (secrets.length === 0) {
-        console.log(`No secrets in ${t.configName}.`)
-        return
-      }
-      for (const s of secrets) {
-        console.log(args['only-names'] ? s.key : `${s.key}  (v${s.version}, ${s.updatedAt})`)
-      }
-    } catch (err) {
-      fail(err)
+    const t = await resolveTarget(args)
+    const { secrets } = await listSecrets(DEPLOY_URL, t.token, t.appId, t.configName)
+    if (args.json) {
+      console.log(JSON.stringify({ ok: true, appId: t.appId, config: t.configName, secrets }))
+      return
+    }
+    if (secrets.length === 0) {
+      console.log(`No secrets in ${t.configName}.`)
+      return
+    }
+    for (const s of secrets) {
+      console.log(args['only-names'] ? s.key : `${s.key}  (v${s.version}, ${s.updatedAt})`)
     }
   },
 })
@@ -186,48 +184,44 @@ const set = defineCommand({
     secret: { type: 'positional', description: 'KEY=value (repeatable)', required: true },
   },
   async run({ args }) {
-    try {
-      const t = await resolveTarget(args)
-      const pairs = dedupePositionals(args.secret, args._)
-      const secrets: Record<string, string> = {}
-      const dupes: string[] = []
-      for (const pair of pairs) {
-        const eq = pair.indexOf('=')
-        if (eq <= 0) throw new InputError(`Expected KEY=value, got "${pair}"`, 'invalid_pair')
-        const key = validateSecretName(pair.slice(0, eq))
-        const value = pair.slice(eq + 1)
-        validateSecretValue(key, value)
-        // The same KEY given twice (with different values) silently keeps the
-        // last — surface it instead of dropping a value without a word.
-        if (key in secrets && !dupes.includes(key)) dupes.push(key)
-        secrets[key] = value
-      }
-      if (dupes.length) {
-        console.warn(
-          `Warning: ${dupes.join(', ')} given more than once — kept the last value for each.`,
-        )
-      }
-      if (Object.keys(secrets).length === 1) {
-        const [[k, v]] = Object.entries(secrets)
-        await setSecret(DEPLOY_URL, t.token, t.appId, t.configName, k, v)
-      } else {
-        await uploadSecrets(DEPLOY_URL, t.token, t.appId, t.configName, secrets, false)
-      }
-      const n = Object.keys(secrets).length
-      ok(
-        args.json === true,
-        { appId: t.appId, config: t.configName, set: Object.keys(secrets), ...APPLIES_AT_DEPLOY },
-        () => {
-          console.log(`Set ${n} secret${n === 1 ? '' : 's'} in ${t.configName}.`)
-          if (!warnIfDebugRoutesEnabled(secrets)) {
-            console.log(APPLY_HINT)
-            console.log(LOCAL_DEV_HINT)
-          }
-        },
-      )
-    } catch (err) {
-      fail(err)
+    const t = await resolveTarget(args)
+    const pairs = dedupePositionals(args.secret, args._)
+    const secrets: Record<string, string> = {}
+    const dupes: string[] = []
+    for (const pair of pairs) {
+      const eq = pair.indexOf('=')
+      if (eq <= 0) throw new InputError(`Expected KEY=value, got "${pair}"`, 'invalid_pair')
+      const key = validateSecretName(pair.slice(0, eq))
+      const value = pair.slice(eq + 1)
+      validateSecretValue(key, value)
+      // The same KEY given twice (with different values) silently keeps the
+      // last — surface it instead of dropping a value without a word.
+      if (key in secrets && !dupes.includes(key)) dupes.push(key)
+      secrets[key] = value
     }
+    if (dupes.length) {
+      console.warn(
+        `Warning: ${dupes.join(', ')} given more than once — kept the last value for each.`,
+      )
+    }
+    if (Object.keys(secrets).length === 1) {
+      const [[k, v]] = Object.entries(secrets)
+      await setSecret(DEPLOY_URL, t.token, t.appId, t.configName, k, v)
+    } else {
+      await uploadSecrets(DEPLOY_URL, t.token, t.appId, t.configName, secrets, false)
+    }
+    const n = Object.keys(secrets).length
+    ok(
+      args.json === true,
+      { appId: t.appId, config: t.configName, set: Object.keys(secrets), ...APPLIES_AT_DEPLOY },
+      () => {
+        console.log(`Set ${n} secret${n === 1 ? '' : 's'} in ${t.configName}.`)
+        if (!warnIfDebugRoutesEnabled(secrets)) {
+          console.log(APPLY_HINT)
+          console.log(LOCAL_DEV_HINT)
+        }
+      },
+    )
   },
 })
 
@@ -239,36 +233,45 @@ const get = defineCommand({
     plain: { type: 'boolean', description: 'Print the plaintext value', default: false },
   },
   async run({ args }) {
-    try {
-      const t = await resolveTarget(args)
-      const key = validateSecretName(args.key)
-      if (args.plain) {
-        const { value } = await getSecretPlain(DEPLOY_URL, t.token, t.appId, t.configName, key)
-        // Raw value, byte-exact when piped (`… get --plain KEY > key.pem`) — a
-        // --json wrapper would corrupt it, so --plain is a raw stream either
-        // way (documented exception, like `download`). Trailing newline only
-        // for a human at a TTY.
-        process.stdout.write(process.stdout.isTTY ? value + '\n' : value)
-        return
-      }
-      const { secrets } = await listSecrets(DEPLOY_URL, t.token, t.appId, t.configName)
-      const item = secrets.find((s) => s.key === key)
-      if (!item)
-        throw new InputError(`Secret "${key}" not found in ${t.configName}`, 'secret_not_found')
-      ok(
-        args.json === true,
-        {
-          appId: t.appId,
-          config: t.configName,
-          key: item!.key,
-          version: item!.version,
-          updatedAt: item!.updatedAt,
-        },
-        () => console.log(`${item!.key}  (v${item!.version}, ${item!.updatedAt})`),
+    // `--plain` is a raw byte stream by design; `--json` promises one JSON
+    // document. Honoring both silently emitted the secret as non-JSON on
+    // stdout under a flag agents add reflexively — refuse the contradiction
+    // instead.
+    //
+    // Checked BEFORE resolving the app: a contradiction in the caller's own
+    // flags must not surface as `not_in_app_repo` or an auth failure.
+    if (args.plain && args.json === true) {
+      throw new InputError(
+        '--plain writes the raw secret value, which is not JSON. Use --plain to capture the value, or --json for the metadata envelope — not both.',
+        'invalid_flags',
       )
-    } catch (err) {
-      fail(err)
     }
+    const t = await resolveTarget(args)
+    const key = validateSecretName(args.key)
+    if (args.plain) {
+      const { value } = await getSecretPlain(DEPLOY_URL, t.token, t.appId, t.configName, key)
+      // Raw value, byte-exact when piped (`… get --plain KEY > key.pem`) — a
+      // --json wrapper would corrupt it, so --plain is a raw stream either
+      // way (documented exception, like `download`). Trailing newline only
+      // for a human at a TTY.
+      process.stdout.write(process.stdout.isTTY ? value + '\n' : value)
+      return
+    }
+    const { secrets } = await listSecrets(DEPLOY_URL, t.token, t.appId, t.configName)
+    const item = secrets.find((s) => s.key === key)
+    if (!item)
+      throw new InputError(`Secret "${key}" not found in ${t.configName}`, 'secret_not_found')
+    ok(
+      args.json === true,
+      {
+        appId: t.appId,
+        config: t.configName,
+        key: item!.key,
+        version: item!.version,
+        updatedAt: item!.updatedAt,
+      },
+      () => console.log(`${item!.key}  (v${item!.version}, ${item!.updatedAt})`),
+    )
   },
 })
 
@@ -279,40 +282,39 @@ const del = defineCommand({
     key: { type: 'positional', description: 'Secret name (repeatable)', required: true },
   },
   async run({ args }) {
-    try {
-      const t = await resolveTarget(args)
-      const keys = dedupePositionals(args.key, args._)
-      let deleted = 0
-      let absent = 0
-      for (const key of keys) {
-        const name = validateSecretName(key)
-        try {
-          const result = await deleteSecret(DEPLOY_URL, t.token, t.appId, t.configName, name)
-          // New servers distinguish an idempotent replay/absent key. An older
-          // successful response has no field and remains a real deletion.
-          if (result.deleted === false) absent++
-          else deleted++
-        } catch (err) {
-          // An already-absent key is a completed delete, not a failure: don't
-          // let one missing key abort the rest, and keep retries idempotent.
-          if ((err as { status?: number })?.status === 404) absent++
-          else throw err
-        }
+    const t = await resolveTarget(args)
+    const keys = dedupePositionals(args.key, args._)
+    let deleted = 0
+    let absent = 0
+    for (const key of keys) {
+      const name = validateSecretName(key)
+      try {
+        const result = await deleteSecret(DEPLOY_URL, t.token, t.appId, t.configName, name)
+        // New servers distinguish an idempotent replay/absent key. An older
+        // successful response has no field and remains a real deletion.
+        if (result.deleted === false) absent++
+        else deleted++
+      } catch (err) {
+        // An already-absent key is a completed delete, not a failure: don't
+        // let one missing key abort the rest, and keep retries idempotent.
+        // `unrecognized_service` is also a 404 but means the whole service is
+        // wrong — reporting "already absent" for it would be a false success.
+        if (err instanceof ApiError && err.status === 404 && err.code !== 'unrecognized_service') {
+          absent++
+        } else throw err
       }
-      const note = absent > 0 ? ` (${absent} already absent)` : ''
-      ok(
-        args.json === true,
-        { appId: t.appId, config: t.configName, deleted, absent, ...APPLIES_AT_DEPLOY },
-        () => {
-          console.log(
-            `Deleted ${deleted} secret${deleted === 1 ? '' : 's'} from ${t.configName}.${note}`,
-          )
-          if (deleted > 0) console.log(APPLY_HINT)
-        },
-      )
-    } catch (err) {
-      fail(err)
     }
+    const note = absent > 0 ? ` (${absent} already absent)` : ''
+    ok(
+      args.json === true,
+      { appId: t.appId, config: t.configName, deleted, absent, ...APPLIES_AT_DEPLOY },
+      () => {
+        console.log(
+          `Deleted ${deleted} secret${deleted === 1 ? '' : 's'} from ${t.configName}.${note}`,
+        )
+        if (deleted > 0) console.log(APPLY_HINT)
+      },
+    )
   },
 })
 
@@ -332,36 +334,32 @@ const upload = defineCommand({
     },
   },
   async run({ args }) {
-    try {
-      const t = await resolveTarget(args)
-      const secrets = parseSecretsUpload(await readUploadSource(args.file))
-      if (Object.keys(secrets).length === 0)
-        throw new InputError('No secrets found in the input.', 'empty_input')
-      await uploadSecrets(DEPLOY_URL, t.token, t.appId, t.configName, secrets, args.replace)
-      const uploaded = Object.keys(secrets)
-      ok(
-        args.json === true,
-        {
-          appId: t.appId,
-          config: t.configName,
-          uploaded,
-          replaced: args.replace === true,
-          ...APPLIES_AT_DEPLOY,
-        },
-        () => {
-          console.log(`Uploaded ${uploaded.length} secrets to ${t.configName}.`)
-          // A file can turn on the debug API just like `set` can — warn either way.
-          if (!warnIfDebugRoutesEnabled(secrets)) console.log(APPLY_HINT)
-        },
-      )
-    } catch (err) {
-      fail(err)
-    }
+    const t = await resolveTarget(args)
+    const secrets = parseSecretsUpload(await readUploadSource(String(args.file)))
+    if (Object.keys(secrets).length === 0)
+      throw new InputError('No secrets found in the input.', 'empty_input')
+    await uploadSecrets(DEPLOY_URL, t.token, t.appId, t.configName, secrets, args.replace)
+    const uploaded = Object.keys(secrets)
+    ok(
+      args.json === true,
+      {
+        appId: t.appId,
+        config: t.configName,
+        uploaded,
+        replaced: args.replace === true,
+        ...APPLIES_AT_DEPLOY,
+      },
+      () => {
+        console.log(`Uploaded ${uploaded.length} secrets to ${t.configName}.`)
+        // A file can turn on the debug API just like `set` can — warn either way.
+        if (!warnIfDebugRoutesEnabled(secrets)) console.log(APPLY_HINT)
+      },
+    )
   },
 })
 
 /** The dotenv/JSON source of an upload: a path, or `-` for stdin. A path
- *  that does not exist is the caller's mistake, coded as such — not a raw
+ *  that cannot be read is the caller's mistake, coded as such — not a raw
  *  ENOENT with the file's own basename mistaken for a secret name. */
 async function readUploadSource(file: string): Promise<string> {
   if (file === '-') {
@@ -376,10 +374,15 @@ async function readUploadSource(file: string): Promise<string> {
   try {
     return readFileSync(file, 'utf-8')
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+    // Two codes, because two recoveries: a missing path is a typo; anything
+    // else is a path that exists but cannot be read — the errno names which.
+    const errno = (err as NodeJS.ErrnoException).code
+    if (typeof errno !== 'string' || errno.length === 0) throw err
     throw new InputError(
-      `No such file: ${file}. Pass the path of a dotenv or JSON file to upload, or \`-\` to read it from stdin.`,
-      'file_not_found',
+      errno === 'ENOENT'
+        ? `No such file: ${file}. Pass the path of a dotenv or JSON file to upload, or \`-\` to read it from stdin.`
+        : `Cannot read ${file} (${errno}).`,
+      errno === 'ENOENT' ? 'file_not_found' : 'file_unreadable',
     )
   }
 }
@@ -388,6 +391,17 @@ const download = defineCommand({
   meta: { name: 'download', description: 'Download a config’s secrets (dotenv/json/shell)' },
   args: {
     ...COMMON_ARGS,
+    // `download` writes a FILE FORMAT to stdout, so `--json` has no meaning
+    // here and is REFUSED rather than described: rewording it was not enough,
+    // because the flag still silently emitted dotenv — zero JSON documents on
+    // a success path, with the plaintext secrets themselves as the output a
+    // parser choked on. `secrets get --plain --json` already refuses the same
+    // contradiction.
+    json: {
+      type: 'boolean' as const,
+      description: 'Not supported here — secrets are a stream; use --format json for JSON output',
+      default: false,
+    },
     format: {
       type: 'string',
       description: 'dotenv (default) | json | shell',
@@ -395,20 +409,22 @@ const download = defineCommand({
     },
   },
   async run({ args }) {
-    try {
-      const t = await resolveTarget(args)
-      const format = args.format as SecretsDownloadFormat
-      if (!['dotenv', 'json', 'shell'].includes(format)) {
-        throw new InputError(
-          `Unknown format "${args.format}" — use dotenv, json, or shell.`,
-          'invalid_format',
-        )
-      }
-      const { secrets } = await fetchSecretsValues(DEPLOY_URL, t.token, t.appId, t.configName)
-      process.stdout.write(formatSecretsDownload(secrets, format))
-    } catch (err) {
-      fail(err)
+    if (args.json === true) {
+      throw new InputError(
+        '--json is not supported by `secrets download`: it writes the secrets themselves to stdout, not an envelope. Use `--format json` for JSON-shaped secrets, or `secrets list --json` for the metadata envelope.',
+        'invalid_flags',
+      )
     }
+    const t = await resolveTarget(args)
+    const format = args.format as SecretsDownloadFormat
+    if (!['dotenv', 'json', 'shell'].includes(format)) {
+      throw new InputError(
+        `Unknown format "${args.format}" — use dotenv, json, or shell.`,
+        'invalid_format',
+      )
+    }
+    const { secrets } = await fetchSecretsValues(DEPLOY_URL, t.token, t.appId, t.configName)
+    process.stdout.write(formatSecretsDownload(secrets, format))
   },
 })
 
@@ -416,38 +432,34 @@ const pull = defineCommand({
   meta: { name: 'pull', description: 'Refresh the .dev.vars cache from the app store' },
   args: { ...COMMON_ARGS },
   async run({ args }) {
-    try {
-      const wranglerEnv = args.env?.trim() || undefined
-      const appDir = findAppDir()
-      if (!appDir)
-        throw new InputError(
-          'Run from a DeepSpace app directory (one containing wrangler.toml).',
-          'not_in_app_repo',
-        )
-      const t = await resolveTarget(args)
-      const ownerId = decodeJwtPayload<{ sub: string }>(t.token).sub
-      const refreshed = await refreshSecretsCache(
-        DEPLOY_URL,
-        t.token,
-        t.appId,
-        wranglerEnv,
-        t.configName,
+    const wranglerEnv = args.env?.trim() || undefined
+    const appDir = findAppDir()
+    if (!appDir)
+      throw new InputError(
+        'Run from a DeepSpace app directory (one containing wrangler.toml).',
+        'not_in_app_repo',
       )
-      await writeDevVars(appDir, ownerId, t.token, wranglerEnv, {
-        appId: t.appId,
-        generatedSecretsCache: refreshed.rendered,
-      })
-      const count = Object.keys(refreshed.pulled?.values ?? {}).length
-      ok(args.json === true, { appId: t.appId, config: t.configName, pulled: count }, () =>
-        console.log(
-          refreshed.pulled
-            ? `Pulled ${count} secrets (${t.configName}) into .dev.vars.`
-            : `Config ${t.configName} does not exist yet; regenerated .dev.vars without app secrets.`,
-        ),
-      )
-    } catch (err) {
-      fail(err)
-    }
+    const t = await resolveTarget(args)
+    const ownerId = decodeJwtPayload<{ sub: string }>(t.token).sub
+    const refreshed = await refreshSecretsCache(
+      DEPLOY_URL,
+      t.token,
+      t.appId,
+      wranglerEnv,
+      t.configName,
+    )
+    await writeDevVars(appDir, ownerId, t.token, wranglerEnv, {
+      appId: t.appId,
+      generatedSecretsCache: refreshed.rendered,
+    })
+    const count = Object.keys(refreshed.pulled?.values ?? {}).length
+    ok(args.json === true, { appId: t.appId, config: t.configName, pulled: count }, () =>
+      console.log(
+        refreshed.pulled
+          ? `Pulled ${count} secrets (${t.configName}) into .dev.vars.`
+          : `Config ${t.configName} does not exist yet; regenerated .dev.vars without app secrets.`,
+      ),
+    )
   },
 })
 
@@ -455,21 +467,17 @@ const configsList = defineCommand({
   meta: { name: 'list', description: 'List the app’s configs' },
   args: { ...COMMON_ARGS },
   async run({ args }) {
-    try {
-      const t = await resolveTarget(args)
-      const { configs } = await listConfigs(DEPLOY_URL, t.token, t.appId)
-      ok(args.json === true, { appId: t.appId, configs }, () => {
-        if (configs.length === 0) {
-          console.log('No configs yet — the first `secrets set` creates one.')
-          return
-        }
-        for (const cfg of configs) {
-          console.log(`${cfg.name}  (${cfg.secretCount ?? 0} secrets, updated ${cfg.updatedAt})`)
-        }
-      })
-    } catch (err) {
-      fail(err)
-    }
+    const t = await resolveTarget(args)
+    const { configs } = await listConfigs(DEPLOY_URL, t.token, t.appId)
+    ok(args.json === true, { appId: t.appId, configs }, () => {
+      if (configs.length === 0) {
+        console.log('No configs yet — the first `secrets set` creates one.')
+        return
+      }
+      for (const cfg of configs) {
+        console.log(`${cfg.name}  (${cfg.secretCount ?? 0} secrets, updated ${cfg.updatedAt})`)
+      }
+    })
   },
 })
 
@@ -481,36 +489,32 @@ const configsCreate = defineCommand({
     'copy-from': { type: 'string', description: 'Copy secrets from this config', required: false },
   },
   async run({ args }) {
-    try {
-      const t = await resolveTarget(args)
-      const name = validateConfigName(args.name)
-      const copyFrom = args['copy-from'] || undefined
-      // Create is idempotent server-side, so a plain create of an existing
-      // config used to print a false "Created". Distinguish the cases up front:
-      // a bare re-create is a no-op ("Already exists."); a --copy-from into an
-      // existing config would clobber it, so refuse rather than silently create.
-      const { configs } = await listConfigs(DEPLOY_URL, t.token, t.appId)
-      if (configs.some((c) => c.name === name)) {
-        if (copyFrom) {
-          throw new InputError(
-            `Config "${name}" already exists — refusing to copy "${copyFrom}" over it. Delete it first, or pick a new name.`,
-            'config_exists',
-          )
-        }
-        ok(args.json === true, { appId: t.appId, config: name, created: false }, () =>
-          console.log(`Config ${name} already exists.`),
+    const t = await resolveTarget(args)
+    const name = validateConfigName(args.name)
+    const copyFrom = args['copy-from'] || undefined
+    // Create is idempotent server-side, so a plain create of an existing
+    // config used to print a false "Created". Distinguish the cases up front:
+    // a bare re-create is a no-op ("Already exists."); a --copy-from into an
+    // existing config would clobber it, so refuse rather than silently create.
+    const { configs } = await listConfigs(DEPLOY_URL, t.token, t.appId)
+    if (configs.some((c) => c.name === name)) {
+      if (copyFrom) {
+        throw new InputError(
+          `Config "${name}" already exists — refusing to copy "${copyFrom}" over it. Delete it first, or pick a new name.`,
+          'config_exists',
         )
-        return
       }
-      await createConfig(DEPLOY_URL, t.token, t.appId, name, copyFrom)
-      ok(
-        args.json === true,
-        { appId: t.appId, config: name, created: true, ...(copyFrom ? { copyFrom } : {}) },
-        () => console.log(`Created ${name}.`),
+      ok(args.json === true, { appId: t.appId, config: name, created: false }, () =>
+        console.log(`Config ${name} already exists.`),
       )
-    } catch (err) {
-      fail(err)
+      return
     }
+    await createConfig(DEPLOY_URL, t.token, t.appId, name, copyFrom)
+    ok(
+      args.json === true,
+      { appId: t.appId, config: name, created: true, ...(copyFrom ? { copyFrom } : {}) },
+      () => console.log(`Created ${name}.`),
+    )
   },
 })
 
@@ -519,18 +523,70 @@ const configsDelete = defineCommand({
   args: {
     ...COMMON_ARGS,
     name: { type: 'positional', description: 'Config name', required: true },
+    yes: {
+      type: 'boolean' as const,
+      alias: 'y',
+      description: 'Skip the confirmation (required for --json / non-interactive)',
+      default: false,
+    },
   },
   async run({ args }) {
-    try {
-      const t = await resolveTarget(args)
-      const name = validateConfigName(args.name)
-      await deleteConfig(DEPLOY_URL, t.token, t.appId, name)
-      ok(args.json === true, { appId: t.appId, config: name, deleted: true }, () =>
-        console.log(`Deleted ${name}.`),
+    const t = await resolveTarget(args)
+    const name = validateConfigName(args.name)
+    // A prompt is a permanent hang for a machine caller — `--json` promises one
+    // document on stdout, and a non-TTY stdin has nobody to answer — so both
+    // refuse with the flag to re-run with. Refused BEFORE the listing: the
+    // count exists only to feed the interactive sentence, so listing first
+    // would let a missing config answer this path with the store's own error
+    // instead of the `confirmation_required` it documents.
+    if (args.yes !== true && (args.json === true || !process.stdin.isTTY)) {
+      throw new InputError(
+        `Deleting config ${name} removes every secret in it permanently. Re-run with --yes to confirm.`,
+        'confirmation_required',
       )
-    } catch (err) {
-      fail(err)
     }
+    // This destroys every secret in the config and there is no undo, so the
+    // confirmation names how many go with it. With --yes the caller has already
+    // decided, so a transient failure to list must not block the delete — the
+    // count is reported as unknown instead.
+    let secrets: Array<{ key: string }> = []
+    let counted = true
+    try {
+      secrets = (await listSecrets(DEPLOY_URL, t.token, t.appId, name)).secrets
+    } catch (error) {
+      if (args.yes !== true) throw error
+      counted = false
+    }
+    const count = secrets.length
+    if (args.yes !== true) {
+      const detail =
+        count === 0
+          ? `Config ${name} is empty.`
+          : `Config ${name} holds ${count} secret${count === 1 ? '' : 's'}: ${secrets
+              .map((secret) => secret.key)
+              .slice(0, 8)
+              .join(', ')}${count > 8 ? `, …` : ''}.`
+      const confirmed = await p.confirm({
+        message: `${detail} Deleting it removes ${count === 1 ? 'that secret' : 'them all'} permanently.`,
+        initialValue: false,
+      })
+      // isCancel covers Ctrl-C and Esc — an interrupted prompt is a refusal to
+      // consent, not consent.
+      if (p.isCancel(confirmed) || !confirmed) {
+        throw new InputError('Cancelled.', 'confirmation_required')
+      }
+    }
+    await deleteConfig(DEPLOY_URL, t.token, t.appId, name)
+    ok(
+      args.json === true,
+      { appId: t.appId, config: name, deleted: true, secretsDeleted: counted ? count : null },
+      () =>
+        console.log(
+          counted
+            ? `Deleted ${name} and ${count} secret${count === 1 ? '' : 's'}.`
+            : `Deleted ${name}.`,
+        ),
+    )
   },
 })
 

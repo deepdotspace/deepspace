@@ -15,6 +15,8 @@ export default defineConfig({
   test: {
     include: ['src/**/__tests__/**/*.test.{ts,tsx}', 'features/**/__tests__/**/*.test.{ts,tsx}'],
     environment: 'node',
+    // Real-git suites must never touch the developer's own git config.
+    setupFiles: ['./vitest.setup.ts'],
     maxWorkers: 4,
     // The CLI suites are process-spawning integration tests (real git against
     // real repos). Their per-test P99 under a full `pnpm check` legitimately

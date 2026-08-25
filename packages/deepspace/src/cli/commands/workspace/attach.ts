@@ -10,7 +10,6 @@ import { listWorktrees, resolveCommit, switchToNewBranch } from '../../lib/git/r
 import { isWorkspaceId, resolveWorkspaceWorktree, workspaceBranchName } from '../../lib/workspace-id'
 import {
   deployBaseUrl,
-  ensureGitIdentity,
   ensureSpaceRemote,
   runGitRemote,
   SPACE_REMOTE,
@@ -129,10 +128,10 @@ export const attachWorkspaceCommand = defineDeepspaceCommand({
           extra: { status: view.workspace.status },
         })
       }
-      ensureSpaceRemote(appDir, appId)
-      // The checkout (and every worktree sharing its .git) is about to
-      // commit on this line — make sure it can.
-      ensureGitIdentity(appDir, token)
+      // The checkout (and every worktree sharing its .git) is about to commit
+      // on this line, so the token goes in: ensureSpaceRemote gives it an
+      // identity too.
+      ensureSpaceRemote(appDir, appId, undefined, token)
       const localWorkspaceRef = spacePrivateRef(`workspaces/${id}`)
       runGitRemote(appDir, token, [
         'fetch',
@@ -317,10 +316,9 @@ export const attachWorkspaceCommand = defineDeepspaceCommand({
     let tip: string
     try {
       runGit(process.cwd(), ['init', '--quiet', dir])
-      ensureSpaceRemote(dir, appId)
-      // A brand-new repo the agent is about to commit in: give it an identity
-      // when the machine has none configured.
-      ensureGitIdentity(dir, token)
+      // A brand-new repo the agent is about to commit in, so the token goes
+      // in: ensureSpaceRemote gives it an identity too.
+      ensureSpaceRemote(dir, appId, undefined, token)
       const localWorkspaceRef = spacePrivateRef(`workspaces/${id}`)
       runGitRemote(dir, token, [
         'fetch',

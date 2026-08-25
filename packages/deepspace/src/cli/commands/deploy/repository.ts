@@ -8,7 +8,11 @@ import {
   resolveCommit,
   revListCount,
 } from '../../lib/git/repository'
-import { trackedSecretFiles } from '../../lib/git/safety'
+import {
+  secretRecoverySentence,
+  trackedSecretFiles,
+  unmergedIndexRefusal,
+} from '../../lib/git/safety'
 import { mintIdempotencyKey, repoApi, type RemoteWorkspace } from '../../lib/repo-api'
 import {
   classifyPushTransportFailure,
@@ -80,7 +84,10 @@ export function preflightDeployRepository(options: {
     // "commit them" is not its remedy — the same refusal push and pull give.
     assertNoOperationInProgress(appDir)
     const branch = currentBranch(appDir)
-    if (!isWorkTreeClean(appDir)) return dirtyWorktreeRefusal(branch)
+    // The checkout is passed so an UNRESOLVED merge is reported as itself
+    // rather than as "uncommitted changes" (whose advice would commit the
+    // markers and ship them).
+    if (!isWorkTreeClean(appDir)) return dirtyWorktreeRefusal(branch, appDir)
     if (!branch) return detachedHeadRefusal()
     return null
   } catch (error: unknown) {
@@ -181,8 +188,8 @@ export async function syncDeployRepository(options: {
     } else if (secretFiles.length > 0) {
       p.log.warn(
         `Skipping cloud-repo push — the branch tracks secret file(s): ${secretFiles.join(', ')}. ` +
-          `Untrack with \`git rm --cached ${secretFiles[0]}\` (add to .gitignore), re-commit, then ` +
-          `\`deepspace push\`. Without the push this deploy carries no source lineage: if the live ` +
+          secretRecoverySentence(secretFiles, '`deepspace push`') +
+          ` Without the push this deploy carries no source lineage: if the live ` +
           `release has one, the server refuses it as stale (--ignore-stale replaces it anyway), and ` +
           `this release's source isn't recoverable until the push works.`,
       )
@@ -346,10 +353,26 @@ export function workspaceDeployLineage(
   return publishedTip === localTip ? 'recoverable' : 'unsynced'
 }
 
-export function dirtyWorktreeRefusal(branch: string | null): {
-  code: 'dirty_worktree'
+export function dirtyWorktreeRefusal(
+  branch: string | null,
+  /** The checkout, when the caller has one. Given it, an UNRESOLVED conflict
+   *  is reported as itself instead of as "uncommitted changes" — this
+   *  refusal's advice ("WIP commits are fine") would otherwise commit the
+   *  `<<<<<<<` markers AND ship them, since deploy publishes what it records. */
+  cwd?: string,
+): {
+  code: string
   error: string
 } {
+  const conflicted = cwd
+    ? unmergedIndexRefusal(cwd, { ours: 'A merge', resume: 'deepspace deploy' })
+    : null
+  if (conflicted) {
+    return {
+      code: conflicted.code,
+      error: `${conflicted.message} A deploy records the commit it ships, so committing an unresolved merge would ship the markers.`,
+    }
+  }
   const workspaceId = workspaceIdFromBranch(branch)
   return {
     code: 'dirty_worktree',

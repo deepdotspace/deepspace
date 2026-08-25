@@ -28,14 +28,14 @@ import {
   inspectWorkspaceCleanup,
   isManagedWorkspaceWorktree,
   materializeWorkspaceWorktree,
-  primaryAppDir,
   rematerializeWorkspaceWorktree,
 } from '../workspace/local'
 import {
   conflictMarkerFiles,
   hasLeftoverConflictMarkers,
   landResumeArgv,
-  pullAfterLandAction,
+  staleTrunkCheckout,
+  staleTrunkPullAction,
 } from '../workspace/land'
 import { cleanFailedFreshAttachDir, finishedWorkspaceMessage } from '../workspace/attach'
 import { overlapsWith, workspaceSyncRelation } from '../workspace/analysis'
@@ -47,6 +47,12 @@ import {
 } from '../workspace/drop'
 import { ApiError } from '../../lib/api'
 import { executableAction } from '../../lib/output'
+import * as appContext from '../../lib/app-context'
+import * as authModule from '../../auth'
+import * as appTargetModule from '../../lib/app-target'
+import * as repoApiModule from '../../lib/repo-api'
+import * as vcRemoteModule from '../../lib/vc-remote'
+import * as vcPushModule from '../../lib/vc-push'
 
 // Real-git suite: every test shells out to git in scratch repos (~2s solo)
 // and blows the default 5s wall under parallel vitest workers — the drifting
@@ -54,10 +60,18 @@ import { executableAction } from '../../lib/output'
 // license to hang.
 vi.setConfig({ testTimeout: 30_000 })
 
+
 const git = (cwd: string, args: string[]): string =>
   execFileSync('git', args, { cwd, encoding: 'utf-8' })
 
-let repo: string
+// Empty until a test assigns it: six describes in this file never do, and an
+// unconditional cleanup there deletes whatever the PREVIOUS test left in
+// `repo` — invisible in a full run, but `-t`/`.only` then removes a directory
+// the selected test still needs. Cleared after each test so the next one
+// cannot inherit a stale path. (A sentinel rather than `undefined`: the ~30
+// uses below are all inside tests that DO assign it first, and TypeScript
+// cannot narrow a module-level `let` across those calls.)
+let repo = ''
 const ORIG_CWD = process.cwd()
 afterEach(() => {
   vi.restoreAllMocks()
@@ -67,7 +81,8 @@ afterEach(() => {
   // cleanupWorkspaceLocal chdir's to the main checkout when run from inside a
   // worktree — restore before removing the temp repo.
   process.chdir(ORIG_CWD)
-  rmSync(repo, { recursive: true, force: true })
+  if (repo) rmSync(repo, { recursive: true, force: true })
+  repo = ''
 })
 
 type RunnableCommand = {
@@ -322,6 +337,62 @@ describe('landResumeArgv (exit-2 resume preserves the caller’s flags)', () => 
   })
 })
 
+describe('staleTrunkCheckout (the "catch up" line + its pull action after a land)', () => {
+  const TRUNK = 'main'
+
+  /** A repo whose trunk is checked out in a LINKED worktree, plus a commit on
+   *  trunk that the checkout does not have yet (the post-land shape). */
+  function repoWithTrunkWorktree(): { main: string; trunkDir: string; landedOid: string } {
+    repo = mkdtempSync(join(tmpdir(), 'ds-stale-trunk-'))
+    git(repo, ['init', '-q', '-b', 'scratch'])
+    git(repo, ['config', 'user.email', 't@t'])
+    git(repo, ['config', 'user.name', 't'])
+    writeFileSync(join(repo, 'f.txt'), 'x\n')
+    git(repo, ['add', '-A'])
+    git(repo, ['commit', '-q', '-m', 'init'])
+    git(repo, ['branch', TRUNK])
+    const trunkDir = join(realpathSync(repo), 'trunk-checkout')
+    git(repo, ['worktree', 'add', '-q', trunkDir, TRUNK])
+    // Advance trunk past the checkout, the way a land's trunk push does.
+    writeFileSync(join(repo, 'g.txt'), 'y\n')
+    git(repo, ['add', '-A'])
+    git(repo, ['commit', '-q', '-m', 'landed'])
+    const landedOid = git(repo, ['rev-parse', 'HEAD']).trim()
+    return { main: repo, trunkDir, landedOid }
+  }
+
+  it('names the worktree holding trunk when it is strictly behind the landed merge', () => {
+    const { main, trunkDir, landedOid } = repoWithTrunkWorktree()
+    expect(staleTrunkCheckout(main, TRUNK, landedOid)).toBe(trunkDir)
+  })
+
+  it('answers null when trunk already has the merge, or is ahead of it', () => {
+    const { main, trunkDir, landedOid } = repoWithTrunkWorktree()
+    // Up to date: the checkout IS the landed commit — nothing to catch up on.
+    git(trunkDir, ['merge', '-q', '--ff-only', landedOid])
+    expect(staleTrunkCheckout(main, TRUNK, landedOid)).toBeNull()
+    // Ahead: `deepspace pull` fast-forwards, so it would refuse this — no
+    // action beats an action that cannot run.
+    writeFileSync(join(trunkDir, 'h.txt'), 'z\n')
+    git(trunkDir, ['add', '-A'])
+    git(trunkDir, ['commit', '-q', '-m', 'local trunk work'])
+    expect(staleTrunkCheckout(main, TRUNK, landedOid)).toBeNull()
+  })
+
+  it('answers null when trunk has DIVERGED, and when no checkout holds it', () => {
+    const { main, trunkDir, landedOid } = repoWithTrunkWorktree()
+    writeFileSync(join(trunkDir, 'h.txt'), 'z\n')
+    git(trunkDir, ['add', '-A'])
+    git(trunkDir, ['commit', '-q', '-m', 'divergent trunk work'])
+    expect(staleTrunkCheckout(main, TRUNK, landedOid)).toBeNull()
+
+    git(main, ['worktree', 'remove', '--force', trunkDir])
+    expect(staleTrunkCheckout(main, TRUNK, landedOid)).toBeNull()
+    // And a branch no worktree ever held.
+    expect(staleTrunkCheckout(main, 'no-such-branch', landedOid)).toBeNull()
+  })
+})
+
 describe('cleanupRefusalMessage (#6 — never advise destructive recovery)', () => {
   it('contains NEITHER --force NOR branch -D, and routes through inspect → preserve → plain remove', () => {
     const msg = cleanupRefusalMessage({
@@ -389,17 +460,22 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
     expect(git(main, ['branch', '--list', BRANCH]).trim()).toBe('')
   })
 
-  it('points a completed land at the matching stale primary checkout', () => {
+  it('prunes a hand-deleted worktree registration before deleting the branch', () => {
+    // listWorktrees drops entries whose directory is gone, so a worktree the
+    // user deleted by hand never reaches the removal arm — cleanup used to
+    // delete the branch and leave git holding a registration for a checkout
+    // that does not exist, on a ref that no longer does either.
     const main = initRepoWithCommit()
-    const head = git(main, ['rev-parse', 'HEAD']).trim()
-    const workspaceDir = addWorktree(main)
+    const dir = addWorktree(main)
+    const registrations = () => git(main, ['worktree', 'list', '--porcelain'])
+    rmSync(dir, { recursive: true, force: true })
+    expect(registrations()).toContain('.deepspace/ws/')
 
-    expect(primaryAppDir(workspaceDir)).toBe(realpathSync(main))
-    expect(pullAfterLandAction(main, 'main', `${'a'.repeat(40)}`)).toEqual({
-      cwd: main,
-      argv: ['deepspace', 'pull'],
-    })
-    expect(pullAfterLandAction(main, 'main', head)).toBeNull()
+    const res = cleanupWorkspaceLocal(main, ID, 'main')
+
+    expect(res.branchDeleted).toBe(BRANCH)
+    expect(git(main, ['branch', '--list', BRANCH]).trim()).toBe('')
+    expect(registrations()).not.toContain('.deepspace/ws/')
   })
 
   it('pins the pull action to the surviving primary checkout before cleanup', () => {
@@ -417,14 +493,18 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
     const workspaceEntry = makeEntry(workspaceDir)
     vi.spyOn(process, 'argv', 'get').mockReturnValue(['node', workspaceEntry])
 
-    const action = pullAfterLandAction(main, 'main', 'a'.repeat(40))
-    expect(action?.argv).toEqual([process.execPath, realpathSync(primaryEntry), 'pull'])
+    // staleTrunkPullAction pins the interpreter at CONSTRUCTION (land calls
+    // it before cleanup), and the entry it pins is the SURVIVING primary
+    // checkout's install — cleanup deletes the workspace entry this process
+    // is running from.
+    const action = staleTrunkPullAction(main, 'main')
+    expect(action.argv).toEqual([process.execPath, realpathSync(primaryEntry), 'pull', '-b', 'main'])
 
     const cleanup = cleanupWorkspaceLocal(main, ID, 'main')
     expect(cleanup.error).toBeUndefined()
     expect(existsSync(workspaceEntry)).toBe(false)
     expect(existsSync(primaryEntry)).toBe(true)
-    expect(action && executableAction(action)).toEqual(action)
+    expect(executableAction(action)).toEqual(action)
   })
 
   it('retains the branch when it advances after the caller approved an older tip', () => {
@@ -580,6 +660,37 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
   })
 })
 
+describe('workspace drop containment predicate', () => {
+  function commit(dir: string, name: string, body: string): string {
+    writeFileSync(join(dir, name), body)
+    git(dir, ['add', name])
+    git(dir, ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', name])
+    return git(dir, ['rev-parse', 'HEAD']).trim()
+  }
+
+  it('separates "this seat has read the line" from "this seat holds unpublished work"', () => {
+    // The two questions drop must keep apart. Conflating them is what let a
+    // peer that had read NOTHING drop freely while a peer one commit behind
+    // was refused — protection inversely proportional to what you had seen.
+    const dir = initRepo()
+    const base = commit(dir, 'a.txt', 'base\n')
+    const published = commit(dir, 'b.txt', 'author work\n')
+
+    // Behind: has not read the published tip, but holds nothing of its own.
+    expect(workspaceSyncRelation(dir, base, published)).toBe('behind')
+    expect(isWorkspaceTipPublished(dir, base, [published])).toBe(true)
+
+    // Ahead: has read it and built on it — safe to abandon, nothing unseen.
+    expect(workspaceSyncRelation(dir, published, base)).toBe('ahead')
+
+    // No local copy at all: nothing to compare, which is the WEAKEST
+    // position, not the strongest — the caller must treat `unknown` as
+    // "cannot prove I have read it".
+    expect(workspaceSyncRelation(dir, null, published)).toBe('unknown')
+    expect(workspaceSyncRelation(dir, base, 'f'.repeat(40))).toBe('unknown')
+  })
+})
+
 describe('workspace drop safety', () => {
   const ID = 'ws_01ABCDEFGHJKMNPQRSTVWXYZ00'
   const BRANCH = `ws/${ID.slice(3).toLowerCase()}`
@@ -620,20 +731,74 @@ describe('workspace drop safety', () => {
     expect(refusal.message).toMatch(/then re-run.*workspace drop/i)
   })
 
-  it('never prescribes sync for a FINISHED workspace — that sync deterministically refuses', () => {
+  it('names --keep-worktree but emits NO action once the workspace is finished', () => {
+    // A FINISHED workspace can never publish again: sync refuses
+    // workspace_not_active and points back at drop, so a sync action here
+    // ping-pongs the two verbs forever. Nor may --keep-worktree be the
+    // action — it still REAPS the cloud workspace, so it is not a safe
+    // default step, and retain-vs-discard is the caller's choice.
+    const workspaceDir = '/worktrees/leftover'
+    for (const status of ['landed', 'dropped'] as const) {
+      const refusal = workspaceUnsyncedRefusal({
+        appId: APP_ID,
+        id: ID,
+        branch: BRANCH,
+        workspaceDir,
+        status,
+      })
+      expect(refusal.action).toBeUndefined()
+      expect(refusal.actionRequired).toBe(false)
+      expect(refusal.message).toContain(status)
+      expect(refusal.message).toContain('--keep-worktree')
+      // The prose must not sell it as lossless.
+      expect(refusal.message).toMatch(/drops the cloud workspace/i)
+      expect(refusal.message).toMatch(/nothing can publish them now/i)
+    }
+  })
+
+  it('still answers a finished workspace with no local worktree', () => {
     const refusal = workspaceUnsyncedRefusal({
       appId: APP_ID,
       id: ID,
       branch: BRANCH,
-      workspaceDir: '/worktrees/safe',
+      workspaceDir: null,
       status: 'landed',
     })
-
     expect(refusal.action).toBeUndefined()
-    expect(refusal.message).not.toMatch(/workspace sync/)
-    expect(refusal.message).toMatch(/already landed/)
-    expect(refusal.message).toMatch(/--keep-worktree/)
-    expect(refusal.extra).toMatchObject({ workspaceId: ID, status: 'landed' })
+    expect(refusal.message).toContain('--keep-worktree')
+  })
+})
+
+describe('workspaceSyncRelation', () => {
+  function commit(dir: string, name: string, body: string): string {
+    writeFileSync(join(dir, name), body)
+    git(dir, ['add', name])
+    git(dir, ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', name])
+    return git(dir, ['rev-parse', 'HEAD']).trim()
+  }
+
+  it('classifies all five relations by ancestry, never by an unsynced flag', () => {
+    // The regression: deriving the relation from "is there unpublished
+    // work?" made `behind` unreachable — a strictly behind checkout holds
+    // nothing unpublished — so a stale checkout rendered as healthy.
+    const dir = initRepo()
+    const first = commit(dir, 'a.txt', 'one\n')
+    const second = commit(dir, 'b.txt', 'two\n')
+
+    expect(workspaceSyncRelation(dir, second, second)).toBe('in_sync')
+    expect(workspaceSyncRelation(dir, first, second)).toBe('behind')
+    expect(workspaceSyncRelation(dir, second, first)).toBe('ahead')
+
+    // Diverged: a sibling commit off the shared parent.
+    git(dir, ['checkout', '-q', '-b', 'other', first])
+    const sibling = commit(dir, 'c.txt', 'three\n')
+    expect(workspaceSyncRelation(dir, sibling, second)).toBe('diverged')
+
+    // Unknown, never a guess: an oid this repo cannot resolve, and nulls.
+    expect(workspaceSyncRelation(dir, second, 'f'.repeat(40))).toBe('unknown')
+    expect(workspaceSyncRelation(dir, null, second)).toBe('unknown')
+    expect(workspaceSyncRelation(dir, second, null)).toBe('unknown')
+    expect(workspaceSyncRelation(null, second, second)).toBe('unknown')
   })
 })
 
@@ -711,35 +876,6 @@ describe('dropRemoteTolerant (post-call truth, legacy-slug tolerance)', () => {
   })
 })
 
-describe('workspaceSyncRelation (one relation drives status, attach, and their advice)', () => {
-  it('classifies in_sync/ahead/behind/diverged and fails to unknown on missing objects', () => {
-    const main = initRepo()
-    git(main, ['config', 'user.email', 't@t'])
-    git(main, ['config', 'user.name', 't'])
-    writeFileSync(join(main, 'f.txt'), 'x\n')
-    git(main, ['add', '-A'])
-    git(main, ['commit', '-q', '-m', 'init'])
-    const c1 = git(main, ['rev-parse', 'HEAD']).trim()
-    writeFileSync(join(main, 'a.txt'), 'a\n')
-    git(main, ['add', 'a.txt'])
-    git(main, ['commit', '-q', '-m', 'c2'])
-    const c2 = git(main, ['rev-parse', 'HEAD']).trim()
-    git(main, ['checkout', '-q', '-b', 'side', c1])
-    writeFileSync(join(main, 'b.txt'), 'b\n')
-    git(main, ['add', 'b.txt'])
-    git(main, ['commit', '-q', '-m', 'c2b'])
-    const c2b = git(main, ['rev-parse', 'HEAD']).trim()
-
-    expect(workspaceSyncRelation(main, c2, c2)).toBe('in_sync')
-    expect(workspaceSyncRelation(main, c2, c1)).toBe('ahead')
-    expect(workspaceSyncRelation(main, c1, c2)).toBe('behind')
-    expect(workspaceSyncRelation(main, c2b, c2)).toBe('diverged')
-    expect(workspaceSyncRelation(main, c2, '0'.repeat(40))).toBe('unknown')
-    expect(workspaceSyncRelation(main, null, c2)).toBe('unknown')
-    expect(workspaceSyncRelation(main, c2, null)).toBe('unknown')
-  })
-})
-
 describe('workspace checkout placement', () => {
   it('anchors defaults under the primary checkout when invoked from a linked worktree', () => {
     const main = initRepo()
@@ -786,6 +922,243 @@ describe('shared workspace command boundary', () => {
       expect(result.exits).toEqual([1])
     },
   )
+})
+
+/**
+ * `workspace drop` reaps the PUBLISHED line, so a seat that cannot prove it
+ * has read that line is refused. This is a documented breaking change and the
+ * refusal is what keeps a peer from destroying commits it never fetched, so
+ * both seats and the explicit waiver are pinned here.
+ */
+describe('workspace drop — the unread-tip guard', () => {
+  const ID = 'ws_01ABCDEFGHJKMNPQRSTVWXYZ00'
+  const BRANCH = `ws/${ID.slice(3).toLowerCase()}`
+  const APP_ID = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
+
+  /** An active workspace whose published tip is `tipOid`. */
+  function activeView(tipOid: string): RemoteWorkspaceView {
+    const view = remoteWorkspaceView(ID)
+    return { ...view, tipOid, workspace: { ...view.workspace, id: ID } }
+  }
+
+  function mockDropService(view: RemoteWorkspaceView) {
+    const dropWorkspace = vi.fn().mockResolvedValue({
+      view: { ...view, workspace: { ...view.workspace, status: 'dropped' } },
+    })
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    vi.spyOn(vcRemoteModule, 'ensureSpaceRemote').mockReturnValue('https://example.invalid/repo')
+    vi.spyOn(vcRemoteModule, 'runGitRemote').mockReturnValue({
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      status: 0,
+    })
+    vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
+      getWorkspace: vi.fn().mockResolvedValue({ view }),
+      dropWorkspace,
+      getRefs: vi.fn().mockResolvedValue({ head: 'refs/heads/main', refs: [] }),
+    } as never)
+    return { dropWorkspace }
+  }
+
+  it('refuses a seat with NO checkout — seeing nothing is the weakest position', async () => {
+    // `cd /tmp && drop <id>` used to be a complete bypass: the protection was
+    // inversely proportional to how much the caller had seen.
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(null)
+    const { dropWorkspace } = mockDropService(activeView('c'.repeat(40)))
+
+    const { output, exits } = await runWorkspaceJson('drop', { id: ID, app: APP_ID })
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'workspace_behind',
+      workspaceId: ID,
+      publishedTip: 'c'.repeat(40),
+      localTip: null,
+      relation: 'unknown',
+    })
+    expect(String(output.error)).toContain('--abandon-unseen')
+    expect(dropWorkspace).not.toHaveBeenCalled()
+    expect(exits).toEqual([1])
+  })
+
+  it('refuses IN a checkout that does not hold the published tip locally', async () => {
+    repo = mkdtempSync(join(tmpdir(), 'ds-ws-drop-'))
+    git(repo, ['init', '-q', '-b', 'main'])
+    git(repo, ['config', 'user.email', 't@t'])
+    git(repo, ['config', 'user.name', 't'])
+    writeFileSync(join(repo, 'f.txt'), 'base\n')
+    git(repo, ['add', '-A'])
+    git(repo, ['commit', '-q', '-m', 'base'])
+    git(repo, ['switch', '-q', '-c', BRANCH])
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
+    // A published tip this clone has never fetched.
+    const { dropWorkspace } = mockDropService(activeView('d'.repeat(40)))
+
+    const { output, exits } = await runWorkspaceJson('drop', { id: ID, app: APP_ID })
+
+    expect(output).toMatchObject({ ok: false, code: 'workspace_behind' })
+    expect(dropWorkspace).not.toHaveBeenCalled()
+    expect(exits).toEqual([1])
+  })
+
+  it('--abandon-unseen proceeds and REPORTS the tip it discarded', async () => {
+    // The waiver is a decision, not a silent one: the abandoned oid is the
+    // fact whoever wrote it needs, and its ref is retained briefly.
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(null)
+    const { dropWorkspace } = mockDropService(activeView('e'.repeat(40)))
+
+    const { output, exits } = await runWorkspaceJson('drop', {
+      id: ID,
+      app: APP_ID,
+      'abandon-unseen': true,
+    })
+
+    expect(output).toMatchObject({
+      ok: true,
+      workspaceId: ID,
+      remoteDropped: true,
+      discardedTip: 'e'.repeat(40),
+    })
+    expect(dropWorkspace).toHaveBeenCalledTimes(1)
+    expect(exits).toEqual([0])
+  })
+})
+
+describe('workspace sync — a finished workspace routes to drop', () => {
+  const ID = 'ws_01ABCDEFGHJKMNPQRSTVWXYZ00'
+  const BRANCH = `ws/${ID.slice(3).toLowerCase()}`
+  const APP_ID = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
+
+  it('refuses workspace_not_active and hands back the drop, not "create a new one"', async () => {
+    // `sync` on a landed workspace can never publish. Advising a new
+    // workspace stranded the checkout; the one verb that resolves a leftover
+    // is `drop`, so it rides along as the action.
+    repo = mkdtempSync(join(tmpdir(), 'ds-ws-sync-'))
+    git(repo, ['init', '-q', '-b', 'main'])
+    git(repo, ['config', 'user.email', 't@t'])
+    git(repo, ['config', 'user.name', 't'])
+    writeFileSync(join(repo, 'f.txt'), 'base\n')
+    git(repo, ['add', '-A'])
+    git(repo, ['commit', '-q', '-m', 'base'])
+    git(repo, ['switch', '-q', '-c', BRANCH])
+    const view = remoteWorkspaceView(ID)
+    const landed: RemoteWorkspaceView = {
+      ...view,
+      tipOid: null,
+      workspace: { ...view.workspace, id: ID, status: 'landed', landedOid: 'f'.repeat(40) },
+    }
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    vi.spyOn(vcRemoteModule, 'ensureSpaceRemote').mockReturnValue('https://example.invalid/repo')
+    vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
+      getWorkspace: vi.fn().mockResolvedValue({ view: landed }),
+      getRefs: vi.fn().mockResolvedValue({ head: 'refs/heads/main', refs: [] }),
+    } as never)
+
+    const { output, exits } = await runWorkspaceJson('sync', { workspace: ID, app: APP_ID })
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'workspace_not_active',
+      status: 'landed',
+      action: { argv: ['deepspace', 'workspace', 'drop', ID, '--app', APP_ID] },
+    })
+    expect(String(output.error)).not.toContain('create a new workspace')
+    expect(exits).toEqual([1])
+  })
+})
+
+describe('workspace status — fetches a published tip it does not hold', () => {
+  const ID = 'ws_01ABCDEFGHJKMNPQRSTVWXYZ00'
+  const BRANCH = `ws/${ID.slice(3).toLowerCase()}`
+  const APP_ID = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
+
+  it('runs a --refmap= fetch so the relation is computable, without moving tracking refs', async () => {
+    // The published object is routinely absent in exactly the checkout that
+    // needs the answer (a peer that never fetched what the author synced).
+    // Without it a strictly BEHIND checkout reported "you hold unpublished
+    // work" about work it does not have. `--refmap=` is what keeps this
+    // diagnostic read from advancing any tracking ref.
+    repo = mkdtempSync(join(tmpdir(), 'ds-ws-status-'))
+    git(repo, ['init', '-q', '-b', 'main'])
+    git(repo, ['config', 'user.email', 't@t'])
+    git(repo, ['config', 'user.name', 't'])
+    writeFileSync(join(repo, 'f.txt'), 'base\n')
+    git(repo, ['add', '-A'])
+    git(repo, ['commit', '-q', '-m', 'base'])
+    git(repo, ['switch', '-q', '-c', BRANCH])
+    const view = remoteWorkspaceView(ID)
+    const absentTip = 'd'.repeat(40)
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(repo)
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    vi.spyOn(vcRemoteModule, 'ensureSpaceRemote').mockReturnValue('https://example.invalid/repo')
+    const runGitRemote = vi.spyOn(vcRemoteModule, 'runGitRemote').mockReturnValue({
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      status: 0,
+    })
+    vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
+      getWorkspace: vi.fn().mockResolvedValue({
+        view: { ...view, tipOid: absentTip, workspace: { ...view.workspace, id: ID } },
+      }),
+      getRefs: vi.fn().mockResolvedValue({ head: 'refs/heads/main', refs: [] }),
+      listWorkspaces: vi.fn().mockResolvedValue({ views: [], truncated: false }),
+    } as never)
+
+    await runWorkspaceJson('status', { workspace: ID, app: APP_ID })
+
+    const fetches = runGitRemote.mock.calls.map(([, , args]) => args)
+    const probe = fetches.find((args) => args.includes('--refmap=') && args.includes(view.workspace.ref))
+    expect(probe).toBeDefined()
+    // The whole point of `--refmap=`: a diagnostic read must not advance any
+    // tracking ref behind the user's back.
+    expect(probe).toContain('--quiet')
+  })
+})
+
+describe('pushWorkspaceRef — a behind checkout is not a divergence', () => {
+  it('says "just behind" when the published tip CONTAINS this head', async () => {
+    // Telling a checkout that holds nothing unpublished "the push was refused
+    // rather than drop that work" sends it hunting for work it does not have.
+    // Reachable only because the callers pass `publishedTip`.
+    repo = mkdtempSync(join(tmpdir(), 'ds-ws-pushref-'))
+    git(repo, ['init', '-q', '-b', 'main'])
+    git(repo, ['config', 'user.email', 't@t'])
+    git(repo, ['config', 'user.name', 't'])
+    writeFileSync(join(repo, 'f.txt'), 'base\n')
+    git(repo, ['add', '-A'])
+    git(repo, ['commit', '-q', '-m', 'base'])
+    const headOid = git(repo, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(join(repo, 'f.txt'), 'ahead\n')
+    git(repo, ['commit', '-q', '-am', 'ahead'])
+    const publishedTip = git(repo, ['rev-parse', 'HEAD']).trim()
+
+    vi.spyOn(vcPushModule, 'pushToSpace').mockReturnValue({
+      status: 'non_fast_forward',
+      localRef: 'HEAD',
+      remoteRef: 'refs/deepspace/ws/x',
+      summary: '[rejected] (non-fast-forward)',
+      reason: 'non-fast-forward',
+    })
+
+    const refusal = await import('../workspace/runtime').then((m) => {
+      try {
+        m.pushWorkspaceRef(repo, 'token', 'refs/deepspace/ws/x', headOid, publishedTip)
+        return null
+      } catch (err) {
+        return err as { message: string; code: string }
+      }
+    })
+
+    expect(refusal?.code).toBe('non_fast_forward')
+    expect(refusal?.message).toContain('nothing of yours is')
+    expect(refusal?.message).toContain('just behind')
+    // NOT the divergence wording, which would be false here.
+    expect(refusal?.message).not.toContain('drop that work')
+  })
 })
 
 describe('overlapsWith (client-side overlap intersection)', () => {

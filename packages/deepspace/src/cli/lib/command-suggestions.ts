@@ -6,8 +6,19 @@ export interface UnknownCommand {
   attemptedPath: string[]
   helpPath: string[]
   suggestion: string[]
-  /** Whether the suggestion may be handed back as a runnable `action`. */
+  /**
+   * May the suggestion be handed back as a runnable `action`, or must it stay
+   * prose? Only a whole command path that arrived as ONE quoted token, to a
+   * non-destructive leaf, is certain — nothing there is being guessed. Every
+   * ranked or exact-leaf guess stays prose: running it verbatim can be a
+   * different act (`undeploy` ranks `deploy`), and no distance threshold
+   * separates those cases.
+   */
   executable: boolean
+  /** Everything the caller wrote AFTER the bad token — the positionals the
+   *  corrected command still needs. Without these the suggested action drops
+   *  them and refuses `missing_argument` when run. */
+  remainder: string[]
   /** The whole command arrived as ONE quoted argv token, e.g. `"auth whoami"`. */
   quotedToken?: true
 }
@@ -42,7 +53,14 @@ function splitTokenPath(
  */
 const DESTRUCTIVE_VERBS = new Set(['rm', 'delete', 'remove', 'drop', 'clear', 'undeploy', 'kill', 'logout'])
 
-/** Levenshtein distance for short command names. */
+/**
+ * Damerau-Levenshtein (optimal string alignment) for short command names.
+ *
+ * Plain Levenshtein charges a TRANSPOSITION two edits, which is how `puhs`
+ * tied `push` with `pull` and — losing the tiebreak alphabetically —
+ * suggested the wrong verb for the single most common kind of typo. Adjacent
+ * swaps cost one.
+ */
 export function editDistance(a: string, b: string): number {
   const left = a.toLowerCase()
   const right = b.toLowerCase()
@@ -58,6 +76,14 @@ export function editDistance(a: string, b: string): number {
         dp[i][j - 1] + 1,
         dp[i - 1][j - 1] + (left[i - 1] === right[j - 1] ? 0 : 1),
       )
+      if (
+        i > 1 &&
+        j > 1 &&
+        left[i - 1] === right[j - 2] &&
+        left[i - 2] === right[j - 1]
+      ) {
+        dp[i][j] = Math.min(dp[i][j], dp[i - 2][j - 2] + 1)
+      }
     }
   }
   return dp[left.length][right.length]
@@ -93,6 +119,11 @@ export function closestCommandPath(
   return ranked[0]?.path ?? null
 }
 
+function takeLeadingPositionals(rest: string[]): string[] {
+  const stop = rest.findIndex((token) => token.startsWith('-'))
+  return stop === -1 ? rest : rest.slice(0, stop)
+}
+
 /**
  * Find the first invalid command token. Once a leaf command is reached, its
  * remaining positional arguments belong to that command and are not checked.
@@ -104,27 +135,38 @@ export function findUnknownCommand(
   let table: Record<string, CommandTreeNode> | undefined = rootCommands
   const accepted: string[] = []
 
-  for (const token of argv) {
+  for (const [index, token] of argv.entries()) {
     if (!table || token.startsWith('-')) return null
     const command: CommandTreeNode | undefined = table[token]
     if (!command) {
-      // An exact path that merely arrived as one token is not a guess — say so
-      // precisely instead of ranking names against a string containing spaces.
+      // Ranking, best evidence first. An UNAMBIGUOUS exact leaf name found
+      // deeper in the tree beats everything: `app add alice@example.com`
+      // means `app collaborators add`, and the alias table would otherwise
+      // read `add` as `create` and point a collaborator invite at the
+      // scaffolder. A leaf name carried by two groups (`cancel`, under both
+      // `transfer` and `collaborators`) is NOT evidence — `closestCommandPath`
+      // would settle that tie alphabetically — so it falls through to ranking
+      // like any other guess.
+      const exactAll = commandPaths(table).filter((path) => path.at(-1) === token)
+      const exactHit = exactAll.length === 1 ? exactAll[0] : null
+      // A whole command path quoted into one token (`"auth whoami"`), not a
+      // lexical guess against a string with spaces.
       const split = splitTokenPath(token, table)
-      const relativeSuggestion = split ?? closestCommandPath(token, table)
+      const relativeSuggestion = exactHit ?? split ?? closestCommandPath(token, table)
       if (!relativeSuggestion) return null
-      // A guess is a useful hint to a human, but only the quoted-token case —
-      // an exact command path typed as one argument — is deterministic enough
-      // to hand back as a runnable `action`. A ranked guess executed blindly
-      // can be catastrophic (`credits` ranks `create` closest, which starts an
-      // interactive scaffold; `auth status` ranks `logout`), and no distance
-      // threshold separates those cases reliably.
+      // Only the quoted-token case is certain enough to hand back as a
+      // runnable `action` (see `executable` above); everything else is prose.
       const guessed = relativeSuggestion.at(-1) ?? ''
       return {
         attemptedPath: ['deepspace', ...accepted, token],
         helpPath: ['deepspace', ...accepted],
         suggestion: ['deepspace', ...accepted, ...relativeSuggestion],
         executable: split !== null && !DESTRUCTIVE_VERBS.has(guessed),
+        // POSITIONALS ONLY. The remainder exists so the corrected verb keeps
+        // the arguments it needs; carrying flags too meant `auth logn --email
+        // a@b --password hunter2` echoed the password into `action.argv`, and
+        // agents persist envelopes. Cut at the first `-` token.
+        remainder: takeLeadingPositionals(argv.slice(index + 1)),
         ...(split ? { quotedToken: true as const } : {}),
       }
     }

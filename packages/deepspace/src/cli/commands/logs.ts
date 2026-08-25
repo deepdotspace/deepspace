@@ -19,6 +19,7 @@
  * right after a request is lag, not absence.
  */
 
+import { displayLines } from '../lib/cli-format'
 import { defineCommand } from 'citty'
 import { setTimeout as delay } from 'node:timers/promises'
 import { ensureToken } from '../auth'
@@ -50,6 +51,9 @@ const MIN_POLL_MS = 2500
  * recover it), so this shrinks — not eliminates — the drop window.
  */
 const FOLLOW_LAG_MS = 90_000
+
+/** Platform log retention; mirrored in the human copy below. */
+const LOG_RETENTION_DAYS = 7
 
 /**
  * The page size a follow tail requests. Follow defaults to the max page so a
@@ -167,7 +171,7 @@ export function formatEvent(e: AppLogEvent, color: boolean, now: number = Date.n
   if (e.eventType === 'exception' && e.exception) {
     tag = paint('31', 'ERROR', color)
     const where = e.request ? ` — ${e.request.method} ${e.request.path}` : ''
-    body = `${e.exception.name}: ${e.exception.message}${where}`
+    body = displayLines(`${e.exception.name}: ${e.exception.message}${where}`)
     if (e.exception.stack) {
       // Drop a leading "Name: message" header line (V8 style) so it isn't
       // shown twice — but Cloudflare worker stacks are often frame-only
@@ -179,22 +183,28 @@ export function formatEvent(e: AppLogEvent, color: boolean, now: number = Date.n
       const frames = (firstIsHeader ? lines.slice(1) : lines)
         .map((l) => '    ' + l.trim())
         .filter((l) => l.trim().length > 0)
-      if (frames.length) body += '\n' + paint('2', frames.join('\n'), color)
+      if (frames.length) body += '\n' + paint('2', displayLines(frames.join('\n')), color)
     }
   } else if (e.eventType === 'request' && e.request) {
     tag = paint('36', 'REQ  ', color)
     const status = e.request.status !== undefined ? ` ${e.request.status}` : ''
     const outcome = e.outcome && e.outcome !== 'ok' ? ` (${e.outcome})` : ''
-    body = `${e.request.method} ${e.request.path}${status}${outcome}`
+    body = displayLines(`${e.request.method} ${e.request.path}${status}${outcome}`)
   } else {
     const style = LEVEL_STYLE[e.level]
     tag = (e.level.toUpperCase() + '     ').slice(0, 5)
     if (style) tag = paint(style, tag, color)
-    body = style ? paint(style, e.message, color) : e.message
+    body = style ? paint(style, displayLines(e.message), color) : displayLines(e.message)
   }
 
   // A browser-forwarded error is tagged so it's not mistaken for a server log.
   const client = e.source === 'client' ? paint('35', 'CLIENT', color) + ' ' : ''
+  // `source === 'client'` events are forwarded from a BROWSER, so their
+  // message, stack and request path are written by whoever visited the app —
+  // an `ESC[2K\r` in any of them repaints the developer's terminal with text
+  // of the visitor's choosing. Escaped per PIECE above rather than here:
+  // painting happens on the way out, and escaping after it would turn our own
+  // colour codes into literal `\x1b[31m`. `time`/`tag` are ours already.
   return `${time} ${client}${tag} ${body}`
 }
 
@@ -339,6 +349,22 @@ export default defineCommand({
     // default 100 would drop the rest of the initial window and jump the cursor
     // past it. One-shot mode keeps the user's (possibly unset) --limit.
     const first = await fetchPage(initialSince, args.follow ? followLimit : limit, token)
+    // Follow mode's OPENING frame, before any event: a tail on a quiet (or
+    // never-deployed) app otherwise emits zero bytes forever, and an agent
+    // cannot tell "connected, nothing to report" from "wedged" — the same
+    // ambiguity the one-shot meta frame removes. `activity --follow` opens
+    // with a `ready` line; this matches it.
+    if (args.follow && args.json) {
+      process.stdout.write(
+        JSON.stringify({
+          type: 'ready',
+          appId,
+          window: windowLabel,
+          count: first.events.length,
+          retentionDays: LOG_RETENTION_DAYS,
+        }) + '\n',
+      )
+    }
     print(first.events)
 
     if (!args.follow) {
@@ -347,12 +373,20 @@ export default defineCommand({
           // An empty NDJSON stream is indistinguishable from a crash without a
           // trailing record — emit a discriminable meta line so an agent can
           // tell "ran, no events" from "died". (events never carry `type`.)
+          // Carries what the human line carries — a "machine mirror" that
+          // knows less than the prose it mirrors is not one.
           process.stdout.write(
-            JSON.stringify({ type: 'meta', count: 0, window: windowLabel }) + '\n',
+            JSON.stringify({
+              type: 'meta',
+              count: 0,
+              window: windowLabel,
+              appId,
+              retentionDays: LOG_RETENTION_DAYS,
+            }) + '\n',
           )
         } else {
           console.log(
-            `No logs in the last ${windowLabel} for ${appId}. New logs can take up to a minute to appear; retention is 7 days.`,
+            `No logs in the last ${windowLabel} for ${appId}. New logs can take up to a minute to appear; retention is ${LOG_RETENTION_DAYS} days.`,
           )
         }
       } else if (first.truncated) {

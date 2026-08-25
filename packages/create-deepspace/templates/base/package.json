@@ -33,7 +33,7 @@
     "clsx": "^2.1.0",
     "ai": "5.0.222",
     "deepspace": "workspace:*",
-    "hono": "^4.7.0",
+    "hono": "^4.12.34",
     "lucide-react": "^0.460.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

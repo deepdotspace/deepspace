@@ -8,10 +8,13 @@ import { runGit } from '../git/process'
 import { initRepo } from '../git/repository'
 import {
   classifyPushTransportFailure,
+  classifyRejection,
   isRecoverablePushFailure,
   isThinPackRejection,
   oversizedPushFix,
   parsePushPorcelain,
+  parseRefusalCode,
+  representativeResult,
   pushFailureMessage,
   pushToSpace,
   type PushRefResult,
@@ -33,7 +36,7 @@ describe('parsePushPorcelain', () => {
       '+\trefs/heads/forced:refs/heads/forced\tabc1234...def5678 (forced update)',
       '=\trefs/heads/same:refs/heads/same\t[up to date]',
       '!\trefs/heads/behind:refs/heads/behind\t[rejected] (non-fast-forward)',
-      '!\trefs/heads/raced:refs/heads/raced\t[remote rejected] (stale ref — fetch first)',
+      '!\trefs/heads/raced:refs/heads/raced\t[remote rejected] (stale_ref: the ref moved first)',
       'Done',
     ].join('\n')
     const results = parsePushPorcelain(out)
@@ -50,7 +53,7 @@ describe('parsePushPorcelain', () => {
       remoteRef: 'refs/heads/new',
     })
     expect(results[4].reason).toBe('non-fast-forward')
-    expect(results[5].reason).toBe('stale ref — fetch first')
+    expect(results[5].reason).toBe('stale_ref: the ref moved first')
   })
 
   it('ignores headers, trailers, blanks, and other noise', () => {
@@ -61,30 +64,51 @@ describe('parsePushPorcelain', () => {
   const line = (flag: string, summary: string) =>
     `${flag}\trefs/heads/main:refs/heads/main\t${summary}`
 
-  it('classifies the server CAS vocabulary separately from hard rejections', () => {
-    for (const reason of [
-      'stale ref',
-      'stale ref — fetch first',
-      'no such ref',
-      'atomic push failed',
-    ]) {
-      expect(parsePushPorcelain(line('!', `[remote rejected] (${reason})`))[0].status).toBe(
-        'ref_conflict',
-      )
+  it('reads the CAS race off the server token, not off its prose', () => {
+    // `stale_ref` is the one rejection `deepspace pull` deterministically
+    // fixes, so it is the one that becomes `ref_conflict`.
+    const result = parsePushPorcelain(
+      line('!', '[remote rejected] (stale_ref: the ref moved since this push was prepared)'),
+    )[0]
+    expect(result.status).toBe('ref_conflict')
+    expect(result.code).toBe('stale_ref')
+  })
+
+  it('keeps every other tagged refusal a hard rejection, token parsed', () => {
+    for (const [code, sentence] of [
+      ['push_too_large', 'object exceeds the 20 MiB limit'],
+      ['repo_full', 'repository is at its size ceiling'],
+      ['secret_committed', 'a secret file is in this history — .env'],
+      ['unpacker_error', 'the pack could not be unpacked'],
+      ['missing_objects', 'missing necessary objects'],
+      ['thin_pack', 'thin pack bases could not be resolved'],
+      ['funny_refname', 'refusing to create a ref with a funny name'],
+      ['internal_ref', 'that ref namespace is reserved'],
+      ['workspace_creator', 'not the workspace creator'],
+      ['bad_tip', 'not a valid branch tip'],
+    ] as const) {
+      const result = parsePushPorcelain(
+        line('!', `[remote rejected] (${code}: ${sentence})`),
+      )[0]
+      expect(result.status, code).toBe('rejected')
+      expect(result.code, code).toBe(code)
+      expect(result.reason, code).toBe(`${code}: ${sentence}`)
     }
+  })
+
+  it('leaves an untagged reason unparsed rather than guessing at it', () => {
+    // An older worker, or a rejection git itself wrote. No token, no code —
+    // and deliberately no prose fallback to invent one.
     for (const reason of [
-      'object exceeds the 20 MiB limit — remove it or use Git LFS',
       'unpacker error',
-      'missing necessary objects',
       'funny refname',
-      'blob is not a valid branch tip',
-      'deletion of the current branch prohibited',
+      'some unrecognised server reason',
       'Tip abc1234 of refs/heads/main is a tree, not a commit',
-      'thin push too heavy — retry with git push --no-thin',
     ]) {
       const result = parsePushPorcelain(line('!', `[remote rejected] (${reason})`))[0]
       expect(result.status, reason).toBe('rejected')
       expect(result.reason, reason).toBe(reason)
+      expect(result.code, reason).toBeUndefined()
     }
   })
 
@@ -149,28 +173,34 @@ describe('pushToSpace against real repositories', () => {
 })
 
 describe('push rejection decisions', () => {
+  // Mirrors what parsePushPorcelain builds, including the parsed token, so
+  // these cases exercise the same shape the real parser produces.
   const rejected = (reason: string): PushRefResult => ({
     status: 'rejected',
     localRef: 'refs/heads/main',
     remoteRef: 'refs/deepspace/ws/ws_X',
     summary: '[remote rejected]',
     reason,
+    ...(parseRefusalCode(reason) ? { code: parseRefusalCode(reason)!.code } : {}),
   })
 
-  it('uses the full-pack retry only for the server thin-pack signal', () => {
-    expect(
-      isThinPackRejection(rejected('thin push too heavy — retry with git push --no-thin')),
-    ).toBe(true)
+  it('uses the full-pack retry only for the server thin-pack token', () => {
+    expect(isThinPackRejection(rejected('thin_pack: thin pack bases unresolved'))).toBe(true)
     for (const reason of [
-      'object exceeds the 20 MiB limit — remove it or use Git LFS',
-      'unpacker error',
-      'funny refname',
-      'deletion of the current branch prohibited',
+      'push_too_large: object exceeds the 20 MiB limit',
+      'unpacker_error: the pack could not be unpacked',
+      'some untagged reason about a thin pack',
+      // A pusher-chosen path echoed INSIDE another refusal's sentence cannot
+      // reach offset 0, so it cannot fire a wasteful full re-upload.
+      'secret_committed: a secret is in this history — thin_pack: notes.txt',
     ]) {
       expect(isThinPackRejection(rejected(reason)), reason).toBe(false)
     }
     for (const status of ['committed', 'up_to_date', 'non_fast_forward', 'ref_conflict'] as const) {
-      expect(isThinPackRejection({ ...rejected('thin push'), status }), status).toBe(false)
+      expect(
+        isThinPackRejection({ ...rejected('thin_pack: unresolved'), status }),
+        status,
+      ).toBe(false)
     }
   })
 
@@ -362,7 +392,7 @@ describe('push rejection decisions', () => {
       const repo = join(root, 'work')
       const media = join(root, 'media')
       try {
-        runGit(root, ['init', '-q', '--bare', 'server.git'])
+        runGit(root, ['init', '-q', '--bare', '-b', 'main', 'server.git'])
         mkdirSync(media)
         mkdirSync(repo)
         initRepo(repo, 'main')
@@ -439,7 +469,7 @@ describe('push rejection decisions', () => {
   it('gives an oversized rejection the correction recipe, never a retry action', () => {
     const message = pushFailureMessage(
       'Workspace upload',
-      rejected('object exceeds the 20 MiB limit — remove it or use Git LFS'),
+      rejected('push_too_large: object exceeds the 20 MiB limit'),
     )
     expect(message).toContain('retrying cannot succeed')
     expect(message).toContain('git rev-list --objects --all')
@@ -449,23 +479,35 @@ describe('push rejection decisions', () => {
   it.each([
     'unpacker error',
     'funny refname',
-    'committed secret: .env — remove from history or rename',
     'commit is not a valid branch tip',
     'an unrecognized future rejection',
+    'future_server_code: a condition this CLI version cannot explain',
   ])('preserves permanent/unknown reason %j without suggesting a retry loop', (reason) => {
     const message = pushFailureMessage('Workspace upload', rejected(reason))
-    expect(message).toContain(reason)
+    // The human line carries the server's sentence; the machine token, when
+    // there is one, belongs to the envelope rather than the prose.
+    expect(message).toContain(parseRefusalCode(reason)?.sentence ?? reason)
     expect(message).toContain('correct the reported history/ref problem')
     expect(message).not.toContain('Retry;')
   })
 
-  it('recommends retry only for the server-classified finalize race', () => {
+  it('advises a retry only where one can actually help', () => {
+    // Retryability is the server's verdict, carried by the token — the CLI no
+    // longer decides it by reading a sentence.
     expect(
-      pushFailureMessage(
-        'Workspace upload',
-        rejected('missing necessary objects — retry the push'),
-      ),
-    ).toContain('Retry;')
+      pushFailureMessage('Workspace upload', rejected('missing_objects: missing necessary objects')),
+    ).toMatch(/Retry/i)
+    for (const reason of [
+      'push_too_large: object exceeds the 20 MiB limit',
+      'repo_full: repository is at its size ceiling',
+      'unpacker_error: the pack could not be unpacked',
+      // Untagged: the old sentence, which now classifies as the catch-all.
+      'missing necessary objects — retry the push',
+    ]) {
+      expect(pushFailureMessage('Workspace upload', rejected(reason)), reason).not.toMatch(
+        /Retry;/,
+      )
+    }
   })
 
   it('names oversized files and sizes when the repository is readable', () => {
@@ -484,11 +526,388 @@ describe('push rejection decisions', () => {
       expect(named).toContain('5 KiB')
       expect(named).toContain('git restore --staged')
       expect(named).not.toContain('rev-list')
-      expect(pushFailureMessage('Workspace upload', rejected('object too large'), repo)).toContain(
-        'retrying cannot succeed',
-      )
+      // The token decides the code, so the oversized recipe is reached by
+      // `push_too_large:` and by nothing else.
+      expect(
+        pushFailureMessage(
+          'Workspace upload',
+          rejected('push_too_large: object exceeds the 20 MiB limit'),
+          repo,
+        ),
+      ).toContain('retrying cannot succeed')
+      // Reasons that merely MENTION size vocabulary — a secret refusal naming
+      // an .lfs file, a ref name echoing a migration branch — carry a
+      // different token or none, so they cannot reach it.
+      for (const reason of [
+        'secret_committed: a secret is in this history — .env.lfs',
+        'stale_ref: refs/heads/lfs-migration moved first',
+        'the file object exceeds the 20 MiB limit.txt is tracked',
+      ]) {
+        expect(pushFailureMessage('Push', rejected(reason), repo), reason).not.toContain(
+          'retrying cannot succeed',
+        )
+      }
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
+  })
+})
+
+describe('an HTTP verdict is never reported as an ambiguous outcome', () => {
+  // Real git prints `send-pack: unexpected disconnect while reading sideband
+  // packet` for EVERY HTTP status, not only for a dropped connection. Matching
+  // on that phrase alone reports a 403 permission denial as "it may have
+  // landed", sending an agent to poll a branch it cannot read — and the status
+  // is the only diagnostic that survives, since git drops the response body.
+  const withStatus = (status: number) =>
+    classifyPushTransportFailure(
+      new Error(
+        `error: RPC failed; HTTP ${status} curl 22 The requested URL returned error: ${status}\n` +
+          'send-pack: unexpected disconnect while reading sideband packet\n' +
+          'fatal: the remote end hung up unexpectedly',
+      ),
+    )
+
+  it('names the auth and permission verdicts, which are DEFINITE failures', () => {
+    expect(withStatus(401)).toMatchObject({ code: 'not_authenticated' })
+    expect(withStatus(401)?.error).toMatch(/nothing was applied/i)
+    expect(withStatus(403)).toMatchObject({ code: 'forbidden' })
+    expect(withStatus(403)?.error).toMatch(/nothing was applied/i)
+  })
+
+  it('never calls a status-carrying failure an unknown outcome', () => {
+    // A status with no specific handler falls through to the raw git error,
+    // which still carries the number — better than a wrong verdict.
+    for (const status of [500, 502, 503, 400]) {
+      expect(withStatus(status)?.code).not.toBe('push_outcome_unknown')
+    }
+  })
+
+  it('says a dropped connection may have LANDED, rather than reporting plain failure', () => {
+    // The server may have applied it; the response just never arrived. Read as
+    // a failure, the agent's next move is compensating — `push --force` or a
+    // reset — against a trunk that already moved.
+    const failure = classifyPushTransportFailure(
+      new Error(
+        'error: RPC failed; curl 52 Empty reply from server\n' +
+          'send-pack: unexpected disconnect while reading sideband packet\n' +
+          'fatal: the remote end hung up unexpectedly',
+      ),
+    )
+    expect(failure).toMatchObject({ code: 'push_outcome_unknown' })
+    expect(failure?.error).toMatch(/may have landed/i)
+    expect(failure?.error).toMatch(/do not force-push or reset/i)
+  })
+})
+
+
+
+
+describe('only the TRANSPORT may report an HTTP status', () => {
+  // A `remote:` line is the server's stdout relayed verbatim — a pre-receive
+  // hook can print anything, including something status-shaped. Coding that as
+  // a transport verdict tells a caller their credentials are wrong about a
+  // push that authenticated fine and was refused on content.
+  it('ignores a status-shaped hook line for every code it decides', () => {
+    for (const status of [401, 403, 409, 413, 422, 429]) {
+      const failure = classifyPushTransportFailure(
+        new Error(
+          `remote: error: ${status} refused by our pre-receive policy\n` +
+            'To https://deploy.deep.space/api/repo/app_x\n' +
+            ' ! [remote rejected] main -> main (pre-receive hook declined)',
+        ),
+      )
+      expect(failure, `remote: error: ${status}`).toBeNull()
+    }
+  })
+
+  it('still classifies the same status when GIT reports it', () => {
+    expect(
+      classifyPushTransportFailure(
+        new Error("fatal: unable to access 'https://x/': The requested URL returned error: 403"),
+      ),
+    ).toMatchObject({ code: 'forbidden' })
+    expect(
+      classifyPushTransportFailure(new Error('error: RPC failed; HTTP 401 curl 22')),
+    ).toMatchObject({ code: 'not_authenticated' })
+  })
+
+  it('reads git’s own line even when a hook line precedes it', () => {
+    // The hook line is skipped, not the whole message.
+    expect(
+      classifyPushTransportFailure(
+        new Error(
+          'remote: error: 403 our policy says no\n' +
+            'error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413',
+        ),
+      ),
+    ).toMatchObject({ code: 'push_too_large' })
+  })
+})
+
+describe('the refusal grammar is parsed, never the prose', () => {
+  it('parses `<code>: <sentence>` and nothing else', () => {
+    expect(parseRefusalCode('push_too_large: object exceeds the 20 MiB limit')).toEqual({
+      code: 'push_too_large',
+      sentence: 'object exceeds the 20 MiB limit',
+    })
+    // The optional detail rides along in the sentence.
+    expect(parseRefusalCode('secret_committed: a secret is here — .env, .dev.vars')).toEqual({
+      code: 'secret_committed',
+      sentence: 'a secret is here',
+      detail: '.env, .dev.vars',
+    })
+    for (const untagged of [
+      'object exceeds the 20 MiB limit',
+      'Not A Code: something',
+      'has-a-hyphen: something',
+      'trailing_colon:no space',
+      '',
+    ]) {
+      expect(parseRefusalCode(untagged), untagged).toBeNull()
+    }
+  })
+
+  it('maps every server code to its CLI slug', () => {
+    const expected: Record<string, string> = {
+      push_too_large: 'push_too_large',
+      repo_full: 'repo_full',
+      secret_committed: 'secret_in_history',
+      missing_objects: 'missing_objects',
+      thin_pack: 'thin_pack',
+      funny_refname: 'funny_refname',
+      workspace_creator: 'workspace_creator',
+      internal_ref: 'internal_ref',
+      bad_tip: 'bad_tip',
+      unpacker_error: 'unpacker_error',
+    }
+    for (const [serverCode, slug] of Object.entries(expected)) {
+      // secret_committed needs its detail: without file names there is no
+      // file-specific recovery, which is its own tested behaviour below.
+      const detail = serverCode === 'secret_committed' ? ' — .env' : ''
+      const verdict = classifyRejection(`${serverCode}: the server's own sentence${detail}`)
+      expect(verdict.code, serverCode).toBe(slug)
+      // Every code carries advice; none falls through to the catch-all prose.
+      expect(verdict.message, serverCode).not.toContain('correct the reported history/ref problem')
+    }
+  })
+
+  it('falls back to `rejected` for an untagged reason or a code it cannot explain', () => {
+    // The rollout gap in full: an older worker sends no token, and a future
+    // worker may send one this CLI version has no advice for. Neither invents
+    // a slug, and the server's sentence still reaches the caller.
+    for (const reason of [
+      'object exceeds the 20 MiB limit',
+      'some unrecognised server reason',
+      'future_server_code: a condition this CLI cannot explain',
+    ]) {
+      const verdict = classifyRejection(reason)
+      expect(verdict.code, reason).toBe('rejected')
+    }
+    expect(
+      pushFailureMessage(
+        'Push',
+        {
+          status: 'rejected',
+          localRef: 'refs/heads/main',
+          remoteRef: 'refs/heads/main',
+          summary: '[remote rejected]',
+          reason: 'future_server_code: a condition this CLI cannot explain',
+          code: 'future_server_code',
+        },
+      ),
+    ).toContain('a condition this CLI cannot explain')
+  })
+
+  it('a crafted FILENAME can no longer steal a code — the parse is at offset 0', () => {
+    // The whole reason the grammar exists. A refusal sentence embeds paths the
+    // pusher chose, so a file literally named after another code must not
+    // reclassify the refusal that names it.
+    const crafted = 'secret_committed: a secret is in this history — push_too_large: x'
+    const verdict = classifyRejection(crafted)
+    expect(verdict.code).toBe('secret_in_history')
+    expect(verdict.code).not.toBe('push_too_large')
+    expect(parseRefusalCode(crafted)?.code).toBe('secret_committed')
+
+    // …and the reverse: a size refusal naming a secret-shaped path stays sized.
+    const reverse = 'push_too_large: object exceeds the cap — secret_committed: .env.bin'
+    expect(classifyRejection(reverse).code).toBe('push_too_large')
+
+    // A code-shaped token anywhere but position 0 is just text.
+    expect(classifyRejection('the file repo_full: notes.txt is too big').code).toBe('rejected')
+  })
+})
+
+describe('an atomic push reports the ref that actually failed', () => {
+  const ngLine = (ref: string, reason: string) =>
+    `!\trefs/heads/${ref}:refs/heads/${ref}\t[remote rejected] (${reason})`
+
+  it('skips `not_attempted` siblings when picking the verdict', () => {
+    // A push is atomic: one refusal marks every sibling `not_attempted`. Those
+    // lines say nothing about the cause, and taking the first blindly reports
+    // whichever ref happened to sort first — sending someone to "fetch first"
+    // for a secret refusal that pulling cannot touch.
+    const results = parsePushPorcelain(
+      [
+        ngLine('a', 'not_attempted: not attempted — the push is atomic and another ref was refused'),
+        ngLine('b', 'secret_committed: committed secret: remove it — .env'),
+      ].join('\n'),
+    )
+    expect(results).toHaveLength(2)
+    const verdict = representativeResult(results)
+    expect(verdict.code).toBe('secret_committed')
+    expect(classifyRejection(verdict.reason!).code).toBe('secret_in_history')
+  })
+
+  it('finds the real refusal wherever it sits among the siblings', () => {
+    const results = parsePushPorcelain(
+      [
+        ngLine('a', 'not_attempted: not attempted'),
+        ngLine('b', 'not_attempted: not attempted'),
+        ngLine('c', 'push_too_large: object exceeds the push size limit'),
+      ].join('\n'),
+    )
+    expect(representativeResult(results).code).toBe('push_too_large')
+  })
+
+  it('falls back to the first line when every ref was un-attempted', () => {
+    // Should not happen — something refused the push — but reporting nothing
+    // would be worse than reporting the un-attempted state honestly.
+    const results = parsePushPorcelain(ngLine('a', 'not_attempted: not attempted'))
+    const verdict = representativeResult(results)
+    expect(verdict.code).toBe('not_attempted')
+    expect(classifyRejection(verdict.reason!).code).toBe('rejected')
+    expect(classifyRejection(verdict.reason!).message).toContain('deepspace feedback')
+  })
+})
+
+describe('only the table’s OWN keys are refusal codes', () => {
+  // `__proto__`, `constructor` and `toString` all match `^[a-z_]+$` and all
+  // resolve through the prototype chain. A bare index answered them with a
+  // TypeError (`__proto__` is an object, not a function) or with a slug-less
+  // verdict (`constructor` returns its argument, so `.code` was undefined and
+  // `--json` carried no code at all).
+  it('treats inherited property names as unknown codes', () => {
+    for (const name of ['__proto__', 'constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+      const reason = `${name}: something the pusher chose`
+      expect(() => classifyRejection(reason), name).not.toThrow()
+      const verdict = classifyRejection(reason)
+      expect(verdict.code, name).toBe('rejected')
+      expect(verdict.message, name).toBeTruthy()
+    }
+  })
+
+  it('still answers the real codes', () => {
+    expect(classifyRejection('push_too_large: over the cap').code).toBe('push_too_large')
+  })
+})
+
+describe('the detail is parsed, and the files it names are used', () => {
+  it('splits the remainder on the FIRST ` — `', () => {
+    // Sentences contain that dash themselves, so a last-separator split would
+    // treat half the advice as a filename.
+    expect(
+      parseRefusalCode(
+        'secret_committed: committed secret: remove it from the history being pushed — .env, .dev.vars',
+      ),
+    ).toEqual({
+      code: 'secret_committed',
+      sentence: 'committed secret: remove it from the history being pushed',
+      detail: '.env, .dev.vars',
+    })
+    expect(parseRefusalCode('repo_full: at the ceiling')).toEqual({
+      code: 'repo_full',
+      sentence: 'at the ceiling',
+    })
+  })
+
+  it('names the secret files the server reported', () => {
+    const verdict = classifyRejection(
+      'secret_committed: committed secret: remove it from the history being pushed — .env, .dev.vars',
+    )
+    expect(verdict.code).toBe('secret_in_history')
+    expect(verdict.message).toContain('.env')
+    expect(verdict.message).toMatch(/rewrite the history/i)
+    expect(verdict.message).toMatch(/rotate/i)
+  })
+
+  it('keeps the slug when the server sends no detail to name', () => {
+    // The code alone establishes the condition; the names only sharpen the
+    // recovery, so a detail-less refusal is still `secret_in_history` with a
+    // generic history-rewrite sentence.
+    expect(classifyRejection('secret_committed: committed secret').code).toBe('secret_in_history')
+  })
+})
+
+describe('a mixed atomic report cannot hide the refusal', () => {
+  it('prefers the refused ref over a successful one', () => {
+    // `[up to date]` sorts first and carries no code, so a "first line that
+    // is not not_attempted" rule answered with it — reporting success for a
+    // push that was refused on another ref.
+    const results = parsePushPorcelain(
+      [
+        '=\trefs/heads/a:refs/heads/a\t[up to date]',
+        '!\trefs/heads/b:refs/heads/b\t[remote rejected] (secret_committed: committed secret — .env)',
+      ].join('\n'),
+    )
+    expect(results.map((r) => r.status)).toEqual(['up_to_date', 'rejected'])
+    expect(representativeResult(results).code).toBe('secret_committed')
+  })
+
+  it('still prefers a real refusal over an un-attempted sibling', () => {
+    const results = parsePushPorcelain(
+      [
+        '=\trefs/heads/a:refs/heads/a\t[up to date]',
+        '!\trefs/heads/b:refs/heads/b\t[remote rejected] (not_attempted: not attempted)',
+        '!\trefs/heads/c:refs/heads/c\t[remote rejected] (push_too_large: over the cap)',
+      ].join('\n'),
+    )
+    expect(representativeResult(results).code).toBe('push_too_large')
+  })
+
+  it('returns a successful line only when nothing was refused', () => {
+    const results = parsePushPorcelain('=\trefs/heads/a:refs/heads/a\t[up to date]')
+    expect(representativeResult(results).status).toBe('up_to_date')
+  })
+})
+
+describe('the detail split survives a sentence that itself contains ` — `', () => {
+  it('cuts at the FIRST separator, not the last', () => {
+    // The earlier fixture had exactly one dash, so `lastIndexOf` passed it.
+    // The grammar puts the detail after the FIRST separator; a sentence that
+    // carries its own dash is what tells the two rules apart.
+    expect(parseRefusalCode('repo_full: over the limit — rewrite history — 41943040 bytes')).toEqual(
+      {
+        code: 'repo_full',
+        sentence: 'over the limit',
+        detail: 'rewrite history — 41943040 bytes',
+      },
+    )
+  })
+
+  it('keeps a multi-file detail whole for the advice to name', () => {
+    const parsed = parseRefusalCode('secret_committed: committed secret — .env, .dev.vars, x.envrc')
+    expect(parsed?.detail).toBe('.env, .dev.vars, x.envrc')
+    const verdict = classifyRejection(
+      'secret_committed: committed secret — .env, .dev.vars, x.envrc',
+    )
+    expect(verdict.message).toContain('.env')
+  })
+})
+
+describe('pushFailureMessage composes one sentence, not two verbs', () => {
+  it('supplies the verb, so the subject must not carry one', () => {
+    // Staging read "The cloud repo rejected main failed (rejected: …)" — a
+    // caller passed a clause where a noun phrase belongs.
+    const line = pushFailureMessage('The push of main', {
+      status: 'rejected',
+      localRef: 'refs/heads/main',
+      remoteRef: 'refs/heads/main',
+      summary: '[remote rejected]',
+      reason: 'push_too_large: object exceeds the push size limit',
+      code: 'push_too_large',
+    })
+    expect(line).toMatch(/^The push of main failed \(rejected: /)
+    expect(line).not.toMatch(/rejected \w+ failed/)
   })
 })

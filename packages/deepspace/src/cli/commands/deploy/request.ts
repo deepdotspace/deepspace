@@ -383,10 +383,14 @@ export async function deployBuiltBundle(options: {
     )
   }
   if (!response.ok || !body.success) {
+    // Cloudflare control-plane failures reach us as prose with no `code` — but
+    // the machine contract promises a stable code on every refusal, and this is
+    // the commonest failure an agent meets. Keep the server's code when it
+    // sends one; otherwise name the phase.
     await bail(
       formatDeployWorkerError(response.status, body.error, body.code),
       'Deploy failed',
-      body.code,
+      body.code ?? 'deploy_failed',
     )
   }
 

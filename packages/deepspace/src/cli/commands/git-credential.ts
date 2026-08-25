@@ -20,6 +20,7 @@
 import { defineCommand } from 'citty'
 import { ensureToken } from '../auth'
 import { deployBaseUrl } from '../lib/vc-remote'
+import { MAX_STDIN_BYTES, readStreamText } from '../lib/stdio'
 
 function parseFields(input: string): Map<string, string> {
   const fields = new Map<string, string>()
@@ -89,16 +90,6 @@ export function declineHint(
   return ''
 }
 
-async function readStdin(): Promise<string> {
-  // Git always pipes the request; a bare interactive invocation gets an
-  // empty request instead of a hung read.
-  if (process.stdin.isTTY) return ''
-  process.stdin.setEncoding('utf-8')
-  let data = ''
-  for await (const chunk of process.stdin) data += chunk
-  return data
-}
-
 export default defineCommand({
   meta: {
     name: 'git-credential',
@@ -113,7 +104,9 @@ export default defineCommand({
   },
   async run({ args }) {
     const op = String(args.op ?? '')
-    const input = await readStdin()
+    // Git always pipes the request; a bare interactive invocation gets an
+    // empty request instead of a hung read.
+    const input = process.stdin.isTTY ? '' : await readStreamText(process.stdin, MAX_STDIN_BYTES)
     // store/erase are silent no-ops — the token lives in ~/.deepspace, not in
     // git's credential storage.
     if (op !== 'get') return

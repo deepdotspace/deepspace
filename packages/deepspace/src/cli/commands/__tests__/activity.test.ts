@@ -64,6 +64,20 @@ describe('landIndex + formatEvent land labeling', () => {
     const unknown = ev({ seq: 5, kind: 'some.future.kind', summary: { x: 1 } })
     expect(formatEvent(unknown)).toContain('some.future.kind')
   })
+
+  it('reads the all-zero oid as a DELETION, not a commit tip', () => {
+    // git's deletion sentinel. Rendered as a tip it printed
+    // "feature/x → 0000000000", which reads as a push TO that oid.
+    const deletion = ev({
+      seq: 6,
+      summary: { refs: [{ ref: 'refs/heads/feature/x', newOid: '0'.repeat(40) }] },
+    })
+    expect(formatEvent(deletion)).toContain('deleted feature/x')
+    expect(formatEvent(deletion)).not.toContain('→')
+
+    // A normal push is unaffected.
+    expect(formatEvent(landPush)).toContain('main → ')
+  })
 })
 
 describe('activity --since/--limit validation fires before any network', () => {

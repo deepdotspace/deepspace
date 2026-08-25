@@ -3,10 +3,12 @@ import { findAppDir } from '../../lib/app-context'
 import { errorCode } from '../../lib/cli-errors'
 import { defineDeepspaceCommand, Refusal } from '../../lib/command'
 import { isAncestor, isWorkTreeClean, resolveCommit } from '../../lib/git/repository'
+import { unmergedIndexRefusal } from '../../lib/git/safety'
 import type { CliAction } from '../../lib/output'
 import { humanCommand } from '../../lib/cli-format'
 import { ensureSpaceRemote, runGitRemote, SPACE_REMOTE } from '../../lib/vc-remote'
-import type { RemoteWorkspaceView, RepoApi } from '../../lib/repo-api'
+import { workspaceSyncRelation } from './analysis'
+import type { RemoteWorkspace, RemoteWorkspaceView, RepoApi } from '../../lib/repo-api'
 import { createSpinner } from '../../lib/spinner'
 import {
   cleanupAction,
@@ -39,33 +41,29 @@ export function workspaceUnsyncedRefusal(args: {
   id: string
   branch: string
   workspaceDir: string | null
-  status: string
+  /** Server-side workspace status — a FINISHED workspace can never publish
+   *  again, so prescribing `sync` here ping-pongs forever with sync's own
+   *  `workspace_not_active` → drop advice. */
+  status: RemoteWorkspace['status']
 }): Refusal {
-  const dropKeepArgv = [
-    'deepspace',
-    'workspace',
-    'drop',
-    args.id,
-    '--app',
-    args.appId,
-    '--keep-worktree',
-  ]
+  const dropArgv = ['deepspace', 'workspace', 'drop', args.id, '--app', args.appId]
   if (args.status !== 'active') {
     // A finished workspace can never publish these commits — `sync` refuses
     // it — so prescribing the publish path would be the dead end this verb
-    // exists to remove. No action: the choice (retain vs discard) is the
-    // caller's.
+    // exists to remove. NO action either: `--keep-worktree` still reaps the
+    // cloud workspace, so it is not a "keep everything" step, and retain vs
+    // discard is the caller's choice, not one command.
+    const keepArgv = [...dropArgv, '--keep-worktree']
     return new Refusal(
-      `${args.id} is already ${args.status} on the server, and this checkout has committed ` +
-        `work that was never published — nothing can publish it now. Keep it with ` +
-        `\`${humanCommand(dropKeepArgv)}\` (retains the branch/worktree for manual disposal), ` +
-        `or delete the branch yourself. Nothing was dropped.`,
+      `${args.id} is already ${args.status} on the server, and this checkout holds commits that ` +
+        `nothing in the cloud represents any more — nothing can publish them now. ` +
+        `\`${humanCommand(keepArgv)}\` drops the cloud workspace but retains the local ` +
+        `branch/worktree for manual disposal, or delete the branch yourself. Nothing was dropped.`,
       'workspace_unsynced',
       { extra: { workspaceId: args.id, status: args.status } },
     )
   }
   const syncArgv = ['deepspace', 'workspace', 'sync', '--app', args.appId, '--workspace', args.id]
-  const dropArgv = ['deepspace', 'workspace', 'drop', args.id, '--app', args.appId]
   const publish = args.workspaceDir
     ? `Publish them first with \`${humanCommand(syncArgv)}\`, then re-run \`${humanCommand(dropArgv)}\`.`
     : `Recreate a worktree from the branch (\`git worktree add <dir> ${args.branch}\`), ` +
@@ -119,6 +117,12 @@ export const dropWorkspaceCommand = defineDeepspaceCommand({
       description: 'Keep the local worktree and branch after dropping',
       default: false,
     },
+    'abandon-unseen': {
+      type: 'boolean',
+      description:
+        'Drop even though this checkout has not seen the published tip — an explicit decision to abandon commits you have not read (workspace_behind)',
+      default: false,
+    },
     app: APP_ARG,
   },
   async run({ args }) {
@@ -126,34 +130,101 @@ export const dropWorkspaceCommand = defineDeepspaceCommand({
     assertExplicitWorkspaceId(explicitId)
     const appArg = typeof args.app === 'string' ? args.app : undefined
     const keepWorktree = Boolean(args['keep-worktree'])
+    const abandonUnseen = Boolean(args['abandon-unseen'])
     const spinner = args.json ? null : createSpinner()
     spinner?.start(`Preparing to drop ${explicitId ?? 'workspace'}…`)
-    if (!findAppDir() && explicitId) {
-      const { api } = await resolveApiOnly(appArg)
-      const statusBefore = (await api.getWorkspace(explicitId)).view.workspace.status
-      const { view, remoteDropped } = await dropRemoteTolerant(api, explicitId, statusBefore)
-      spinner?.stop()
-      if (!args.json) {
-        p.log.success(
-          remoteDropped
-            ? `Dropped ${explicitId}. Its ref sticks around briefly for undo, then is reaped.`
-            : `Workspace ${explicitId} was already ${view.workspace.status} on the server — nothing to drop remotely.`,
-        )
-      }
-      return { data: { workspaceId: explicitId, status: view.workspace.status, remoteDropped } }
-    }
-
-    const { appDir, appId, token, api } = await resolveTarget(appArg)
-    const id = inferWorkspaceId(appDir, explicitId)
-    const inspection = inspectWorkspaceCleanup(appDir, id)
+    // ONE path, with or without a local checkout. Outside one an explicit id is
+    // the whole address — there is nothing local to infer from, compare
+    // against, or clean up — and with no id either, `resolveTarget` owns the
+    // "run this from an app directory" refusal.
+    const inCheckout = findAppDir() !== null || !explicitId
+    const { appDir, appId, token, api } = inCheckout
+      ? await resolveTarget(appArg)
+      : { appDir: null, ...(await resolveApiOnly(appArg)) }
+    // `inCheckout` is false only when an explicit id was given.
+    const id = appDir ? inferWorkspaceId(appDir, explicitId) : explicitId!
+    const inspection = appDir ? inspectWorkspaceCleanup(appDir, id) : null
     let approvedBranchOid: string | undefined
     const { view: before } = await api.getWorkspace(id)
+    // Dropping reaps the PUBLISHED line, so this guard protects the CLOUD side
+    // and sits OUTSIDE the local-ownership condition below. It applies to every
+    // seat, a checkout-less one included: seeing nothing is the weakest
+    // position, not a licence to drop. `--abandon-unseen` is the only waiver.
+    if (before.workspace.status === 'active' && before.tipOid !== null) {
+      // The fetch lives OUTSIDE the refusal condition on purpose: the second
+      // guard's containment proof needs this object too, so skipping it with
+      // `--abandon-unseen` used to make that guard fail with a false
+      // "isn't published yet" — the escape only escaped if you first
+      // triggered the refusal you were escaping.
+      if (appDir) {
+        // The recovery is a `git pull` IN this checkout, so the token goes in:
+        // it needs the remote configured and an identity to write the merge
+        // commit, or the one command we hand back dies where we told the user
+        // to run it.
+        ensureSpaceRemote(appDir, appId, undefined, token)
+        if (resolveCommit(appDir, before.tipOid) === null) {
+          runGitRemote(
+            appDir,
+            token,
+            ['fetch', '--quiet', '--refmap=', SPACE_REMOTE, before.workspace.ref],
+            { allowFail: true },
+          )
+        }
+      }
+      // 'unknown' with no local branch — and with no checkout at all.
+      const relation = workspaceSyncRelation(appDir, inspection?.branchOid ?? null, before.tipOid)
+      if (!abandonUnseen && relation !== 'in_sync' && relation !== 'ahead') {
+        const pullArgv = ['git', 'pull', '--no-rebase', SPACE_REMOTE, before.workspace.ref]
+        const attachArgv = ['deepspace', 'workspace', 'attach', id, '--app', appId]
+        // `--abandon-unseen` is named in the PROSE and never handed back as
+        // the action. The action is what an agent runs verbatim on the first
+        // retry, and this refusal exists to stop exactly that: pointing it at
+        // the destructive bypass turned the guard into a one-hop speed bump.
+        // The escape stays a decision a human types.
+        const abandonCommand = humanCommand([
+          'deepspace',
+          'workspace',
+          'drop',
+          id,
+          '--app',
+          appId,
+          '--abandon-unseen',
+        ])
+        // Only name the pull when there is a worktree to run it in: in a
+        // branch-only clone that command runs against the CURRENT branch and
+        // fast-forwards trunk onto the workspace line.
+        const worktreeDir = inspection?.checkout.dir ?? null
+        throw new Refusal(
+          `Dropping ${id} would discard its published tip ${before.tipOid.slice(0, 10)}, which ` +
+            `this seat has not read (${relation}) — integrate it first, or run ` +
+            `\`${abandonCommand}\` to abandon it unread. Nothing was dropped.`,
+          'workspace_behind',
+          {
+            action: worktreeDir
+              ? { cwd: worktreeDir, argv: pullArgv }
+              : appDir
+                ? { cwd: appDir, argv: attachArgv }
+                : undefined,
+            extra: {
+              workspaceId: id,
+              publishedTip: before.tipOid,
+              localTip: inspection?.branchOid ?? null,
+              relation,
+            },
+          },
+        )
+      }
+    }
 
     // External Git/Codex/Claude worktrees are retained by cleanup, so only a
-    // branch that default cleanup actually owns needs publication proof.
-    if (!keepWorktree && inspection.willDeleteBranch && inspection.branchOid) {
+    // branch that default cleanup actually owns needs LOCAL publication proof.
+    if (appDir && inspection && !keepWorktree && inspection.willDeleteBranch && inspection.branchOid) {
       const publishedOids = [
-        before.tipOid,
+        // A FINISHED workspace's own ref is being reaped — it can prove
+        // nothing. Only trunk (landed) or the pre-existing base counts, or a
+        // dropped workspace's last local copy gets deleted on the strength of
+        // the very ref that is going away.
+        ...(before.workspace.status === 'active' ? [before.tipOid] : []),
         before.workspace.landedOid,
         before.workspace.baseOid,
       ].filter((oid): oid is string => oid !== null)
@@ -189,12 +260,27 @@ export const dropWorkspaceCommand = defineDeepspaceCommand({
       approvedBranchOid = inspection.branchOid
     }
 
-    const cleanupDir = inspection.willDeleteBranch ? inspection.checkout.dir : null
+    const cleanupDir = inspection?.willDeleteBranch ? inspection.checkout.dir : null
     if (!keepWorktree && cleanupDir && !isWorkTreeClean(cleanupDir)) {
       const dropArgv = ['deepspace', 'workspace', 'drop', id, '--app', appId]
       const dropNext = humanCommand(dropArgv)
+      // "Commit them" over an UNMERGED index commits the <<<<<<< markers —
+      // and following this refusal's own chain then published them to the
+      // workspace ref, where a peer sees them. Same guard `land` and
+      // `review merge` use; the class is "any verb that tells you to commit".
+      const conflicted = unmergedIndexRefusal(cleanupDir, {
+        ours: 'A merge',
+        resume: dropNext,
+      })
+      if (conflicted) {
+        throw new Refusal(
+          `${conflicted.message} Or pass \`--keep-worktree\` to drop the workspace while retaining this checkout. Nothing was dropped.`,
+          conflicted.code,
+          { extra: { workspaceId: id, conflict: true, operation: conflicted.operation } },
+        )
+      }
       throw new Refusal(
-        `The workspace checkout has uncommitted changes and cleanup would remove it or switch it off ${inspection.branch}. Commit them and re-run \`${dropNext}\`, or pass \`--keep-worktree\` to drop while retaining the checkout. Nothing was dropped.`,
+        `The workspace checkout has uncommitted changes and cleanup would remove it or switch it off ${inspection!.branch}. Commit them and re-run \`${dropNext}\`, or pass \`--keep-worktree\` to drop while retaining the checkout. Nothing was dropped.`,
         'dirty_worktree',
         { extra: { workspaceId: id } },
       )
@@ -204,22 +290,38 @@ export const dropWorkspaceCommand = defineDeepspaceCommand({
     // drop remotely — but this stale worktree is still worth cleaning up, and
     // no other verb owns that. The publication proof above already accepted
     // the local tip against the landed history, so cleanup is safe.
-    // Re-dropping replays server-side, so `before`'s status decides the
-    // report: otherwise a no-op replay claims a fresh drop.
-    const { view, remoteDropped } = await dropRemoteTolerant(api, id, before.workspace.status)
-    spinner?.message(`Cleaning up ${id} locally…`)
-    const cleanup = keepWorktree
-      ? null
-      : cleanupWorkspaceLocal(appDir, id, null, {
-          expectedBranchOid: approvedBranchOid,
-          retainLocal: !inspection.willDeleteBranch,
-        })
+    // Re-read: the guards above may have taken a while, and `remoteDropped`
+    // must reflect the status the drop call actually raced. Re-dropping
+    // replays server-side, so this pre-drop status decides the report —
+    // otherwise a no-op replay claims a fresh drop.
+    const statusBefore = (await api.getWorkspace(id)).view.workspace.status
+    const { view, remoteDropped } = await dropRemoteTolerant(api, id, statusBefore)
+    if (appDir && !keepWorktree) spinner?.message(`Cleaning up ${id} locally…`)
+    const cleanup =
+      appDir && inspection && !keepWorktree
+        ? cleanupWorkspaceLocal(appDir, id, null, {
+            expectedBranchOid: approvedBranchOid,
+            retainLocal: !inspection.willDeleteBranch,
+          })
+        : null
     const retainedWorktree =
-      cleanup?.worktreeRetained ?? (keepWorktree ? inspection.checkout.dir : null)
+      cleanup?.worktreeRetained ?? (keepWorktree ? (inspection?.checkout.dir ?? null) : null)
+    // A clone with no local copy of the line cannot be BEHIND anything, so
+    // the guard above has nothing to compare and correctly lets the drop
+    // through — but the tip it reaped still deserves to be said out loud,
+    // not discovered later by whoever wrote it.
+    // Report the abandoned tip whenever this seat could not prove it had read
+    // it — including (especially) when the user explicitly ordered the
+    // discard, where the exact OID is known and was suppressed before.
+    const discardedTip =
+      remoteDropped && before.tipOid && (!inspection?.branchOid || abandonUnseen)
+        ? before.tipOid
+        : null
     const data = {
       workspaceId: id,
       status: view.workspace.status,
       remoteDropped,
+      ...(discardedTip ? { discardedTip } : {}),
       ...(retainedWorktree ? { worktree: retainedWorktree } : {}),
       ...(cleanup ? { cleanup: cleanupJson(cleanup) } : {}),
     }
@@ -230,8 +332,14 @@ export const dropWorkspaceCommand = defineDeepspaceCommand({
       p.log.success(
         remoteDropped
           ? `Dropped ${id}. Its ref sticks around briefly for undo, then is reaped.`
-          : `Workspace ${id} was already ${view.workspace.status} on the server — nothing to drop remotely.`,
+          : `Workspace ${id} was already ${statusBefore} on the server — nothing to drop remotely.`,
       )
+      if (discardedTip) {
+        p.log.warn(
+          `The published tip ${discardedTip.slice(0, 10)} was abandoned unread — this seat could ` +
+            `not prove it had read it. Its ref is retained briefly if that was a mistake.`,
+        )
+      }
       if (cleanup && !cleanup.error) reportCleanupHuman(cleanup)
       else if (retainedWorktree) p.log.info(`Retained checkout: ${retainedWorktree}`)
     }

@@ -50,7 +50,7 @@ describe('GitHub remote selection', () => {
 
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), 'ds-source-control-'))
-    runGit(repo, ['init', '--quiet'])
+    runGit(repo, ['init', '--quiet', '-b', 'main'])
   })
 
   afterEach(() => rmSync(repo, { recursive: true, force: true }))

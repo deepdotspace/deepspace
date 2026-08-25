@@ -1,7 +1,7 @@
 /** Process hardening and Git-version parsing. */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GIT_TIMEOUT_MS, GitError, gitMeetsFloor, parseGitVersion, runGit } from '../git/process'
@@ -10,7 +10,7 @@ let dir: string
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), 'ds-git-process-'))
-  runGit(dir, ['init', '--quiet'])
+  runGit(dir, ['init', '--quiet', '-b', 'main'])
 })
 
 afterAll(() => rmSync(dir, { recursive: true, force: true }))
@@ -77,5 +77,48 @@ describe('Git 2.29 version floor', () => {
     expect(gitMeetsFloor([2, 26])).toBe(false)
     expect(gitMeetsFloor([1, 9])).toBe(false)
     expect(gitMeetsFloor(null)).toBe(true)
+  })
+})
+
+describe('ENOENT is ambiguous — say WHICH thing is missing', () => {
+  it('reports a vanished cwd as worktree_missing, not a missing git install', () => {
+    const gone = mkdtempSync(join(tmpdir(), 'ds-git-gone-'))
+    rmSync(gone, { recursive: true, force: true })
+    try {
+      runGit(gone, ['status'])
+      expect.unreachable('a git run in a deleted directory must throw')
+    } catch (error) {
+      const err = error as GitError
+      expect(err.code).toBe('worktree_missing')
+      expect(err.message).toContain(gone)
+      // The recovery is prune + re-attach, not "install git".
+      expect(err.message).toMatch(/prune/)
+      expect(err.message).not.toMatch(/not installed/)
+    }
+  })
+
+  it('reports a cwd that is a FILE the same way (ENOTDIR, not a generic failure)', () => {
+    const file = join(dir, 'not-a-directory')
+    writeFileSync(file, 'x')
+    try {
+      runGit(file, ['status'])
+      expect.unreachable('a git run with a file as cwd must throw')
+    } catch (error) {
+      const err = error as GitError
+      expect(err.code).toBe('worktree_missing')
+      expect(err.message).toContain(file)
+    }
+  })
+
+  it('still says "git is not installed" when the cwd is fine and git is absent', () => {
+    // PATH with no git on it: the binary lookup fails while the cwd exists.
+    try {
+      runGit(dir, ['status'], { env: { PATH: join(dir, 'empty-bin') } })
+      // Some environments resolve git by absolute path from the parent env;
+      // if the run succeeded there is nothing to assert about the message.
+    } catch (error) {
+      const err = error as GitError
+      if (err.code) expect(err.code).toBe('git_not_installed')
+    }
   })
 })

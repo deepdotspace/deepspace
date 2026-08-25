@@ -57,6 +57,9 @@ function commitScaffoldIfUnborn(appDir: string, token: string): boolean {
     if (runGit(appDir, ['rev-parse', '--verify', 'HEAD'], { allowFail: true }).status === 0) {
       return false
     }
+    // The one PRE-REMOTE commit in the CLI: this runs before any `space`
+    // remote exists, so it is the only direct caller left. Every remote-bound
+    // verb gets its identity through `ensureSpaceRemote`, which folds this in.
     ensureGitIdentity(appDir, token)
     if (runGit(appDir, ['add', '-A'], { allowFail: true }).status !== 0) return false
     const commit = runGit(appDir, ['commit', '-m', 'Initial DeepSpace scaffold', '--no-verify'], {

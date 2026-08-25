@@ -6,7 +6,14 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import logs, { parseSince, SeenEvents, formatEvent, followInitialLimit, nextPollSince } from '../logs'
+import logs, {
+  parseSince,
+  SeenEvents,
+  formatEvent,
+  followInitialLimit,
+  nextPollSince,
+} from '../logs'
+import * as apiModule from '../../lib/api'
 import * as authModule from '../../auth'
 import * as appTargetModule from '../../lib/app-target'
 import * as appContext from '../../lib/app-context'
@@ -195,6 +202,129 @@ describe('formatEvent (color off)', () => {
     )
     expect(line).toContain('at a (x:1:1)')
     expect(line).toContain('at b (y:2:2)')
+  })
+})
+
+/**
+ * The NDJSON discriminators. An empty stream is indistinguishable from a
+ * crashed one without a record to read, so both modes emit one — and each
+ * carries the facts the human surface carries, because a "machine mirror"
+ * that knows less than the prose it mirrors is not one.
+ */
+describe('logs --json discriminator frames', () => {
+  const APP_ID = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    process.exitCode = undefined
+  })
+
+  async function runLogs(args: Record<string, unknown>, page: Record<string, unknown>) {
+    const out: string[] = []
+    const stdoutSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(((chunk: unknown) => {
+          out.push(String(chunk))
+          return true
+        }) as never)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    vi.spyOn(appTargetModule, 'assertAppTargetResolvable').mockImplementation(() => {})
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    vi.spyOn(appTargetModule, 'listApps').mockResolvedValue([
+      { appId: APP_ID, status: 'active', createdAt: 'x', deployedAt: 'y', name: null, url: null },
+    ])
+    // logs reads through the retrying variant when it has no abort signal, and
+    // plain apiFetch when it does (follow polls) — stub both.
+    vi.spyOn(apiModule, 'apiFetch').mockResolvedValue(page as never)
+    vi.spyOn(apiModule, 'apiFetchReadWithRetry').mockResolvedValue(page as never)
+    const command = logs as unknown as {
+      run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+    }
+    await command.run({ args: { json: true, ...args } })
+    stdoutSpy.mockRestore()
+    return out
+      .join('')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+  }
+
+  it('bounded mode emits a meta frame carrying appId and retentionDays', async () => {
+    const records = await runLogs({}, { events: [], truncated: false })
+
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({
+      type: 'meta',
+      count: 0,
+      appId: APP_ID,
+      retentionDays: 7,
+    })
+    expect(records[0].window).toEqual(expect.any(String))
+  })
+
+  it('follow mode OPENS with a ready frame, before any event', async () => {
+    // A tail on a quiet (or never-deployed) app otherwise emits zero bytes
+    // forever, and an agent cannot tell "connected, nothing to report" from
+    // "wedged". The frame is written before the first event and before the
+    // poll loop; the loop is then ended through its own FATAL path (a token
+    // refresh that fails is not retryable) rather than by raising SIGINT,
+    // which vitest itself handles.
+    const out: string[] = []
+    const stdoutSpy = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(((chunk: unknown) => {
+          out.push(String(chunk))
+          return true
+        }) as never)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(authModule, 'ensureToken')
+      .mockResolvedValueOnce('token')
+      .mockRejectedValue(new Error('session expired'))
+    vi.spyOn(appTargetModule, 'assertAppTargetResolvable').mockImplementation(() => {})
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    vi.spyOn(appTargetModule, 'listApps').mockResolvedValue([
+      { appId: APP_ID, status: 'active', createdAt: 'x', deployedAt: 'y', name: null, url: null },
+    ])
+    const page = {
+      events: [
+        {
+          id: 'e1',
+          timestamp: NOW,
+          level: 'log',
+          eventType: 'log',
+          message: 'hello',
+          source: 'server',
+        },
+      ],
+      truncated: false,
+    }
+    vi.spyOn(apiModule, 'apiFetch').mockResolvedValue(page as never)
+    vi.spyOn(apiModule, 'apiFetchReadWithRetry').mockResolvedValue(page as never)
+
+    const command = logs as unknown as {
+      run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+    }
+    await expect(command.run({ args: { json: true, follow: true } })).rejects.toThrow(
+      /session expired/,
+    )
+    stdoutSpy.mockRestore()
+
+    const records = out
+      .join('')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+
+    expect(records[0]).toMatchObject({
+      type: 'ready',
+      appId: APP_ID,
+      count: 1,
+      retentionDays: 7,
+    })
+    // It precedes the event it announced.
+    expect(records[1]).toMatchObject({ id: 'e1' })
   })
 })
 

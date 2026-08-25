@@ -23,7 +23,7 @@ import { sync as spawnSync } from 'cross-spawn'
 import { readFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { wrapCommandErrors, errorCode } from './lib/cli-errors'
+import { wrapCommandErrors, errorCode, formatCliError } from './lib/cli-errors'
 import { forTerminal, humanCommand, stripAnsi } from './lib/cli-format'
 import { stopActiveSpinner } from './lib/spinner'
 import { executableAction, printAction, withSlug } from './lib/output'
@@ -68,6 +68,16 @@ import gitCredential from './commands/git-credential'
 import source from './commands/source'
 import update from './commands/update'
 
+// A reader that exits first (`deepspace secrets download | head`) closes the
+// pipe under us; Node's default is an unhandled 'error' event and a stack
+// trace. SWALLOW rather than exit: exiting 0 the moment a write fails reports
+// SUCCESS for a long verb killed mid-operation, and every spinner tick goes to
+// stdout. Dropping the write lets the command finish on its own verdict.
+process.stdout.on('error', (error: NodeJS.ErrnoException) => {
+  if (error.code === 'EPIPE') return
+  throw error
+})
+
 // Read own version from package.json so the CLI banner stays in sync with publishes.
 // __dirname of the bundled output is <pkg>/dist; package.json sits one level up.
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -110,6 +120,22 @@ const create = defineCommand({
     },
   },
   run({ rawArgs }) {
+    // `--json` is forwarded like everything else, and the scaffolder has no
+    // JSON mode — so the documented first step of the lifecycle would die on
+    // `Unknown option '--json'` having written a human line and NO envelope,
+    // the one shape a machine caller cannot handle. Refuse it here, in the
+    // envelope an agent is already parsing, and say what to run instead.
+    if (rawArgs.includes('--json')) {
+      console.log(
+        JSON.stringify({
+          ok: false,
+          code: 'invalid_flags',
+          error:
+            '`app create` runs the interactive scaffolder, which has no JSON mode — its output is a directory, not a document. Run it without --json; every later command in the new app supports it.',
+        }),
+      )
+      process.exit(1)
+    }
     // Forward EVERY argument verbatim and pin the scaffolder to this CLI's own
     // version — `npm create deepspace@latest` used to drop all flags and could
     // fetch a create-deepspace newer than the running CLI.
@@ -260,8 +286,16 @@ function assertKnownCommandPath(argv: string[]): void {
     `${unknownCommandMessage(unknown)}\n` +
       `Run \`${unknown.helpPath.join(' ')} --help\` for the command list.`,
   )
+  // Only a CERTAIN, non-destructive correction becomes a runnable line; a
+  // lexical guess stays prose. The caller's own positionals ride along, or the
+  // action would refuse `missing_argument` when run verbatim.
   if (unknown.executable) {
-    printAction(executableAction({ cwd: process.cwd(), argv: unknown.suggestion }))
+    printAction(
+      executableAction({
+        cwd: process.cwd(),
+        argv: [...unknown.suggestion, ...unknown.remainder],
+      }),
+    )
   }
   process.exit(1)
 }
@@ -342,8 +376,19 @@ if (rawArgs.includes('--json') && !wantsHelp) {
         ok: false,
         code: 'unknown_command',
         error: unknownCommandMessage(unknown),
+        // The corrected verb PLUS what the caller wrote after it: an action
+        // that drops the positionals refuses `missing_argument` when run
+        // verbatim, which is the one thing the action contract promises it
+        // will not do. Attached ONLY when the correction is executable
+        // (certain and non-destructive); a guess would hand an agent a
+        // different verb to execute against its own arguments.
         ...(unknown.executable
-          ? { action: executableAction({ cwd: process.cwd(), argv: unknown.suggestion }) }
+          ? {
+              action: executableAction({
+                cwd: process.cwd(),
+                argv: [...unknown.suggestion, ...unknown.remainder],
+              }),
+            }
           : {}),
       }),
     )
@@ -366,9 +411,11 @@ if (rawArgs.includes('--json') && !wantsHelp) {
           : cittyCode === 'E_NO_COMMAND'
             ? 'no_command'
             : errorCode(err)
-    // citty colorizes some messages (cyan), so strip ANSI before it lands
-    // in the machine-read string.
-    const message = stripAnsi(err instanceof Error ? err.message : String(err))
+    // formatCliError first (it rewrites the errors whose raw text names no
+    // fix — a vanished cwd reports `ENOENT … uv_cwd`), then stripAnsi: citty
+    // colorizes some messages (cyan) and its no-color check ignores a non-TTY
+    // stdout, so strip before it lands in the machine-read string.
+    const message = stripAnsi(formatCliError(err))
     console.log(JSON.stringify({ ok: false, error: message, ...(code ? { code } : {}) }))
     process.exit(1)
   })

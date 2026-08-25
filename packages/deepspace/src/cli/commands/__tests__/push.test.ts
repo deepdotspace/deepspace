@@ -23,6 +23,7 @@ import * as vcRemoteModule from '../../lib/vc-remote'
 // license to hang.
 vi.setConfig({ testTimeout: 30_000 })
 
+
 // A valid ws/<ulid> branch (Crockford base32: no I/L/O/U).
 const WS_BRANCH = 'ws/01hq9j8k7m6n5p4r3s2t1v0w9x'
 const WS_ID = 'ws_01HQ9J8K7M6N5P4R3S2T1V0W9X'
@@ -100,6 +101,22 @@ describe('workspaceBranchPushRefusal', () => {
     expect(r).not.toBeNull()
     expect(r!.code).toBe('workspace_branch')
     expect(r!.error).toContain('workspace sync')
+  })
+
+  it('refuses a MALFORMED ws/ name too — the namespace is reserved by prefix', () => {
+    // `ws/fakeid` is not a workspace id, and matching only the ULID shape lets
+    // it become a real branch that `land --into` then accepts as a target,
+    // stranding the work on it.
+    const r = workspaceBranchPushRefusal('ws/fakeid')
+    expect(r).not.toBeNull()
+    expect(r!.code).toBe('workspace_branch')
+    expect(workspaceBranchPushRefusal('wsfoo')).toBeNull()
+    expect(workspaceBranchPushRefusal('feature/ws/x')).toBeNull()
+    // Case-SENSITIVE, matching the server and git itself: `WS/foo` is a legal
+    // branch the server accepts, so refusing it would make the CLI stricter
+    // than the platform.
+    expect(workspaceBranchPushRefusal('WS/foo')).toBeNull()
+    expect(workspaceBranchPushRefusal('ws')).toBeNull()
   })
 
   it('renders the workspace refusal through the shared exit-2 boundary', async () => {
@@ -223,6 +240,13 @@ describe('push recovery target', () => {
       registered: true,
     })
     vi.spyOn(vcRemoteModule, 'ensureSpaceRemote').mockReturnValue('https://example.invalid/repo')
+    // A rejected fast-forward probes the cloud tip (to tell an own-line
+    // rewrite and a strictly-behind checkout apart); stub that fetch.
+    vi.spyOn(vcRemoteModule, 'runGitRemote').mockReturnValue({
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      status: 0,
+    })
     vi.spyOn(vcPushModule, 'pushToSpace').mockReturnValue({
       status: 'non_fast_forward',
       localRef: `refs/heads/${branch}`,
@@ -300,6 +324,13 @@ describe('push recovery target', () => {
       registered: true,
     })
     vi.spyOn(vcRemoteModule, 'ensureSpaceRemote').mockReturnValue('https://example.invalid/repo')
+    // A rejected fast-forward probes the cloud tip (to tell an own-line
+    // rewrite and a strictly-behind checkout apart); stub that fetch.
+    vi.spyOn(vcRemoteModule, 'runGitRemote').mockReturnValue({
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      status: 0,
+    })
     vi.spyOn(vcPushModule, 'pushToSpace').mockReturnValue({
       status: 'non_fast_forward',
       localRef: `refs/heads/${branch}`,
@@ -316,6 +347,265 @@ describe('push recovery target', () => {
         argv: ['deepspace', 'pull', '--app', appId, '--branch', branch],
       },
     })
+  })
+})
+
+describe('the --force ownership ledger', () => {
+  const appId = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
+  const LEDGER = (branch: string) => `refs/deepspace/pushed/${branch}`
+
+  /** Everything the run needs to reach the push itself, with the network
+   *  stubbed: the probe fetch is a no-op, so whatever FETCH_HEAD holds is what
+   *  the force guard reads as the cloud tip. */
+  function stageTarget() {
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(appId)
+    vi.spyOn(appTargetModule, 'warnIfPhantomApp').mockResolvedValue()
+    vi.spyOn(sourceApiModule, 'getAppSource').mockResolvedValue({
+      appId,
+      source: { provider: 'deepspace' },
+      revision: 1,
+      registered: true,
+    })
+    vi.spyOn(vcRemoteModule, 'ensureSpaceRemote').mockReturnValue('https://example.invalid/repo')
+    vi.spyOn(vcRemoteModule, 'runGitRemote').mockReturnValue({
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      status: 0,
+    })
+  }
+
+  const seedFetchHead = (dir: string, oid: string, branch: string) =>
+    writeFileSync(join(dir, '.git', 'FETCH_HEAD'), `${oid}\t\tbranch '${branch}' of space\n`)
+
+  // `rev-parse --verify` exits non-zero on a missing ref, which is the answer
+  // here rather than a failure.
+  const hasRef = (dir: string, ref: string): boolean => {
+    try {
+      return (
+        execFileSync('git', ['rev-parse', '--verify', '--quiet', ref], {
+          cwd: dir,
+          encoding: 'utf-8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim().length > 0
+      )
+    } catch {
+      return false
+    }
+  }
+
+  it('records NOTHING on up_to_date, so a later force onto a peer tip is still refused', async () => {
+    // `up_to_date` means the cloud tip equals ours — just as true right after
+    // pulling a PEER's commit as after publishing our own. Recording it would
+    // claim ownership of work this checkout never published, and the force
+    // guard reads that record as "your own line".
+    const branch = 'main'
+    repo = makeRepo(branch)
+    const root = git(repo, ['rev-parse', 'HEAD']).trim()
+    writeFileSync(join(repo, 'ours.txt'), 'our work\n')
+    git(repo, ['add', 'ours.txt'])
+    git(repo, ['commit', '-q', '-m', 'our work'])
+    // A real commit off the SAME root: neither side contains the other, which
+    // is what makes this a divergence rather than a rewind.
+    git(repo, ['switch', '-q', '--detach', root])
+    writeFileSync(join(repo, 'peer.txt'), 'peer work\n')
+    git(repo, ['add', 'peer.txt'])
+    git(repo, ['commit', '-q', '-m', 'peer work'])
+    const peerOid = git(repo, ['rev-parse', 'HEAD']).trim()
+    git(repo, ['update-ref', 'refs/heads/peer', peerOid])
+    git(repo, ['switch', '-q', branch])
+    stageTarget()
+
+    const upToDate = vi.spyOn(vcPushModule, 'pushToSpace').mockReturnValue({
+      status: 'up_to_date',
+      localRef: `refs/heads/${branch}`,
+      remoteRef: `refs/heads/${branch}`,
+      summary: '(up to date)',
+    })
+    const first = await runPushJson({ app: 'selected-app', branch }, repo)
+    expect(first.output).toMatchObject({ ok: true, status: 'up_to_date' })
+    // The whole point: no ownership was claimed.
+    expect(hasRef(repo, LEDGER(branch))).toBe(false)
+
+    // Now force over the peer's tip. With no ledger the guard cannot call this
+    // our own line, so it refuses rather than dropping the peer's commit.
+    upToDate.mockRestore()
+    seedFetchHead(repo, peerOid, branch)
+    const { output, exits } = await runPushJson(
+      { app: 'selected-app', branch, force: true },
+      repo,
+    )
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'diverged',
+      appId,
+      branch,
+      action: { argv: ['deepspace', 'pull', '--app', appId, '--branch', branch] },
+    })
+    // No record ⇒ no claim about a peer, and no claim that we pushed it: a
+    // plain `git push space` publishes without writing the ledger.
+    expect(String(output.error)).toContain('no record of publishing it')
+    expect(exits).toEqual([2])
+  })
+
+  it('refuses a force that would only REWIND as `behind`, not `diverged`', async () => {
+    // The cloud tip CONTAINS ours, so the force publishes nothing and drops
+    // provable commits — a fast-forward, not a merge, and its own slug.
+    const branch = 'main'
+    repo = makeRepo(branch)
+    writeFileSync(join(repo, 'newer.txt'), 'newer\n')
+    git(repo, ['add', 'newer.txt'])
+    git(repo, ['commit', '-q', '-m', 'newer'])
+    const aheadOid = git(repo, ['rev-parse', 'HEAD']).trim()
+    // Keep the object alive, then rewind the branch behind it.
+    git(repo, ['update-ref', 'refs/heads/ahead', aheadOid])
+    git(repo, ['reset', '-q', '--hard', 'HEAD~1'])
+    stageTarget()
+    seedFetchHead(repo, aheadOid, branch)
+
+    const { output, exits } = await runPushJson(
+      { app: 'selected-app', branch, force: true },
+      repo,
+    )
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'behind',
+      appId,
+      branch,
+      action: { argv: ['deepspace', 'pull', '--app', appId, '--branch', branch] },
+    })
+    expect(String(output.error)).toContain('strictly behind')
+    expect(String(output.error)).toContain('REWIND')
+    expect(exits).toEqual([2])
+  })
+
+  it('reports an ORDINARY push that is strictly behind as `behind`, not non_fast_forward', async () => {
+    // Same classification the --force guard makes. `non_fast_forward` here
+    // tells an agent to reconcile a divergence that does not exist: the pull
+    // is a plain fast-forward and there is nothing local to publish.
+    const branch = 'main'
+    repo = makeRepo(branch)
+    writeFileSync(join(repo, 'newer.txt'), 'newer\n')
+    git(repo, ['add', 'newer.txt'])
+    git(repo, ['commit', '-q', '-m', 'newer'])
+    const aheadOid = git(repo, ['rev-parse', 'HEAD']).trim()
+    git(repo, ['update-ref', 'refs/heads/ahead', aheadOid])
+    git(repo, ['reset', '-q', '--hard', 'HEAD~1'])
+    stageTarget()
+    seedFetchHead(repo, aheadOid, branch)
+    vi.spyOn(vcPushModule, 'pushToSpace').mockReturnValue({
+      status: 'non_fast_forward',
+      localRef: `refs/heads/${branch}`,
+      remoteRef: `refs/heads/${branch}`,
+      summary: '[rejected] (non-fast-forward)',
+      reason: 'non-fast-forward',
+    })
+
+    const { output, exits } = await runPushJson({ app: 'selected-app', branch, force: false }, repo)
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'behind',
+      // The underlying git outcome stays readable in `extra`.
+      status: 'non_fast_forward',
+      action: { argv: ['deepspace', 'pull', '--app', appId, '--branch', branch] },
+    })
+    expect(String(output.error)).toContain('already contains everything this checkout has')
+    expect(exits).toEqual([2])
+  })
+})
+
+describe('rejection codes are one classification across the verbs', () => {
+  it('maps an oversize reason to push_too_large rather than the catch-all', async () => {
+    // `push`, `workspace sync` and `workspace land` all read
+    // `classifyRejection`, so a size-capped push reports the same slug
+    // whichever verb hit it.
+    const branch = 'main'
+    const appId = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
+    repo = makeRepo(branch)
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(appId)
+    vi.spyOn(appTargetModule, 'warnIfPhantomApp').mockResolvedValue()
+    vi.spyOn(sourceApiModule, 'getAppSource').mockResolvedValue({
+      appId,
+      source: { provider: 'deepspace' },
+      revision: 1,
+      registered: true,
+    })
+    vi.spyOn(vcRemoteModule, 'ensureSpaceRemote').mockReturnValue('https://example.invalid/repo')
+    vi.spyOn(vcPushModule, 'pushToSpace').mockReturnValue({
+      status: 'rejected',
+      localRef: `refs/heads/${branch}`,
+      remoteRef: `refs/heads/${branch}`,
+      summary: '[remote rejected]',
+      // The server states the machine fact itself: `<code>: <sentence>`, with
+      // the token at offset 0. The pusher-chosen path rides in the detail,
+      // where it cannot steal a code.
+      reason: 'push_too_large: object exceeds the push size limit — assets/video.mp4',
+      code: 'push_too_large',
+    })
+
+    const { output } = await runPushJson({ app: 'selected-app', branch }, repo)
+
+    expect(output).toMatchObject({ ok: false, code: 'push_too_large', status: 'rejected' })
+  })
+})
+
+describe('own-line rewrite recovery', () => {
+  const appId = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
+
+  // A non-fast-forward onto the tip THIS checkout last pushed — an amend of
+  // one's own published line.
+  function stageOwnRewrite(branch: string) {
+    repo = makeRepo(branch)
+    const headOid = git(repo, ['rev-parse', 'HEAD']).trim()
+    // The private "last pushed by me" ledger the guard reads, plus a
+    // FETCH_HEAD the (mocked, no-op) probe fetch leaves in place — together
+    // they make the cloud tip read back as our own last push, no network.
+    git(repo, ['update-ref', `refs/deepspace/pushed/${branch}`, headOid])
+    writeFileSync(join(repo, '.git', 'FETCH_HEAD'), `${headOid}\t\tbranch '${branch}' of space\n`)
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(appId)
+    vi.spyOn(appTargetModule, 'warnIfPhantomApp').mockResolvedValue()
+    vi.spyOn(sourceApiModule, 'getAppSource').mockResolvedValue({
+      appId,
+      source: { provider: 'deepspace' },
+      revision: 1,
+      registered: true,
+    })
+    vi.spyOn(vcRemoteModule, 'ensureSpaceRemote').mockReturnValue('https://example.invalid/repo')
+    // The own-last-push probe fetch succeeds as a no-op, leaving the
+    // FETCH_HEAD seeded above untouched.
+    vi.spyOn(vcRemoteModule, 'runGitRemote').mockReturnValue({
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      status: 0,
+    })
+    vi.spyOn(vcPushModule, 'pushToSpace').mockReturnValue({
+      status: 'non_fast_forward',
+      localRef: `refs/heads/${branch}`,
+      remoteRef: `refs/heads/${branch}`,
+      summary: '[rejected] (non-fast-forward)',
+      reason: 'non-fast-forward',
+    })
+  }
+
+  it('offers `push --force`, not the pull, when the cloud tip is our own last push', async () => {
+    const branch = 'feature/selected'
+    stageOwnRewrite(branch)
+    const { output, exits } = await runPushJson({ app: 'selected-app', branch, force: false }, repo)
+
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'non_fast_forward',
+      appId,
+      branch,
+      action: { argv: ['deepspace', 'push', '--force', '--app', appId, '--branch', branch] },
+    })
+    expect(String(output.error)).toContain('rewrote your own published')
+    expect(exits).toEqual([2])
   })
 })
 

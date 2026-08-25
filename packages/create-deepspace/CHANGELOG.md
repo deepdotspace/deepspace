@@ -1,5 +1,11 @@
 # create-deepspace
 
+## 0.25.0
+
+### Patch Changes
+
+- Raise the hono floor to ^4.12.34, the minimum release carrying the fixes for the 2026 hono security advisories (CORS credential reflection, bodyLimit bypass, cookie-name validation, and related middleware issues), in the SDK's dependencies and the scaffold template.
+
 ## 0.24.1
 
 ## 0.24.0

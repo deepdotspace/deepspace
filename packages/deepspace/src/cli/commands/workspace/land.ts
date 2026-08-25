@@ -4,15 +4,20 @@ import { defineDeepspaceCommand, Refusal } from '../../lib/command'
 import { executableAction, type CliAction } from '../../lib/output'
 import { runGit } from '../../lib/git/process'
 import {
-  currentBranch,
+  isAncestor,
   isPlausibleBranchName,
   isWorkTreeClean,
+  listWorktrees,
   resolveCommit,
 } from '../../lib/git/repository'
 import { committedSecretRefusal } from '../../lib/git/safety'
-import { pushToSpace } from '../../lib/vc-push'
 import {
-  ensureGitIdentity,
+  classifyRejection,
+  parseRefusalCode,
+  pushFailureMessage,
+  pushToSpace,
+} from '../../lib/vc-push'
+import {
   ensureSpaceRemote,
   runGitRemote,
   SPACE_REMOTE,
@@ -27,7 +32,6 @@ import {
   cleanupRefusalMessage,
   cleanupWorkspaceLocal,
   inOwnLinkedWorktree,
-  primaryAppDir,
   reportCleanupHuman,
 } from './local'
 import {
@@ -54,15 +58,57 @@ export function conflictMarkerFiles(diffCheckOutput: string): string[] {
   return [...files]
 }
 
-/** Refresh a primary checkout that is already on the branch landing advanced. */
-export function pullAfterLandAction(
-  primaryDir: string,
+/**
+ * The runnable twin of the "catch up" line — the interpreter/entry is pinned
+ * HERE (executableAction), because the caller builds it before cleanup, which
+ * can delete the npx-installed entry this process is running from; resolving
+ * at print time in the shared output runtime is too late.
+ */
+export function staleTrunkPullAction(
+  trunkCheckoutDir: string,
+  intoBranch: string,
+  appArg?: string,
+): CliAction {
+  return executableAction({
+    cwd: trunkCheckoutDir,
+    argv: [
+      'deepspace',
+      'pull',
+      '-b',
+      intoBranch,
+      // The trunk checkout is a DIFFERENT directory; carry `-a` when the
+      // caller named an app, or the action could resolve a different one
+      // from that cwd.
+      ...(appArg && appArg.trim() ? ['-a', appArg.trim()] : []),
+    ],
+  })
+}
+
+/**
+ * The checkout holding `intoBranch` when a land just moved that branch past
+ * it, or null — the one fact behind land's "catch up" line and its `deepspace
+ * pull` action.
+ *
+ * Names the worktree actually ON the branch, not the primary checkout:
+ * `deepspace pull` refuses inside a workspace worktree (it is on a `ws/*`
+ * branch), so pointing there would prescribe a command that cannot run.
+ *
+ * Strictly BEHIND only — pull fast-forwards, so an AHEAD or DIVERGED local
+ * trunk is a different conversation and gets no action rather than one that
+ * would be refused.
+ */
+export function staleTrunkCheckout(
+  appDir: string,
   intoBranch: string,
   landedOid: string,
-): CliAction | null {
-  if (currentBranch(primaryDir) !== intoBranch) return null
-  if (resolveCommit(primaryDir, 'HEAD') === landedOid) return null
-  return executableAction({ cwd: primaryDir, argv: ['deepspace', 'pull'] })
+): string | null {
+  // `listWorktrees` already drops entries whose directory is gone, so `dir` is
+  // a cwd git calls can run in.
+  const dir = listWorktrees(appDir).find((worktree) => worktree.branch === intoBranch)?.path ?? null
+  if (dir === null) return null
+  const localTip = resolveCommit(dir, `refs/heads/${intoBranch}`)
+  if (localTip === null || localTip === landedOid) return null
+  return isAncestor(dir, localTip, landedOid) ? dir : null
 }
 
 export interface LandArgs {
@@ -180,8 +226,7 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
       spinner?.stop('Workspace finished.')
       throw workspaceNotActiveRefusal(id, view.workspace.status, dropAction)
     }
-    ensureSpaceRemote(appDir, appId)
-    ensureGitIdentity(appDir, token)
+    ensureSpaceRemote(appDir, appId, undefined, token)
 
     // A conflict retry keeps the pure workspace line immutable: HEAD's first parent is its tip.
     const isResumedMerge =
@@ -189,7 +234,11 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
       view.tipOid !== null &&
       resolveCommit(appDir, 'HEAD^') === view.tipOid
     if (!isResumedMerge) {
-      pushWorkspaceRef(appDir, token, view.workspace.ref, headBefore)
+      // `view.tipOid` is what the cloud already holds for this workspace ref:
+      // it bounds the secret scan to the commits this publish actually
+      // uploads, and it is what lets the refusal tell "strictly behind" from a
+      // real divergence. Without it the scan degrades to the tip tree alone.
+      pushWorkspaceRef(appDir, token, view.workspace.ref, headBefore, view.tipOid)
     }
 
     const intoBranch =
@@ -331,6 +380,10 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
     const trunkSecret = committedSecretRefusal(appDir, resolveCommit(appDir, 'HEAD'), {
       action: `land onto ${intoBranch}`,
       then: 're-run the land',
+      // The fetched trunk tip is what this push uploads against, so the scan
+      // covers exactly the commits the merge carries onto trunk — the same
+      // range the server scans.
+      base: remoteTip,
     })
     if (trunkSecret) {
       spinner?.stop('Secret in history.')
@@ -342,7 +395,12 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
     if (push.status === 'ref_conflict' || push.status === 'non_fast_forward') {
       spinner?.stop('Trunk moved.')
       throw new Refusal(
-        `${intoBranch} moved while you merged (${push.reason ?? push.summary}). Re-run \`${resumeNext}\` to integrate the new tip.`,
+        // The machine token belongs in `code`, not mid-sentence: the reason
+        // arrives as `<code>: <sentence>`, and printing it raw put
+        // "stale_ref: stale ref, fetch first" inside human prose.
+        `${intoBranch} moved while you merged (${
+          parseRefusalCode(push.reason ?? push.summary)?.sentence ?? push.reason ?? push.summary
+        }). Re-run \`${resumeNext}\` to integrate the new tip.`,
         'trunk_moved',
         {
           actionRequired: true,
@@ -353,9 +411,12 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
     }
     if (push.status === 'rejected') {
       spinner?.stop('Push rejected.')
+      // Same classification `push` and `workspace sync` use: the reason text
+      // carries the stably-distinguishable conditions, and the raw reason on
+      // its own gave an agent a code it could not branch on and no advice.
       throw new Refusal(
-        `The cloud repo rejected the land push: ${push.reason ?? push.summary}.`,
-        'push_rejected',
+        pushFailureMessage('The land push', push, appDir),
+        classifyRejection(push.reason ?? push.summary ?? '', appDir).code,
       )
     }
 
@@ -405,11 +466,23 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
       )
     }
     spinner?.stop(`Landed ${id} into ${intoBranch} at ${landedOid.slice(0, 10)}.`)
-    const primaryDir = primaryAppDir(appDir)
-    // Pin the continuation while this CLI entry still exists. A successful
-    // cleanup can remove the managed worktree containing the npx-installed
-    // entry before the shared output runtime sees the action.
-    const action = pullAfterLandAction(primaryDir, intoBranch, landedOid)
+    // Read the trunk checkout's state BEFORE cleanup: cleanup can remove the
+    // very worktree we are standing in, and a git call afterwards runs with a
+    // deleted cwd — which surfaces as ENOENT and would report a SUCCESSFUL
+    // land (trunk moved, workspace recorded) as a hard failure.
+    const trunkCheckoutDir = staleTrunkCheckout(appDir, intoBranch, landedOid)
+    const localTrunkBehind = trunkCheckoutDir !== null
+    // Pin the continuation NOW as well: cleanup can also remove the managed
+    // worktree holding the npx-installed entry this process runs from, and the
+    // shared output runtime resolves the action's interpreter only at print
+    // time — too late.
+    const action = trunkCheckoutDir
+      ? staleTrunkPullAction(
+          trunkCheckoutDir,
+          intoBranch,
+          typeof args.app === 'string' ? args.app : undefined,
+        )
+      : null
     const cleanup = keepWorktree
       ? null
       : cleanupWorkspaceLocal(appDir, id, intoBranch, { expectedBranchOid: landedOid })
@@ -420,6 +493,7 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
       workspaceId: id,
       into: intoBranch,
       landedOid,
+      ...(localTrunkBehind ? { localTrunkBehind: true } : {}),
       ...(validationResult ? { validation: validationResult } : {}),
       ...(retainedWorktree ? { worktree: retainedWorktree } : {}),
       ...(cleanup ? { cleanup: cleanupJson(cleanup) } : {}),
@@ -428,6 +502,11 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
       reportCleanupHuman(cleanup)
     } else if (!args.json && retainedWorktree) {
       p.log.info(`Retained checkout: ${retainedWorktree}`)
+    }
+    if (!args.json && localTrunkBehind) {
+      p.log.info(
+        `Local ${intoBranch} in ${trunkCheckoutDir} is behind the landed merge — run \`deepspace pull\` there to catch up.`,
+      )
     }
     if (cleanup?.error) {
       const action = cleanupAction({

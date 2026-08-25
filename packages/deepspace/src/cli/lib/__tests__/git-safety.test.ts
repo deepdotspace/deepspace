@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import {
   committedSecretRefusal,
+  secretFilesInPushRange,
+  secretRecoverySentence,
   findOversizedObjects,
   statusFiles,
   trackedSecretFiles,
@@ -19,6 +21,7 @@ import { runGit } from '../git/process'
 // license to hang.
 vi.setConfig({ testTimeout: 30_000 })
 import { initRepo, resolveCommit } from '../git/repository'
+import { SPACE_REMOTE } from '../vc-remote'
 
 function git(cwd: string, args: string[], input?: string): string {
   return runGit(cwd, args, input === undefined ? {} : { input })
@@ -215,10 +218,15 @@ describe('committedSecretRefusal (workspace publish/land guard)', () => {
       expect(refusal).not.toBeNull()
       expect(refusal?.files).toContain('.env')
       expect(refusal?.code).toBe(SECRET_IN_HISTORY_CODE)
-      // Names the offender and the untrack recipe — an agent must not have to
-      // hunt for which file blocked the publish.
+      // Names the offender — an agent must not have to hunt for which file
+      // blocked the publish — and names a recovery that actually recovers.
+      // `git rm --cached` alone does NOT: the blob is already in the commit
+      // being published and rides its history either way, so recommending it
+      // sent agents around a loop of untrack → retry → identical refusal.
       expect(refusal?.message).toContain('.env')
-      expect(refusal?.message).toContain('git rm --cached')
+      expect(refusal?.message).not.toContain('git rm --cached')
+      expect(refusal?.message).toMatch(/rewrite the history|rename/i)
+      expect(refusal?.message).toMatch(/rotate/i)
     } finally {
       rmSync(r, { recursive: true, force: true })
     }
@@ -502,6 +510,243 @@ describe('findOversizedObjects', () => {
       expect(findOversizedObjects(empty, 1)).toEqual([])
     } finally {
       rmSync(empty, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('secretFilesInPushRange — the same scope the server enforces', () => {
+  const mkRepo = (): string => {
+    const r = mkdtempSync(join(tmpdir(), 'ds-secret-range-'))
+    initRepo(r, 'main')
+    git(r, ['config', 'user.email', 't@example.com'])
+    git(r, ['config', 'user.name', 'T'])
+    return r
+  }
+
+  it('sees a secret added then DELETED inside the range (the tip tree is clean)', () => {
+    const r = mkRepo()
+    try {
+      writeFileSync(join(r, 'a.txt'), 'one\n')
+      git(r, ['add', 'a.txt'])
+      git(r, ['commit', '-q', '-m', 'base'])
+      const base = resolveCommit(r, 'HEAD')!
+
+      writeFileSync(join(r, '.dev.vars'), 'TOKEN=hunter2\n')
+      git(r, ['add', '-f', '.dev.vars'])
+      git(r, ['commit', '-q', '-m', 'oops'])
+      // The "fix" an agent reaches for first — it cleans the TIP but the blob
+      // still rides the pack through the commit above.
+      git(r, ['rm', '-q', '--cached', '.dev.vars'])
+      git(r, ['commit', '-q', '-m', 'untrack'])
+      const tip = resolveCommit(r, 'HEAD')!
+
+      expect(trackedSecretFiles(r, tip)).toEqual([])
+      expect(secretFilesInPushRange(r, base, tip)).toContain('.dev.vars')
+    } finally {
+      rmSync(r, { recursive: true, force: true })
+    }
+  })
+
+  it('is clean when the range introduces no secret', () => {
+    const r = mkRepo()
+    try {
+      writeFileSync(join(r, 'a.txt'), 'one\n')
+      git(r, ['add', 'a.txt'])
+      git(r, ['commit', '-q', '-m', 'base'])
+      const base = resolveCommit(r, 'HEAD')!
+      writeFileSync(join(r, 'b.txt'), 'two\n')
+      git(r, ['add', 'b.txt'])
+      git(r, ['commit', '-q', '-m', 'more'])
+      expect(secretFilesInPushRange(r, base, resolveCommit(r, 'HEAD')!)).toEqual([])
+    } finally {
+      rmSync(r, { recursive: true, force: true })
+    }
+  })
+
+  it('scans the tip tree when there is no base (a first push)', () => {
+    const r = mkRepo()
+    try {
+      writeFileSync(join(r, '.env'), 'K=v\n')
+      git(r, ['add', '-f', '.env'])
+      git(r, ['commit', '-q', '-m', 'first'])
+      expect(secretFilesInPushRange(r, null, resolveCommit(r, 'HEAD')!)).toContain('.env')
+    } finally {
+      rmSync(r, { recursive: true, force: true })
+    }
+  })
+
+  it('scans the WHOLE history on a first push, where every commit is sent', () => {
+    // No base means no known remote tip, so the push uploads everything
+    // reachable from the tip — including a secret added and then removed. A
+    // tip-only scan called that clean and handed the refusal to the server,
+    // which answers from inside git's transport with no envelope.
+    const r = mkRepo()
+    try {
+      writeFileSync(join(r, '.dev.vars'), 'TOKEN=hunter2\n')
+      git(r, ['add', '-f', '.dev.vars'])
+      git(r, ['commit', '-q', '-m', 'oops'])
+      git(r, ['rm', '-q', '--cached', '.dev.vars'])
+      git(r, ['commit', '-q', '-m', 'untrack'])
+      const tip = resolveCommit(r, 'HEAD')!
+
+      expect(trackedSecretFiles(r, tip)).toEqual([])
+      expect(secretFilesInPushRange(r, null, tip)).toContain('.dev.vars')
+    } finally {
+      rmSync(r, { recursive: true, force: true })
+    }
+  })
+
+  it('reaches the ROOT commit, whose own files are additions too', () => {
+    // The secret exists ONLY in the initial commit, which is the shape a
+    // scaffolded repo takes: one commit, then someone notices and deletes the
+    // file. The blob still ships in a first push, so the walk has to reach the
+    // root — this pins that it does, whatever git's default for diffing the
+    // initial commit happens to be.
+    const r = mkRepo()
+    try {
+      writeFileSync(join(r, '.env'), 'K=v\n')
+      writeFileSync(join(r, 'a.txt'), 'one\n')
+      git(r, ['add', '-f', '.env', 'a.txt'])
+      git(r, ['commit', '-q', '-m', 'root commit carries it'])
+      git(r, ['rm', '-q', '.env'])
+      git(r, ['commit', '-q', '-m', 'remove'])
+      const tip = resolveCommit(r, 'HEAD')!
+
+      expect(trackedSecretFiles(r, tip)).toEqual([])
+      expect(secretFilesInPushRange(r, null, tip)).toContain('.env')
+    } finally {
+      rmSync(r, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('secret recovery advice must not describe a loop', () => {
+  it('does not offer a rename: the offending ADD stays in the range either way', () => {
+    const r = mkdtempSync(join(tmpdir(), 'ds-secret-rename-'))
+    try {
+      initRepo(r, 'main')
+      git(r, ['config', 'user.email', 't@example.com'])
+      git(r, ['config', 'user.name', 'T'])
+      writeFileSync(join(r, 'a.txt'), 'one\n')
+      git(r, ['add', 'a.txt'])
+      git(r, ['commit', '-q', '-m', 'base'])
+      const base = resolveCommit(r, 'HEAD')!
+
+      writeFileSync(join(r, '.env'), 'K=v\n')
+      git(r, ['add', '-f', '.env'])
+      git(r, ['commit', '-q', '-m', 'secret'])
+      expect(secretFilesInPushRange(r, base, resolveCommit(r, 'HEAD')!)).toContain('.env')
+
+      // Following a "just rename it" instruction leaves the refusal identical
+      // — and costs the agent the filename the message was keyed to.
+      git(r, ['mv', '.env', 'config.txt'])
+      git(r, ['commit', '-q', '-m', 'rename away'])
+      expect(secretFilesInPushRange(r, base, resolveCommit(r, 'HEAD')!)).toContain('.env')
+
+      expect(secretRecoverySentence(['.env'], 'push')).not.toMatch(/rename/i)
+      expect(secretRecoverySentence(['.env'], 'push')).toMatch(/rewrite the history/i)
+    } finally {
+      rmSync(r, { recursive: true, force: true })
+    }
+  })
+
+  it('catches a rename INTO a secret name (git reports it as R, not A)', () => {
+    const r = mkdtempSync(join(tmpdir(), 'ds-secret-into-'))
+    try {
+      initRepo(r, 'main')
+      git(r, ['config', 'user.email', 't@example.com'])
+      git(r, ['config', 'user.name', 'T'])
+      writeFileSync(join(r, 'notes.txt'), 'TOKEN=abc\n')
+      git(r, ['add', 'notes.txt'])
+      git(r, ['commit', '-q', '-m', 'base'])
+      const base = resolveCommit(r, 'HEAD')!
+
+      git(r, ['mv', 'notes.txt', '.env'])
+      git(r, ['commit', '-q', '-m', 'name it properly'])
+      git(r, ['rm', '-q', '.env'])
+      git(r, ['commit', '-q', '-m', 'remove'])
+      const tip = resolveCommit(r, 'HEAD')!
+
+      // The tip is clean and the add is a RENAME — but the .env-named tree
+      // and its blob still ride the pack, and the server refuses on exactly
+      // that. Rename detection made this invisible to a --diff-filter=A scan.
+      expect(trackedSecretFiles(r, tip)).toEqual([])
+      expect(secretFilesInPushRange(r, base, tip)).toContain('.env')
+    } finally {
+      rmSync(r, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('a new branch is not blamed for trunk history', () => {
+  const mk = (): string => {
+    const r = mkdtempSync(join(tmpdir(), 'ds-branch-scope-'))
+    initRepo(r, 'main')
+    git(r, ['config', 'user.email', 't@example.com'])
+    git(r, ['config', 'user.name', 'T'])
+    return r
+  }
+
+  it('does NOT refuse a new branch for a secret already accepted on trunk', () => {
+    // Every new branch has no per-branch base. Walking to the root there made
+    // a secret that the server already holds — long since accepted on trunk —
+    // block the first push of every branch cut from it, with a recovery
+    // (rewrite history) that would rewrite trunk.
+    const r = mk()
+    try {
+      writeFileSync(join(r, '.env'), 'K=v\n')
+      git(r, ['add', '-f', '.env'])
+      git(r, ['commit', '-q', '-m', 'historical secret on trunk'])
+      git(r, ['rm', '-q', '.env'])
+      git(r, ['commit', '-q', '-m', 'removed later'])
+      // The server already has trunk: that is what a tracking ref means.
+      git(r, ['update-ref', `refs/remotes/${SPACE_REMOTE}/main`, 'HEAD'])
+
+      git(r, ['checkout', '-q', '-b', 'feature'])
+      writeFileSync(join(r, 'a.txt'), 'clean work\n')
+      git(r, ['add', 'a.txt'])
+      git(r, ['commit', '-q', '-m', 'clean commit'])
+
+      expect(secretFilesInPushRange(r, null, resolveCommit(r, 'HEAD')!)).toEqual([])
+    } finally {
+      rmSync(r, { recursive: true, force: true })
+    }
+  })
+
+  it('still refuses a secret the branch itself adds', () => {
+    const r = mk()
+    try {
+      writeFileSync(join(r, 'a.txt'), 'one\n')
+      git(r, ['add', 'a.txt'])
+      git(r, ['commit', '-q', '-m', 'base'])
+      git(r, ['update-ref', `refs/remotes/${SPACE_REMOTE}/main`, 'HEAD'])
+
+      git(r, ['checkout', '-q', '-b', 'feature'])
+      writeFileSync(join(r, '.dev.vars'), 'TOKEN=x\n')
+      git(r, ['add', '-f', '.dev.vars'])
+      git(r, ['commit', '-q', '-m', 'oops'])
+      git(r, ['rm', '-q', '--cached', '.dev.vars'])
+      git(r, ['commit', '-q', '-m', 'untrack'])
+
+      expect(secretFilesInPushRange(r, null, resolveCommit(r, 'HEAD')!)).toContain('.dev.vars')
+    } finally {
+      rmSync(r, { recursive: true, force: true })
+    }
+  })
+
+  it('still walks to the root on the repo’s genuine first push', () => {
+    // No space refs at all: nothing on the server to exclude, so every commit
+    // really is being sent and the whole history is in scope.
+    const r = mk()
+    try {
+      writeFileSync(join(r, '.env'), 'K=v\n')
+      git(r, ['add', '-f', '.env'])
+      git(r, ['commit', '-q', '-m', 'root carries it'])
+      git(r, ['rm', '-q', '.env'])
+      git(r, ['commit', '-q', '-m', 'remove'])
+      expect(secretFilesInPushRange(r, null, resolveCommit(r, 'HEAD')!)).toContain('.env')
+    } finally {
+      rmSync(r, { recursive: true, force: true })
     }
   })
 })

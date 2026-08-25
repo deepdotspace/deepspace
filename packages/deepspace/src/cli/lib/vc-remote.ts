@@ -11,6 +11,8 @@ import { DEEPSPACE_ENV, PLATFORM_URLS, type DeepSpaceEnvironment } from '../env'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { shQuote } from './cli-format'
 import { runGit } from './git/process'
+import { declaredAppIds } from './app-identity'
+import { InputError } from './cli-errors'
 
 /** Resolve the source remote without allowing staging to re-aim production state. */
 export function spaceRemoteName(environment: DeepSpaceEnvironment = DEEPSPACE_ENV): string {
@@ -184,23 +186,59 @@ function installCredentialHelper(cwd: string, url: string): void {
   }
 }
 
-/** Point one platform source remote at this app and install its host-scoped credential helper. */
-export function ensureSpaceRemote(cwd: string, appId: string, remote = SPACE_REMOTE): string {
+/**
+ * Point one platform source remote at this app, install its host-scoped
+ * credential helper, and — when the caller hands over its session token —
+ * fill in the checkout's git identity.
+ *
+ * `token` is what marks a verb that will go on to COMMIT (or hand back a
+ * committing recovery): those are the only ones allowed to write
+ * `.git/config`, and every one of them already resolves a token before it gets
+ * here. Read-only verbs pass none and nothing is written. Folding the identity
+ * step in is what makes it a chokepoint — as a separate call it was an
+ * adjacent line each caller had to remember.
+ */
+export function ensureSpaceRemote(
+  cwd: string,
+  appId: string,
+  remote = SPACE_REMOTE,
+  token?: string,
+): string {
   const url = repoUrl(appId)
   const current = runGit(cwd, ['remote', 'get-url', remote], { allowFail: true })
-  if (current.status !== 0) {
-    runGit(cwd, ['remote', 'add', remote, url])
-  } else {
-    const existing = current.stdout.toString('utf-8').trim()
-    if (existing !== url) {
-      const priorApp = appIdFromRepoUrl(existing)
-      if (priorApp && priorApp !== appId && !process.argv.includes('--json')) {
-        process.stderr.write(
-          `warning: remote '${remote}' was pointed at app ${priorApp}; re-aiming it at ${appId}.\n`,
-        )
-      }
-      runGit(cwd, ['remote', 'set-url', remote, url])
+  const existing = current.status === 0 ? current.stdout.toString('utf-8').trim() : null
+  // The invariant is RE-AIMING: never point an existing remote at a different
+  // app than it already serves, or a later plain `git push` publishes this
+  // app's source into another's repo, exit 0. So the checkout's declared ids
+  // are consulted only when the remote is actually moving — a clone whose
+  // committed wrangler.toml still names the app it was forked from is ordinary,
+  // and a checkout declaring nothing proves nothing.
+  if (appIdFromRepoUrl(existing ?? '') !== appId) {
+    const owned = declaredAppIds(cwd)
+    if (owned.size > 0 && !owned.has(appId)) {
+      throw new InputError(
+        `This checkout declares ${[...owned].join(', ')}, but this command targets ${appId}. ` +
+          `Pointing its \`${remote}\` remote at another app would send every later plain ` +
+          `\`git push ${remote}\` to the wrong repo. Work on ${appId} from its own checkout ` +
+          `(\`deepspace clone ${appId}\` into a new directory), or fork THIS checkout into a ` +
+          `brand-new app of your own with \`deepspace app init --new-id\`.`,
+        'app_checkout_mismatch',
+      )
     }
+  }
+  // After the guard: a refused command must not have written to the user's
+  // `.git/config` on its way out.
+  if (token) ensureGitIdentity(cwd, token)
+  if (existing === null) {
+    runGit(cwd, ['remote', 'add', remote, url])
+  } else if (existing !== url) {
+    const priorApp = appIdFromRepoUrl(existing)
+    if (priorApp && priorApp !== appId && !process.argv.includes('--json')) {
+      process.stderr.write(
+        `warning: remote '${remote}' was pointed at app ${priorApp}; re-aiming it at ${appId}.\n`,
+      )
+    }
+    runGit(cwd, ['remote', 'set-url', remote, url])
   }
   installCredentialHelper(cwd, url)
   return url
@@ -229,12 +267,15 @@ export function removeSpaceRemote(cwd: string, remote = SPACE_REMOTE): boolean {
  * "unable to auto-detect email address") — cannot commit or merge, including
  * the `git pull` a divergence refusal hands back as its recovery.
  *
- * Deliberately NOT called from `ensureSpaceRemote`: read-only verbs must not
- * write to a user's `.git/config`. Call it from the verbs that go on to
- * commit or hand back a committing recovery (clone, attach, sync, land).
- * `--local` scope — shared by every linked worktree of the checkout, which is
- * what land-from-a-worktree needs — and per key, so anything the user set is
- * never overwritten.
+ * Called from `ensureSpaceRemote` — which passes the token exactly for the
+ * verbs that go on to commit — and once pre-remote from `init`, for the
+ * scaffold's first commit. `--local` scope — shared by every linked
+ * worktree of the checkout, which is what land-from-a-worktree needs — and per
+ * key, so anything the user set is never overwritten.
+ *
+ * `user.useConfigOnly=true` is respected: that flag means "never guess my
+ * identity", and guessing anyway — silently, in a repo the user deliberately
+ * left unconfigured — is precisely what it exists to prevent.
  */
 export function ensureGitIdentity(cwd: string, token: string): void {
   try {
@@ -244,6 +285,16 @@ export function ensureGitIdentity(cwd: string, token: string): void {
     const missingName = !configured('user.name')
     const missingEmail = !configured('user.email')
     if (!missingName && !missingEmail) return
+    // `--type=bool` because git accepts true|yes|on|1 and a bare key; a
+    // literal string compare would honor only `= true` and quietly overwrite
+    // every other spelling of the same intent.
+    if (
+      runGit(cwd, ['config', '--get', '--type=bool', 'user.useConfigOnly'], { allowFail: true })
+        .stdout.toString('utf-8')
+        .trim() === 'true'
+    ) {
+      return
+    }
     const payload = decodeJwtPayload<{ email?: string; name?: string }>(token)
     if (!payload.email) return
     if (missingName) {
@@ -254,6 +305,19 @@ export function ensureGitIdentity(cwd: string, token: string): void {
     if (missingEmail) {
       runGit(cwd, ['config', '--local', 'user.email', payload.email], { allowFail: true })
     }
+    // Say it out loud, with the undo — this writes to a file the user owns.
+    // To STDERR, always: `--json` promises exactly one document on stdout, and
+    // a chatty repair on the commonest bootstrap path (the first `--json` call
+    // in a fresh clone) makes that document unparseable. The undo names only
+    // the keys THIS call wrote (a hand-set user.name must survive the paste),
+    // and quotes the path so it survives a checkout with spaces in it.
+    const wrote = [...(missingEmail ? ['user.email'] : []), ...(missingName ? ['user.name'] : [])]
+    const dir = /^[A-Za-z0-9_./:@-]+$/.test(cwd) ? cwd : shQuote(cwd)
+    const undo = wrote.map((key) => `git -C ${dir} config --local --unset ${key}`).join(' && ')
+    process.stderr.write(
+      `Git identity for this checkout set from your DeepSpace login (${payload.email}).\n` +
+        `  Undo with: ${undo}\n`,
+    )
   } catch {
     // Undecodable token, unreadable config, or a non-repo cwd — leave Git as it is.
   }

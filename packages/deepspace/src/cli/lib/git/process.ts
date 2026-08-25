@@ -1,4 +1,6 @@
 import { sync as spawnSync } from 'cross-spawn'
+import { existsSync } from 'node:fs'
+import { displayLines } from '../cli-format'
 
 const MAX_GIT_BUFFER = 512 * 1024 * 1024
 
@@ -20,7 +22,10 @@ export class GitError extends Error {
     /** Optional machine slug; generic Git errors fall back to `git_error`. */
     readonly code?: string,
   ) {
-    super(message)
+    // git's own stderr carries ref names and paths the pusher chose, and this
+    // class bypasses the Refusal/InputError exits — `formatCliError` prints it
+    // verbatim to the terminal and into the `--json` envelope.
+    super(displayLines(message))
     this.name = 'GitError'
   }
 }
@@ -68,7 +73,18 @@ export function runGit(
   }
   if (result.error) {
     const code = (result.error as NodeJS.ErrnoException).code
-    if (code === 'ENOENT') {
+    // ENOENT is ambiguous: the BINARY is missing, or the cwd is. A worktree
+    // the user deleted or moved produces the second, and reporting "git is
+    // not installed" for it sends people to fix a working git install.
+    // ENOTDIR is the same story with a file where the directory should be.
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      if (code === 'ENOTDIR' || !existsSync(cwd)) {
+        throw new GitError(
+          `The directory this command runs in is not there: ${cwd}. ` +
+            `If it was a workspace worktree, prune it (\`git worktree prune\`) and re-attach.`,
+          'worktree_missing',
+        )
+      }
       throw new GitError(
         'git is not installed or not on PATH — install git and retry.',
         'git_not_installed',

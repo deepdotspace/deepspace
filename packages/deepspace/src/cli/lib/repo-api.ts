@@ -13,7 +13,16 @@
 
 import { randomUUID } from 'node:crypto'
 import { apiFetch, ApiError } from './api'
+import { displayText } from './cli-format'
+import { isWorkspaceId } from './workspace-id'
 import { githubSourceRefusal } from './source-api'
+
+/** The ref the server owns for a workspace: the prefix plus the workspace id
+ *  (`vc/do/workspaces.ts` composes exactly this). */
+function isWorkspaceRef(ref: string): boolean {
+  const prefix = 'refs/deepspace/ws/'
+  return ref.startsWith(prefix) && isWorkspaceId(ref.slice(prefix.length))
+}
 
 export interface RemoteRef {
   name: string
@@ -171,12 +180,35 @@ export function repoApi(deployUrl: string, token: string, appId: string) {
   // typo'd key rejects every valid 2xx as invalid_response — fail-loud, caught by
   // the per-endpoint happy-path tests). Keys stay strings (not `keyof T`) so T
   // still infers from each method's return annotation rather than from the spec.
+  /**
+   * The ONE seam where a server workspace becomes CLI data.
+   *
+   * `task` is peer-authored prose: one agent writes it, every other seat's
+   * `workspace list`/`attach`/`status` prints it. Escaping it here rather than
+   * at each print site is what makes the rule hold — the print sites are
+   * spread across six files and the next one added would be raw again.
+   *
+   * `ref` goes straight into git argv and into emitted `action.argv`, so it is
+   * validated rather than escaped: a server that answers with anything but the
+   * ref shape it owns is a broken service, not a rendering problem.
+   */
+  const normalizeWorkspace = (view: unknown, path: string): void => {
+    if (view === null || typeof view !== 'object') return
+    const workspace = (view as { workspace?: unknown }).workspace
+    if (workspace === null || typeof workspace !== 'object') return
+    const fields = workspace as Record<string, unknown>
+    if (typeof fields.ref !== 'string' || !isWorkspaceRef(fields.ref)) throw shapeError(path)
+    if (typeof fields.task === 'string') fields.task = displayText(fields.task)
+  }
   const assertShape = <T>(r: T, spec: Record<string, Kind>, path: string): T => {
     if (r === null || typeof r !== 'object') throw shapeError(path)
     const obj = r as Record<string, unknown>
     for (const [key, kind] of Object.entries(spec)) {
       if (!KIND[kind](obj[key])) throw shapeError(path)
     }
+    // Every workspace endpoint answers `{view}` or `{views}`; both funnel here.
+    normalizeWorkspace(obj.view, path)
+    if (Array.isArray(obj.views)) for (const view of obj.views) normalizeWorkspace(view, path)
     return r
   }
   const getShape = async <T>(path: string, spec: Record<string, Kind>): Promise<T> =>
@@ -214,10 +246,13 @@ export function repoApi(deployUrl: string, token: string, appId: string) {
       return postShape('/workspaces', args, { view: 'object' })
     },
 
+    /** `truncated` ⇒ the server had more rows than `limit` and stopped. Without
+     *  it a capped page is indistinguishable from the whole set, so a caller
+     *  reading "3 workspaces" cannot tell that a fourth exists. */
     listWorkspaces(opts?: {
       all?: boolean
       limit?: number
-    }): Promise<{ views: RemoteWorkspaceView[] }> {
+    }): Promise<{ views: RemoteWorkspaceView[]; truncated?: boolean }> {
       const params = new URLSearchParams()
       if (opts?.all) params.set('all', '1')
       if (opts?.limit) params.set('limit', String(opts.limit))

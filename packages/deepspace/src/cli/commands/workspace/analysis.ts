@@ -20,27 +20,33 @@ import {
 const MAX_OVERLAP_PATHS = 20
 const PEER_REF_PREFIX = `${spacePrivateRef('peers')}/`
 
-export function peerWorkspaceRef(workspaceId: string): string {
-  return `${PEER_REF_PREFIX}${workspaceId}`
+/** How a checkout stands against the workspace's published tip. */
+export type WorkspaceSyncRelation = 'in_sync' | 'ahead' | 'behind' | 'diverged' | 'unknown'
+
+/**
+ * Classify a checkout against the published tip by ANCESTRY — shared by
+ * `workspace status` (human + `--json syncRelation`) and `attach`, so every
+ * surface prescribes the recovery the relation admits (`sync` when ahead;
+ * `git pull` first when behind or diverged). Ancestry is the only input that
+ * can name `behind`: a strictly behind checkout holds nothing unpublished, so
+ * an "is there unpublished work?" predicate never reaches that arm. `unknown`
+ * whenever the tip's object is unreachable locally — never a guess.
+ */
+export function workspaceSyncRelation(
+  dir: string | null,
+  headOid: string | null,
+  publishedTip: string | null,
+): WorkspaceSyncRelation {
+  if (dir === null || headOid === null || publishedTip === null) return 'unknown'
+  if (headOid === publishedTip) return 'in_sync'
+  if (resolveCommit(dir, publishedTip) === null) return 'unknown'
+  if (isAncestor(dir, headOid, publishedTip)) return 'behind'
+  if (isAncestor(dir, publishedTip, headOid)) return 'ahead'
+  return 'diverged'
 }
 
-/** How a checkout's tip stands against the workspace's published tip — one
- *  word, shared by `workspace status` (human + `--json syncRelation`) and
- *  `attach`, so every surface prescribes the recovery this relation actually
- *  admits (`sync` when ahead; `git pull` first when behind or diverged).
- *  `unknown` when either side is missing or the published tip is not a local
- *  object — fail toward the generic advice, never a wrong specific one. */
-export function workspaceSyncRelation(
-  dir: string,
-  localOid: string | null,
-  publishedOid: string | null,
-): 'in_sync' | 'ahead' | 'behind' | 'diverged' | 'unknown' {
-  if (localOid !== null && localOid === publishedOid) return 'in_sync'
-  if (localOid === null || publishedOid === null) return 'unknown'
-  if (resolveCommit(dir, publishedOid) === null) return 'unknown'
-  if (isAncestor(dir, localOid, publishedOid)) return 'behind'
-  if (isAncestor(dir, publishedOid, localOid)) return 'ahead'
-  return 'diverged'
+export function peerWorkspaceRef(workspaceId: string): string {
+  return `${PEER_REF_PREFIX}${workspaceId}`
 }
 
 export interface WorkspaceOverlap {

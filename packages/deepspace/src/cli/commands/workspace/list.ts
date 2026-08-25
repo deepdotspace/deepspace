@@ -33,7 +33,7 @@ export const listWorkspacesCommand = defineDeepspaceCommand({
       typeof args.app === 'string' ? args.app : undefined,
     )
     const all = Boolean(args.all)
-    const { views } = await api.listWorkspaces({ all, limit })
+    const { views, truncated } = await api.listWorkspaces({ all, limit })
     if (views.length === 0) {
       spinner?.stop('No workspaces found.')
       if (!args.json) {
@@ -43,14 +43,20 @@ export const listWorkspacesCommand = defineDeepspaceCommand({
             : 'No active workspaces. Create one with `deepspace workspace new -t "…"`.',
         )
       }
-      return { data: { workspaces: views } }
+      // `truncated` here too: an empty page is exactly where a caller checks
+      // whether there is more. Always present — a key that appears only when
+      // true reads as "absent = unknown".
+      return { data: { workspaces: views, truncated: truncated === true } }
     }
 
     spinner?.message('Checking workspace overlaps…')
     const overlapsPromise = listOverlaps(appId, token, api, views)
     if (args.json) {
       return {
-        data: { workspaces: withWorkspaceOverlaps(views, await overlapsPromise) },
+        data: {
+          workspaces: withWorkspaceOverlaps(views, await overlapsPromise),
+          truncated: truncated === true,
+        },
       }
     }
     const [actors, overlapsById] = await Promise.all([actorLabels(token, appId), overlapsPromise])
@@ -76,7 +82,15 @@ export const listWorkspacesCommand = defineDeepspaceCommand({
         )
       }
     }
+    if (truncated) {
+      // "Not here" is a conclusion agents draw from this list — say so when
+      // the list is a page rather than the whole set.
+      p.log.warn(
+        `More workspaces exist than shown — this is the first ${views.length}. ` +
+          `Raise it with \`--limit\` (up to 200); past that, narrow with \`--all\` off or land/drop finished work.`,
+      )
+    }
     p.log.info('↑ commits ahead of base · ↓ trunk commits since base (staleness)')
-    return { data: { workspaces } }
+    return { data: { workspaces, truncated: truncated === true } }
   },
 })

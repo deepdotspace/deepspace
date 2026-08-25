@@ -89,6 +89,34 @@ export function repoToplevel(cwd: string): string {
   return gitLine(cwd, ['rev-parse', '--show-toplevel'])
 }
 
+/**
+ * The interrupted git operation this checkout is in the middle of, if any.
+ *
+ * A rebase/merge/cherry-pick in progress detaches HEAD, which every
+ * branch-derived inference then reads as "not a workspace" — advice that would
+ * have sent an agent to create a SECOND workspace and strand the one it was
+ * standing in. Naming the real state lets the refusal name the real fix.
+ */
+export function interruptedGitOperation(
+  cwd: string,
+): 'rebase' | 'am' | 'merge' | 'cherry-pick' | 'revert' | 'bisect' | null {
+  const gitDir = runGit(cwd, ['rev-parse', '--git-path', 'HEAD'], { allowFail: true })
+  if (gitDir.status !== 0) return null
+  const dir = dirname(resolve(cwd, gitDir.stdout.toString('utf-8').trim()))
+  // `git am` and `git rebase --apply` share the rebase-apply directory, and
+  // git itself refuses the wrong verb for the other ("It looks like 'git am'
+  // is in progress. Cannot rebase."). The `applying` marker is how git tells
+  // them apart, so prescribing `git rebase --continue` for an interrupted
+  // `am` handed back a command that cannot run.
+  if (existsSync(join(dir, 'rebase-apply', 'applying'))) return 'am'
+  if (existsSync(join(dir, 'rebase-merge')) || existsSync(join(dir, 'rebase-apply'))) return 'rebase'
+  if (existsSync(join(dir, 'MERGE_HEAD'))) return 'merge'
+  if (existsSync(join(dir, 'CHERRY_PICK_HEAD'))) return 'cherry-pick'
+  if (existsSync(join(dir, 'REVERT_HEAD'))) return 'revert'
+  if (existsSync(join(dir, 'BISECT_LOG'))) return 'bisect'
+  return null
+}
+
 /** Current branch short name, or null when HEAD is detached. */
 export function currentBranch(cwd: string): string | null {
   const result = runGit(cwd, ['symbolic-ref', '--short', '-q', 'HEAD'], { allowFail: true })
@@ -107,6 +135,13 @@ export function resolveCommit(cwd: string, ref: string): string | null {
 
 export function isWorkTreeClean(cwd: string): boolean {
   return gitLine(cwd, ['status', '--porcelain']) === ''
+}
+
+/** Unmerged index entries — a merge, cherry-pick, revert or stash-pop stopped
+ *  at a conflict. `git pull` refuses outright in this state, and "commit
+ *  them" is unfollowable until the conflict is resolved. */
+export function hasUnmergedEntries(cwd: string): boolean {
+  return gitLine(cwd, ['ls-files', '-u']) !== ''
 }
 
 export function updateRef(cwd: string, ref: string, oid: string): void {
@@ -173,6 +208,12 @@ export interface GitWorktree {
   branch: string | null
 }
 
+/**
+ * Worktrees that still EXIST on disk. `git worktree list` keeps listing one
+ * whose directory was deleted — flagged `prunable`, but listed — until someone
+ * prunes. Callers use the result to pick a directory to send someone to, so a
+ * prunable entry would turn a recovery into a path that cannot be entered.
+ */
 export function listWorktrees(cwd: string): GitWorktree[] {
   const result = runGit(cwd, ['worktree', 'list', '--porcelain'], { allowFail: true })
   if (result.status !== 0) return []
@@ -187,7 +228,7 @@ export function listWorktrees(cwd: string): GitWorktree[] {
       current.branch = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref
     }
   }
-  return worktrees
+  return worktrees.filter((worktree) => existsSync(worktree.path))
 }
 
 /** Add a pattern to the repository's shared, local-only info/exclude file. */

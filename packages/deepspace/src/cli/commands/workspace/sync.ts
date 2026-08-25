@@ -2,7 +2,7 @@ import * as p from '@clack/prompts'
 import { defineDeepspaceCommand, Refusal } from '../../lib/command'
 import { resolveCommit } from '../../lib/git/repository'
 import { statusFiles } from '../../lib/git/safety'
-import { ensureGitIdentity, ensureSpaceRemote } from '../../lib/vc-remote'
+import { ensureSpaceRemote } from '../../lib/vc-remote'
 import { createSpinner } from '../../lib/spinner'
 import {
   fetchTrunk,
@@ -78,17 +78,17 @@ export const syncWorkspaceCommand = defineDeepspaceCommand({
     ])
     if (before.workspace.status !== 'active') {
       spinner?.stop('Workspace finished.')
-      throw new Refusal(
-        `Workspace ${id} is ${before.workspace.status} — create a new workspace to continue this line of work.`,
-        'workspace_not_active',
-        { extra: { status: before.workspace.status } },
-      )
+      // Routed to `drop`, the one verb that resolves a leftover checkout —
+      // "create a new workspace" is not a step this state admits.
+      throw workspaceNotActiveRefusal(id, before.workspace.status, {
+        cwd: appDir,
+        argv: ['deepspace', 'workspace', 'drop', id, '--app', appId],
+      })
     }
-    ensureSpaceRemote(appDir, appId)
-    // The divergence refusal below hands back a `git pull` that MERGES — it
-    // needs an identity, same as the verbs that commit directly.
-    ensureGitIdentity(appDir, token)
-    pushWorkspaceRef(appDir, token, before.workspace.ref, headOid)
+    // The divergence refusal below hands back `git pull --no-rebase`, which
+    // needs an identity to write the merge commit — hence the token.
+    ensureSpaceRemote(appDir, appId, undefined, token)
+    pushWorkspaceRef(appDir, token, before.workspace.ref, headOid, before.tipOid)
 
     // Keep advisory overlap math current without turning a transient fetch into a sync failure.
     try {
@@ -111,7 +111,7 @@ export const syncWorkspaceCommand = defineDeepspaceCommand({
     const dirty = statusFiles(appDir)
     spinner?.stop(
       upToDate
-        ? `Already synced — ${id} is up to date at ${headOid.slice(0, 10)}.`
+        ? `Already synced — ${id} is up to date at ${headOid.slice(0, 10)}${dirty.length > 0 ? ` (${dirty.length} uncommitted file(s) remain unpublished)` : ''}.`
         : changedPaths !== undefined
           ? `Synced ${id} → ${headOid.slice(0, 10)} (${changedPaths.length} ${changedPaths.length === 1 ? 'file' : 'files'} vs base).`
           : `Synced ${id} → ${headOid.slice(0, 10)} (base not present locally — no overlap report).`,

@@ -206,7 +206,11 @@ export default defineDeepspaceCommand({
     // bare 422 with no sentence.
     spinner?.message(`Checking the cloud ${branch} ref…`)
     const remote = await repoApi(deployUrl, token, appId).getRefs()
-    ensureSpaceRemote(appDir, appId)
+    // The token goes in: a diverged pull hands back `git merge
+    // refs/remotes/space/<branch>`, which writes a commit — and a fresh clone
+    // with no global git identity dies on `unable to auto-detect email
+    // address`. `ensureSpaceRemote` is the identity seam.
+    ensureSpaceRemote(appDir, appId, undefined, token)
     if (!remote) {
       spinner?.stop('No cloud repo yet.')
       const pushCommand = targetedVcCommand('push', appId, branch)

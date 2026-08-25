@@ -20,6 +20,7 @@
  */
 
 import * as p from '@clack/prompts'
+import { displayText } from '../lib/cli-format'
 import { ensureToken } from '../auth'
 import { resolveAppTarget, assertAppTargetResolvable } from '../lib/app-target'
 import { deployBaseUrl } from '../lib/vc-remote'
@@ -53,6 +54,8 @@ export function formatEvent(
 ): string {
   const s = (e.summary ?? {}) as Record<string, unknown>
   const short = (oid: unknown) => (typeof oid === 'string' ? oid.slice(0, 10) : '?')
+  // The all-zero OID is git's deletion sentinel, not a commit tip.
+  const isZeroOid = (oid: unknown) => typeof oid === 'string' && /^0{40}$/.test(oid)
   const who = (id: unknown) =>
     typeof id === 'string' ? (actors?.get(id) ?? id) : String(id ?? '?')
   let detail = ''
@@ -60,7 +63,10 @@ export function formatEvent(
     case 'push': {
       const refs = Array.isArray(s.refs) ? (s.refs as Array<{ ref?: string; newOid?: string }>) : []
       detail = refs
-        .map((r) => `${String(r.ref ?? '').replace('refs/heads/', '')} → ${short(r.newOid)}`)
+        .map((r) => {
+          const name = String(r.ref ?? '').replace('refs/heads/', '')
+          return isZeroOid(r.newOid) ? `deleted ${name}` : `${name} → ${short(r.newOid)}`
+        })
         .join(', ')
       const landWs = refs
         .map((r) => (typeof r.newOid === 'string' ? lands?.get(r.newOid) : undefined))
@@ -101,7 +107,11 @@ export function formatEvent(
     default:
       detail = ''
   }
-  return `#${e.seq}  ${e.createdAt}  ${e.kind}  ${who(e.actor)}  ${detail}`.trimEnd()
+  // Sanitised at the single exit: `detail` is assembled from server-stored
+  // fields — tasks, titles, branch names — that a PEER wrote. Raw, an
+  // `ESC[2K\r` in any of them erases this row and reprints whatever the peer
+  // chose, so one seat can forge another seat's output.
+  return displayText(`#${e.seq}  ${e.createdAt}  ${e.kind}  ${who(e.actor)}  ${detail}`.trimEnd())
 }
 
 export default defineDeepspaceCommand({
