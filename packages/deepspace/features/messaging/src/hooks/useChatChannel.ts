@@ -1,10 +1,10 @@
 /**
- * useChatChannel — Find or create a default chat channel, and auto-join.
+ * useChatChannel — Find or create a default public chat channel.
  *
- * Encapsulates all channel logic so consuming components never need to
- * know about the channels collection. On first mount (when no channel
- * exists yet) it creates a "general" public channel automatically and
- * joins the current user.
+ * Encapsulates default-channel discovery so consuming components never need
+ * to know about the channels collection. On first mount, a member or admin
+ * creates the "general" public channel when none exists. Channel membership
+ * remains optional and is not used as a read-access gate.
  *
  * Usage:
  *   const { channelId, status } = useChatChannel()
@@ -13,9 +13,8 @@
  */
 
 import { useEffect, useRef } from 'react'
-import { useUser } from 'deepspace'
+import { useUser, isWriterRole } from 'deepspace'
 import { useChannels } from 'deepspace'
-import { useChannelMembers } from 'deepspace'
 import type { Channel } from 'deepspace'
 import type { RecordData } from 'deepspace'
 
@@ -24,7 +23,10 @@ const DEFAULT_CHANNEL_NAME = 'general'
 export function useChatChannel(channelName: string = DEFAULT_CHANNEL_NAME) {
   const { user } = useUser()
   const { channels, status, create } = useChannels()
-  const hasInitialized = useRef(false)
+  // Keyed by channel name, not a boolean: the same mounted hook can be
+  // repointed at another channel, which needs its own one-shot create.
+  const initializedFor = useRef<string | null>(null)
+  const canCreateChannel = isWriterRole(user?.role)
 
   // Nothing enforces name uniqueness server-side, so two first visitors can
   // race the one-shot init below and BOTH create the default channel. With a
@@ -43,32 +45,25 @@ export function useChatChannel(channelName: string = DEFAULT_CHANNEL_NAME) {
         a.createdAt.localeCompare(b.createdAt) || a.recordId.localeCompare(b.recordId),
     )[0]
 
-  const { isMember, join, status: membersStatus } = useChannelMembers(defaultChannel?.recordId)
-
   // One-shot initialization: create the default channel if it doesn't exist.
   useEffect(() => {
-    if (!user || status !== 'ready' || hasInitialized.current) return
-    hasInitialized.current = true
+    if (!canCreateChannel || status !== 'ready' || initializedFor.current === channelName) return
+    initializedFor.current = channelName
 
     if (!defaultChannel) {
-      create({
+      void create({
         name: channelName,
-        type: 'public',
         description: 'Default chat channel',
+      }).catch(() => {
+        // A not-ready write already reaches RecordProvider.onWriteError. Allow
+        // a later ready render to retry instead of leaving initialization stuck.
+        initializedFor.current = null
       })
     }
-  }, [user, status, defaultChannel, create, channelName])
-
-  // Wait for the members query to be ready before auto-joining.
-  useEffect(() => {
-    if (!user || !defaultChannel || isMember || membersStatus !== 'ready') return
-    join()
-  }, [user, defaultChannel, isMember, membersStatus, join])
+  }, [canCreateChannel, status, defaultChannel, create, channelName])
 
   return {
     channelId: defaultChannel?.recordId,
     status,
-    isMember,
-    join,
   }
 }

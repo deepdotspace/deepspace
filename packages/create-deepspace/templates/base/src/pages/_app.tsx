@@ -49,3 +49,12 @@ export function Catch() {
   const error = useRouteError()
   return <ErrorScreen error={error} />
 }
+
+/** Root fallback shown while Generouted loads the first lazy route module. */
+export function HydrateFallback() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background text-sm text-muted-foreground">
+      Loading...
+    </div>
+  )
+}

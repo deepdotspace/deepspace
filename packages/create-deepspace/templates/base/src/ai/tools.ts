@@ -34,8 +34,8 @@ type Interpretation = CollectionSchema['columns'][number]['interpretation']
 
 /**
  * Interpretation is `string | Record<string, unknown>`. When it's an object
- * the convention across the SDK's built-in schemas is `{ kind: string, ... }`
- * (see `server/schemas/directory.ts`). Narrow safely to a human-readable name.
+ * the convention across the SDK's schemas is `{ kind: string, ... }`.
+ * Narrow safely to a human-readable name.
  */
 function interpretationLabel(interpretation: Interpretation): string {
   if (typeof interpretation === 'string') return interpretation

@@ -4,9 +4,10 @@
  */
 
 import { useEffect, useRef } from 'react'
-import { useMessages } from 'deepspace'
+import { useMessages, isWriterRole } from 'deepspace'
 import { useReactions } from 'deepspace'
 import { useUserLookup } from 'deepspace'
+import { useUser } from 'deepspace'
 import type { Message } from 'deepspace'
 import type { RecordData } from 'deepspace'
 import { MessageItem } from './MessageItem'
@@ -20,16 +21,21 @@ interface ThreadPanelProps {
 
 export function ThreadPanel({ channelId, parentMessageId, onClose }: ThreadPanelProps) {
   const { messages: allMessages } = useMessages(channelId)
-  const { messages: replies, send, edit, remove } = useMessages(channelId, {
+  const {
+    messages: replies,
+    send,
+    edit,
+    remove,
+  } = useMessages(channelId, {
     parentMessageId,
   })
   const { getReactionsForMessage, toggle: toggleReaction } = useReactions(channelId)
   const { getUser } = useUserLookup()
+  const { user } = useUser()
+  const canWrite = isWriterRole(user?.role)
   const bottomRef = useRef<HTMLDivElement>(null)
 
-  const parentMessage = allMessages.find(
-    (m: RecordData<Message>) => m.recordId === parentMessageId
-  )
+  const parentMessage = allMessages.find((m: RecordData<Message>) => m.recordId === parentMessageId)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -58,7 +64,13 @@ export function ThreadPanel({ channelId, parentMessageId, onClose }: ThreadPanel
           onClick={onClose}
           className="p-1 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
         >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <svg
+            className="w-4 h-4"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
             <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
           </svg>
         </button>
@@ -72,7 +84,10 @@ export function ThreadPanel({ channelId, parentMessageId, onClose }: ThreadPanel
             </span>
             <span className="text-xs text-muted-foreground">{parentTime}</span>
           </div>
-          <p className="text-sm text-foreground/90 whitespace-pre-wrap break-words" data-testid="thread-parent-content">
+          <p
+            className="text-sm text-foreground/90 whitespace-pre-wrap break-words"
+            data-testid="thread-parent-content"
+          >
             {parentMessage.data.content}
           </p>
           <div className="mt-1.5 text-xs text-muted-foreground">
@@ -98,10 +113,9 @@ export function ThreadPanel({ channelId, parentMessageId, onClose }: ThreadPanel
         <div ref={bottomRef} />
       </div>
 
-      <MessageInput
-        onSend={(content) => send(content, parentMessageId)}
-        placeholder="Reply..."
-      />
+      {canWrite && (
+        <MessageInput onSend={(content) => send(content, parentMessageId)} placeholder="Reply..." />
+      )}
     </div>
   )
 }

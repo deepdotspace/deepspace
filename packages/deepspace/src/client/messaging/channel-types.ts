@@ -7,7 +7,7 @@
 export interface Channel {
   name: string
   description?: string
-  type: 'public' | 'private' | 'dm'
+  type: 'public'
   createdBy: string
   archived: boolean
 }
@@ -42,9 +42,9 @@ export interface ReadReceipt {
   lastReadAt: string
 }
 
-export interface ChannelInvitation {
-  channelId: string
-  invitedUserId: string
-  invitedBy: string
-  status: 'pending' | 'accepted' | 'declined'
+export interface GroupedReaction {
+  emoji: string
+  count: number
+  currentUserReacted: boolean
+  userIds: string[]
 }

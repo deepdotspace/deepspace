@@ -7,8 +7,7 @@ import { useQuery } from '../storage/hooks/useQuery'
 import { useMutations } from '../storage/hooks/useMutations'
 import { useUser } from '../storage/hooks/useUser'
 import type { RecordData } from '../storage/types'
-import type { Reaction } from './channel-types'
-import type { GroupedReaction } from './types'
+import type { GroupedReaction, Reaction } from './channel-types'
 
 export function useReactions(channelId: string | undefined) {
   const { user } = useUser()
@@ -43,7 +42,8 @@ export function useReactions(channelId: string | undefined) {
     (messageId: string, emoji: string) => {
       if (!channelId || !user) return
       const existing = records.find(
-        (r) => r.data.messageId === messageId && r.data.emoji === emoji && r.data.userId === user.id,
+        (r) =>
+          r.data.messageId === messageId && r.data.emoji === emoji && r.data.userId === user.id,
       )
       if (existing) {
         removeMutation(existing.recordId)
@@ -54,5 +54,11 @@ export function useReactions(channelId: string | undefined) {
     [channelId, user, records, create, removeMutation],
   )
 
-  return { reactions: records as RecordData<Reaction>[], status, error, getReactionsForMessage, toggle }
+  return {
+    reactions: records as RecordData<Reaction>[],
+    status,
+    error,
+    getReactionsForMessage,
+    toggle,
+  }
 }

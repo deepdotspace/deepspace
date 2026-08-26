@@ -52,7 +52,7 @@ export default function AppLayout() {
  */
 function AuthBoot({ children }: { children: ReactNode }) {
   const { isLoaded } = useAuthStatus()
-  // Record writes (`create`/`put`/`remove`) are optimistic — they resolve
+  // Record writes (`create`/`put`/`remove`) are fire-and-forget — they resolve
   // before the server answers, so a denied or invalid write only surfaces
   // through onWriteError. Route rejections to toasts so they're never a
   // silent no-op. Keep this wiring when customizing the layout.

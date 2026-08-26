@@ -1,6 +1,6 @@
 /**
  * A record room only serves the collections it was constructed with. Records
- * are sharded across rooms by scope (`app:*`, `chat:*`, `conv:*`, …), so asking
+ * are sharded across app-owned rooms (`app:*`, `chat:*`, …), so asking
  * a room for a collection that lives in a different scope is a routing mistake.
  *
  * `records.query` used to answer that with `{ success: true, records: [], count: 0 }`

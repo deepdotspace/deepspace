@@ -14,9 +14,9 @@
 import { describe, it, expect } from 'vitest'
 import Database from 'better-sqlite3'
 import { RecordRoom } from '../record-room'
-
-;(globalThis as { WebSocketRequestResponsePair?: unknown }).WebSocketRequestResponsePair ??=
-  class { constructor(_req: string, _resp: string) {} }
+;(globalThis as { WebSocketRequestResponsePair?: unknown }).WebSocketRequestResponsePair ??= class {
+  constructor(_req: string, _resp: string) {}
+}
 
 // ---------------------------------------------------------------------------
 // SqlStorage shim over better-sqlite3 (same shape as canvas-room.test.ts)
@@ -50,7 +50,7 @@ function makeState(db: Database.Database): DurableObjectState {
     // Record room stubs are addressed with `idFromName(scopeId)`, so a real
     // state always carries the scope as `id.name`. Handlers read it to name
     // the room when a caller asks for a collection from another scope.
-    id: { name: 'conv:debug-gate-test', toString: () => 'conv:debug-gate-test' },
+    id: { name: 'app:debug-gate-test', toString: () => 'app:debug-gate-test' },
     storage: {
       sql: makeSql(db),
       setAlarm() {},
@@ -67,7 +67,7 @@ function makeRoom(env: unknown): RecordRoom {
   return new RecordRoom(makeState(new Database(':memory:')), env)
 }
 
-/** A RecordRoom that pins debug off regardless of env, mirroring GlobalRecordRoom. */
+/** A deployed RecordRoom can pin debug off regardless of its environment. */
 class ShieldedRoom extends RecordRoom {
   protected get debugRoutesEnabled(): boolean {
     return false
@@ -75,9 +75,9 @@ class ShieldedRoom extends RecordRoom {
 }
 
 const debugSql = () =>
-  new Request('https://do/api/debug/sql?scopeId=conv:debug-gate-test', { method: 'GET' })
+  new Request('https://do/api/debug/sql?scopeId=app:debug-gate-test', { method: 'GET' })
 const debugStatus = () =>
-  new Request('https://do/api/debug/status?scopeId=conv:debug-gate-test', { method: 'GET' })
+  new Request('https://do/api/debug/status?scopeId=app:debug-gate-test', { method: 'GET' })
 
 // ---------------------------------------------------------------------------
 
@@ -101,7 +101,9 @@ describe('RecordRoom: debug route gating', () => {
   })
 
   it('a subclass that pins debug off returns 404 even with the flag set', async () => {
-    const room = new ShieldedRoom(makeState(new Database(':memory:')), { ALLOW_DEBUG_ROUTES: 'true' })
+    const room = new ShieldedRoom(makeState(new Database(':memory:')), {
+      ALLOW_DEBUG_ROUTES: 'true',
+    })
     const res = await room.fetch(debugStatus())
     expect(res.status).toBe(404)
   })
@@ -109,7 +111,7 @@ describe('RecordRoom: debug route gating', () => {
   it('leaves non-debug /api/ routes reachable (gate is debug-only)', async () => {
     // /api/tools/list is unauthenticated-safe and returns the tool catalog.
     const res = await makeRoom({}).fetch(
-      new Request('https://do/api/tools/list?scopeId=conv:debug-gate-test', { method: 'GET' }),
+      new Request('https://do/api/tools/list?scopeId=app:debug-gate-test', { method: 'GET' }),
     )
     expect(res.status).toBe(200)
   })

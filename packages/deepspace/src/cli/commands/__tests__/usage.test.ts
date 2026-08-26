@@ -10,10 +10,12 @@ import { formatCredits, formatUsd, renderSummary, type UsageSummary } from '../u
 
 const emptyBucket = { allocation: 0, used: 0, remaining: 0 }
 
-function makeSummary(overrides: {
-  credits?: Partial<UsageSummary['credits']>
-  usageByIntegration?: UsageSummary['usageByIntegration']
-} = {}): UsageSummary {
+function makeSummary(
+  overrides: {
+    credits?: Partial<UsageSummary['credits']>
+    usageByIntegration?: UsageSummary['usageByIntegration']
+  } = {},
+): UsageSummary {
   return {
     credits: {
       credits: 442.3,
@@ -68,6 +70,7 @@ describe('formatUsd', () => {
 describe('renderSummary', () => {
   it('shows the plan, renewal date, and total balance', () => {
     const out = renderSummary(makeSummary())
+    expect(out).toContain('Account usage (all apps)')
     expect(out).toContain('Plan:     free · renews Aug 1, 2026')
     expect(out).toContain('Credits:  442 of 500 remaining (100 credits = $1)')
   })
@@ -110,7 +113,9 @@ describe('renderSummary', () => {
   it('marks an expired bonus instead of showing a stale balance', () => {
     const out = renderSummary(
       makeSummary({
-        credits: { bonus: { ...emptyBucket, expiresAt: '2026-06-01T00:00:00.000Z', expired: true } },
+        credits: {
+          bonus: { ...emptyBucket, expiresAt: '2026-06-01T00:00:00.000Z', expired: true },
+        },
       }),
     )
     expect(out).toContain('Bonus:         expired')

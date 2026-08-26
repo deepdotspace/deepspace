@@ -394,7 +394,10 @@ describe('the --force ownership ledger', () => {
     }
   }
 
-  it('records NOTHING on up_to_date, so a later force onto a peer tip is still refused', async () => {
+  // Two full CLI invocations in one scenario (the up_to_date push, then the
+  // refused force), so it carries twice the suite's per-test budget — it
+  // timed out at 30s under the parallel release gate.
+  it('records NOTHING on up_to_date, so a later force onto a peer tip is still refused', { timeout: 60_000 }, async () => {
     // `up_to_date` means the cloud tip equals ours — just as true right after
     // pulling a PEER's commit as after publishing our own. Recording it would
     // claim ownership of work this checkout never published, and the force

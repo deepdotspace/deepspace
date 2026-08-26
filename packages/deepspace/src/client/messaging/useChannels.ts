@@ -19,10 +19,10 @@ export function useChannels() {
   const { create: createMutation, put, remove } = useMutations<Channel>('channels')
 
   const create = useCallback(
-    (data: { name: string; type: Channel['type']; description?: string }) => {
+    (data: { name: string; description?: string }) => {
       return createMutation({
         name: data.name,
-        type: data.type,
+        type: 'public',
         description: data.description ?? '',
         createdBy: user?.id ?? '',
         archived: false,

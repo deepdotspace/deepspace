@@ -70,7 +70,7 @@ export function useMutations<T = unknown>(collection: string): {
 
   // The single readiness gate for every mutation below. A write refused here
   // never touches the socket, so `onWriteError` — the one surface an app can
-  // observe a rejected optimistic write on — is the only place it can show
+  // observe a rejected fire-and-forget write on — is the only place it can show
   // up; it reports *and* throws, so callers that await keep their contract
   // and callers that don't still get a visible failure instead of silence.
   const assertReady = useCallback(() => {

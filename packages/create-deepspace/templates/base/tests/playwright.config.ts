@@ -5,10 +5,9 @@ import { defineConfig } from '@playwright/test'
  * defaulting to 5173. The same port is passed to vite via --strictPort so
  * a busy address fails fast rather than silently rebinding to 5174.
  *
- * To run multiple apps in parallel, give each one a different port:
- *   DEEPSPACE_PORT=5180 npx deepspace dev start  (terminal 1, app A)
- *   DEEPSPACE_PORT=5181 npx deepspace dev start  (terminal 2, app B)
- *   DEEPSPACE_PORT=5180 npx deepspace test run   (terminal 3, against A)
+ * The test runner owns this server. A busy port is a hard failure so a test
+ * can never attach to an unrelated or shutting-down app. To run suites in
+ * parallel, give each one a different --port.
  */
 const PORT = Number(process.env.DEEPSPACE_PORT ?? 5173)
 const BASE_URL = `http://localhost:${PORT}`
@@ -16,7 +15,6 @@ const BASE_URL = `http://localhost:${PORT}`
 export default defineConfig({
   testDir: '.',
   testMatch: '**/*.spec.ts',
-  globalSetup: './helpers/global-setup.ts',
   timeout: 30_000,
   retries: 0,
   use: {
@@ -26,9 +24,13 @@ export default defineConfig({
   webServer: {
     command: `npx vite --port ${PORT} --strictPort --host`,
     cwd: '..',
-    url: BASE_URL,
-    reuseExistingServer: true,
-    timeout: 30_000,
+    // Readiness gates on the auth plane, not just vite: /api/auth/ok only
+    // answers once workerd behind /api/* has booted, so no test starts
+    // against a half-up server. Playwright keeps polling through non-OK
+    // responses and fails setup with its own clear error at the timeout.
+    url: `${BASE_URL}/api/auth/ok`,
+    reuseExistingServer: false,
+    timeout: 60_000,
     stdout: 'pipe',
     stderr: 'pipe',
   },

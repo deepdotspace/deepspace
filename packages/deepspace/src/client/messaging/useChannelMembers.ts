@@ -16,20 +16,24 @@ export function useChannelMembers(channelId: string | undefined) {
     where: channelId ? { channelId } : { channelId: '__none__' },
   })
 
-  const { create, remove: removeMutation } = useMutations<ChannelMember>('channel-members')
+  const { createConfirmed, removeConfirmed } = useMutations<ChannelMember>('channel-members')
 
-  const join = useCallback(() => {
+  const join = useCallback(async () => {
     if (!channelId || !user) return
     const existing = records.find((r) => r.data.userId === user.id)
     if (existing) return
-    create({ channelId, userId: user.id, joinedAt: new Date().toISOString() } as unknown as ChannelMember)
-  }, [channelId, user, records, create])
+    await createConfirmed({
+      channelId,
+      userId: user.id,
+      joinedAt: new Date().toISOString(),
+    } as unknown as ChannelMember)
+  }, [channelId, user, records, createConfirmed])
 
-  const leave = useCallback(() => {
+  const leave = useCallback(async () => {
     if (!channelId || !user) return
     const membership = records.find((r) => r.data.userId === user.id)
-    if (membership) removeMutation(membership.recordId)
-  }, [channelId, user, records, removeMutation])
+    if (membership) await removeConfirmed(membership.recordId)
+  }, [channelId, user, records, removeConfirmed])
 
   const isMember = user ? records.some((r) => r.data.userId === user.id) : false
 

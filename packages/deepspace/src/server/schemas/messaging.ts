@@ -2,7 +2,9 @@
  * Messaging Schemas
  *
  * Pre-built collection schemas for messaging functionality.
- * Any app can import these to add channels, messages, reactions, etc.
+ * These schemas intentionally model public channels only. RecordRoom row
+ * permissions cannot make a channel private by themselves; advertising DMs
+ * or private groups here would expose their records to every room member.
  *
  * @example
  * ```typescript
@@ -21,7 +23,7 @@ export const CHANNELS_SCHEMA: CollectionSchema = {
     {
       name: 'type',
       storage: 'text',
-      interpretation: { kind: 'select', options: ['public', 'private', 'dm'] },
+      interpretation: { kind: 'select', options: ['public'] },
     },
     {
       name: 'createdBy',
@@ -97,45 +99,6 @@ export const CHANNEL_MEMBERS_SCHEMA: CollectionSchema = {
   permissions: {
     admin: { read: true, create: true, update: false, delete: true },
     member: { read: true, create: true, update: false, delete: 'own' },
-    viewer: { read: true, create: false, update: false, delete: false },
-  },
-}
-
-export const CHANNEL_INVITATIONS_SCHEMA: CollectionSchema = {
-  name: 'channel-invitations',
-  columns: [
-    {
-      name: 'channelId',
-      storage: 'text',
-      interpretation: 'plain',
-      required: true,
-      immutable: true,
-    },
-    {
-      name: 'invitedUserId',
-      storage: 'text',
-      interpretation: 'plain',
-      required: true,
-      immutable: true,
-    },
-    {
-      name: 'invitedBy',
-      storage: 'text',
-      interpretation: 'plain',
-      userBound: true,
-      immutable: true,
-    },
-    {
-      name: 'status',
-      storage: 'text',
-      interpretation: { kind: 'select', options: ['pending', 'accepted', 'declined'] },
-      required: true,
-    },
-  ],
-  uniqueOn: ['channelId', 'invitedUserId'],
-  permissions: {
-    admin: { read: true, create: true, update: true, delete: true },
-    member: { read: true, create: true, update: true, delete: false },
     viewer: { read: true, create: false, update: false, delete: false },
   },
 }

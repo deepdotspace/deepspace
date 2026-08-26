@@ -1,5 +1,40 @@
 # deepspace
 
+## 0.26.1
+
+### Patch Changes
+
+- Remove the unused platform-owned conversation, directory, and inbox stack,
+  including its hooks, schemas, routes, bindings, Durable Object class, and
+  dead client platform context/WebSocket helpers.
+
+  Make the bundled messaging feature honest and smaller by supporting public
+  channels only, confirming membership writes, and removing duplicate multi-chat,
+  DM, private-group, invitation, and unread-state implementations. Remove the
+  overbuilt sidebar feature and reduce search to a controlled inline component
+  plus local ranking.
+
+  Make generated Playwright runs own their test server and refuse busy ports
+  (`port_in_use`, after a bounded grace for a server still shutting down), gate
+  suite readiness on the auth plane, settle screenshots before capture (with
+  opt-in `--wait-for-selector`), add the router hydration fallback, bound deploy
+  JSON progress, and label `app usage` as account-wide.
+
+  Migration for existing apps: removed `deepspace` exports include
+  `useConversation`, the `client/directory` hooks (`useConversations`,
+  `useCommunities`, `usePosts`), the client platform context
+  (`PlatformProvider`, `usePlatformWS`), `ChannelInvitation`,
+  `CHANNEL_INVITATIONS_SCHEMA`, `CONVERSATION_SCHEMAS`, `VOTING_SCHEMAS`,
+  `DIRECTORY_SCHEMAS`, and the messaging display utils
+  (`formatMessageTime`, `groupReactionsForMessage`, `parseMessageMetadata`, …).
+  Apps that installed the pre-0.27 messaging feature should delete the copied
+  `chat-multi/` components, `ChatMultiPage`, and `useMultiChannel` (they import
+  the removed exports), and drop `channel-invitations` from their schemas. The
+  bundled `channels` schema now admits only `type: 'public'`: existing
+  `private`/`dm` rows keep reading but fail validation on writes that echo the
+  old value — delete those rows or keep an app-local schema that still declares
+  them.
+
 ## 0.26.0
 
 ### Minor Changes

@@ -90,7 +90,7 @@ export interface RoomUser {
 
 export type RoomConnectionState = 'connecting' | 'connected' | 'disconnected'
 
-/** A rejected optimistic write. */
+/** A rejected fire-and-forget write. */
 export interface WriteError {
   /**
    * `permission` — RBAC denial; `validation` — data validation/other server

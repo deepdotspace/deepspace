@@ -404,21 +404,21 @@ describe('the git-identity fold', () => {
     }
   })
 
-  it('respects user.useConfigOnly, in every spelling git accepts', () => {
-    // The flag means "never guess my identity". Guessing anyway — silently,
-    // in a repo deliberately left unconfigured — is what it exists to
-    // prevent, and a literal `=== "true"` string compare honoured only one of
-    // the spellings git treats as true.
-    for (const spelling of ['true', 'yes', 'on', '1']) {
-      const repo = freshRepo()
-      try {
-        runGit(repo, ['config', '--local', 'user.useConfigOnly', spelling])
-        ensureSpaceRemote(repo, APP, undefined, token)
-        expect(configured(repo, 'user.email'), spelling).toBe('')
-        expect(configured(repo, 'user.name'), spelling).toBe('')
-      } finally {
-        rmSync(repo, { recursive: true, force: true })
-      }
+  // The flag means "never guess my identity". Guessing anyway — silently,
+  // in a repo deliberately left unconfigured — is what it exists to
+  // prevent, and a literal `=== "true"` string compare honoured only one of
+  // the spellings git treats as true. One test per spelling: each is a full
+  // real-git scenario, and four of them in one test blew the per-test budget
+  // under the parallel release gate.
+  it.each(['true', 'yes', 'on', '1'])('respects user.useConfigOnly spelled %s', (spelling) => {
+    const repo = freshRepo()
+    try {
+      runGit(repo, ['config', '--local', 'user.useConfigOnly', spelling])
+      ensureSpaceRemote(repo, APP, undefined, token)
+      expect(configured(repo, 'user.email'), spelling).toBe('')
+      expect(configured(repo, 'user.name'), spelling).toBe('')
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
     }
   })
 

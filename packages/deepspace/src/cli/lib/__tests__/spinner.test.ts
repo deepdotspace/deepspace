@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 const stub = vi.hoisted(() => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() }))
 vi.mock('@clack/prompts', () => ({ spinner: () => stub }))
 
-import { createSpinner, stopActiveSpinner } from '../spinner'
+import { createSpinner, stopActiveSpinner, setPlainProgress } from '../spinner'
 
 const origIsTTY = process.stdout.isTTY
 function forceTTY(): void {
@@ -15,6 +15,7 @@ function forceTTY(): void {
 
 afterEach(() => {
   Object.defineProperty(process.stdout, 'isTTY', { value: origIsTTY, configurable: true })
+  setPlainProgress(false)
   stub.start.mockClear()
   stub.stop.mockClear()
   stub.message.mockClear()
@@ -60,6 +61,25 @@ describe('non-TTY progress', () => {
     } finally {
       log.mockRestore()
     }
+    expect(lines).toEqual(['Preparing…', 'Transferring…', 'Done.'])
+  })
+
+  it('setPlainProgress(true) forces bounded lines even in a TTY (--json runs)', () => {
+    forceTTY()
+    setPlainProgress(true)
+    const lines: string[] = []
+    const log = vi.spyOn(console, 'log').mockImplementation((value?: unknown) => {
+      lines.push(String(value))
+    })
+    try {
+      const progress = createSpinner()
+      progress.start('Preparing…')
+      progress.message('Transferring…')
+      progress.stop('Done.')
+    } finally {
+      log.mockRestore()
+    }
+    expect(stub.start).not.toHaveBeenCalled()
     expect(lines).toEqual(['Preparing…', 'Transferring…', 'Done.'])
   })
 })

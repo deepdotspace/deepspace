@@ -203,7 +203,7 @@ function RecordProviderState({
 // ============================================================================
 
 /**
- * Default write-error handler. Optimistic mutations (`create`/`put`/`remove`)
+ * Default write-error handler. Fire-and-forget mutations (`create`/`put`/`remove`)
  * resolve before the server answers, so a denied or invalid write can only
  * surface through `onWriteError` — if it's unhandled, the app looks like it
  * worked while the server silently rejected. Never let that be fully silent:
@@ -288,7 +288,7 @@ function SignedOutDiagnostic(): React.ReactElement {
  * ```tsx
  * <RecordProvider>
  *   <RecordScope roomId="app:slack-clone" schemas={appSchemas}>
- *     <RecordScope roomId={`conv:${channelId}`} schemas={convSchemas}>
+ *     <RecordScope roomId={`chat:${channelId}`} schemas={messagingSchemas}>
  *       <ChannelView />
  *     </RecordScope>
  *   </RecordScope>

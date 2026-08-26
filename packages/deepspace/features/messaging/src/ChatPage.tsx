@@ -5,8 +5,7 @@
 
 import { useEffect, useRef } from 'react'
 import { useChatChannel } from '../components/messaging/hooks/useChatChannel'
-import { useReadReceipts } from 'deepspace'
-import { RecordScope } from 'deepspace'
+import { RecordScope, useReadReceipts, useUser, isWriterRole } from 'deepspace'
 import type { CollectionSchema } from 'deepspace/schema'
 import { messagingSchemas } from '../schemas/messaging-schema'
 import { ChatHeader } from '../components/messaging/chat/ChatHeader'
@@ -23,18 +22,20 @@ export default function ChatPage({
   channelName = 'general',
   className,
 }: ChatPageProps) {
-  const { channelId, status, isMember, join } = useChatChannel(channelName)
+  const { channelId, status } = useChatChannel(channelName)
   const { markAsRead } = useReadReceipts()
+  const { user } = useUser()
   const lastMarkedRef = useRef<string | null>(null)
+  const canTrackReadState = isWriterRole(user?.role)
 
   useEffect(() => {
-    if (!channelId || !isMember) return
+    if (!channelId || !canTrackReadState) return
     if (lastMarkedRef.current === channelId) return
     lastMarkedRef.current = channelId
     markAsRead(channelId)
-  }, [channelId, isMember, markAsRead])
+  }, [canTrackReadState, channelId, markAsRead])
 
-  if (status !== 'ready' || !channelId) {
+  if (status !== 'ready') {
     // data-testid lets tests (and humans reading a trace) distinguish "stuck
     // waiting for the default channel" from "route never mounted".
     return (
@@ -47,20 +48,15 @@ export default function ChatPage({
     )
   }
 
-  if (!isMember) {
+  if (!channelId) {
     return (
       <div className={`flex flex-col h-full ${className ?? ''}`} data-testid="chat-page">
-        <ChatHeader channelId={channelId} />
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
-            <p className="text-foreground mb-3">You're not a member of this channel</p>
-            <button
-              data-testid="join-channel-btn"
-              onClick={join}
-              className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
-            >
-              Join Channel
-            </button>
+            <p className="text-foreground">No public channel exists yet.</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              A member or admin can create the first channel.
+            </p>
           </div>
         </div>
       </div>

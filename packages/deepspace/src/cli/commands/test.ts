@@ -23,8 +23,9 @@
  * so tests hit the worktree's server, not the main repo's. The chosen port is
  * exported as DEEPSPACE_PORT to the Playwright child so the config +
  * webServer both bind to the same address. Pass a different port per app to
- * run multiple apps
- * (and test suites) in parallel.
+ * run multiple apps (and test suites) in parallel. The runner always owns its
+ * web server; a busy port is refused instead of attaching to whatever happens
+ * to be listening there.
  *
  * Defined with the command runtime (lib/command.ts). The suite runner streams
  * playwright/vitest output live; under `--json` that stream goes to STDERR so
@@ -47,7 +48,7 @@ import { ensureInstallReady } from '../lib/install-status'
 import { childStdio, ensurePlaywright, routeChildStdoutToStderr } from '../lib/playwright'
 import { preflightNodeVersion, preflightWindowsWorkerd } from '../lib/preflight'
 import { refreshSecretsCache } from '../lib/secrets'
-import { assertReusableDevServer, DEFAULT_PORT, resolvePort } from '../lib/port'
+import { ensurePortFree, DEFAULT_PORT, resolvePort } from '../lib/port'
 import {
   prepareWranglerEnvConfig,
   wranglerViteEnv,
@@ -188,13 +189,16 @@ export default defineDeepspaceCommand({
       throw noAppDirRefusal(start)
     }
 
-    // Inside any linked Git worktree the default port must match that
-    // checkout's dev server (not 5173): Playwright's reuseExistingServer
-    // would otherwise attach to the MAIN repo's server and silently test
-    // stale code. Explicit --port still wins.
+    // Inside any linked Git worktree use that checkout's stable port by
+    // default. The suite still starts and owns the server on that port.
     const configuredPort = Boolean(args.port) || Boolean(process.env.DEEPSPACE_PORT)
     const worktreePort = configuredPort ? null : resolveWorktreePort(appDir)
     const port = worktreePort ?? resolvePort(args.port as string | undefined)
+
+    // The runner owns its server (reuseExistingServer: false), so any live
+    // listener on the port is refused before auth/install work; a previous
+    // run's server still shutting down gets a bounded grace first.
+    if (suite !== 'unit') await ensurePortFree(port, '0.0.0.0')
 
     // Always write .dev.vars pointing to dev workers. A logged-in user is
     // required so writeDevVars can mint APP_OWNER_JWT via the auth-worker.
@@ -267,10 +271,6 @@ export default defineDeepspaceCommand({
     if (suite !== 'unit') {
       preflightWindowsWorkerd(appDir)
       ensurePlaywright(appDir)
-      // Back-to-back runs race the previous run's dev server on this port;
-      // a zombie there passes Playwright's reuse probe and then dies mid-run,
-      // reading as a test failure instead of a port conflict.
-      await assertReusableDevServer(port)
     }
 
     let exitCode = 0
@@ -291,7 +291,9 @@ export default defineDeepspaceCommand({
         break
       case 'unit':
         if (forwarded.grep || forwarded.project || forwarded.headed) {
-          console.error('note: --grep/--project/--headed apply to Playwright suites and are ignored by `unit`')
+          console.error(
+            'note: --grep/--project/--headed apply to Playwright suites and are ignored by `unit`',
+          )
         }
         exitCode = runVitest(appDir, wranglerEnv)
         break

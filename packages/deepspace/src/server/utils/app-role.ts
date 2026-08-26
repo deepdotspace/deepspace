@@ -1,4 +1,4 @@
-import type { Role } from '../../shared/roles'
+import { isWriterRole, type Role } from '../../shared/roles'
 
 interface AppRoleEnv {
   RECORD_ROOMS: DurableObjectNamespace
@@ -31,7 +31,7 @@ export async function resolveAppRole(env: AppRoleEnv, userId: string): Promise<R
       data?: { record?: { data?: { role?: unknown } } }
     }
     const role = json.data?.record?.data?.role
-    return json.success && (role === 'admin' || role === 'member') ? role : 'viewer'
+    return json.success && isWriterRole(role) ? role : 'viewer'
   } catch {
     return 'viewer'
   }

@@ -7,25 +7,51 @@ import { Refusal } from './command'
  * so a typo doesn't quietly bind the wrong port.
  */
 
-import { createServer, Socket } from 'node:net'
+import { Socket } from 'node:net'
 
 export const DEFAULT_PORT = 5173
 
 /**
- * Whether `port` is free to bind on `host`. Used by `dev` to pre-probe before
- * spawning vite (which binds with `--host`, i.e. 0.0.0.0), so a busy port gets
- * a friendly `deepspace dev kill` / `--port` remedy instead of vite's raw
- * EADDRINUSE stack (DEV-5). Best-effort: a bind race after the probe still
- * surfaces vite's own error, but the common "server already running" case is
- * caught cleanly.
+ * The one busy-port guard for `dev start` and `test run` (DEV-5): refuse a
+ * held port with a friendly `deepspace dev kill` / `--port` remedy instead of
+ * vite's raw --strictPort EADDRINUSE stack. Three states, one answer each:
+ * port free → proceed; port held by a live server (HTTP answers) → refuse
+ * now, it won't go away on its own; port held but HTTP dead — a previous
+ * run's server still shutting down — → bounded wait for it to free, so
+ * back-to-back runs don't flake, then the same refusal. A CONNECT probe, not
+ * a bind probe: SO_REUSEADDR lets a wildcard bind succeed while a server
+ * holds 127.0.0.1, so a bind probe reports a live loopback server as absent.
+ * Best-effort: a race after the probe still surfaces vite's own error.
  */
-export function checkPortAvailable(port: number, host = '0.0.0.0'): Promise<boolean> {
-  return new Promise((resolve) => {
-    const srv = createServer()
-    srv.once('error', () => resolve(false))
-    srv.once('listening', () => srv.close(() => resolve(true)))
-    srv.listen(port, host)
-  })
+export async function ensurePortFree(port: number, host: string, waitMs = 15_000): Promise<void> {
+  if (!(await isPortListening(port, host))) return
+  if (!(await isHttpResponding(port))) {
+    const deadline = Date.now() + waitMs
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      if (!(await isPortListening(port, host))) return
+    }
+  }
+  const killArgv =
+    port === DEFAULT_PORT
+      ? ['deepspace', 'dev', 'kill']
+      : ['deepspace', 'dev', 'kill', '--port', String(port)]
+  throw new Refusal(
+    `Port ${port} is already in use.\n` +
+      `Free it with \`${killArgv.join(' ')}\`, or use another port: \`--port <other>\`.`,
+    'port_in_use',
+    { extra: { port } },
+  )
+}
+
+/** Whether an HTTP server on the loopback port answers at all (any status). */
+async function isHttpResponding(port: number, timeoutMs = 2000): Promise<boolean> {
+  try {
+    await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(timeoutMs) })
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -74,45 +100,6 @@ export async function waitForPortListening(
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
   return false
-}
-
-/**
- * Refuse a ZOMBIE dev server before Playwright can adopt it.
- *
- * `reuseExistingServer` probes the URL once: a previous run's vite that still
- * holds the port while shutting down passes that probe and then dies mid-run,
- * which surfaces as ERR_CONNECTION_REFUSED inside a spec — a broken-app look
- * for what is a port conflict. Three states, one answer each: port free →
- * proceed (Playwright starts vite); port held and HTTP answers → proceed
- * (a live server, reuse is correct); port held and HTTP dead → bounded wait
- * for it to free, then a `port_in_use` refusal naming the port — never a hang,
- * never an adoption.
- */
-export async function assertReusableDevServer(port: number, waitMs = 15_000): Promise<void> {
-  if (!(await isPortListening(port, '127.0.0.1'))) return
-  if (await isHttpResponding(port)) return
-  const deadline = Date.now() + waitMs
-  while (Date.now() < deadline) {
-    if (!(await isPortListening(port, '127.0.0.1'))) return
-    await new Promise((resolve) => setTimeout(resolve, 500))
-  }
-  throw new Refusal(
-    `Port ${port} is held by a server that no longer answers HTTP — likely a previous run's dev ` +
-      `server still shutting down. Waited ${Math.round(waitMs / 1000)}s for it to exit. ` +
-      `Stop it (\`deepspace dev kill\`) or pass --port <other>, then re-run.`,
-    'port_in_use',
-    { extra: { port } },
-  )
-}
-
-/** Whether an HTTP server on the loopback port answers at all (any status). */
-async function isHttpResponding(port: number, timeoutMs = 2000): Promise<boolean> {
-  try {
-    await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(timeoutMs) })
-    return true
-  } catch {
-    return false
-  }
 }
 
 export function resolvePort(arg?: string): number {

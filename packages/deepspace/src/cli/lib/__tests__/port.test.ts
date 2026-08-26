@@ -1,11 +1,11 @@
 /**
- * DEV-5: `dev` pre-probes the port with checkPortAvailable so a collision gets
- * a friendly remedy instead of vite's raw EADDRINUSE stack.
+ * DEV-5: `dev` and `test run` pre-probe the port with ensurePortFree so a
+ * collision gets a friendly remedy instead of vite's raw EADDRINUSE stack.
  */
 import { describe, it, expect } from 'vitest'
 import { createServer, type Server } from 'node:net'
 import {
-  checkPortAvailable,
+  ensurePortFree,
   isPortListening,
   resolvePort,
   waitForPortListening,
@@ -23,17 +23,42 @@ function listenOnEphemeral(): Promise<{ server: Server; port: number }> {
   })
 }
 
-describe('checkPortAvailable (DEV-5)', () => {
-  it('reports a bound port as unavailable and a freed port as available', async () => {
+describe('ensurePortFree (DEV-5)', () => {
+  it('passes a free port through silently', async () => {
     const { server, port } = await listenOnEphemeral()
-    try {
-      expect(await checkPortAvailable(port)).toBe(false)
-    } finally {
-      await new Promise((r) => server.close(r))
-    }
-    // Same port is free once the server closed.
-    expect(await checkPortAvailable(port)).toBe(true)
+    await new Promise((r) => server.close(r))
+    await expect(ensurePortFree(port, '0.0.0.0')).resolves.toBeUndefined()
   })
+
+  it('refuses a port held by a live HTTP server, without waiting', async () => {
+    const { createServer: createHttpServer } = await import('node:http')
+    const httpServer = createHttpServer((_req, res) => res.end('ok'))
+    const port = await new Promise<number>((resolve) => {
+      httpServer.listen(0, '0.0.0.0', () => {
+        const addr = httpServer.address()
+        resolve(typeof addr === 'object' && addr ? addr.port : 0)
+      })
+    })
+    try {
+      const started = Date.now()
+      await expect(ensurePortFree(port, '0.0.0.0')).rejects.toMatchObject({
+        code: 'port_in_use',
+      })
+      // A live server never frees itself — the refusal must not burn the
+      // shutting-down grace window first.
+      expect(Date.now() - started).toBeLessThan(5_000)
+    } finally {
+      await new Promise((r) => httpServer.close(r))
+    }
+  })
+
+  it('waits out a non-HTTP holder that frees the port (back-to-back runs)', async () => {
+    const { server, port } = await listenOnEphemeral()
+    // Free the port shortly after the probe starts, like a previous run's
+    // server finishing its shutdown.
+    setTimeout(() => server.close(), 700)
+    await expect(ensurePortFree(port, '0.0.0.0')).resolves.toBeUndefined()
+  }, 15_000)
 })
 
 describe('resolvePort', () => {
@@ -59,11 +84,6 @@ describe('isPortListening', () => {
     try {
       expect(await isPortListening(port, '0.0.0.0')).toBe(true)
       expect(await isPortListening(port, '127.0.0.1')).toBe(true)
-      // The historical bind-probe bug is a macOS/BSD socket behavior. Linux
-      // correctly reports the wildcard bind as occupied; the connect-probe
-      // assertions above are the cross-platform contract.
-      const bsdBindSemantics = ['darwin', 'freebsd', 'openbsd'].includes(process.platform)
-      expect(await checkPortAvailable(port, '127.0.0.1')).toBe(bsdBindSemantics)
     } finally {
       server.close()
     }

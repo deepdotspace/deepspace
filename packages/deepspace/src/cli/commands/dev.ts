@@ -46,7 +46,7 @@ import { preflightNodeVersion, preflightWindowsWorkerd } from '../lib/preflight'
 import { removeMacosJunk } from '../lib/macos-junk'
 import { refreshSecretsCache } from '../lib/secrets'
 import { lintProjectSchemas, formatSchemaLintFindings } from '../lib/schema-lint'
-import { DEFAULT_PORT, resolvePort, isPortListening, waitForPortListening } from '../lib/port'
+import { DEFAULT_PORT, ensurePortFree, resolvePort, waitForPortListening } from '../lib/port'
 
 /** What vite's bare `--host` means: every interface. */
 const DEFAULT_DEV_HOST = '0.0.0.0'
@@ -268,22 +268,12 @@ export default defineDeepspaceCommand({
     preflightWindowsWorkerd(appDir)
 
     // Pre-probe the port so a collision gets a friendly remedy instead of
-    // vite's raw --strictPort EADDRINUSE stack trace (DEV-5). A connect probe,
-    // because a bind probe on 127.0.0.1 reports "free" while another server
-    // holds 0.0.0.0 — and vite then dies with the stack this exists to avoid.
-    if (await isPortListening(port, host)) {
-      const killArgv =
-        port === DEFAULT_PORT
-          ? ['deepspace', 'dev', 'kill']
-          : ['deepspace', 'dev', 'kill', '--port', String(port)]
-      const killCmd = killArgv.join(' ')
+    // vite's raw --strictPort EADDRINUSE stack trace (DEV-5).
+    try {
+      await ensurePortFree(port, host)
+    } catch (err) {
       wranglerConfig.cleanup()
-      throw new Refusal(
-        `Port ${port} is already in use.\n` +
-          `Free it with \`${killCmd}\`, or start on another port: \`deepspace dev start --port <other>\`.`,
-        'port_in_use',
-        { extra: { port } },
-      )
+      throw err
     }
 
     // 0.0.0.0 is a bind address, not an address to fetch — name the loopback

@@ -24,5 +24,8 @@ export default defineConfig({
     // forced gate runs, unchanged by worker caps — so the budget matches the
     // workload class, same as deploy-worker's config and for the same reason.
     testTimeout: 20_000,
+    // Console output from PASSING tests is noise that buries real failures
+    // in gate logs; failing tests keep their full output.
+    silent: 'passed-only',
   },
 })

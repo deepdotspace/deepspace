@@ -5,7 +5,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useUserLookup } from 'deepspace'
+import { useUserLookup, isWriterRole } from 'deepspace'
 import { useUser } from 'deepspace'
 import { usePresence } from 'deepspace'
 import type { Message } from 'deepspace'
@@ -43,7 +43,6 @@ interface MessageItemProps {
   forceEdit?: boolean
   onEditDone?: () => void
   isHighlighted?: boolean
-  onStartDM?: (userId: string) => void
 }
 
 export function MessageItem({
@@ -59,7 +58,6 @@ export function MessageItem({
   forceEdit = false,
   onEditDone,
   isHighlighted = false,
-  onStartDM,
 }: MessageItemProps) {
   const { getUser } = useUserLookup()
   const { user: currentUser } = useUser()
@@ -74,11 +72,12 @@ export function MessageItem({
   const authorId = message.data.authorId || message.createdBy
   const author = getUser(authorId)
   const isOwn = currentUser?.id === authorId || currentUser?.id === message.createdBy
+  const canWrite = isWriterRole(currentUser?.role)
   const online = isOnline(authorId)
 
   const longPressHandlers = useLongPress(
     () => {
-      if (!contentRef.current) return
+      if (!canWrite || !contentRef.current) return
       const rect = contentRef.current.getBoundingClientRect()
       onLongPress?.({
         top: rect.top,
@@ -198,9 +197,7 @@ export function MessageItem({
       {/* Avatar column */}
       <div className="shrink-0 w-10">
         {isFirstInGroup ? (
-          <UserProfilePopover userId={authorId} onStartDM={onStartDM}>
-            {avatar}
-          </UserProfilePopover>
+          <UserProfilePopover userId={authorId}>{avatar}</UserProfilePopover>
         ) : (
           <span className="w-full pt-1 flex justify-center text-[10px] text-muted-foreground/0 group-hover:text-muted-foreground/70 transition-colors select-none">
             {timeStr}
@@ -212,7 +209,7 @@ export function MessageItem({
       <div ref={contentRef} className={`flex-1 min-w-0 ${isHighlighted ? 'invisible' : ''}`}>
         {isFirstInGroup && (
           <div className="flex items-baseline gap-2 mb-0.5">
-            <UserProfilePopover userId={authorId} onStartDM={onStartDM}>
+            <UserProfilePopover userId={authorId}>
               <span className="text-sm font-semibold text-foreground hover:underline cursor-pointer">
                 {author?.name ?? 'Unknown'}
               </span>
@@ -289,6 +286,7 @@ export function MessageItem({
                 key={r.emoji}
                 data-testid={`reaction-${message.recordId}-${r.emoji}`}
                 onClick={() => onToggleReaction(r.emoji)}
+                disabled={!canWrite}
                 className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border transition-colors ${
                   r.currentUserReacted
                     ? 'bg-primary/15 border-primary/30 text-primary'
@@ -315,7 +313,7 @@ export function MessageItem({
       </div>
 
       {/* Desktop hover toolbar */}
-      {!isEditing && (
+      {!isEditing && canWrite && (
         <div
           data-testid={`hover-toolbar-${message.recordId}`}
           className="absolute -top-3 right-5 flex items-center gap-0.5 bg-card border border-border/60 rounded-lg shadow-sm p-0.5 transition-all duration-100 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto"

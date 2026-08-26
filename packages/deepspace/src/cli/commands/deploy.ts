@@ -11,7 +11,7 @@ import { readAppId } from '../lib/app-identity'
 import { ensureInstallReady } from '../lib/install-status'
 import type { CliAction } from '../lib/output'
 import { preflightNodeVersion } from '../lib/preflight'
-import { createSpinner } from '../lib/spinner'
+import { createSpinner, setPlainProgress } from '../lib/spinner'
 import { wakeWorker, waitForLiveRelease, type ReleaseWait } from '../lib/edge-propagation'
 import { MAX_DEPLOY_ASSET_FILE_BYTES, formatBytes } from '../../shared/app-files'
 import {
@@ -105,6 +105,9 @@ export default defineCommand({
   },
   async run({ args }) {
     const output = createDeployOutput(args.json === true)
+    // Under --json every spinner becomes a static line through the redirected
+    // stdout above — recorded for the crash envelope, printed on stderr.
+    setPlainProgress(output.json)
     // Every failure leaves through `output.die`, deploy's one exit door. An
     // error that escaped this body used to reach the shared renderer, whose
     // JSON envelope landed on the stdout deploy has redirected — and the exit

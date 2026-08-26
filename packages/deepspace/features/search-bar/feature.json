@@ -2,39 +2,28 @@
   "id": "search-bar",
   "name": "Search Bar",
   "category": "data",
-  "description": "Drop-in InlineSearch/SearchOverlay for app search; use instead of raw SearchInput when showing or filtering results",
-  "details": "Use this before hand-rolling search over local arrays, feeds, tables, pickers, or RecordRoom records. Installs focused UI and search-model modules for inline or overlay search, ranking, keyboard navigation, grouped results, async search, highlighting, and optional recent searches. It does not add a route or demo page; import the installed modules into the page you are building.",
+  "description": "Inline local search with lightweight ranking and highlighting",
+  "details": "A controlled InlineSearch component and a small local ranking hook. The feature does not own overlays, persistence, history, networking, navigation, or app state.",
   "files": [
     {
       "src": "src/search-model.ts",
       "dest": "src/components/search/search-model.ts"
     },
     {
-      "src": "src/SearchOverlay.tsx",
-      "dest": "src/components/search/SearchOverlay.tsx"
+      "src": "src/InlineSearch.tsx",
+      "dest": "src/components/search/InlineSearch.tsx"
     }
   ],
   "requires": [],
   "instructions": [
-    "Installs src/components/search/SearchOverlay.tsx for UI and src/components/search/search-model.ts for ranking, async search, highlighting, and recent-history behavior. It adds no route.",
-    "Import InlineSearch, SearchOverlay, or SearchResultList from @/components/search/SearchOverlay; import useSearchIndex, useAsyncSearch, or getHighlightedParts from @/components/search/search-model.",
-    "Use InlineSearch + useSearchIndex for in-page filtering (lists, feeds, tables, pickers, RecordRoom records); use SearchOverlay for global/command-style search.",
-    "Use the raw SearchInput primitive only for a bare input with no result list, ranking, keyboard navigation, or selection handling."
+    "Import InlineSearch from @/components/search/InlineSearch and useSearchIndex from @/components/search/search-model.",
+    "Keep source data, async fetching, navigation, and persistence in the page that owns the search experience."
   ],
   "agentNotes": [
-    "Use InlineSearch when search belongs to a specific page section and results should appear beneath that input; use SearchOverlay when search is temporary, global, command-like, includes recent searches, submits partial text to a search-results page, or should interrupt the current workflow.",
-    "Pass onSearchSubmit when pressing Enter should navigate to or render a full search-results page for the typed query; result clicks still call onSelect.",
-    "Ask the user which placement they prefer only when both overlay and inline search are plausible and the page context does not make the placement obvious.",
-    "Use SearchOverlay's recentStorageKey, maxRecentItems, and showRecentSearches props when recent selections or submitted text queries should appear before the user types; keep recent searches off inline controls unless the surrounding UI has room for them.",
-    "Use getHighlightedParts with renderTitle, renderSubtitle, or renderDescription when matching text should be highlighted; leave highlighting to app-specific renderers so colors, emphasis, and density match the local design."
+    "Use this feature for local list, feed, table, picker, or RecordRoom filtering. Build a product-specific overlay only when the app actually needs one."
   ],
   "patterns": [
-    "For local feed/list filtering, keep the source array in the page, derive results with useSearchIndex, map results to SearchItem[], and render InlineSearch where the user expects to search.",
-    "For RecordRoom data, call useQuery in the page and pass records mapped to SearchItem[] into InlineSearch or SearchOverlay.",
-    "For overlay search that previews matching items but routes Enter to a results page, pass onSearchSubmit={(query) => navigate(`/search?q=${encodeURIComponent(query)}`)} and keep onSelect for direct result clicks.",
-    "Keep selections app-specific: create or update records in the onSelect handler only after the user explicitly chooses a result.",
-    "Use mocked or debounced async providers during prototyping before wiring live integration calls.",
-    "For privacy-sensitive search contexts, set showRecentSearches={false} or use a scoped recentStorageKey per page or account context."
+    "Call useSearchIndex in the page, map results to SearchItem[], and pass the controlled query and selection handler to InlineSearch."
   ],
-  "example": "import { InlineSearch } from '@/components/search/SearchOverlay'\nimport { useSearchIndex } from '@/components/search/search-model'\n\nconst results = useSearchIndex({\n  items: posts,\n  query,\n  getText: (post) => [post.title, post.body, post.authorName],\n})\n\n<InlineSearch\n  query={query}\n  onQueryChange={setQuery}\n  items={results.map((post) => ({\n    id: post.id,\n    title: post.title,\n    subtitle: post.authorName,\n    description: post.body,\n  }))}\n  onSelect={(item) => openPost(item.id)}\n  placeholder=\"Search posts...\"\n/>"
+  "example": "import { InlineSearch } from '@/components/search/InlineSearch'\nimport { useSearchIndex } from '@/components/search/search-model'\n\nconst results = useSearchIndex({ items: posts, query, getText: (post) => [post.title, post.body] })\n\n<InlineSearch query={query} onQueryChange={setQuery} items={results.map((post) => ({ id: post.id, title: post.title, description: post.body }))} onSelect={(item) => openPost(item.id)} />"
 }

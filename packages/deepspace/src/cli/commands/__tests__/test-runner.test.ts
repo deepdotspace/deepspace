@@ -14,11 +14,13 @@ import testCommand, {
   specsSkippedByDefaultSuite,
 } from '../test'
 import * as appContext from '../../lib/app-context'
+import { Refusal } from '../../lib/command'
 import * as authModule from '../../auth'
 import * as devVarsModule from '../../lib/dev-vars'
 import * as installStatusModule from '../../lib/install-status'
 import * as playwrightModule from '../../lib/playwright'
 import { childStdio } from '../../lib/playwright'
+import * as portModule from '../../lib/port'
 import * as preflightModule from '../../lib/preflight'
 import * as testAccountModule from '../../lib/test-account-service'
 
@@ -60,6 +62,7 @@ async function runDefaultSuite(
   vi.spyOn(preflightModule, 'preflightWindowsWorkerd').mockImplementation(() => {})
   vi.spyOn(installStatusModule, 'ensureInstallReady').mockImplementation(() => {})
   vi.spyOn(playwrightModule, 'ensurePlaywright').mockImplementation(() => {})
+  vi.spyOn(portModule, 'ensurePortFree').mockResolvedValue(undefined)
   vi.spyOn(testAccountModule, 'syncTestAccountStore').mockResolvedValue({
     accounts: [],
     removed: 0,
@@ -198,6 +201,41 @@ describe('outside an app directory', () => {
     expect(envelope.code).toBe('not_in_app_repo')
     expect(envelope.error).toMatch(/No wrangler.toml found at or above/)
     expect(process.exitCode).toBe(1)
+  })
+})
+
+describe('Playwright server ownership', () => {
+  it('refuses a busy port before installing or spawning Playwright', async () => {
+    const dir = makeAppWithSpecs([...DEFAULT_SUITE_SPECS])
+    const lines: string[] = []
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(dir)
+    vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
+    vi.spyOn(preflightModule, 'preflightNodeVersion').mockImplementation(() => {})
+    vi.spyOn(installStatusModule, 'ensureInstallReady').mockImplementation(() => {})
+    const ensurePlaywright = vi.spyOn(playwrightModule, 'ensurePlaywright')
+    vi.spyOn(portModule, 'ensurePortFree').mockRejectedValue(
+      new Refusal('Port 5199 is already in use.', 'port_in_use', { extra: { port: 5199 } }),
+    )
+
+    const command = testCommand as unknown as {
+      run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+    }
+    await command.run({ args: { json: true, port: '5199' } })
+
+    expect(ensurePlaywright).not.toHaveBeenCalled()
+    expect(spawnSyncMock).not.toHaveBeenCalled()
+    expect(JSON.parse(lines.at(-1) ?? '{}')).toMatchObject({
+      ok: false,
+      code: 'port_in_use',
+      port: 5199,
+    })
+  })
+
+  it('does not probe a port for unit tests', async () => {
+    const dir = makeAppWithSpecs([])
+    const probe = vi.spyOn(portModule, 'ensurePortFree')
+    await runDefaultSuite(dir, true, { suite: 'unit' })
+    expect(probe).not.toHaveBeenCalled()
   })
 })
 

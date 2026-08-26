@@ -1,8 +1,10 @@
 /**
  * deepspace app usage
  *
- * Shows the logged-in user's credit balance, quota headroom, and
- * per-integration spend — the CLI view of the dashboard's billing page.
+ * Shows the logged-in user's account-wide credit balance, quota headroom, and
+ * per-integration spend — the CLI view of the dashboard's billing page. The
+ * command is nested under `app` for compatibility; it is not scoped to the
+ * app in the current directory.
  * Agents driving `deepspace integrations invoke` pay per call; this is how they check
  * the balance without a browser.
  *
@@ -76,6 +78,9 @@ export function renderSummary(summary: UsageSummary): string {
   const { credits, usageByIntegration } = summary
   const lines: string[] = []
 
+  lines.push('Account usage (all apps)')
+  lines.push('')
+
   const renews = credits.subscription.renewsAt
     ? ` · renews ${formatDate(credits.subscription.renewsAt)}`
     : ''
@@ -113,7 +118,9 @@ export function renderSummary(summary: UsageSummary): string {
     const nameWidth = Math.max(11, ...usageByIntegration.map((u) => u.name.length))
     lines.push(`${'INTEGRATION'.padEnd(nameWidth)}  CALLS  COST`)
     for (const u of usageByIntegration) {
-      lines.push(`${u.name.padEnd(nameWidth)}  ${String(u.count).padEnd(5)}  ${formatUsd(u.totalCost)}`)
+      lines.push(
+        `${u.name.padEnd(nameWidth)}  ${String(u.count).padEnd(5)}  ${formatUsd(u.totalCost)}`,
+      )
     }
   }
 
@@ -125,7 +132,7 @@ export function renderSummary(summary: UsageSummary): string {
 export default defineDeepspaceCommand({
   meta: {
     name: 'usage',
-    description: 'Show credit balance, quota headroom, and per-integration spend',
+    description: 'Show account-wide credits and integration spend (all apps)',
   },
   async run({ args }) {
     const token = await ensureToken()
@@ -134,6 +141,6 @@ export default defineDeepspaceCommand({
     if (!args.json) console.log(renderSummary(summary))
     // No `next`: reading the balance is terminal — topping up happens in the
     // dashboard, which the human output already links.
-    return { data: { ...summary } }
+    return { data: { scope: 'account', ...summary } }
   },
 })

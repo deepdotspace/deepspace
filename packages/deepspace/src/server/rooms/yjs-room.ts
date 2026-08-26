@@ -17,6 +17,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import * as Y from 'yjs'
+import { isWriterRole } from '../../shared/roles'
 import { BaseRoom, type UserAttachment } from './base-room'
 import {
   MSG_SYNC,
@@ -115,7 +116,7 @@ export class YjsRoom<E = Record<string, unknown>> extends BaseRoom<E> {
 
   protected onConnect(ws: WebSocket, user: UserAttachment): YjsAttachment {
     const role = ((user as Record<string, unknown>).role as string) ?? 'viewer'
-    const canWrite = role === 'member' || role === 'admin'
+    const canWrite = isWriterRole(role)
 
     const attachment: YjsAttachment = {
       ...user,

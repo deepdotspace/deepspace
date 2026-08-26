@@ -212,7 +212,7 @@ describe('typed feature catalog info (FEAT-11)', () => {
     const out = renderFeatureInfo(config!)
     expect(out).toContain('Integration steps')
     // Agent guidance was moved to the non-printed `agentNotes` field.
-    expect(out).not.toContain('Ask the user which placement')
+    expect(out).not.toContain('Build a product-specific overlay')
   })
 })
 
@@ -626,9 +626,9 @@ describe('post-install command guidance', () => {
       expect(status).toBe(0)
       expect(out).not.toContain('Start the dev server')
       expect(out).not.toContain('Next:')
-      expect(existsSync(join(dir, 'src/components/search/SearchOverlay.tsx'))).toBe(true)
+      expect(existsSync(join(dir, 'src/components/search/InlineSearch.tsx'))).toBe(true)
       expect(existsSync(join(dir, 'src/components/search/search-model.ts'))).toBe(true)
-      expect(readFileSync(join(dir, 'src/components/search/SearchOverlay.tsx'), 'utf-8')).toContain(
+      expect(readFileSync(join(dir, 'src/components/search/InlineSearch.tsx'), 'utf-8')).toContain(
         "from './search-model'",
       )
     } finally {
@@ -690,7 +690,7 @@ describe('agent-facing install result', () => {
           files: {
             created: [
               'src/components/search/search-model.ts',
-              'src/components/search/SearchOverlay.tsx',
+              'src/components/search/InlineSearch.tsx',
             ],
             preexisting: [],
             missing: [],
@@ -702,14 +702,10 @@ describe('agent-facing install result', () => {
           },
         },
         manifestGuidance: {
-          instructions: expect.arrayContaining([
-            expect.stringContaining('Import InlineSearch, SearchOverlay, or SearchResultList'),
-          ]),
-          patterns: expect.arrayContaining([
-            expect.stringContaining('For local feed/list filtering'),
-          ]),
+          instructions: expect.arrayContaining([expect.stringContaining('Import InlineSearch')]),
+          patterns: expect.arrayContaining([expect.stringContaining('Call useSearchIndex')]),
           agentNotes: expect.arrayContaining([
-            expect.stringContaining('Use InlineSearch when search belongs'),
+            expect.stringContaining('Use this feature for local'),
           ]),
         },
       })

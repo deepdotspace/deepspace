@@ -27,8 +27,8 @@ export interface SubscriptionContext {
   schemaRegistry: SchemaRegistry
   state: DurableObjectState // Needed to get all connected WebSockets
   /**
-   * The scope this room was addressed by — `app:{appId}`, `chat:{channelId}`,
-   * `conv:{convId}`, `dir:{appId}`, … Records are sharded across rooms
+   * The app-owned scope this room was addressed by — for example
+   * `app:{appId}` or `chat:{channelId}`. Records are sharded across rooms
    * by scope, so the scope is what names the room in an unknown-collection
    * failure. Undefined only for rooms addressed by a unique id rather than a
    * name (`idFromName` populates `DurableObjectId.name`).

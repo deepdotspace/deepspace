@@ -61,8 +61,8 @@ bindings = [
 # binding = "KNOWLEDGE"
 # instance_name = "auto"
 #
-# Full reference (all binding types + companion fields):
-#   https://docs.deep.space
+# Full reference, behavior, and pricing:
+#   https://docs.deep.space/bindings/knowledge
 
 # --- DeepSpace detected secrets (names only; values live in `npx deepspace secrets`) ---
 #   (none declared)

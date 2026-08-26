@@ -1,10 +1,9 @@
 /**
- * ChatHeader -- Channel header showing name, description, and member count.
+ * ChatHeader -- Channel header showing the public channel name and description.
  * Generic styling (no Slack-specific prefixes like #).
  */
 
 import { useChannels } from 'deepspace'
-import { useChannelMembers } from 'deepspace'
 import type { Channel } from 'deepspace'
 import type { RecordData } from 'deepspace'
 
@@ -16,7 +15,6 @@ interface ChatHeaderProps {
 
 export function ChatHeader({ channelId, onToggleThread, threadOpen }: ChatHeaderProps) {
   const { channels } = useChannels()
-  const { members } = useChannelMembers(channelId)
 
   const channel = channels.find((c: RecordData<Channel>) => c.recordId === channelId)
 
@@ -42,14 +40,8 @@ export function ChatHeader({ channelId, onToggleThread, threadOpen }: ChatHeader
         )}
       </div>
 
-      <div className="flex items-center gap-2 shrink-0">
-        <span
-          className="text-xs text-muted-foreground"
-          data-testid="chat-header-member-count"
-        >
-          {members.length} {members.length === 1 ? 'member' : 'members'}
-        </span>
-        {onToggleThread && (
+      {onToggleThread && (
+        <div className="flex items-center gap-2 shrink-0">
           <button
             data-testid="toggle-thread-btn"
             onClick={onToggleThread}
@@ -69,8 +61,8 @@ export function ChatHeader({ channelId, onToggleThread, threadOpen }: ChatHeader
               />
             </svg>
           </button>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   )
 }

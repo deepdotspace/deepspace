@@ -5,13 +5,11 @@
 
 import { useState, useRef, useEffect, useCallback, type ReactNode } from 'react'
 import { useUserLookup } from 'deepspace'
-import { useUser } from 'deepspace'
 import { usePresence } from 'deepspace'
 
 interface UserProfilePopoverProps {
   userId: string
   children: ReactNode
-  onStartDM?: (userId: string) => void
 }
 
 function formatLastSeen(lastSeenAt: string | undefined): string {
@@ -28,9 +26,8 @@ function formatLastSeen(lastSeenAt: string | undefined): string {
 
 const POPOVER_HEIGHT_ESTIMATE = 180
 
-export function UserProfilePopover({ userId, children, onStartDM }: UserProfilePopoverProps) {
+export function UserProfilePopover({ userId, children }: UserProfilePopoverProps) {
   const { getUser } = useUserLookup()
-  const { user: currentUser } = useUser()
   const { isOnline, users } = usePresence()
   const [open, setOpen] = useState(false)
   const [placement, setPlacement] = useState<'below' | 'above'>('below')
@@ -49,9 +46,7 @@ export function UserProfilePopover({ userId, children, onStartDM }: UserProfileP
         const rect = triggerRef.current.getBoundingClientRect()
         const spaceBelow = window.innerHeight - rect.bottom
         const inBottomHalf = rect.top > window.innerHeight / 2
-        setPlacement(
-          spaceBelow < POPOVER_HEIGHT_ESTIMATE || inBottomHalf ? 'above' : 'below'
-        )
+        setPlacement(spaceBelow < POPOVER_HEIGHT_ESTIMATE || inBottomHalf ? 'above' : 'below')
       }
       return !prev
     })
@@ -61,8 +56,10 @@ export function UserProfilePopover({ userId, children, onStartDM }: UserProfileP
     if (!open) return
     function handleClickOutside(e: MouseEvent) {
       if (
-        popoverRef.current && !popoverRef.current.contains(e.target as Node) &&
-        triggerRef.current && !triggerRef.current.contains(e.target as Node)
+        popoverRef.current &&
+        !popoverRef.current.contains(e.target as Node) &&
+        triggerRef.current &&
+        !triggerRef.current.contains(e.target as Node)
       ) {
         close()
       }
@@ -81,9 +78,7 @@ export function UserProfilePopover({ userId, children, onStartDM }: UserProfileP
     }
   }, [open, close])
 
-  const positionClass = placement === 'above'
-    ? 'bottom-full mb-2 left-0'
-    : 'top-full mt-2 left-0'
+  const positionClass = placement === 'above' ? 'bottom-full mb-2 left-0' : 'top-full mt-2 left-0'
 
   return (
     <span className="relative inline-flex">
@@ -118,7 +113,9 @@ export function UserProfilePopover({ userId, children, onStartDM }: UserProfileP
               />
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-foreground truncate">{user.name ?? 'Unknown'}</p>
+              <p className="text-sm font-semibold text-foreground truncate">
+                {user.name ?? 'Unknown'}
+              </p>
               {roomUser?.role && (
                 <span className="inline-block mt-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded bg-muted text-muted-foreground">
                   {roomUser.role}
@@ -135,22 +132,6 @@ export function UserProfilePopover({ userId, children, onStartDM }: UserProfileP
               {online ? 'Online' : `Last seen ${formatLastSeen(roomUser?.lastSeenAt)}`}
             </p>
           </div>
-
-          {onStartDM && currentUser?.id !== userId && (
-            <button
-              data-testid={`dm-from-profile-${userId}`}
-              onClick={() => {
-                onStartDM(userId)
-                close()
-              }}
-              className="mt-3 w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
-            >
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-              </svg>
-              Message
-            </button>
-          )}
         </div>
       )}
     </span>

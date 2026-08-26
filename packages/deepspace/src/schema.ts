@@ -18,8 +18,5 @@ export {
   MESSAGES_SCHEMA,
   REACTIONS_SCHEMA,
   CHANNEL_MEMBERS_SCHEMA,
-  CHANNEL_INVITATIONS_SCHEMA,
   READ_RECEIPTS_SCHEMA,
 } from './server/schemas/messaging'
-export { CONVERSATION_SCHEMAS, VOTING_SCHEMAS } from './server/schemas/conversation'
-export { DIRECTORY_SCHEMAS } from './server/schemas/directory'
