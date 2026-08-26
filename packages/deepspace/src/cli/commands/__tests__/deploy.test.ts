@@ -917,6 +917,23 @@ describe('clientAppIdRefusal', () => {
     })
   })
 
+  it('ignores compiled documentation pages, whose samples only MENTION ids', () => {
+    // The SDK's docs builder names MDX content chunks `documentation-page-*`.
+    // A deployment guide's code sample carries the define (and example ids) as
+    // string content, not evaluated identifiers — it kept the deep.space site
+    // itself from deploying. The docs runtime's own chunks stay scanned.
+    withClient(
+      {
+        'documentation-page-AWFCDME6.js':
+          `const s="declare const __DEEPSPACE_APP_ID__: string";const x="${OTHER}"`,
+        'app.js': `const a="${TARGET}"`,
+      },
+      (assets) => {
+        expect(clientAppIdRefusal(assets, TARGET)).toBeNull()
+      },
+    )
+  })
+
   it('names every edit the migration needs, so half of it cannot be applied', () => {
     // Both refusals must enumerate the full adoption, or an app applies part of
     // it and ships a dead bundle. The steps are three files, no migration.

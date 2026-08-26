@@ -385,6 +385,13 @@ export function oversizedAssetRefusal(assets: DeployAsset[]): string | null {
  *  and scanning them only invents false refusals. */
 const CLIENT_CODE_ASSET = /\.(?:js|mjs|html)$/i
 
+/** Compiled MDX content chunks from the SDK's documentation builder
+ *  (custom-runtime.ts names them `documentation-page-[hash]`). Their code
+ *  samples legitimately MENTION `__DEEPSPACE_APP_ID__` and example app ids
+ *  as text inside string literals — scanning them refused every site that
+ *  documents the app-id pattern. The runtime's own chunks stay scanned. */
+const DOCUMENTATION_PAGE_CHUNK = /(?:^|\/)documentation-page-[^/]+\.js$/i
+
 /** `app_` + 26 Crockford base32 chars, anywhere in a file (not anchored — the
  *  point is to find it inside minified code). Mirrors `APP_ID_RE`, which is
  *  anchored and therefore can't be reused for a scan. */
@@ -444,6 +451,7 @@ export function clientAppIdRefusal(
   let unsubstituted: string | undefined
   for (const asset of assets) {
     if (!CLIENT_CODE_ASSET.test(asset.path)) continue
+    if (DOCUMENTATION_PAGE_CHUNK.test(asset.path)) continue
     const source = readFileSync(asset.sourcePath, 'utf-8')
     if (unsubstituted === undefined && source.includes(APP_ID_DEFINE)) unsubstituted = asset.path
     for (const found of source.matchAll(APP_ID_LITERAL)) {

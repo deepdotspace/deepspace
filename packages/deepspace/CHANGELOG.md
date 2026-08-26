@@ -1,5 +1,15 @@
 # deepspace
 
+## 0.26.2
+
+### Patch Changes
+
+- Fix the deploy app-id guard refusing sites whose documentation merely
+  mentions the pattern: compiled `documentation-page-*` MDX chunks are
+  excluded from the `__DEEPSPACE_APP_ID__`/foreign-id scan, since their code
+  samples carry those tokens as text, not evaluated identifiers. The
+  documentation runtime's own chunks stay scanned.
+
 ## 0.26.1
 
 ### Patch Changes
