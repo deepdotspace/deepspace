@@ -71,10 +71,10 @@ export async function completeProjectSetup(
     ? { status: 'skipped' }
     : registerAppIdentity(project.appDir, progress)
   printNextSteps(project, identity)
-  // A registration that was attempted and failed is a failed scaffold step —
-  // exit nonzero so `create && cd && deploy` cannot march past it. Skipped is
-  // the caller's choice and exits clean.
-  if (identity.status === 'failed') process.exitCode = 1
+  // A failed registration attempt no longer fails the scaffold: the first
+  // `deploy` mints the id itself when wrangler.toml has none, so the scaffold
+  // is COMPLETE either way and `create && cd && deploy` works uninterrupted.
+  // The attempt above stays as the fast path for a signed-in shell.
 }
 
 /** How the identity step ended: registered (with the account it went to when
@@ -122,8 +122,9 @@ function registerAppIdentity(appDir: string, progress: Progress): IdentityOutcom
     (result.stderr || result.stdout || result.error?.message || 'app init failed').trim().split('\n').slice(-3).join('\n')
   p.log.warn(error)
   p.log.warn(
-    'Your app has no id yet, so no initial commit was made. Fix the cause above, then run ' +
-      '`npx deepspace app init` in the app dir — it also creates the initial commit.',
+    'Your app has no id yet, so no initial commit was made. Nothing to do now — the first ' +
+      '`npx deepspace deploy` registers the app and creates the commit (log in first if the ' +
+      'cause above was a missing login).',
   )
   return { status: 'failed', code: envelope?.code, error, plane }
 }
@@ -294,21 +295,28 @@ export function nextStepsLines(
   project: Pick<PreparedProject, 'appName' | 'isInPlace'>,
   identity: IdentityOutcome,
 ): string[] {
-  // `auth login` is the recovery only when the failure WAS a missing login; a
-  // quota, network, or ownership refusal is fixed by its own remedy, after
-  // which `app init` alone registers the app.
+  // Registration is no longer a prerequisite anywhere: the first `deploy`
+  // mints the id itself when wrangler.toml has none. `auth login` is the only
+  // step worth naming when the failure WAS a missing login (deploy needs it
+  // anyway); every other failure heals at first deploy with its own coded
+  // refusal.
   //
-  // `--no-register` keeps the pair even in a signed-in shell, deliberately:
-  // the flag exists to keep the app OFF whatever login this shell holds, so
-  // "sign in (as the intended owner), then init" is the sequence it was asked
-  // for. Probing `auth whoami` here would cost a CLI subprocess to answer a
-  // question the flag already said not to trust.
+  // `--no-register` keeps the login line even in a signed-in shell,
+  // deliberately: the flag exists to keep the app OFF whatever login this
+  // shell holds, so "sign in as the intended owner first" is the sequence it
+  // was asked for.
   const recovery =
     identity.status === 'registered'
       ? []
-      : identity.status === 'failed' && identity.code !== 'not_authenticated'
-        ? ['npx deepspace app init']
-        : ['npx deepspace auth login', 'npx deepspace app init']
+      : identity.status === 'skipped'
+        ? [
+            '# --no-register: any deepspace command run while logged in WILL',
+            '# register the app to that login — sign in as the intended owner first.',
+            'npx deepspace auth login',
+          ]
+        : identity.code !== 'not_authenticated'
+          ? []
+          : ['npx deepspace auth login']
   return [
     ...(project.isInPlace ? [] : [`cd ${project.appName}`]),
     ...recovery,
@@ -328,6 +336,6 @@ function printNextSteps(project: PreparedProject, identity: IdentityOutcome): vo
   p.outro(
     identity.status === 'registered'
       ? `${project.appName} is ready`
-      : `${project.appName} is scaffolded but has no app id yet — run \`npx deepspace app init\` in it`,
+      : `${project.appName} is ready — it registers on first use (deploy, dev, secrets…)`,
   )
 }

@@ -1,6 +1,7 @@
 /** Resolve explicit or local app selectors to canonical app ids. */
 
 import { APP_ID_RE, readAppId } from './app-identity'
+import { canHealAppRegistration, ensureAppRegistered } from './app-registration'
 import { apiFetchReadWithRetry } from './api'
 import { InputError, Refusal } from './cli-errors'
 import { findAppDir } from './app-context'
@@ -104,6 +105,15 @@ export async function listApps(deployUrl: string, token: string): Promise<AppLis
 export interface AppTargetOptions {
   /** Raw `--env` value. Preserve blank-vs-absent so blank never falls back to production. */
   wranglerEnv?: string
+  /**
+   * Whether an id-less (but healable) checkout may REGISTER on this resolve.
+   * Only the verbs whose purpose is building/using the app opt in — deploy,
+   * dev, test, push, secrets. Default false: a read or ownership verb
+   * (`logs`, `releases`, `collaborators add`, `transfer offer`, …) must never
+   * consume a quota slot as a side effect of resolving its target; those keep
+   * the `app_not_initialized` refusal.
+   */
+  register?: boolean
 }
 
 /** Find an app id or subdomain name in the caller's registry list. */
@@ -153,9 +163,16 @@ export async function resolveAppTarget(
   if (app !== undefined) return resolveAppSelector(deployUrl, token, app)
   const { wranglerEnv } = parseWranglerEnvArg(options.wranglerEnv)
   const appDir = findAppDir()
+  if (options.register === true) {
+    // THE first-use registration chokepoint: an id-less checkout is healed by
+    // minting here, so `secrets set`, `push` — whatever a fresh scaffold's
+    // first build-or-use command is — just works with no `app init` step.
+    // (deploy/dev/test call ensureAppRegistered themselves.)
+    const ensured = appDir ? await ensureAppRegistered(appDir, token, wranglerEnv) : null
+    if (!ensured) throw appTargetMissingError(appDir, wranglerEnv)
+    return ensured.appId
+  }
   const id = appDir ? readAppId(appDir, wranglerEnv) : null
-  // `assertAppTargetResolvable` already produced the precise failure. Keeping
-  // this guard makes the filesystem race explicit without weakening the type.
   if (!id) throw appTargetMissingError(appDir, wranglerEnv)
   return id
 }
@@ -254,7 +271,14 @@ export function assertAppTargetResolvable(
   if (app !== undefined) return
 
   const appDir = findAppDir()
-  if (!appDir || !readAppId(appDir, wranglerEnv)) throw appTargetMissingError(appDir, wranglerEnv)
+  if (appDir && readAppId(appDir, wranglerEnv)) return
+  // An id-less checkout that CAN heal is resolvable for a registering verb:
+  // `resolveAppTarget` mints on first use (apps register when first used, not
+  // "at the beginning"). Non-registering verbs, and the states minting must
+  // not touch (no wrangler.toml; an `--env` name the config never declares),
+  // refuse here exactly as before.
+  if (options.register === true && appDir && canHealAppRegistration(appDir, wranglerEnv)) return
+  throw appTargetMissingError(appDir, wranglerEnv)
 }
 
 /** Warn before an explicit unknown id can be registered by push or deploy. */

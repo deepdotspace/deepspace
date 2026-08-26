@@ -13,65 +13,27 @@
  * the slug, the `Next:` line and the exit codes come from there.
  */
 
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
 import { ensureToken } from '../auth'
 import { DEEPSPACE_ENV, PLATFORM_URLS } from '../env'
-import { ApiError, apiFetch } from '../lib/api'
+import { ApiError } from '../lib/api'
 import { findAppDir } from '../lib/app-context'
 import { getAppSource } from '../lib/source-api'
-import { readAppId, writeAppId } from '../lib/app-identity'
+import { readAppId } from '../lib/app-identity'
+import {
+  commitScaffoldIfUnborn,
+  mintAppIdentity,
+  wranglerConfigUncommitted,
+} from '../lib/app-registration'
 import { errorCode } from '../lib/cli-errors'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 import { readAppIdVar, readWranglerConfig } from '../lib/wrangler-env'
-import { runGit } from '../lib/git/process'
-import { ensureGitIdentity } from '../lib/vc-remote'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
-/**
- * Complete a scaffold the login gate paused. The scaffolder git-inits the
- * repo but makes the initial commit only once the app has its identity, so a
- * logged-out scaffold arrives here with an UNBORN HEAD holding nothing but
- * scaffold output (an unborn `git worktree add` fails, so agents need this
- * healed). Commits only in that exact state — a repo with any history is the
- * user's to commit.
- */
-/** True exactly when the post-init `git commit … wrangler.toml` action would
- *  succeed. Asked of git itself via `--dry-run` rather than parsed out of
- *  porcelain codes: an untracked pathspec, a clean file, and a mid-merge
- *  partial commit (which git refuses even when wrangler.toml is not the
- *  conflicted file) all fail the dry run the same way they would fail the
- *  offered command, so the predicate cannot drift from git's behavior. */
-export function wranglerConfigUncommitted(appDir: string): boolean {
-  if (!existsSync(join(appDir, '.git'))) return false
-  const dryRun = runGit(appDir, ['commit', '--dry-run', '-m', 'x', '--', 'wrangler.toml'], {
-    allowFail: true,
-  })
-  return dryRun.status === 0
-}
-
-function commitScaffoldIfUnborn(appDir: string, token: string): boolean {
-  try {
-    if (!existsSync(join(appDir, '.git'))) return false
-    if (runGit(appDir, ['rev-parse', '--verify', 'HEAD'], { allowFail: true }).status === 0) {
-      return false
-    }
-    // The one PRE-REMOTE commit in the CLI: this runs before any `space`
-    // remote exists, so it is the only direct caller left. Every remote-bound
-    // verb gets its identity through `ensureSpaceRemote`, which folds this in.
-    ensureGitIdentity(appDir, token)
-    if (runGit(appDir, ['add', '-A'], { allowFail: true }).status !== 0) return false
-    const commit = runGit(appDir, ['commit', '-m', 'Initial DeepSpace scaffold', '--no-verify'], {
-      allowFail: true,
-    })
-    return commit.status === 0
-  } catch {
-    // No git on PATH (or an unreadable repo): identity is registered either
-    // way; the commit is a convenience, never a failure of init.
-    return false
-  }
-}
+// The registration mechanics live in lib/app-registration — the same
+// chokepoint `resolveAppTarget` heals through on first use. Re-exported here
+// because init's tests exercise them under this module's name.
+export { mintAppIdentity, wranglerConfigUncommitted }
 
 export default defineDeepspaceCommand({
   meta: {
@@ -160,15 +122,22 @@ export default defineDeepspaceCommand({
           },
         )
       }
+      // A registered id with an UNBORN HEAD happens when another verb minted
+      // first (the resolver never authors commits) — heal the scaffold commit
+      // here too, or "already initialized" leaves the one state init exists
+      // to finish.
+      const healedScaffold = commitScaffoldIfUnborn(appDir, token)
       if (!args.json) {
         console.log(
-          `Already initialized: ${existing}${envName ? ` (env: ${envName})` : ''} — registered on ${DEEPSPACE_ENV}`,
+          `Already initialized: ${existing}${envName ? ` (env: ${envName})` : ''} — registered on ${DEEPSPACE_ENV}` +
+            (healedScaffold ? ' — initial scaffold commit created.' : ''),
         )
         console.log(`App dir: ${appDir}`)
       }
       return {
         data: {
           status: 'already_initialized',
+          ...(healedScaffold ? { committedScaffold: true } : {}),
           appId: existing,
           appDir,
           env: DEEPSPACE_ENV,
@@ -177,16 +146,16 @@ export default defineDeepspaceCommand({
       }
     }
     const token = await ensureToken()
-    const { appId } = await apiFetch<{ appId: string }>(DEPLOY_URL, token, '/api/apps/mint', {
-      method: 'POST',
-    })
-    writeAppId(appDir, appId, { wranglerEnv: envName, force: Boolean(args['new-id']) })
     // wrangler.toml is the ONLY place the id lives: the client bundle resolves
     // it at build time from the same config (deepspace/build appIdDefine), so
     // there is nothing to stamp into source files — including on --new-id
     // forks, which previously needed re-stamping to avoid scoping the fork's
     // client to the original app.
-    const committedScaffold = commitScaffoldIfUnborn(appDir, token)
+    const { appId, committedScaffold } = await mintAppIdentity(appDir, token, {
+      wranglerEnv: envName,
+      force: Boolean(args['new-id']),
+      commitScaffold: true,
+    })
     if (!args.json) {
       const envSuffix = envName ? ` (env: ${envName})` : ''
       // The id lives only in wrangler.toml, so the follow-up is identical for a

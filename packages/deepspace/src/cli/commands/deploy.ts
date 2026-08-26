@@ -5,6 +5,7 @@ import { defineCommand } from 'citty'
 import { join, resolve } from 'node:path'
 import { ensureToken, refreshTokenFromSession } from '../auth'
 import { PLATFORM_URLS } from '../env'
+import { commitScaffoldIfUnborn, ensureAppRegistered } from '../lib/app-registration'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { readAppId } from '../lib/app-identity'
 import { ensureInstallReady } from '../lib/install-status'
@@ -148,16 +149,9 @@ async function runDeploy(args: DeployArgs, output: DeployOutput): Promise<void> 
   if (!hasWranglerConfig(appDir)) {
     output.die(noWranglerConfigMessage(join(appDir, 'wrangler.toml')), 'not_in_app_repo')
   }
-  try {
-    ensureInstallReady(appDir)
-  } catch (error: unknown) {
-    const refusal = error as { message?: string; code?: string; action?: CliAction }
-    output.die(refusal.message ?? String(error), refusal.code ?? 'deps_missing', {
-      action: refusal.action,
-    })
-  }
-
   // One deploy per checkout: taken before any work, released on every exit.
+  // The dependency heal runs INSIDE it (see runLockedDeploy) — two deploys
+  // must not race two package managers into one node_modules.
   const releaseLock = acquireDeployLock(appDir)
   try {
     await runLockedDeploy(args, output, appDir, envName)
@@ -188,25 +182,51 @@ async function runLockedDeploy(
     )
   }
   const appName = nameResult.name
-  const appId = readAppId(appDir, envName)
+  let appId = readAppId(appDir, envName)
   p.log.info(envName ? `App: ${appName}  (env: ${envName})` : `App: ${appName}`)
 
   const { token, ownerId } = await authenticate(appDir, output)
 
-  if (!appId) {
-    return output.die(
-      `No app id in wrangler.toml${envName ? ` for [env.${envName}]` : ''}. Run ` +
-        `\`deepspace app init${envName ? ` --env ${envName}` : ''}\` to register this app, then re-deploy.`,
-      'app_not_initialized',
-      {
-        action: {
-          cwd: appDir,
-          argv: ['deepspace', 'app', 'init', ...(envName ? ['--env', envName] : [])],
-        },
-        actionRequired: true,
-      },
-    )
+  // After auth (a logged-out user must not sit through a full install only to
+  // hit not_authenticated) and inside the deploy lock (no concurrent installs
+  // into one node_modules).
+  try {
+    ensureInstallReady(appDir)
+  } catch (error: unknown) {
+    const refusal = error as { message?: string; code?: string; action?: CliAction }
+    return output.die(refusal.message ?? String(error), refusal.code ?? 'install_failed', {
+      action: refusal.action,
+    })
   }
+
+  if (!appId) {
+    // First use REGISTERS: nothing has to be registered "at the beginning".
+    // The id must exist before the build (the client bundle bakes it in via
+    // deepspace/build appIdDefine), so it is healed here — after auth, before
+    // any other work — through the same chokepoint every other verb resolves
+    // through. `readAppId` has already refused a malformed value
+    // (`invalid_app_id`), so this only ever fills a genuinely absent slot.
+    const ensured = await ensureAppRegistered(appDir, token, envName, { commitScaffold: true })
+    if (!ensured) {
+      // Only reachable with a wranglerEnv whose block is undeclared, or a
+      // wrangler.toml that never mentions DEEPSPACE_APP_ID (not a DeepSpace
+      // app — minting must not rewrite a stranger's config).
+      return output.die(
+        envName
+          ? `No app id for [env.${envName}] — declare the [env.${envName}] block with its own DEEPSPACE_APP_ID entry (the \`__APP_ID__\` placeholder is enough), or run \`deepspace app init --env ${envName}\`.`
+          : 'wrangler.toml declares no DEEPSPACE_APP_ID — this does not look like a DeepSpace app. Run `deepspace app init` to register it as one.',
+        envName ? 'no_app_id_for_env' : 'app_not_initialized',
+      )
+    }
+    appId = ensured.appId
+  }
+  // ALWAYS, not only when this run minted: another verb (`secrets set`,
+  // `dev start`) may have registered first — those never author commits, so
+  // the scaffold can arrive here with a real id and a still-unborn HEAD.
+  // Without this, the DeepSpace preflight then refused `dirty_worktree` on a
+  // scaffold the user never touched, and `app init` (already initialized)
+  // would not heal it either. No-op the moment HEAD exists.
+  commitScaffoldIfUnborn(appDir, token)
   p.log.info(`Id: ${appId}`)
 
   // Registration first: it is the cheapest, most specific precondition, and

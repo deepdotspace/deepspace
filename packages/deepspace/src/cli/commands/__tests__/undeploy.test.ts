@@ -49,7 +49,7 @@ describe('undeploy partial failure', () => {
     }
     // The runtime records the code on process.exitCode instead of calling
     // process.exit (see lib/command.ts); the afterEach above clears it.
-    await command.run({ args: { name: appId, json: true } })
+    await command.run({ args: { name: appId, json: true, yes: true } })
     expect(process.exitCode).toBe(2)
 
     expect(JSON.parse(lines[0])).toMatchObject({
@@ -81,14 +81,14 @@ describe('undeploy partial failure', () => {
     const command = undeploy as unknown as {
       run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
     }
-    await command.run({ args: { name: appId, json: true } })
+    await command.run({ args: { name: appId, json: true, yes: true } })
 
     expect(process.exitCode).toBe(1)
-    expect(JSON.parse(lines[0])).toMatchObject({
-      ok: false,
-      code: 'not_app_owner',
-      error: 'Only the app owner can do this.',
-    })
+    const envelope = JSON.parse(lines[0]) as Record<string, unknown>
+    expect(envelope).toMatchObject({ ok: false, code: 'not_app_owner' })
+    // The server sentence survives, with the shared hint's recoveries after it.
+    expect(String(envelope.error)).toContain('Only the app owner can do this.')
+    expect(String(envelope.error)).toContain('app init --new-id')
   })
 })
 
@@ -109,7 +109,7 @@ describe('undeploy idempotence', () => {
       'fetch',
       vi.fn(async () => Response.json({ success: true, releasedHosts: ['my-shop.app.space'] })),
     )
-    expect(await run({ name: appId, json: true })).toEqual({
+    expect(await run({ name: appId, json: true, yes: true })).toEqual({
       ok: true,
       appId,
       releasedHosts: ['my-shop.app.space'],
@@ -121,7 +121,7 @@ describe('undeploy idempotence', () => {
   it('reports alreadyUndeployed:true when the registry released no route (second undeploy)', async () => {
     const appId = 'app_01HZXYABCDEFGHJKMNPQRSTVWX'
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ success: true, releasedHosts: [] })))
-    expect(await run({ name: appId, json: true })).toEqual({
+    expect(await run({ name: appId, json: true, yes: true })).toEqual({
       ok: true,
       appId,
       releasedHosts: [],
@@ -152,5 +152,28 @@ describe('undeploy consent', () => {
     } finally {
       Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true })
     }
+  })
+
+  it('refuses --json without --yes instead of treating the command as consent', async () => {
+    // "The command itself is consent" made --yes decorative exactly where a
+    // typo'd app id is most destructive — both 0.25.0 AX audits took a live
+    // app to 404 through this path without meaning to.
+    const appId = 'app_01HZXYABCDEFGHJKMNPQRSTVWX'
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const lines: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
+    const command = undeploy as unknown as {
+      run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+    }
+    await command.run({ args: { name: appId, json: true } })
+    expect(process.exitCode).toBe(1)
+    expect(JSON.parse(lines[0])).toMatchObject({
+      ok: false,
+      code: 'confirmation_required',
+      appId,
+    })
+    // Refused BEFORE the DELETE — nothing was taken down.
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 })

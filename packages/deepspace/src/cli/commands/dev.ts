@@ -26,7 +26,7 @@
  * exit envelope is the LAST line, not the only one.
  */
 
-import { readAppId } from '../lib/app-identity'
+import { ensureAppRegistered } from '../lib/app-registration'
 import { resolve, basename, join } from 'node:path'
 import spawn from 'cross-spawn'
 import { ensureToken } from '../auth'
@@ -186,16 +186,6 @@ export default defineDeepspaceCommand({
       updatePort: explicitPort,
     })
 
-    ensureInstallReady(appDir)
-
-    // Surface schema-lint findings in the terminal the developer is watching.
-    // The worker also warns at runtime, but only in the DO's console after a
-    // client connects — easy to miss, and these are shipping privacy bugs.
-    const lintFindings = await lintProjectSchemas(appDir)
-    if (lintFindings && lintFindings.length > 0 && !args.json) {
-      for (const line of formatSchemaLintFindings(lintFindings)) console.warn(line)
-    }
-
     let token: string
     try {
       token = await ensureToken()
@@ -225,11 +215,37 @@ export default defineDeepspaceCommand({
     say(`Port: ${port}`)
     if (host !== DEFAULT_DEV_HOST) say(`Host: ${host}`)
 
+    // After auth: a logged-out user must not sit through a first-use install
+    // only to hit not_authenticated.
+    ensureInstallReady(appDir)
+
+    // AFTER the heal: the lint esbuild-bundles src/schemas.ts, which needs
+    // node_modules — before the reorder, the first run on a fresh clone (the
+    // run the heal exists for) always skipped the one check that catches
+    // shipping privacy bugs.
+    const lintFindings = await lintProjectSchemas(appDir)
+    if (lintFindings && lintFindings.length > 0 && !args.json) {
+      for (const line of formatSchemaLintFindings(lintFindings)) console.warn(line)
+    }
+
     // Refresh the app-store secrets cache (config = wrangler env, or 'prd').
-    // A repo without a DEEPSPACE_APP_ID hasn't been initialized — writeDevVars
-    // below throws with the `deepspace app init` pointer, so skip the pull.
+    // An id-less checkout heals here: apps register on first use, so a fresh
+    // scaffold's `dev start` needs no `app init` step first.
     let generatedSecretsCache: string | undefined
-    const appIdForSecrets = readAppId(appDir, wranglerEnv)
+    let appIdForSecrets: string | null = null
+    try {
+      appIdForSecrets = (await ensureAppRegistered(appDir, token, wranglerEnv))?.appId ?? null
+    } catch (registrationError) {
+      // Local-first: a failed MINT (quota, offline, 5xx) must not stop a
+      // local dev/test run whose only loss is the app-secrets cache. Warn
+      // loudly and carry on; the same failure surfaces as a hard refusal on
+      // deploy/push, where the registration is actually required.
+      process.stderr.write(
+        `warning: could not register the app (` +
+          `${registrationError instanceof Error ? registrationError.message.split('\n')[0] : String(registrationError)}` +
+          `) — continuing without app secrets.\n`,
+      )
+    }
     if (appIdForSecrets) {
       try {
         const refreshed = await refreshSecretsCache(DEPLOY_URL, token, appIdForSecrets, wranglerEnv)

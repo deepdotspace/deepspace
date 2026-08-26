@@ -1,14 +1,9 @@
-import { GitError, runGit } from './git/process'
+import { runGit } from './git/process'
 
 export interface GitHubRemote {
   name: string
   repository: string
   url: string
-}
-
-export interface GitRef {
-  name: string
-  oid: string
 }
 
 /** Canonical GitHub owner/repository, or null for a non-GitHub URL. */
@@ -67,60 +62,3 @@ export function selectGitHubRemote(
   )
 }
 
-/** Public branches and tags advertised by a normal Git remote. */
-export function remotePublicRefs(cwd: string, remote: string): GitRef[] {
-  let output: string
-  try {
-    output = runGit(cwd, ['ls-remote', '--refs', remote]).stdout.toString('utf-8')
-  } catch (error) {
-    if (!isGitCredentialFailure(error)) throw error
-    throw new GitError(
-      'Git could not authenticate the remote. In a container, forward an SSH agent or use an ephemeral Git credential helper, then retry. Do not put tokens in remote URLs.',
-      'github_credentials_required',
-    )
-  }
-  return output
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [oid, name] = line.split(/\s+/, 2)
-      return { oid, name }
-    })
-    .filter(
-      (ref) =>
-        /^[0-9a-f]{40}$/.test(ref.oid) &&
-        (ref.name.startsWith('refs/heads/') || ref.name.startsWith('refs/tags/')),
-    )
-}
-
-export function isGitCredentialFailure(error: unknown): boolean {
-  if (!(error instanceof Error)) return false
-  return /authentication failed|could not read username|permission denied \(publickey\)|repository not found|terminal prompts disabled/i.test(
-    error.message,
-  )
-}
-
-export function remoteBranchOid(cwd: string, remote: string, branch: string): string | null {
-  return (
-    remotePublicRefs(cwd, remote).find((ref) => ref.name === `refs/heads/${branch}`)?.oid ?? null
-  )
-}
-
-/** Local refs under a transfer namespace, rewritten to their public names. */
-export function localTransferRefs(cwd: string, prefix: string, target: string): GitRef[] {
-  const output = runGit(cwd, [
-    'for-each-ref',
-    '--format=%(refname) %(objectname)',
-    prefix,
-  ]).stdout.toString('utf-8')
-  return output
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [name, oid] = line.split(/\s+/, 2)
-      return { name: `${target}/${name.slice(`${prefix}/`.length)}`, oid }
-    })
-    .filter((ref) => /^[0-9a-f]{40}$/.test(ref.oid))
-}

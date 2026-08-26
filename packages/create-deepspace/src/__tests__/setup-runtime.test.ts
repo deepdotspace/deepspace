@@ -50,47 +50,41 @@ describe('nextStepsLines', () => {
     expect(lines).toContain('npx deepspace dev start')
   })
 
-  it('lists login AND init together when the scaffold has no identity yet', () => {
+  it('lists only login when the scaffold has no identity yet — deploy registers', () => {
+    // The first `deploy` mints the id itself; login is the one true
+    // prerequisite (deploy needs it anyway), so `app init` is never a step.
     expect(
       nextStepsLines(project, {
         status: 'failed',
         code: 'not_authenticated',
         error: 'Not logged in.',
         plane: 'production',
-      }).slice(0, 3),
-    ).toEqual([
-      'cd demo',
-      'npx deepspace auth login',
-      'npx deepspace app init',
-    ])
+      }).slice(0, 2),
+    ).toEqual(['cd demo', 'npx deepspace auth login'])
   })
 
-  it('offers only `app init` when registration failed for a non-login reason', () => {
-    // A quota (or ownership, or network) refusal is not fixed by signing in;
-    // telling a signed-in user to `auth login` sent them the wrong way.
+  it('offers no recovery step when registration failed for a non-login reason', () => {
+    // A quota (or ownership, or network) refusal surfaces again — coded — at
+    // the first deploy, which is already on the list; nothing to add.
     const quota = nextStepsLines(project, {
       status: 'failed',
       code: 'app_quota_exceeded',
       error: 'Active app quota exceeded.',
       plane: 'production',
     })
-    expect(quota.slice(0, 2)).toEqual(['cd demo', 'npx deepspace app init'])
+    expect(quota.slice(0, 2)).toEqual(['cd demo', 'npx deepspace dev start'])
     expect(quota).not.toContain('npx deepspace auth login')
+    expect(quota).not.toContain('npx deepspace app init')
   })
 
-  it('offers login + init when registration was skipped or the login was missing', () => {
-    expect(nextStepsLines(project, { status: 'skipped' }).slice(1, 3)).toEqual([
-      'npx deepspace auth login',
-      'npx deepspace app init',
-    ])
-    expect(
-      nextStepsLines(project, {
-        status: 'failed',
-        code: 'not_authenticated',
-        error: 'Not logged in.',
-        plane: 'production',
-      }).slice(1, 3),
-    ).toEqual(['npx deepspace auth login', 'npx deepspace app init'])
+  it('warns --no-register scaffolds that first use registers under the active login', () => {
+    // The flag exists to keep the app OFF this shell's login; with first-use
+    // registration, ANY later verb under the wrong login would claim it — so
+    // the next steps must say so before naming the login step.
+    const lines = nextStepsLines(project, { status: 'skipped' })
+    expect(lines.join('\n')).toContain('WILL')
+    expect(lines).toContain('npx deepspace auth login')
+    expect(lines).not.toContain('npx deepspace app init')
   })
 })
 

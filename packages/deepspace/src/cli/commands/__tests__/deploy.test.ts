@@ -156,6 +156,44 @@ describe('blankSelectorRefusal (pre-auth blank deploy selector)', () => {
  * multi-hundred-KiB upload. They are answered by the pre-build `/source`
  * response, so the CLI settles them before `buildDeployBundle` runs.
  */
+describe('external git source is inferred, never registered', () => {
+  // The `source_unclaimed` fork-in-the-road is gone: an unclaimed app whose
+  // checkout points at GitHub deploys as GitHub — no claim step, no git gates.
+  it('skips every git gate for an unclaimed app with a GitHub remote, even dirty', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ds-deploy-inferred-'))
+    try {
+      const g = (args: string[]) => execFileSync('git', args, { cwd: repo })
+      g(['init', '-q', '-b', 'main'])
+      g(['remote', 'add', 'origin', 'git@github.com:acme/app.git'])
+      writeFileSync(join(repo, 'wip.txt'), 'uncommitted deploy bytes\n')
+
+      expect(preflightDeployRepository({ appDir: repo, push: true, source: null })).toBeNull()
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  it('still runs the DeepSpace gates for an unclaimed app with no GitHub remote', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ds-deploy-native-'))
+    try {
+      const g = (args: string[]) => execFileSync('git', args, { cwd: repo })
+      g(['init', '-q', '-b', 'main'])
+      g(['config', 'user.email', 'test@example.com'])
+      g(['config', 'user.name', 'Test'])
+      writeFileSync(join(repo, 'f.txt'), 'base\n')
+      g(['add', '-A'])
+      g(['commit', '-q', '-m', 'base'])
+      writeFileSync(join(repo, 'f.txt'), 'dirty\n')
+
+      expect(
+        preflightDeployRepository({ appDir: repo, push: true, source: null }),
+      ).toMatchObject({ code: 'dirty_worktree' })
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('pre-build deploy refusals', () => {
   it('refuses a collaborator whose app has no live APP_OWNER_JWT, with the platform’s sentence', () => {
     const refusal = ownerJwtMissingRefusal({ onBehalf: { ownerJwtLive: false } })
@@ -279,9 +317,9 @@ describe('on-behalf deploy attribution', () => {
         deployKey: 'key',
         source: null,
         sourceRevision: 0,
-        baseReleaseId: null,
         branch: 'main',
         dirty: false,
+        observedRepository: null,
       },
       output: {
         json: true,
@@ -354,9 +392,9 @@ describe('on-behalf deploy attribution', () => {
         deployKey: 'stable-deploy-key',
         source: null,
         sourceRevision: 0,
-        baseReleaseId: null,
         branch: 'main',
         dirty: false,
+        observedRepository: null,
       },
       output: {
         json: true,
@@ -431,9 +469,9 @@ describe('on-behalf deploy attribution', () => {
           deployKey: 'stable-deploy-key',
           source: null,
           sourceRevision: 0,
-          baseReleaseId: null,
           branch: 'main',
           dirty: false,
+          observedRepository: null,
         },
         output: {
           json: true,
@@ -509,9 +547,9 @@ describe('on-behalf deploy attribution', () => {
         deployKey: 'key',
         source: null,
         sourceRevision: 0,
-        baseReleaseId: null,
         branch: 'main',
         dirty: false,
+        observedRepository: null,
       },
       output: {
         json: true,
@@ -582,9 +620,9 @@ describe('on-behalf deploy attribution', () => {
           deployKey: 'key',
           source: null,
           sourceRevision: 0,
-          baseReleaseId: null,
           branch: 'main',
           dirty: false,
+          observedRepository: null,
         },
         output: {
           json: true,
@@ -1723,7 +1761,6 @@ describe('manual GitHub deploy', () => {
         recoverable: false,
         source: { provider: 'github', repository: 'deepdotspace/example' },
         sourceRevision: 3,
-        baseReleaseId: null,
         // With no commit recorded, these two ARE the record of what shipped.
         branch: 'main',
         dirty: true,

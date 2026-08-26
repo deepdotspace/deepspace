@@ -101,6 +101,7 @@ export function formatEvent(
             : s.sourceProvider === 'deepspace'
               ? { provider: 'deepspace' }
               : null,
+        sourceDirty: typeof s.sourceDirty === 'boolean' ? s.sourceDirty : null,
       })}`
       break
     // Unknown kinds still print their kind + actor — never crash the feed.

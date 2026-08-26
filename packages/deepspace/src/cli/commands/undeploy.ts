@@ -40,8 +40,8 @@ export default defineDeepspaceCommand({
     },
     yes: {
       type: 'boolean',
-      description:
-        'Skip the interactive confirmation. (Scripts and --json callers are never prompted; the command itself is their consent.)',
+      alias: 'y',
+      description: 'Skip the confirmation (required for --json / non-interactive)',
       default: false,
     },
   },
@@ -83,14 +83,24 @@ export default defineDeepspaceCommand({
       )
     }
 
-    // The most destructive app command: at an interactive terminal, confirm
-    // before the live URL goes dark. Scripts, agents and `--json` callers are
-    // never prompted (a paused piped stdin would hang the exit; the command
-    // is their consent) — matching how the rest of the CLI treats consent.
+    // The most destructive app command, so consent is never implicit. A
+    // prompt is a permanent hang for a machine caller — `--json` promises one
+    // document on stdout and a non-TTY stdin has nobody to answer — so both
+    // refuse with the flag to re-run with, exactly like `secrets configs
+    // delete`. "The command itself is consent" was the old rule here, and it
+    // made `--yes` decorative precisely where a typo'd app id is most
+    // destructive (both 0.25.0 AX audits flagged it independently).
+    const target = label && label !== appId ? `${label} (${appId})` : appId
+    if (args.yes !== true && (args.json === true || !process.stdin.isTTY)) {
+      throw new Refusal(
+        `Undeploying ${target} takes its URL offline immediately and destroys its live data — records, messages, canvas state, cron history — with the worker (secrets and the registration stay). Re-run with --yes to confirm.`,
+        'confirmation_required',
+        { extra: { appId } },
+      )
+    }
     // The sentence must match what undeploy does (docs: app-identity guide):
     // the worker and its Durable Objects go, so the app's data goes with
     // them; secrets and the registration stay.
-    const target = label && label !== appId ? `${label} (${appId})` : appId
     if (!args.json && !args.yes && process.stdin.isTTY) {
       p.intro(`Undeploying ${target}`)
       const confirmed = await p.confirm({

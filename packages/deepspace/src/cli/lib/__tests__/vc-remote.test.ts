@@ -13,7 +13,6 @@ import {
   ensureSpaceRemote,
   removeSpaceRemote,
   gitAuthEnv,
-  gitSourceImportEnv,
   repoUrl,
   spacePrivateRef,
   spaceRemoteName,
@@ -130,16 +129,6 @@ describe('gitAuthEnv', () => {
     expect(gitAuthEnv('t').GIT_CONFIG_KEY_0).toBe('http.https://default.test.extraHeader')
   })
 
-  it('adds a revision-bound import header without replacing bearer auth', () => {
-    delete process.env.GIT_CONFIG_COUNT
-    expect(gitSourceImportEnv('tok', 7, 'https://deploy.test')).toEqual({
-      GIT_CONFIG_COUNT: '2',
-      GIT_CONFIG_KEY_0: 'http.https://deploy.test.extraHeader',
-      GIT_CONFIG_VALUE_0: 'Authorization: Bearer tok',
-      GIT_CONFIG_KEY_1: 'http.https://deploy.test.extraHeader',
-      GIT_CONFIG_VALUE_1: 'X-DeepSpace-Source-Revision: 7',
-    })
-  })
 })
 
 describe('ensureSpaceRemote against a real repository', () => {

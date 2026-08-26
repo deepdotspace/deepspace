@@ -20,10 +20,10 @@ import {
   pushToSpace,
   type PushRefResult,
 } from '../../lib/vc-push'
-import { ensureSpaceRemote, runGitRemote, spaceRemoteName } from '../../lib/vc-remote'
+import { ensureSpaceRemote, removeSpaceRemote, runGitRemote, spaceRemoteName } from '../../lib/vc-remote'
 import { workspaceIdFromBranch } from '../../lib/workspace-id'
 import { CliExit, errorCode } from '../../lib/cli-errors'
-import { listGitHubRemotes } from '../../lib/source-control'
+import { listGitHubRemotes, selectGitHubRemote } from '../../lib/source-control'
 import { getAppSource, type AppSource, type AppSourceState } from '../../lib/source-api'
 import type { DeployOutput } from './output'
 
@@ -33,13 +33,20 @@ export interface DeployRepositoryState {
   deployKey: string
   source: AppSource | null
   sourceRevision: number
-  baseReleaseId: string | null
   /** The branch this release was built from; null on a detached HEAD or a
    *  non-repository app dir. */
   branch: string | null
   /** Whether the tree carried uncommitted changes; null when there is no
    *  repository to ask. */
   dirty: boolean | null
+  /**
+   * INFERRED-GitHub evidence only: the repository an unclaimed checkout's
+   * remote points at, recorded per release. Deliberately NOT carried as
+   * `source` — a 0.25.0 worker trusts a request's claimed source and would
+   * skip its stale-base guard on it; this separate field is simply ignored
+   * by older workers. Null for claimed apps and non-GitHub checkouts.
+   */
+  observedRepository: string | null
 }
 
 /**
@@ -59,6 +66,39 @@ function describeWorktree(appDir: string): { branch: string | null; dirty: boole
 }
 
 /**
+ * Whether this deploy's git truth lives OUTSIDE the platform: a claimed
+ * GitHub app, or an unclaimed app whose checkout has a GitHub remote. The
+ * inference that replaced the `source_unclaimed` question — nothing is
+ * registered up front; a checkout that points at GitHub deploys as GitHub
+ * until the day a `deepspace push` claims DeepSpace source by using it.
+ */
+export function externalGitSource(appDir: string, source: AppSource | null): boolean {
+  if (source?.provider === 'github') return true
+  if (source !== null) return false
+  try {
+    return listGitHubRemotes(appDir).length > 0
+  } catch {
+    // No git on PATH, or no repository: nothing external to defer to.
+    return false
+  }
+}
+
+/** The repository label an unclaimed deploy records as evidence: the
+ *  unambiguous remote when there is one, else the first GitHub remote — an
+ *  arbitrary-but-deterministic pick still names A repository the checkout
+ *  points at, where null would drop the evidence (and the server's stale
+ *  guard with it). */
+function observedGitHubRepository(appDir: string): string | null {
+  try {
+    return (
+      selectGitHubRemote(appDir)?.repository ?? listGitHubRemotes(appDir)[0]?.repository ?? null
+    )
+  } catch {
+    return null
+  }
+}
+
+/**
  * Read-only local checks that should fail before an expensive build. The
  * actual sync repeats these checks immediately before its remote mutation so
  * a working tree changed during the build still fails safely.
@@ -69,17 +109,10 @@ export function preflightDeployRepository(options: {
   source: AppSource | null
 }): { code: string; error: string } | null {
   const { appDir, push, source } = options
-  if (!push || source?.provider === 'github') return null
+  if (!push || externalGitSource(appDir, source)) return null
 
   try {
     assertSyncableRepo(appDir)
-    if (!source && listGitHubRemotes(appDir).length > 0) {
-      return {
-        code: 'source_unclaimed',
-        error:
-          'This app has a GitHub remote but no claimed source. Choose once with `deepspace app source github` (manual GitHub ownership) or `deepspace app source deepspace` (packaged DeepSpace source), then deploy again.',
-      }
-    }
     // Before the dirty check: a half-finished merge IS a dirty tree, but
     // "commit them" is not its remedy — the same refusal push and pull give.
     assertNoOperationInProgress(appDir)
@@ -111,13 +144,42 @@ export async function syncDeployRepository(options: {
   const deployKey = mintIdempotencyKey()
   let source = sourceState.source
   let sourceRevision = sourceState.revision
-  const baseReleaseId: string | null = null
   const worktree = describeWorktree(appDir)
 
-  // GitHub owns source, but deployment remains the traditional manual flow:
-  // ship the local working tree without inspecting or mutating Git. Only
-  // DeepSpace source has commit-first synchronization and workspace lineage.
-  if (source?.provider === 'github') {
+  // No cloud-repo probe here: an unclaimed app with DeepSpace history cannot
+  // exist. Pushing and claiming happen at the same receive path (any writer,
+  // since this release; the owner since v0.15.0, when the repo store and the
+  // source model shipped together), so "has history" implies "claimed" by
+  // construction, and the local inference below is the whole answer.
+  const external = externalGitSource(appDir, source)
+
+  // GitHub owns source — claimed, or inferred from the checkout's remote on
+  // an unclaimed app with no DeepSpace history — and deployment remains the
+  // traditional manual flow: ship the local working tree without inspecting
+  // or mutating Git. Only DeepSpace source has commit-first synchronization
+  // and workspace lineage.
+  if (external) {
+    // A CLAIMED GitHub app's `space` remote is definitionally dead (the
+    // server refuses it with a bodiless 422 git cannot render). The old
+    // `app source github` claim removed it; with the setter gone, deploy —
+    // the verb GitHub apps actually run — self-heals it instead. Scoped to
+    // claimed apps only: on an UNCLAIMED app the remote is functional (a
+    // push through it claims DeepSpace source), so it is left alone.
+    if (sourceState.source?.provider === 'github') {
+      try {
+        if (removeSpaceRemote(appDir)) {
+          p.log.info(`Removed the stale \`space\` git remote — GitHub owns this app's source.`)
+        }
+      } catch {
+        // Local git-config cleanup must never fail a deploy.
+      }
+    }
+    // Evidence, not registration: an unclaimed app's release is labeled with
+    // the repository its checkout actually points at, so the ledger reads
+    // `GitHub · owner/repo` with no claim step ever taken. Carried as its own
+    // field, never as claimed `source` (see DeployRepositoryState — a 0.25.0
+    // worker would trust it and skip its stale guard).
+    const observedRepository = source === null ? observedGitHubRepository(appDir) : null
     // This release records no commit, so the branch and the dirty flag are the
     // only trace of what it shipped. Say them — the deploy is NOT refused
     // (shipping the working tree is what GitHub source means), but an
@@ -131,7 +193,7 @@ export async function syncDeployRepository(options: {
     } else {
       p.log.info(`${where} (clean). GitHub-source releases record no commit lineage.`)
     }
-    return { commitOid, recoverable, deployKey, source, sourceRevision, baseReleaseId, ...worktree }
+    return { commitOid, recoverable, deployKey, source, sourceRevision, observedRepository, ...worktree }
   }
 
   if (!push) {
@@ -141,7 +203,15 @@ export async function syncDeployRepository(options: {
     } catch {
       // A non-repository app can still deploy; it simply has no source lineage.
     }
-    return { commitOid, recoverable, deployKey, source, sourceRevision, baseReleaseId, ...worktree }
+    // The JSON envelope and the release row both carry the dirty flag; the
+    // human running the deploy must hear it too, not learn it from
+    // `releases` later — the recorded commit is NOT what shipped.
+    if (worktree.dirty) {
+      p.log.warn(
+        `--no-push: shipping the working tree WITH uncommitted changes — the recorded commit ${commitOid ? commitOid.slice(0, 10) : ''} is not exactly what went live.`,
+      )
+    }
+    return { commitOid, recoverable, deployKey, source, sourceRevision, observedRepository: null, ...worktree }
   }
 
   try {
@@ -160,7 +230,7 @@ export async function syncDeployRepository(options: {
 
     const tip = resolveCommit(appDir, `refs/heads/${branch}`)
     if (!tip) {
-      return { commitOid, recoverable, deployKey, source, sourceRevision, baseReleaseId, ...worktree }
+      return { commitOid, recoverable, deployKey, source, sourceRevision, observedRepository: null, ...worktree }
     }
 
     const secretFiles = workspaceBranchId ? [] : trackedSecretFiles(appDir, tip)
@@ -194,6 +264,16 @@ export async function syncDeployRepository(options: {
           `this release's source isn't recoverable until the push works.`,
       )
     } else {
+      // The push below CLAIMS DeepSpace source on an unclaimed app —
+      // permanent. Say so at the moment it happens, and only on the path
+      // that actually pushes (the secret-files skip and the workspace path
+      // above never send the pack, so the sentence would be false there).
+      // stderr: the fact must reach --json callers without touching stdout.
+      if (sourceState.source === null) {
+        process.stderr.write(
+          "This app's source is unclaimed — this deploy's push claims DeepSpace source for it, permanently.\n",
+        )
+      }
       const pushResult = await pushWithTransientRetry(() =>
         pushToSpace(appDir, token, `refs/heads/${branch}:refs/heads/${branch}`, {
           remote: sourceRemote,
@@ -267,7 +347,7 @@ export async function syncDeployRepository(options: {
     output.die(failure.error, failure.code)
   }
 
-  return { commitOid, recoverable, deployKey, source, sourceRevision, baseReleaseId, ...worktree }
+  return { commitOid, recoverable, deployKey, source, sourceRevision, observedRepository: null, ...worktree }
 }
 
 function classifyRemoteState(

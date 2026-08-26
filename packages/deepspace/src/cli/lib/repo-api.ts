@@ -49,6 +49,9 @@ export interface RemoteRelease {
   createdAt: string
   source: { provider: 'deepspace' } | { provider: 'github'; repository: string } | null
   sourceRevision: number | null
+  /** Whether the shipped working tree carried uncommitted changes; absent or
+   *  null when unknown (older server, or no repository to ask). */
+  sourceDirty?: boolean | null
 }
 
 /**
@@ -63,11 +66,22 @@ export interface RemoteRelease {
 export function releaseSourceLabel(release: {
   commitOid: string | null
   source: RemoteRelease['source']
+  sourceDirty?: boolean | null
 }): string {
-  if (release.commitOid) return `commit ${release.commitOid.slice(0, 10)}`
-  if (release.source?.provider === 'github') return `GitHub · ${release.source.repository}`
-  if (release.source?.provider === 'deepspace') return 'DeepSpace source, no commit recorded'
-  return 'no source recorded'
+  // The dirty flag is the ledger's only trace of what a release actually
+  // shipped beyond its label — without it a dirty deploy and a clean one read
+  // identically, and a rollback picks between them blind. A commit-bearing
+  // dirty release is the `--no-push` case: the recorded commit is NOT what
+  // shipped, and saying so is the whole point.
+  const dirty = release.sourceDirty === true ? ' (dirty worktree)' : ''
+  if (release.commitOid) return `commit ${release.commitOid.slice(0, 10)}${dirty}`
+  if (release.source?.provider === 'github') {
+    return `GitHub · ${release.source.repository}${dirty ? ', dirty worktree' : ''}`
+  }
+  if (release.source?.provider === 'deepspace') {
+    return `DeepSpace source, no commit recorded${dirty}`
+  }
+  return `no source recorded${dirty}`
 }
 
 export interface RemoteWorkspace {

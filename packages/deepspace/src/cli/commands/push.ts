@@ -39,6 +39,7 @@ import {
   SECRET_IN_HISTORY_CODE,
   secretFilesInPushRange,
   secretRecoverySentence,
+  statusFiles,
 } from '../lib/git/safety'
 import { workspaceIdFromBranch } from '../lib/workspace-id'
 import { shQuote } from '../lib/cli-format'
@@ -248,11 +249,11 @@ export default defineDeepspaceCommand({
       const resolveTarget = async (): Promise<{ token: string; appId: string }> => {
         // Blank --app / missing app context is a client-side error — reject it
         // BEFORE the token read so it never surfaces as not_authenticated.
-        assertAppTargetResolvable(appArg)
+        assertAppTargetResolvable(appArg, { register: true })
         const token = await ensureToken()
         // Accepts an id OR a subdomain name — a raw name must never pass
         // through as a literal app id (it would register a phantom app).
-        const appId = await resolveAppTarget(deployBaseUrl(), token, appArg)
+        const appId = await resolveAppTarget(deployBaseUrl(), token, appArg, { register: true })
         await warnIfPhantomApp(deployBaseUrl(), token, appId, appArg?.trim() || undefined)
         return { token, appId }
       }
@@ -372,6 +373,16 @@ export default defineDeepspaceCommand({
       // status. This is the best-informed site, and it refuses before git runs.
       if (sourceState.source?.provider === 'github') {
         throw githubSourceRefusal(appId, sourceState.source.repository)
+      }
+      // The first push CLAIMS DeepSpace source, and the claim is permanent —
+      // say so at the moment it happens, not only in `app source`'s output.
+      // stderr: the fact must reach --json callers without touching stdout.
+      if (sourceState.source === null) {
+        process.stderr.write(
+          `This app's source is unclaimed — this push claims DeepSpace source for it, ` +
+            `permanently (a checkout that deploys from GitHub instead should not run ` +
+            `\`deepspace push\`).\n`,
+        )
       }
       const pullRecoveryCwd = selectedBranchCheckout(appDir, branch) ?? appDir
       // The token goes in: every recovery this command hands back (`deepspace
@@ -604,7 +615,26 @@ export default defineDeepspaceCommand({
           extra: { status: result.status, appId, branch, oid: tipOid },
         })
       }
-      return { data: { status: result.status, appId, branch, oid: tipOid } }
+      // Push moves COMMITTED history only. A success over a dirty tree used to
+      // say nothing about it, and "committed" is the word most likely to
+      // convince an agent all its work is safe — name what stayed local, on
+      // both surfaces (workspace sync already does the same).
+      const uncommitted = appDir ? statusFiles(appDir) : []
+      if (!args.json && uncommitted.length > 0) {
+        p.log.warn(
+          `${uncommitted.length} uncommitted file${uncommitted.length === 1 ? '' : 's'} NOT pushed — ` +
+            'push publishes committed history only. Commit and push again to publish them.',
+        )
+      }
+      return {
+        data: {
+          status: result.status,
+          appId,
+          branch,
+          oid: tipOid,
+          ...(uncommitted.length > 0 ? { uncommitted } : {}),
+        },
+      }
     } catch (err) {
       if (err instanceof Refusal) throw err
       const transportFailure = classifyPushTransportFailure(err, appDir ?? undefined)

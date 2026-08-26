@@ -1,9 +1,24 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, describe, expect, it } from 'vitest'
-import { installState, resolvesDeepspace } from '../install-status'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
+
+// cross-spawn is CJS, so its namespace cannot be spied — mock the module,
+// but intercept ONLY `<pm> install` (the heal under test); everything else
+// (the real `git` calls resolvesDeepspace's worktree-boundary logic makes)
+// passes through to the actual implementation.
+const spawnMock = vi.hoisted(() => ({ install: vi.fn() }))
+vi.mock('cross-spawn', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('cross-spawn')>()
+  const sync = (cmd: string, args?: readonly string[], opts?: unknown) =>
+    cmd !== 'git' && args?.[0] === 'install'
+      ? (spawnMock.install as (...a: unknown[]) => unknown)(cmd, args, opts)
+      : (actual.sync as (...a: unknown[]) => unknown)(cmd, args, opts)
+  return { ...actual, default: Object.assign(sync, actual), sync }
+})
+
+import { ensureInstallReady, installState, resolvesDeepspace } from '../install-status'
 
 describe('resolvesDeepspace', () => {
   const root = mkdtempSync(join(tmpdir(), 'ds-install-'))
@@ -54,5 +69,69 @@ describe('resolvesDeepspace', () => {
     mkdirSync(join(app, '.deepspace'), { recursive: true })
     writeFileSync(join(app, '.deepspace', 'install.err'), 'failed')
     expect(installState(app)).toBe('failed')
+  })
+})
+
+describe('ensureInstallReady heals a plain-missing install', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ds-install-heal-'))
+  afterAll(() => rmSync(root, { recursive: true, force: true }))
+  afterEach(() => {
+    vi.restoreAllMocks()
+    spawnMock.install.mockReset()
+  })
+
+  it('runs the detected package manager once and writes the sentinel protocol', () => {
+    // A fresh clone self-installs on first use, like an id-less checkout
+    // self-registers — the deps_missing refusal is gone for this state.
+    const app = join(root, 'clone')
+    mkdirSync(app, { recursive: true })
+    writeFileSync(join(app, 'package.json'), JSON.stringify({ packageManager: 'pnpm@11.0.0' }))
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true)
+    const run = spawnMock.install.mockImplementation((() => {
+      // The install's observable effect: deepspace resolves afterwards.
+      mkdirSync(join(app, 'node_modules', 'deepspace'), { recursive: true })
+      writeFileSync(join(app, 'node_modules', 'deepspace', 'package.json'), '{}')
+      return { status: 0, stdout: 'ok', stderr: '', output: [], pid: 1, signal: null }
+    }) as never)
+
+    ensureInstallReady(app)
+
+    expect(run).toHaveBeenCalledWith('pnpm', ['install'], expect.objectContaining({ cwd: app }))
+    expect(existsSync(join(app, '.deepspace', 'install.done'))).toBe(true)
+    // Output streams to the log via a file descriptor (tail-able mid-install,
+    // no pipe-buffer cap); the mock writes nothing, so only existence is ours.
+    expect(existsSync(join(app, '.deepspace', 'install.log'))).toBe(true)
+    // Ready now — a second call never re-runs the install.
+    ensureInstallReady(app)
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('a failing install writes install.err and refuses install_failed with the log', () => {
+    const app = join(root, 'broken')
+    mkdirSync(app, { recursive: true })
+    writeFileSync(join(app, 'package.json'), '{}')
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true)
+    spawnMock.install.mockReturnValue({
+      status: 1,
+      stdout: '',
+      stderr: 'ERR_PNPM_NO_OFFLINE',
+      output: [],
+      pid: 1,
+      signal: null,
+    } as never)
+
+    expect(() => ensureInstallReady(app)).toThrow(
+      expect.objectContaining({ code: 'install_failed' }),
+    )
+    expect(readFileSync(join(app, '.deepspace', 'install.err'), 'utf-8')).toContain('exited 1')
+    // The failure is NOT sticky: the next command retries (a transient blip
+    // must not permanently re-impose the manual step) — with the manager
+    // still failing, it fails loudly again rather than wedging on its own
+    // leftover pid sentinel.
+    expect(installState(app)).toBe('failed')
+    expect(() => ensureInstallReady(app)).toThrow(
+      expect.objectContaining({ code: 'install_failed' }),
+    )
+    expect(spawnMock.install).toHaveBeenCalledTimes(2)
   })
 })

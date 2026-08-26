@@ -1,15 +1,19 @@
 import { Refusal } from './command'
 /**
  * Verifies the app's dependencies are installed before running a command that
- * needs them (dev, test, deploy, add).
+ * needs them (dev, test, deploy, add) — and HEALS the plain-missing state by
+ * installing on first use (a fresh clone needs no manual `npm install`, the
+ * way an id-less checkout needs no manual `app init`). A failed or still-
+ * running install keeps its refusal.
  *
  * `create-deepspace` completes installation before returning and before its
  * initial commit. Sentinels under `<appDir>/.deepspace/` are how a run that
  * did NOT complete is told apart from one still in progress:
  *
- *   install.started — created before the worker is spawned
- *   install.pid     — the worker's pid; the liveness check that separates
- *                     "still installing" from "died without finishing"
+ *   install.started — created before the package manager is spawned
+ *   install.pid     — the installing process's pid; the liveness check that
+ *                     separates "still installing" from "died without
+ *                     finishing" (a dead pid retries on the next command)
  *   install.done    — written on successful completion
  *   install.err     — written on failure (contains the error message)
  *   install.log     — combined stdout/stderr, quoted in the refusal
@@ -21,8 +25,20 @@ import { Refusal } from './command'
  * The presence of `node_modules/deepspace/package.json` is the ground truth
  * for "ready"; the sentinels only shape the error message.
  */
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { sync as spawnSync } from 'cross-spawn'
 import { repoToplevel } from './git/repository'
 import { detectPackageManager } from './package-manager'
 
@@ -52,48 +68,170 @@ export function ensureInstallReady(appDir: string): void {
   if (resolvesDeepspace(appDir)) return
 
   const sentinelDir = join(appDir, '.deepspace')
-  const errPath = join(sentinelDir, 'install.err')
   const startedPath = join(sentinelDir, 'install.started')
   const donePath = join(sentinelDir, 'install.done')
   const logPath = join(sentinelDir, 'install.log')
 
-  if (existsSync(errPath)) {
-    const detail = readFileSync(errPath, 'utf-8').trimEnd()
-    const log = existsSync(logPath) ? ` Full log: ${logPath}.` : ''
+  // Opt-out for callers who want to review before anything executes (an
+  // install runs the packages' own lifecycle scripts): restore the old
+  // refusal, same code and shape it always had.
+  if (process.env.DEEPSPACE_NO_INSTALL) {
     throw new Refusal(
-      `Dependency install failed: ${detail}.${log} Run \`npm install\` (or \`bun install\`) manually, then retry.`,
-      'install_failed',
+      'Dependencies not installed, and DEEPSPACE_NO_INSTALL is set — run the install yourself, then retry.',
+      'deps_missing',
       { action: { cwd: appDir, argv: [detectPackageManager(appDir), 'install'] } },
     )
   }
 
-  if (existsSync(startedPath) && !existsSync(donePath)) {
-    // A worker that died without writing done/err (OOM, docker stop, laptop
-    // shutdown) must not read as "still installing" forever. Every installer
-    // generation writes a valid install.pid before starting package-manager work.
-    if (!installWorkerAlive(sentinelDir)) {
-      const log = existsSync(logPath) ? ` See what happened: ${logPath}.` : ''
-      throw new Refusal(
-        `The dependency install is no longer running and never finished.${log} Run \`npm install\` (or \`bun install\`) manually, then retry.`,
-        'install_failed',
-        { action: { cwd: appDir, argv: [detectPackageManager(appDir), 'install'] } },
-      )
-    }
-    // `tail -f` isn't a Windows command — tailHint points PowerShell users at its equivalent.
+  // ANOTHER process's live install: wait-refuse rather than run a second
+  // package manager into the same node_modules. Our own recorded pid is never
+  // "another process" — it is a leftover from an interrupted earlier run of
+  // this very pid slot (or a recycled pid), and treating it as live wedged
+  // the checkout forever. Age-bounded for the same reason: a RECYCLED pid can
+  // belong to an unrelated live process (container restarts recycle from 1),
+  // and without a bound that false positive also wedged forever — no real
+  // install outlives the 5-minute timeout by much, so a sentinel past 30
+  // minutes is stale evidence, not a live installer.
+  if (
+    existsSync(startedPath) &&
+    !existsSync(donePath) &&
+    installWorkerAlive(sentinelDir) &&
+    sentinelAgeMs(startedPath) < 30 * 60 * 1000
+  ) {
     const tail = existsSync(logPath) ? ` Tail progress: ${tailHint(logPath)}.` : ''
     throw new Refusal(
-      `Dependencies are still installing.${tail} Retry once it finishes.`,
+      `Dependencies are still installing.${tail} Retry once it finishes (or remove ${sentinelDir}/install.started if no install is actually running).`,
       'install_in_progress',
     )
   }
 
-  throw new Refusal(
-    'Dependencies not installed. Run `npm install` (or `bun install`) first.',
-    'deps_missing',
-    {
-      action: { cwd: appDir, argv: [detectPackageManager(appDir), 'install'] },
-    },
+  // Everything else — plain missing, a previous attempt's install.err, an
+  // interrupted install (started, no done, dead pid) — is healed by trying
+  // again NOW. A transient failure (registry blip, offline laptop) must not
+  // permanently convert "installs on first use" back into a manual step;
+  // each command invocation makes exactly one bounded attempt, so a
+  // deterministic failure still fails loudly every time rather than looping.
+  healMissingInstall(appDir)
+}
+
+/** One bounded foreground install, through the same sentinel protocol the
+ *  scaffolder's installer writes, so a concurrent command sees `installing`
+ *  and a crash mid-install reads as an interrupted attempt (retried on the
+ *  next command) — never as "ready". Output STREAMS to install.log via a
+ *  file descriptor: the log is tail-able during the install, and no pipe
+ *  buffer cap can kill a chatty package manager mid-flight. */
+function healMissingInstall(appDir: string): void {
+  const manager = detectPackageManager(appDir)
+  const sentinelDir = join(appDir, '.deepspace')
+  const logPath = join(sentinelDir, 'install.log')
+  const errPath = join(sentinelDir, 'install.err')
+  const previousFailure = existsSync(errPath)
+    ? readFileSync(errPath, 'utf-8').trimEnd()
+    : null
+  // stderr, always: `--json` stdout carries exactly one document, and a
+  // silent multi-minute install reads as a hang without the log to watch.
+  process.stderr.write(
+    `Installing dependencies (${manager} install) — first use installs them. ` +
+      `${previousFailure ? `Retrying after: ${previousFailure}. ` : ''}Watch: ${tailHint(logPath)}\n`,
   )
+  // Windows resolves child binaries from the child's cwd FIRST: a cloned
+  // repo shipping `npm.cmd` at its root would execute instead of the real
+  // npm. Refuse rather than resolve — a repo carrying a file named after a
+  // package manager at its root is not something to run an install in.
+  if (process.platform === 'win32') {
+    for (const ext of ['.cmd', '.bat', '.exe', '.com', '.ps1']) {
+      if (existsSync(join(appDir, `${manager}${ext}`))) {
+        throw new Refusal(
+          `Refusing to install: ${appDir} contains ${manager}${ext}, which Windows would execute instead of the real ${manager}. Remove it, or run the install yourself from a shell you trust.`,
+          'install_failed',
+        )
+      }
+    }
+  }
+  mkdirSync(sentinelDir, { recursive: true })
+  ensureSentinelsIgnored(appDir)
+  rmSync(errPath, { force: true })
+  rmSync(join(sentinelDir, 'install.done'), { force: true })
+  writeFileSync(join(sentinelDir, 'install.started'), new Date().toISOString())
+  writeFileSync(join(sentinelDir, 'install.pid'), String(process.pid))
+  const logFd = openSync(logPath, 'w')
+  let result: ReturnType<typeof spawnSync>
+  try {
+    result = spawnSync(manager, ['install'], {
+      cwd: appDir,
+      stdio: ['ignore', logFd, logFd],
+      // Bounded (repo rule: no task over 5 minutes): a hung registry must
+      // surface as a fast failure, never a stall. The log names the cure.
+      timeout: 5 * 60 * 1000,
+    })
+  } finally {
+    closeSync(logFd)
+  }
+  if (result.status === 0 && !result.error && resolvesDeepspace(appDir)) {
+    writeFileSync(join(sentinelDir, 'install.done'), new Date().toISOString())
+    return
+  }
+  const detail = result.error
+    ? (result.error as NodeJS.ErrnoException).code === 'ETIMEDOUT'
+      ? `${manager} install timed out after 5 minutes`
+      : result.error.message
+    : result.status === 0
+      ? `${manager} install completed but the \`deepspace\` package still does not resolve — is this directory the app (its package.json must depend on deepspace)?`
+      : result.status === null
+        ? `${manager} install was killed (${result.signal ?? 'signal'})`
+        : `${manager} install exited ${result.status}`
+  writeFileSync(errPath, detail)
+  // The tail rides in the refusal itself: in CI the runner (and its log
+  // file) is destroyed with the job, so a path alone explains nothing.
+  let logTail = ''
+  try {
+    const log = readFileSync(logPath, 'utf-8')
+    const tail = log.slice(-1500).trimEnd()
+    if (tail) logTail = `\n--- install log (tail) ---\n${tail}`
+  } catch {
+    // No log to quote.
+  }
+  throw new Refusal(
+    `Dependency install failed: ${detail}. Full log: ${logPath}. It will be retried on the next command, or run \`${manager} install\` yourself.${logTail}`,
+    'install_failed',
+    { action: { cwd: appDir, argv: [manager, 'install'] } },
+  )
+}
+
+/** Age of a sentinel file in ms; Infinity when unreadable (treat as stale). */
+function sentinelAgeMs(path: string): number {
+  try {
+    return Date.now() - statSync(path).mtimeMs
+  } catch {
+    return Number.POSITIVE_INFINITY
+  }
+}
+
+/**
+ * Keep the heal's own sentinels out of the user's working tree. Scaffolds
+ * ship `.deepspace` in .gitignore; a hand-built or GitHub-sourced app may
+ * not, and then the sentinels the heal writes would trip deploy's
+ * dirty-worktree refusal, push's uncommitted warning, and the release's
+ * dirty flag — all self-inflicted. `.git/info/exclude` is the repo-LOCAL
+ * ignore file (never committed, never the user's .gitignore), which makes it
+ * the one place this tool may write an ignore rule.
+ */
+function ensureSentinelsIgnored(appDir: string): void {
+  try {
+    const check = spawnSync('git', ['-C', appDir, 'check-ignore', '-q', '.deepspace'], {
+      stdio: 'ignore',
+    })
+    if (check.status === 0 || check.error) return // already ignored, or no git
+    const excludePath = spawnSync('git', ['-C', appDir, 'rev-parse', '--git-path', 'info/exclude'], {
+      encoding: 'utf-8',
+    })
+    if (excludePath.status !== 0) return
+    const target = resolve(appDir, excludePath.stdout.trim())
+    mkdirSync(dirname(target), { recursive: true })
+    appendFileSync(target, '\n# deepspace CLI state (added by first-use install)\n.deepspace/\n')
+  } catch {
+    // Best-effort: an unwritable .git must never block the install.
+  }
 }
 
 /**
@@ -135,7 +273,12 @@ function canonicalPath(path: string): string {
 function installWorkerAlive(sentinelDir: string): boolean {
   const pidPath = join(sentinelDir, 'install.pid')
   if (!existsSync(pidPath)) return false
-  return processAlive(Number(readFileSync(pidPath, 'utf-8').trim()))
+  const pid = Number(readFileSync(pidPath, 'utf-8').trim())
+  // Our OWN pid is never a separate live installer — it is this process's
+  // earlier failed/interrupted attempt (or a recycled pid); treating it as
+  // live wedged the checkout in `install_in_progress` forever.
+  if (pid === process.pid) return false
+  return processAlive(pid)
 }
 
 /** Is a process with this pid alive? Signal 0 probes without delivering;

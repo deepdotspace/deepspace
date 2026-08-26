@@ -297,7 +297,17 @@ export async function deployBuiltBundle(options: {
         form.append('sourceRepository', repository.source.repository)
       }
     }
-    if (repository.baseReleaseId) form.append('baseReleaseId', repository.baseReleaseId)
+    // A GitHub-source release records no commit, so this flag is the ledger's
+    // only trace of whether the shipped tree was clean — without it a dirty
+    // deploy and a clean one are indistinguishable in `releases`, and a
+    // rollback picks between them blind.
+    if (repository.dirty !== null) form.append('sourceDirty', repository.dirty ? 'true' : 'false')
+    // Inferred-GitHub evidence rides its own field (never `sourceProvider`,
+    // which a 0.25.0 worker would trust as claimed source and skip its stale
+    // guard on); an older worker simply ignores it.
+    if (repository.observedRepository) {
+      form.append('observedRepository', repository.observedRepository)
+    }
     if (ignoreStale) form.append('ignoreStale', 'true')
     form.append('deployKey', repository.deployKey)
     return form

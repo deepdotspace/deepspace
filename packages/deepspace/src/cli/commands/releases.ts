@@ -14,6 +14,7 @@ import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { resolveAppTarget, assertAppTargetResolvable, parseWranglerEnvArg } from '../lib/app-target'
 import { releaseSourceLabel, repoApi } from '../lib/repo-api'
+import { displayText } from '../lib/cli-format'
 import { actorLabels } from '../lib/actor-labels'
 import { parseLimitArg } from '../lib/citty-args'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
@@ -69,7 +70,10 @@ export default defineDeepspaceCommand({
         // names an email is readable, a row that names Kr7JX… is not.
         const actors = await actorLabels(token, appId)
         for (const r of releases) {
-          const source = releaseSourceLabel(r)
+          // displayText like every other server-string sink: the repository
+          // half of the label is deployer-supplied evidence, and the input
+          // regex upstream is a bound, not a substitute for escaping here.
+          const source = displayText(releaseSourceLabel(r))
           const rollback = r.rollbackAvailable ? 'rollback available' : 'rollback unavailable'
           console.log(
             `#${r.seq}  ${r.id}  ${r.kind.padEnd(8)}  ${r.createdAt}  ${actors.get(r.actor) ?? r.actor}  ${source}  ${rollback}`,

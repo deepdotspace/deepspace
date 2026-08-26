@@ -12,6 +12,8 @@ import { Readable } from 'node:stream'
 import secrets from '../secrets'
 import * as authModule from '../../auth'
 import * as appContext from '../../lib/app-context'
+import * as appRegistration from '../../lib/app-registration'
+import * as secretsLib from '../../lib/secrets'
 import { Refusal, renderCliError } from '../../lib/cli-errors'
 
 const APP_ID = 'app_01JG8QK4M2N7P9RSTVWXYZ0123'
@@ -95,18 +97,29 @@ describe('secrets refusals carry codes', () => {
     expect(String(out.error)).toContain('DEEPSPACE_DEPLOY_URL')
   })
 
-  it('in an app with no id yet → app_not_initialized with the `app init` action, like deploy', async () => {
+  it('in an app with no id yet: WRITE verbs register on first use, READ verbs refuse', async () => {
+    // `secrets set` BEFORE the first deploy (the normal order — the app needs
+    // its secrets at runtime) registers at the resolver and proceeds. `list`
+    // answers a question about a store that cannot exist yet, so it keeps the
+    // refusal — a read must never burn a quota slot as a resolve side effect.
     const appDir = appWith('name = "x"\n[vars]\nDEEPSPACE_APP_ID = "__APP_ID__"\n')
     vi.spyOn(appContext, 'findAppDir').mockReturnValue(appDir)
-    const ensure = vi.spyOn(authModule, 'ensureToken').mockResolvedValue('tok')
-    expect(await runJson('list', {})).toMatchObject({
-      ok: false,
-      code: 'app_not_initialized',
-      actionRequired: true,
-      action: { cwd: appDir, argv: ['deepspace', 'app', 'init'] },
-    })
-    expect(process.exitCode).toBe(2)
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('tok')
+    const APP_MINTED = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
+    const ensure = vi
+      .spyOn(appRegistration, 'ensureAppRegistered')
+      .mockResolvedValue({ appId: APP_MINTED, minted: true, committedScaffold: false })
+
+    expect(await runJson('list', {})).toMatchObject({ ok: false, code: 'app_not_initialized' })
     expect(ensure).not.toHaveBeenCalled()
+
+    vi.spyOn(secretsLib, 'setSecret').mockResolvedValue({ ok: true })
+    expect(await runJson('set', { secret: 'KEY=value' })).toMatchObject({
+      ok: true,
+      appId: APP_MINTED,
+      set: ['KEY'],
+    })
+    expect(ensure).toHaveBeenCalledWith(appDir, 'tok', undefined)
   })
 
   it('a malformed id → invalid_app_id (never "no app id")', async () => {

@@ -65,23 +65,6 @@ export function gitAuthEnv(token: string, base: string = deployBaseUrl()): Recor
   }
 }
 
-/** Auth plus a source revision header for an owner preparing an inactive
- * DeepSpace destination while GitHub remains authoritative. */
-export function gitSourceImportEnv(
-  token: string,
-  revision: number,
-  base: string = deployBaseUrl(),
-): Record<string, string> {
-  const env = gitAuthEnv(token, base)
-  const index = Number(env.GIT_CONFIG_COUNT)
-  return {
-    ...env,
-    GIT_CONFIG_COUNT: String(index + 1),
-    [`GIT_CONFIG_KEY_${index}`]: `http.${base.replace(/\/+$/, '')}.extraHeader`,
-    [`GIT_CONFIG_VALUE_${index}`]: `X-DeepSpace-Source-Revision: ${revision}`,
-  }
-}
-
 /** Run Git with bearer-auth configuration injected via its environment. */
 export function runGitRemote(
   cwd: string,

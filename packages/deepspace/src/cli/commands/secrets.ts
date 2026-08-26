@@ -93,16 +93,25 @@ interface Target {
  * BEFORE the token read so a missing target never surfaces as
  * `not_authenticated`.
  */
-async function resolveTarget(args: {
-  app?: string
-  config?: string
-  env?: string
-}): Promise<Target> {
-  assertAppTargetResolvable(args.app, { wranglerEnv: args.env })
+async function resolveTarget(
+  args: {
+    app?: string
+    config?: string
+    env?: string
+  },
+  opts: { register?: boolean } = {},
+): Promise<Target> {
+  // `register` only for the WRITE verbs (set/upload/pull/configs create):
+  // "secrets before the first deploy" is the flow first-use registration
+  // exists for. The read verbs (list/get/download/configs list) answer
+  // questions — an id-less checkout has an empty store by definition, and a
+  // read must never consume a quota slot as a resolve side effect.
+  const register = opts.register === true
+  assertAppTargetResolvable(args.app, { wranglerEnv: args.env, register })
   const { wranglerEnv } = parseWranglerEnvArg(args.env)
   const configName = validateConfigName(args.config?.trim() || defaultConfigNameForEnv(wranglerEnv))
   const token = await ensureToken()
-  const appId = await resolveAppTarget(DEPLOY_URL, token, args.app, { wranglerEnv })
+  const appId = await resolveAppTarget(DEPLOY_URL, token, args.app, { wranglerEnv, register })
   return { appId, configName, token }
 }
 
@@ -184,7 +193,7 @@ const set = defineCommand({
     secret: { type: 'positional', description: 'KEY=value (repeatable)', required: true },
   },
   async run({ args }) {
-    const t = await resolveTarget(args)
+    const t = await resolveTarget(args, { register: true })
     const pairs = dedupePositionals(args.secret, args._)
     const secrets: Record<string, string> = {}
     const dupes: string[] = []
@@ -334,7 +343,7 @@ const upload = defineCommand({
     },
   },
   async run({ args }) {
-    const t = await resolveTarget(args)
+    const t = await resolveTarget(args, { register: true })
     const secrets = parseSecretsUpload(await readUploadSource(String(args.file)))
     if (Object.keys(secrets).length === 0)
       throw new InputError('No secrets found in the input.', 'empty_input')
@@ -439,7 +448,7 @@ const pull = defineCommand({
         'Run from a DeepSpace app directory (one containing wrangler.toml).',
         'not_in_app_repo',
       )
-    const t = await resolveTarget(args)
+    const t = await resolveTarget(args, { register: true })
     const ownerId = decodeJwtPayload<{ sub: string }>(t.token).sub
     const refreshed = await refreshSecretsCache(
       DEPLOY_URL,
@@ -489,7 +498,7 @@ const configsCreate = defineCommand({
     'copy-from': { type: 'string', description: 'Copy secrets from this config', required: false },
   },
   async run({ args }) {
-    const t = await resolveTarget(args)
+    const t = await resolveTarget(args, { register: true })
     const name = validateConfigName(args.name)
     const copyFrom = args['copy-from'] || undefined
     // Create is idempotent server-side, so a plain create of an existing

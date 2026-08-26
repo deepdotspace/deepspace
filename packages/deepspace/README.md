@@ -129,15 +129,16 @@ GitHub source is explicit and manual because the developer owns that repository:
 ```bash
 git remote add origin git@github.com:owner/repository.git
 git push -u origin main
-npx deepspace app source github
 npx deepspace deploy
 ```
 
-DeepSpace verifies GitHub but never writes it. Inspect or transfer authority with
-`deepspace app source`, `deepspace app source github`, or
-`deepspace app source deepspace`. Transfers mirror branches and tags before one
-atomic authority change; switching back uses the same commands. Commands support
-`--json` for agents. Use `deepspace --help`, command-specific `--help`, and the
+Nothing to declare: a checkout with a GitHub remote deploys as GitHub
+automatically — DeepSpace never reads or writes the GitHub repository, and
+each release records which repository the checkout pointed at (and whether
+the tree was dirty). The first `deepspace push` instead claims DeepSpace
+source, permanently — using it is choosing it; there are no transfers.
+Inspect with `deepspace app source` (read-only). Commands support `--json`
+for agents. Use `deepspace --help`, command-specific `--help`, and the
 [public manual](https://docs.deep.space) for workspaces, releases, and
 rollback.
 

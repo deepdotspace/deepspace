@@ -189,7 +189,13 @@ export function errorCode(err: unknown): string | undefined {
  * and render as-is; don't grow this into a mirror of the server's errors.
  */
 const API_ERROR_HINTS: Record<string, string> = {
-  not_app_owner: 'Only the app owner can do this.',
+  // Starts where the server sentence ("Only the app owner can do this.")
+  // stops, so the two read as one message instead of a stutter.
+  not_app_owner:
+    'Collaborators can deploy and manage secrets, but ownership verbs (collaborators, transfer, ' +
+    'undeploy) stay with the owner. Ask them to run it, have them transfer the app ' +
+    '(`deepspace app transfer offer`), or fork your checkout as your own app ' +
+    '(`deepspace app init --new-id`).',
   app_not_found:
     'App not found on the service this command asked. Check the app id — the DEEPSPACE_APP_ID ' +
     'value in wrangler.toml, usually `app_…` (a legacy app\'s id is its name); list your apps ' +

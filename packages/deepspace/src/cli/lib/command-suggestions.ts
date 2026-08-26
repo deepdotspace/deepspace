@@ -152,15 +152,23 @@ export function findUnknownCommand(
       // A whole command path quoted into one token (`"auth whoami"`), not a
       // lexical guess against a string with spaces.
       const split = splitTokenPath(token, table)
-      const relativeSuggestion = exactHit ?? split ?? closestCommandPath(token, table)
-      if (!relativeSuggestion) return null
+      // The same exact-leaf rule, widened to the WHOLE tree when this group
+      // has no exact match of its own: `auth status` means the top-level
+      // `status` (an exact name), not the fuzzy-nearest sibling — which was
+      // `logout`, a destructive guess for a read verb.
+      const rootExactAll =
+        exactHit || split ? [] : commandPaths(rootCommands).filter((path) => path.at(-1) === token)
+      const rootExact = rootExactAll.length === 1 ? rootExactAll[0] : null
+      const relativeSuggestion = exactHit ?? split ?? (rootExact ? null : closestCommandPath(token, table))
+      const suggestionPath = relativeSuggestion ? [...accepted, ...relativeSuggestion] : rootExact
+      if (!suggestionPath) return null
       // Only the quoted-token case is certain enough to hand back as a
       // runnable `action` (see `executable` above); everything else is prose.
-      const guessed = relativeSuggestion.at(-1) ?? ''
+      const guessed = suggestionPath.at(-1) ?? ''
       return {
         attemptedPath: ['deepspace', ...accepted, token],
         helpPath: ['deepspace', ...accepted],
-        suggestion: ['deepspace', ...accepted, ...relativeSuggestion],
+        suggestion: ['deepspace', ...suggestionPath],
         executable: split !== null && !DESTRUCTIVE_VERBS.has(guessed),
         // POSITIONALS ONLY. The remainder exists so the corrected verb keeps
         // the arguments it needs; carrying flags too meant `auth logn --email

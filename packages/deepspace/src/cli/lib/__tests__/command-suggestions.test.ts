@@ -57,6 +57,21 @@ describe('command suggestions', () => {
     })
   })
 
+  it('prefers an exact command elsewhere in the tree over a fuzzy sibling', () => {
+    // `deepspace auth status` — `status` exists at the top level, and the
+    // fuzzy-nearest sibling under auth was `logout`: a destructive guess for
+    // a read verb (2026-08-25 collab AX audit).
+    const tree: Record<string, CommandTreeNode> = {
+      status: {},
+      auth: { subCommands: { login: {}, logout: {}, whoami: {} } },
+    }
+    expect(findUnknownCommand(['auth', 'status'], tree)).toMatchObject({
+      attemptedPath: ['deepspace', 'auth', 'status'],
+      suggestion: ['deepspace', 'status'],
+      executable: false,
+    })
+  })
+
   it('searches below the accepted command path for nested typos', () => {
     expect(findUnknownCommand(['app', 'migarte'], commands)).toEqual({
       attemptedPath: ['deepspace', 'app', 'migarte'],

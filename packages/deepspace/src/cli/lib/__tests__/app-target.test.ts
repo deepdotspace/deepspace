@@ -11,6 +11,9 @@ import {
   resolveAppTarget,
   requireAppIdArg,
 } from '../app-target'
+import * as appRegistration from '../app-registration'
+
+const APP = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
 
 /** The machine `code` a thrown value carries (InputError/ApiError), or undefined. */
 const thrownCode = (fn: () => unknown): unknown => {
@@ -189,23 +192,46 @@ describe('"which app?" — one failure per state', () => {
     })
   })
 
-  it('inside an app with no id yet: app_not_initialized with the executable `app init` action (exit-2 tier)', async () => {
-    await inDir('name = "my-app"\n[vars]\nDEEPSPACE_APP_ID = "__APP_ID__"\n', () => {
-      let thrown: unknown
-      try {
-        assertAppTargetResolvable(undefined)
-      } catch (e) {
-        thrown = e
-      }
-      expect(thrown).toMatchObject({
-        code: 'app_not_initialized',
-        actionRequired: true,
-        action: { cwd: process.cwd(), argv: ['deepspace', 'app', 'init'] },
-      })
-    })
-    // A missing [vars] block is the same state.
-    await inDir('name = "my-app"\n', () => {
+  it('inside an app with no id yet: registering verbs mint, others refuse', async () => {
+    // Registration is no longer an upfront step, but only the verbs whose
+    // purpose is building/using the app opt in (`register: true`). A read or
+    // ownership verb must never consume a quota slot as a resolve side
+    // effect, so the default keeps the `app_not_initialized` refusal.
+    await inDir('name = "my-app"\n[vars]\nDEEPSPACE_APP_ID = "__APP_ID__"\n', async () => {
       expect(thrownCode(() => assertAppTargetResolvable(undefined))).toBe('app_not_initialized')
+      await expect(resolveAppTarget('https://deploy.test', 'tok', undefined)).rejects.toMatchObject(
+        { code: 'app_not_initialized' },
+      )
+      expect(() => assertAppTargetResolvable(undefined, { register: true })).not.toThrow()
+      const ensure = vi
+        .spyOn(appRegistration, 'ensureAppRegistered')
+        .mockResolvedValue({ appId: APP, minted: true, committedScaffold: false })
+      try {
+        await expect(
+          resolveAppTarget('https://deploy.test', 'tok', undefined, { register: true }),
+        ).resolves.toBe(APP)
+        expect(ensure).toHaveBeenCalledWith(process.cwd(), 'tok', undefined)
+      } finally {
+        ensure.mockRestore()
+      }
+    })
+    // Healing requires the config to DECLARE DEEPSPACE_APP_ID (the scaffold's
+    // placeholder). A wrangler.toml that never mentions it is not provably a
+    // DeepSpace app — minting would rewrite a stranger's Workers config — so
+    // it refuses even for a registering verb.
+    await inDir('name = "my-app"\n', () => {
+      expect(
+        thrownCode(() => assertAppTargetResolvable(undefined, { register: true })),
+      ).toBe('app_not_initialized')
+    })
+    // And an --env name the config never declares must still refuse — a typo
+    // must not silently mint a fresh app for it.
+    await inDir('name = "my-app"\n', () => {
+      expect(
+        thrownCode(() =>
+          assertAppTargetResolvable(undefined, { wranglerEnv: 'staging', register: true }),
+        ),
+      ).toBe('no_app_id_for_env')
     })
   })
 

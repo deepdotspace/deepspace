@@ -33,7 +33,7 @@
  * it keeps both). The suite's own exit code collapses to the contract's 0/1.
  */
 
-import { readAppId } from '../lib/app-identity'
+import { ensureAppRegistered } from '../lib/app-registration'
 import { readdirSync, type Dirent } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
 import { sync as spawnSync } from 'cross-spawn'
@@ -47,7 +47,7 @@ import { ensureInstallReady } from '../lib/install-status'
 import { childStdio, ensurePlaywright, routeChildStdoutToStderr } from '../lib/playwright'
 import { preflightNodeVersion, preflightWindowsWorkerd } from '../lib/preflight'
 import { refreshSecretsCache } from '../lib/secrets'
-import { DEFAULT_PORT, resolvePort } from '../lib/port'
+import { assertReusableDevServer, DEFAULT_PORT, resolvePort } from '../lib/port'
 import {
   prepareWranglerEnvConfig,
   wranglerViteEnv,
@@ -196,8 +196,6 @@ export default defineDeepspaceCommand({
     const worktreePort = configuredPort ? null : resolveWorktreePort(appDir)
     const port = worktreePort ?? resolvePort(args.port as string | undefined)
 
-    ensureInstallReady(appDir)
-
     // Always write .dev.vars pointing to dev workers. A logged-in user is
     // required so writeDevVars can mint APP_OWNER_JWT via the auth-worker.
     let token: string
@@ -216,11 +214,28 @@ export default defineDeepspaceCommand({
       )
     }
 
+    // After auth: a logged-out user must not sit through a first-use install
+    // only to hit not_authenticated.
+    ensureInstallReady(appDir)
+
     // Refresh the app-store secrets cache (config = wrangler env, or 'prd').
-    // A repo without a DEEPSPACE_APP_ID hasn't been initialized — writeDevVars
-    // below throws with the `deepspace app init` pointer, so skip the pull.
+    // An id-less checkout heals here: apps register on first use, so a fresh
+    // scaffold's `test run` needs no `app init` step first.
     let generatedSecretsCache: string | undefined
-    const appIdForSecrets = readAppId(appDir, wranglerEnv)
+    let appIdForSecrets: string | null = null
+    try {
+      appIdForSecrets = (await ensureAppRegistered(appDir, token, wranglerEnv))?.appId ?? null
+    } catch (registrationError) {
+      // Local-first: a failed MINT (quota, offline, 5xx) must not stop a
+      // local dev/test run whose only loss is the app-secrets cache. Warn
+      // loudly and carry on; the same failure surfaces as a hard refusal on
+      // deploy/push, where the registration is actually required.
+      process.stderr.write(
+        `warning: could not register the app (` +
+          `${registrationError instanceof Error ? registrationError.message.split('\n')[0] : String(registrationError)}` +
+          `) — continuing without app secrets.\n`,
+      )
+    }
     if (appIdForSecrets) {
       try {
         const refreshed = await refreshSecretsCache(DEPLOY_URL, token, appIdForSecrets, wranglerEnv)
@@ -252,6 +267,10 @@ export default defineDeepspaceCommand({
     if (suite !== 'unit') {
       preflightWindowsWorkerd(appDir)
       ensurePlaywright(appDir)
+      // Back-to-back runs race the previous run's dev server on this port;
+      // a zombie there passes Playwright's reuse probe and then dies mid-run,
+      // reading as a test failure instead of a port conflict.
+      await assertReusableDevServer(port)
     }
 
     let exitCode = 0

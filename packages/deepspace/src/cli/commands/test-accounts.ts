@@ -8,7 +8,7 @@
  * Credentials are saved to ~/.deepspace/test-accounts.json (0600)
  * so they persist across projects and sessions.
  *
- *   deepspace test accounts create --email bot@deepspace.test --password Pass123!
+ *   printf %s "$PW" | deepspace test accounts create --email bot@deepspace.test --password-stdin
  *   deepspace test accounts list
  *   deepspace test accounts delete --email bot@deepspace.test
  *   deepspace test accounts delete --id <id>
@@ -21,6 +21,7 @@ import { defineCommand } from 'citty'
 import * as p from '@clack/prompts'
 import { ensureToken } from '../auth'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
+import { MAX_STDIN_BYTES, readStreamText } from '../lib/stdio'
 import {
   createRemoteTestAccount,
   deleteRemoteTestAccount,
@@ -51,8 +52,13 @@ const create = defineDeepspaceCommand({
     },
     password: {
       type: 'string',
-      description: 'Password (min 8 characters)',
-      required: true,
+      description: 'Password (min 8 characters). Prefer --password-stdin — argv is visible in `ps` and shell history',
+      required: false,
+    },
+    'password-stdin': {
+      type: 'boolean',
+      description: 'Read the password from stdin (one trailing newline stripped)',
+      default: false,
     },
     name: {
       type: 'string',
@@ -68,7 +74,29 @@ const create = defineDeepspaceCommand({
   async run({ args }) {
     await ensureToken()
     const email = args.email as string
-    const password = args.password as string
+    // The skill's own rule is "never put a password on a command line", and
+    // this command was the one surface that forced it. Same contract as
+    // `auth login --password-stdin`.
+    if (args['password-stdin'] && args.password !== undefined) {
+      throw new Refusal('Pass either --password or --password-stdin, not both.', 'invalid_flags')
+    }
+    let password: string
+    if (args['password-stdin']) {
+      if (process.stdin.isTTY) {
+        throw new Refusal(
+          '--password-stdin expects the password piped on stdin, e.g. `printf %s "$PW" | deepspace test accounts create --email bot@deepspace.test --password-stdin`.',
+          'password_stdin_needs_pipe',
+        )
+      }
+      password = (await readStreamText(process.stdin, MAX_STDIN_BYTES)).replace(/\r?\n$/, '')
+    } else if (typeof args.password === 'string') {
+      password = args.password
+    } else {
+      throw new Refusal(
+        'A password is required: pipe it with --password-stdin (preferred), or pass --password.',
+        'missing_password',
+      )
+    }
     // An unnamed account can never be selected via `users(['Name'])`, so
     // default the selector to the email local-part instead of leaving it unset.
     const name = (args.name as string | undefined) ?? email.split('@')[0]

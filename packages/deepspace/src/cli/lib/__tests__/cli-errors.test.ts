@@ -48,7 +48,10 @@ describe('formatCliError', () => {
   it('appends a hint for known API error slugs', () => {
     const out = formatCliError(new ApiError('You do not own this app.', 403, 'not_app_owner'))
     expect(out).toContain('You do not own this app.')
-    expect(out).toContain('Only the app owner can do this.')
+    // The hint names the recoveries, not just the fact (2026-08-25 AX pass:
+    // three call sites answered with the bare sentence and no way forward).
+    expect(out).toContain('app transfer offer')
+    expect(out).toContain('app init --new-id')
   })
 
   it('explains the lazy-provisioning footgun on user_not_found', () => {

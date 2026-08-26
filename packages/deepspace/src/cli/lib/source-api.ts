@@ -1,6 +1,5 @@
-import { apiFetch, apiFetchReadWithRetry, ApiError } from './api'
+import { apiFetchReadWithRetry, ApiError } from './api'
 import { Refusal } from './command'
-import type { GitRef } from './source-control'
 
 export type AppSource = { provider: 'deepspace' } | { provider: 'github'; repository: string }
 
@@ -45,12 +44,6 @@ export interface AppSourceState {
   onBehalf?: { ownerJwtLive: boolean }
 }
 
-export interface AppSourceChangeResult {
-  appId: string
-  source: AppSource
-  revision: number
-}
-
 export async function getAppSource(
   deployUrl: string,
   token: string,
@@ -69,24 +62,4 @@ export async function getAppSource(
     }
     throw error
   }
-}
-
-export function setAppSource(
-  deployUrl: string,
-  token: string,
-  appId: string,
-  input: {
-    source: AppSource
-    expectedRevision: number
-    refs?: GitRef[]
-    expectedReleaseId?: string | null
-    expectedReleaseCommitOid?: string | null
-  },
-): Promise<AppSourceChangeResult> {
-  return apiFetch<AppSourceChangeResult>(
-    deployUrl,
-    token,
-    `/api/apps/${encodeURIComponent(appId)}/source`,
-    { method: 'POST', body: JSON.stringify(input) },
-  )
 }

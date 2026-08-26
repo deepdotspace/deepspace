@@ -34,6 +34,7 @@ import {
   type RemoteWorkspaceView,
 } from '../lib/repo-api'
 import { errorCode } from '../lib/cli-errors'
+import { externalGitSource } from './deploy/repository'
 import { installState } from '../lib/install-status'
 import { installCommand } from '../lib/package-manager'
 import { createSpinner } from '../lib/spinner'
@@ -218,7 +219,7 @@ export default defineCommand({
             ? ` (${appId})`
             : appIdError
               ? ` — ${appIdError}`
-              : ' — no DEEPSPACE_APP_ID; run `deepspace app init`'
+              : ' — no DEEPSPACE_APP_ID yet; it registers on first use (deploy, secrets, dev…)'
         }`,
       ])
       json.inApp = true
@@ -235,7 +236,9 @@ export default defineCommand({
           ? 'installed'
           : deps === 'installing'
             ? 'dependency installation is still running'
-            : `${deps} — run ${depsInstallCommand}`,
+            : deps === 'missing'
+              ? 'missing — any command that needs them installs on first use'
+              : `failed — retried automatically by the next dev/test/deploy (or run ${depsInstallCommand})`,
       ])
       json.deps = deps
 
@@ -310,8 +313,22 @@ export default defineCommand({
             ])
             json.source = { ...source, revision: sourceResult.value.revision }
           } else {
-            lines.push(['Source', 'unclaimed · next normal deploy defaults to DeepSpace'])
+            // Inference, not a default: with a GitHub remote in the checkout
+            // the next deploy ships as GitHub; without one it syncs to
+            // DeepSpace (and that sync claims, permanently).
+            const github = externalGitSource(appDir, null)
+            lines.push([
+              'Source',
+              `unclaimed · ${
+                github
+                  ? 'next deploy infers GitHub from this checkout’s remote'
+                  : 'next deploy syncs to DeepSpace and claims it, permanently'
+              }`,
+            ])
             json.source = null
+            // The machine mirror of the prose above — `source: null` alone
+            // would know less than the human line.
+            json.sourceInference = github ? 'github' : 'deepspace'
           }
           const [refsResult, wsResult, releaseResult, appsResult] = await Promise.all([
             githubSource
@@ -451,6 +468,9 @@ export default defineCommand({
               byYou,
               source: rel.source,
               sourceRevision: rel.sourceRevision,
+              // The human line can say "dirty worktree"; the machine mirror
+              // must be able to say the same.
+              sourceDirty: rel.sourceDirty ?? null,
             }
             // The listing answered, but not about this app. An admin acting on
             // someone else's app sees exactly this, and it is NOT evidence the
