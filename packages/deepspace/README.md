@@ -118,11 +118,14 @@ The hierarchy shown by `deepspace --help` keeps durable app lifecycle under
 operations stay top-level. The historical `deepspace app migrate` command was
 removed in 0.15.0; it is not an upgrade or recovery path.
 
-Every app has one authoritative Git repository. DeepSpace source is the packaged
-default: the first normal deploy claims it and publishes automatically.
-`deepspace push` publishes the current branch and `deepspace clone <app>` checks
-it out; both configure a `space` remote and credential helper, so normal
-`git fetch space` and `git push space` work afterward.
+Every app has one authoritative Git repository, and which one it is follows
+from what you do rather than from anything you declare. DeepSpace source is the
+packaged default: on a checkout with no GitHub remote, the first
+`deepspace push` — or the source sync inside the first normal deploy — claims
+it and publishes automatically. `deepspace push` publishes the current branch
+and `deepspace clone <app>` checks it out; both configure a `space` remote and
+credential helper, so normal `git fetch space` and `git push space` work
+afterward.
 
 GitHub source is explicit and manual because the developer owns that repository:
 

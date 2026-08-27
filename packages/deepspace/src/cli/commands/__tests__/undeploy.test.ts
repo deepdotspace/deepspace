@@ -3,11 +3,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   ensureToken: vi.fn(async () => 'token'),
   resolveAppSelector: vi.fn(async (_url: string, _token: string, app: string) => app),
+  listApps: vi.fn(async () => [] as unknown[]),
   confirm: vi.fn(async (_opts: { message: string }) => false),
 }))
 
 vi.mock('../../auth', () => ({ ensureToken: mocks.ensureToken }))
-vi.mock('../../lib/app-target', () => ({ resolveAppSelector: mocks.resolveAppSelector }))
+vi.mock('../../lib/app-target', () => ({
+  resolveAppSelector: mocks.resolveAppSelector,
+  listApps: mocks.listApps,
+}))
 vi.mock('@clack/prompts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@clack/prompts')>()
   return { ...actual, intro: vi.fn(), confirm: mocks.confirm }
@@ -23,6 +27,8 @@ afterEach(() => {
   process.exitCode = undefined
   mocks.ensureToken.mockClear()
   mocks.resolveAppSelector.mockClear()
+  mocks.listApps.mockReset()
+  mocks.listApps.mockResolvedValue([])
 })
 
 describe('undeploy partial failure', () => {
@@ -174,6 +180,45 @@ describe('undeploy consent', () => {
       appId,
     })
     // Refused BEFORE the DELETE — nothing was taken down.
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('ownership before consent', () => {
+  const appId = 'app_01HZXYABCDEFGHJKMNPQRSTVWX'
+  const run = async (args: Record<string, unknown>) => {
+    const lines: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
+    const command = undeploy as unknown as {
+      run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+    }
+    await command.run({ args })
+    return lines
+  }
+
+  it('a collaborator is refused not_app_owner BEFORE the consent gate', async () => {
+    // v0.26.0 collab AX F3: the consent refusal said "re-run with --yes" to a
+    // caller the server would then refuse anyway — teaching the wrong next
+    // step on the most destructive verb.
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    mocks.listApps.mockResolvedValue([{ appId, role: 'collaborator' }])
+    const lines = await run({ name: appId, json: true })
+    expect(process.exitCode).toBe(1)
+    expect(JSON.parse(lines[0])).toMatchObject({ ok: false, code: 'not_app_owner', appId })
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('an owner (or an app the listing cannot see) still reaches the consent gate', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    mocks.listApps.mockResolvedValue([{ appId, role: 'owner' }])
+    const lines = await run({ name: appId, json: true })
+    expect(JSON.parse(lines[0])).toMatchObject({ ok: false, code: 'confirmation_required' })
+    // A listing failure is advisory — the server still enforces ownership.
+    mocks.listApps.mockRejectedValue(new Error('registry blip'))
+    const lines2 = await run({ name: appId, json: true })
+    expect(JSON.parse(lines2[0])).toMatchObject({ ok: false, code: 'confirmation_required' })
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 })

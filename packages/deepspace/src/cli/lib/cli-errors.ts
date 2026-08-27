@@ -191,11 +191,15 @@ export function errorCode(err: unknown): string | undefined {
 const API_ERROR_HINTS: Record<string, string> = {
   // Starts where the server sentence ("Only the app owner can do this.")
   // stops, so the two read as one message instead of a stutter.
+  // Neutral about the reader's standing: this hint also reaches a REMOVED
+  // collaborator, to whom "collaborators can deploy" reads as "you should
+  // have been able to" (v0.26.0 collab AX).
   not_app_owner:
-    'Collaborators can deploy and manage secrets, but ownership verbs (collaborators, transfer, ' +
-    'undeploy) stay with the owner. Ask them to run it, have them transfer the app ' +
-    '(`deepspace app transfer offer`), or fork your checkout as your own app ' +
-    '(`deepspace app init --new-id`).',
+    'Ownership verbs (collaborators, transfer, undeploy) run only as the owner; current ' +
+    'collaborators can deploy and manage secrets, and an account that was removed has no ' +
+    'access at all (`deepspace app list` shows your standing). Ask the owner to run it, have ' +
+    'them transfer the app (`deepspace app transfer offer`), or fork your checkout as your ' +
+    'own app (`deepspace app init --new-id`).',
   app_not_found:
     'App not found on the service this command asked. Check the app id — the DEEPSPACE_APP_ID ' +
     'value in wrangler.toml, usually `app_…` (a legacy app\'s id is its name); list your apps ' +

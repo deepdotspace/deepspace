@@ -20,6 +20,7 @@ import { resolve, basename, join } from 'node:path'
 import { ensureToken } from '../auth'
 import { resolveAppSelector, assertAppTargetResolvable } from '../lib/app-target'
 import { currentBranch, resolveCommit } from '../lib/git/repository'
+import { githubInferredRefusal, inferredGitHubRepository } from '../lib/source-api'
 import {
   deployBaseUrl,
   ensureSpaceRemote,
@@ -119,6 +120,13 @@ export default defineDeepspaceCommand({
     const branches = (remote?.refs ?? []).filter((r) => r.name.startsWith('refs/heads/'))
     if (!remote || branches.length === 0) {
       spinner?.stop('Nothing to clone.')
+      // An empty cloud repo has two very different meanings: a DeepSpace app
+      // nobody pushed yet, or a GitHub-inferred app whose emptiness is the
+      // design. Telling the second kind to `deepspace push` steers them
+      // through the permanent claim (v0.26.0 AX finding), so consult the
+      // release ledger before prescribing it.
+      const githubRepo = await inferredGitHubRepository(deployUrl, token, appId)
+      if (githubRepo) throw githubInferredRefusal(appId, githubRepo)
       throw new Refusal(
         `${selector} has no cloud repo history yet. Its owner (or their agent) needs to run \`deepspace push\` from the app's repo first.`,
         'no_cloud_repo',

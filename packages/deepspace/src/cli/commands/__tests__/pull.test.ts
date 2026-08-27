@@ -31,11 +31,6 @@ import * as vcRemoteModule from '../../lib/vc-remote'
 import { SPACE_REMOTE } from '../../lib/vc-remote'
 import type { RemoteRefsResult } from '../../lib/repo-api'
 
-// Real-git suite: every test shells out to git in scratch repos (~2s solo)
-// and blows the default 5s wall under parallel vitest workers — the drifting
-// 18-24 failures in docs/audits/2026-08-06-e2e-0.13.0. Headroom, not a
-// license to hang.
-vi.setConfig({ testTimeout: 30_000 })
 
 
 const git = (cwd: string, args: string[]): string =>
@@ -259,8 +254,18 @@ describe('pull gives a fresh clone an identity before handing back a merge', () 
     const token = `${b64({ alg: 'none' })}.${b64({ email: 'dev@example.com' })}.sig`
     vi.spyOn(authModule, 'ensureToken').mockResolvedValue(token)
     vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    // A cloud repo WITH history whose refs do not include `main`: pull
+    // proceeds past the (now mutation-free) empty-repo refusals, reaches the
+    // real `ensureSpaceRemote` — the seam under test — and only then refuses
+    // branch_not_found. The old fixture answered `getRefs: null`, which as of
+    // the v0.26.0 AX fixes refuses BEFORE any mutation (a read-only refusal
+    // must not rewrite the checkout's identity) — asserted separately below.
     vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
-      getRefs: vi.fn().mockResolvedValue(null),
+      getRefs: vi.fn().mockResolvedValue({
+        refs: [{ name: 'refs/heads/other', oid: 'a'.repeat(40) }],
+        head: 'refs/heads/other',
+      }),
+      latestRelease: vi.fn().mockResolvedValue({ release: null }),
     } as never)
     // The REAL ensureSpaceRemote runs here — that is the seam under test.
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
@@ -283,6 +288,73 @@ describe('pull gives a fresh clone an identity before handing back a merge', () 
       if (priorSystem === undefined) delete process.env.GIT_CONFIG_SYSTEM
       else process.env.GIT_CONFIG_SYSTEM = priorSystem
     }
+  })
+
+  it('a no-cloud-repo refusal mutates NOTHING — no identity write, no space remote', async () => {
+    // v0.26.0 github AX-3b: pull rewrote the checkout's git identity and
+    // installed a push-capable remote, then refused — on a repo whose
+    // authority is GitHub. A read-only refusal leaves no side effect.
+    const dir = mkdtempSync(join(tmpdir(), 'ds-pull-noident-'))
+    repo = dir
+    git(dir, ['init', '-q', '-b', 'main'])
+    writeFileSync(join(dir, 'f.txt'), 'initial\n')
+    git(dir, ['-c', 'user.email=seed@t', '-c', 'user.name=seed', 'add', '-A'])
+    git(dir, ['-c', 'user.email=seed@t', '-c', 'user.name=seed', 'commit', '-q', '-m', 'initial'])
+
+    const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url')
+    const token = `${b64({ alg: 'none' })}.${b64({ email: 'dev@example.com' })}.sig`
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue(token)
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
+      getRefs: vi.fn().mockResolvedValue(null),
+      latestRelease: vi.fn().mockResolvedValue({ release: null }),
+    } as never)
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    await runPullJson({ app: 'selected-app', branch: 'main' }, dir)
+    const localConfig = (key: string): string => {
+      try {
+        return execFileSync('git', ['config', '--local', '--get', key], {
+          cwd: dir,
+          encoding: 'utf-8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim()
+      } catch {
+        return ''
+      }
+    }
+    expect(localConfig('user.email')).toBe('')
+    expect(localConfig('remote.space.url')).toBe('')
+  })
+
+  it('a GitHub-INFERRED app (ledger evidence) refuses source_managed_by_github, not "push first"', async () => {
+    // v0.26.0 github AX-3: on an app whose releases record GitHub evidence,
+    // the empty cloud repo is the design — prescribing `deepspace push`
+    // steers the caller through the PERMANENT DeepSpace claim. Evidence is
+    // the release ledger ONLY: a mirror remote on a never-released app is
+    // not evidence (adversarial review, PR #324).
+    const dir = mkdtempSync(join(tmpdir(), 'ds-pull-ghinfer-'))
+    repo = dir
+    git(dir, ['init', '-q', '-b', 'main'])
+    writeFileSync(join(dir, 'f.txt'), 'x\n')
+    git(dir, ['-c', 'user.email=s@t', '-c', 'user.name=s', 'add', '-A'])
+    git(dir, ['-c', 'user.email=s@t', '-c', 'user.name=s', 'commit', '-q', '-m', 'i'])
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('tok')
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
+      getRefs: vi.fn().mockResolvedValue(null),
+      latestRelease: vi.fn().mockResolvedValue({
+        release: { source: { provider: 'github', repository: 'acme/rockets' } },
+      }),
+    } as never)
+    const { output, exits } = await runPullJson({ app: 'selected-app', branch: 'main' }, dir)
+    expect(output).toMatchObject({
+      ok: false,
+      code: 'source_managed_by_github',
+      repository: 'acme/rockets',
+      inferred: true,
+    })
+    expect(exits).toEqual([1])
   })
 })
 

@@ -27,7 +27,6 @@ import {
 } from '../workspace/local'
 
 // Real-git suite: shells out to git in scratch repos; see workspace.test.ts.
-vi.setConfig({ testTimeout: 30_000 })
 
 type RunGitResult = { stdout: Buffer; stderr: Buffer; status: number }
 

@@ -70,6 +70,30 @@ describe('resolvesDeepspace', () => {
     writeFileSync(join(app, '.deepspace', 'install.err'), 'failed')
     expect(installState(app)).toBe('failed')
   })
+
+  it('a RESOLVING tree with started-without-done evidence is NOT ready (interrupted install)', () => {
+    // v0.26.0 linux AX BUG-1: npm writes node_modules/deepspace/package.json
+    // long before it links .bin, so a killed install leaves a tree that
+    // resolves but cannot run anything. Resolution alone must not read as
+    // ready — the sentinels are the corroboration.
+    const app = join(root, 'interrupted')
+    mkdirSync(join(app, 'node_modules', 'deepspace'), { recursive: true })
+    writeFileSync(join(app, 'node_modules', 'deepspace', 'package.json'), '{}')
+    mkdirSync(join(app, '.deepspace'), { recursive: true })
+    writeFileSync(join(app, '.deepspace', 'install.started'), new Date().toISOString())
+    expect(installState(app)).not.toBe('ready')
+    // A populated node_modules/.bin is the counter-evidence: bin links are
+    // the last thing a package manager writes, so their presence means the
+    // install finished — by the heal or BY HAND. Without this, the
+    // DEEPSPACE_NO_INSTALL flow's own remedy ("run the install yourself")
+    // could never clear the sentinel and looped forever (final adversarial
+    // review, PR #324).
+    mkdirSync(join(app, 'node_modules', '.bin'), { recursive: true })
+    writeFileSync(join(app, 'node_modules', '.bin', 'deepspace'), '#!/bin/sh\n')
+    expect(installState(app)).toBe('ready')
+    // And the self-heal recorded completion, so the answer is durable.
+    expect(existsSync(join(app, '.deepspace', 'install.done'))).toBe(true)
+  })
 })
 
 describe('ensureInstallReady heals a plain-missing install', () => {

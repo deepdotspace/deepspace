@@ -22,8 +22,13 @@ import { Refusal } from './command'
  * an older detached installer. They are not: the current installer writes both
  * and this module reads both on every refusal path.
  *
- * The presence of `node_modules/deepspace/package.json` is the ground truth
- * for "ready"; the sentinels only shape the error message.
+ * "Ready" is `node_modules/deepspace/package.json` resolving AND no
+ * interrupted-install evidence (`install.started` without `install.done`).
+ * Resolution alone is not enough: npm writes that package.json long before it
+ * links `node_modules/.bin`, so a KILLED install leaves a tree that resolves
+ * but cannot run anything (`vitest: not found`, exit 127) — the sentinels are
+ * the corroboration that the install actually finished. A tree installed by
+ * hand has no sentinels and is ready on resolution alone.
  */
 import {
   appendFileSync,
@@ -31,6 +36,7 @@ import {
   existsSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -44,9 +50,41 @@ import { detectPackageManager } from './package-manager'
 
 export type InstallState = 'ready' | 'installing' | 'failed' | 'missing'
 
+/** `install.started` without `install.done`: an install began and never
+ *  finished — the tree may RESOLVE (npm writes package.json early) while
+ *  `.bin` was never linked, so this evidence overrides resolution. The
+ *  counter-evidence is `.bin` itself: bin links are the LAST thing a package
+ *  manager writes, so a populated `node_modules/.bin` means the install
+ *  finished — by the heal, or by hand. Record `install.done` and stand down,
+ *  or a hand-repaired tree (the DEEPSPACE_NO_INSTALL flow's own remedy)
+ *  would loop on stale evidence forever: nothing but the heal ever wrote the
+ *  done sentinel. */
+function installInterrupted(appDir: string): boolean {
+  const sentinelDir = join(appDir, '.deepspace')
+  if (
+    !existsSync(join(sentinelDir, 'install.started')) ||
+    existsSync(join(sentinelDir, 'install.done'))
+  ) {
+    return false
+  }
+  try {
+    if (readdirSync(join(appDir, 'node_modules', '.bin')).length > 0) {
+      try {
+        writeFileSync(join(sentinelDir, 'install.done'), new Date().toISOString())
+      } catch {
+        // Unwritable sentinel dir: the .bin evidence alone still answers.
+      }
+      return false
+    }
+  } catch {
+    // No node_modules/.bin at all — genuinely incomplete.
+  }
+  return true
+}
+
 /** Non-throwing install state for informational surfaces such as status. */
 export function installState(appDir: string): InstallState {
-  if (resolvesDeepspace(appDir)) return 'ready'
+  if (resolvesDeepspace(appDir) && !installInterrupted(appDir)) return 'ready'
   const sentinelDir = join(appDir, '.deepspace')
   if (existsSync(join(sentinelDir, 'install.err'))) return 'failed'
   if (existsSync(join(sentinelDir, 'install.started'))) {
@@ -65,7 +103,7 @@ export function tailHint(logPath: string, platform: NodeJS.Platform = process.pl
 }
 
 export function ensureInstallReady(appDir: string): void {
-  if (resolvesDeepspace(appDir)) return
+  if (resolvesDeepspace(appDir) && !installInterrupted(appDir)) return
 
   const sentinelDir = join(appDir, '.deepspace')
   const startedPath = join(sentinelDir, 'install.started')
@@ -76,8 +114,14 @@ export function ensureInstallReady(appDir: string): void {
   // install runs the packages' own lifecycle scripts): restore the old
   // refusal, same code and shape it always had.
   if (process.env.DEEPSPACE_NO_INSTALL) {
+    // Two states land here: nothing installed, or a tree that RESOLVES but
+    // carries interrupted-install evidence — say which, or the message
+    // contradicts what the user can see on disk.
+    const detail = resolvesDeepspace(appDir)
+      ? 'A previous dependency install was interrupted (install.started without install.done)'
+      : 'Dependencies not installed'
     throw new Refusal(
-      'Dependencies not installed, and DEEPSPACE_NO_INSTALL is set — run the install yourself, then retry.',
+      `${detail}, and DEEPSPACE_NO_INSTALL is set — run the install yourself, then retry.`,
       'deps_missing',
       { action: { cwd: appDir, argv: [detectPackageManager(appDir), 'install'] } },
     )

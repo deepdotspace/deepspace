@@ -61,15 +61,37 @@ describe('command suggestions', () => {
     // `deepspace auth status` — `status` exists at the top level, and the
     // fuzzy-nearest sibling under auth was `logout`: a destructive guess for
     // a read verb (2026-08-25 collab AX audit).
+    //
+    // The fixture mirrors the REAL tree's duplication: `status` appears three
+    // times (top-level, `workspace status`, `app transfer status`). The
+    // shipped 0.26.0 regression (2026-08-26 linux AX audit) passed the old
+    // one-`status` fixture while the real tree fell to the fuzzy `logout`,
+    // because the rule demanded a globally unique leaf. The shallowest exact
+    // match must win instead.
     const tree: Record<string, CommandTreeNode> = {
       status: {},
       auth: { subCommands: { login: {}, logout: {}, whoami: {} } },
+      workspace: { subCommands: { status: {}, sync: {} } },
+      app: { subCommands: { transfer: { subCommands: { status: {}, cancel: {} } } } },
     }
     expect(findUnknownCommand(['auth', 'status'], tree)).toMatchObject({
       attemptedPath: ['deepspace', 'auth', 'status'],
       suggestion: ['deepspace', 'status'],
       executable: false,
     })
+  })
+
+  it('withholds the exact-match guess when two matches tie at the same depth', () => {
+    // Two equally-shallow `logs` — neither is the obvious meaning, and a
+    // wrong exact-looking guess is worse than the fuzzy fallback's hedge.
+    const tree: Record<string, CommandTreeNode> = {
+      app: { subCommands: { logs: {} } },
+      workspace: { subCommands: { logs: {} } },
+      auth: { subCommands: { login: {}, logout: {} } },
+    }
+    const guess = findUnknownCommand(['auth', 'logs'], tree)
+    expect(guess?.suggestion).not.toEqual(['deepspace', 'app', 'logs'])
+    expect(guess?.suggestion).not.toEqual(['deepspace', 'workspace', 'logs'])
   })
 
   it('searches below the accepted command path for nested typos', () => {

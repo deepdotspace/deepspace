@@ -1,7 +1,7 @@
 /** Resolve explicit or local app selectors to canonical app ids. */
 
 import { APP_ID_RE, readAppId } from './app-identity'
-import { canHealAppRegistration, ensureAppRegistered } from './app-registration'
+import { canHealAppRegistration, ensureAppRegistered, healBlocker, healRefusal } from './app-registration'
 import { apiFetchReadWithRetry } from './api'
 import { InputError, Refusal } from './cli-errors'
 import { findAppDir } from './app-context'
@@ -238,6 +238,16 @@ export function appTargetMissingError(
       `${noWranglerConfigMessage(process.cwd())} Or pass --app <id or name> to target an app from anywhere.`,
       'not_in_app_repo',
     )
+  }
+  // A committed placeholder blocked first-use minting — say so, with the real
+  // remedy, instead of the generic "run app init" (whose reason the caller
+  // could not guess: the file DOES declare an id slot).
+  if (healBlocker(appDir, wranglerEnv) === 'placeholder_committed') {
+    const refusal = healRefusal(appDir, wranglerEnv)
+    return new Refusal(refusal.message, refusal.code, {
+      action: refusal.action,
+      actionRequired: true,
+    })
   }
   if (wranglerEnv) {
     return new InputError(

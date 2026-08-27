@@ -42,8 +42,10 @@ export function acquireDeployLock(appDir: string): () => void {
       (holder
         ? `Another deploy of this directory holds the deploy lock (pid ${holder.pid}, started ${holder.startedAt})`
         : `A deploy lock is present at ${path} but unreadable, so this run cannot tell whether a deploy is live`) +
-        ' — two deploys of one checkout race on its build output. Wait for it to finish, then ' +
-        `retry; if no deploy is running, remove ${path}.`,
+        ' — two deploys of one checkout race on its build output. Judge liveness by the ' +
+        'START TIME, not the pid: no deploy runs longer than a few minutes, so a lock older ' +
+        'than ~10 minutes is a dead deploy (in containers the pid can read as alive — a ' +
+        `reaped child leaves a zombie \`ps\` still reports). Then remove ${path} and retry.`,
       'deploy_in_progress',
       {
         extra: {

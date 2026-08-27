@@ -39,6 +39,17 @@ describe('scaffolded collaboration spec', () => {
     expect(spec).toContain("getByTestId('nav-user-name')).toHaveText(/\\S/")
   })
 
+  it('skips itself on a machine with no usable test-account pool', () => {
+    // A cold machine has no pool, and `users()` throws there — which turned
+    // "you have not created test accounts yet" into three red tests about the
+    // app on the very first `deepspace test run all`.
+    expect(spec).toContain("loadAllTestAccounts } from 'deepspace/testing'")
+    expect(spec).toMatch(/test\.skip\(\s*\n?\s*usableTestAccounts < 2,/)
+    // The skip reason has to name the command that fixes it.
+    expect(spec).toContain('test accounts create')
+    expect(spec).toContain('--password-stdin')
+  })
+
   it('finds its assertion targets in every product overlay', () => {
     for (const component of OVERLAY_NAVIGATION) {
       const source = template(component)

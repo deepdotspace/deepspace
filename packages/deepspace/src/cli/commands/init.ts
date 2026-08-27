@@ -20,6 +20,7 @@ import { findAppDir } from '../lib/app-context'
 import { getAppSource } from '../lib/source-api'
 import { readAppId } from '../lib/app-identity'
 import {
+  accountLabel,
   commitScaffoldIfUnborn,
   mintAppIdentity,
   wranglerConfigUncommitted,
@@ -167,10 +168,10 @@ export default defineDeepspaceCommand({
       if (existing) {
         console.log(`Forked: ${existing} → ${appId}${envSuffix}${commitNote}`)
         console.log(
-          `Registered on ${DEEPSPACE_ENV} as a NEW app under your account; the original is untouched.`,
+          `Registered on ${DEEPSPACE_ENV} as a NEW app under ${accountLabel(token)}; the original is untouched.`,
         )
       } else {
-        console.log(`Registered ${appId}${envSuffix} on ${DEEPSPACE_ENV} to your account${commitNote}`)
+        console.log(`Registered ${appId}${envSuffix} on ${DEEPSPACE_ENV} to ${accountLabel(token)}${commitNote}`)
         if (replacedMalformed !== null) {
           console.log(
             `Replaced the malformed DEEPSPACE_APP_ID ${JSON.stringify(replacedMalformed)} — it was never a registered id.`,

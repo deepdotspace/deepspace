@@ -73,7 +73,15 @@ const list = defineDeepspaceCommand({
     }>(token, `/api/app-collaborators/${encodeURIComponent(app)}`)
     if (!collaborators.length && !pending.length) {
       if (!args.json) {
-        console.log(`No collaborators on ${app}. Add one with \`deepspace app collaborators add <email>\`.`)
+        // A collaborator reading the roster (readable since 0.27.0) cannot
+        // run `add`, and pending invites are hidden from them — so the
+        // owner-shaped advice would name a command they cannot run about a
+        // roster that may not actually be empty.
+        console.log(
+          `No collaborators on ${app}.` +
+            ` The owner adds one with \`deepspace app collaborators add <email>\`` +
+            ` (pending invites are visible to the owner alone).`,
+        )
       }
       return { data: { collaborators, pending } }
     }

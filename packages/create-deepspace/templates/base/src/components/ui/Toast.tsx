@@ -201,9 +201,12 @@ export function ToastProvider({
     >
       {children}
 
-      {/* Toast container */}
+      {/* Toast viewport. `pointer-events-none` is load-bearing: this is a
+          fixed z-100 layer over one corner of every page, so without it the
+          container (and every toast in it) silently eats clicks on whatever
+          sits underneath. Each toast re-enables events for itself. */}
       <div
-        className={`fixed z-[100] flex flex-col gap-2 ${positionClasses[position]}`}
+        className={`pointer-events-none fixed z-[100] flex flex-col gap-2 ${positionClasses[position]}`}
       >
         {toasts.map((t) => (
           <ToastItem key={t.id} toast={t} onDismiss={() => dismiss(t.id)} />
@@ -250,6 +253,7 @@ function ToastItem({ toast, onDismiss }: ToastItemProps): React.ReactElement {
   return (
     <div
       className={`
+        pointer-events-auto
         relative flex items-start gap-2.5 min-w-[260px] max-w-[360px]
         overflow-hidden rounded-lg border border-border bg-popover
         text-popover-foreground pl-3.5 pr-2 py-2.5 shadow-lg

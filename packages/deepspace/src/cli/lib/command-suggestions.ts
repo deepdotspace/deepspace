@@ -158,7 +158,15 @@ export function findUnknownCommand(
       // `logout`, a destructive guess for a read verb.
       const rootExactAll =
         exactHit || split ? [] : commandPaths(rootCommands).filter((path) => path.at(-1) === token)
-      const rootExact = rootExactAll.length === 1 ? rootExactAll[0] : null
+      // Prefer the SHALLOWEST exact match rather than requiring global
+      // uniqueness: `status` exists three times in the real tree (top-level,
+      // `workspace status`, `app transfer status`), and demanding one hit
+      // sent `auth status` to the fuzzy sibling — `logout`, a destructive
+      // guess for a read verb. Ambiguity only remains when two matches share
+      // the minimum depth; then no exact guess is safe.
+      const minDepth = Math.min(...rootExactAll.map((path) => path.length))
+      const shallowest = rootExactAll.filter((path) => path.length === minDepth)
+      const rootExact = shallowest.length === 1 ? shallowest[0] : null
       const relativeSuggestion = exactHit ?? split ?? (rootExact ? null : closestCommandPath(token, table))
       const suggestionPath = relativeSuggestion ? [...accepted, ...relativeSuggestion] : rootExact
       if (!suggestionPath) return null

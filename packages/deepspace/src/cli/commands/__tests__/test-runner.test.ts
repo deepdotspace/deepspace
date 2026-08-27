@@ -56,8 +56,16 @@ async function runDefaultSuite(
   extraArgs: Record<string, unknown> = {},
 ) {
   const lines: string[] = []
+  const logLines: string[] = []
   vi.spyOn(appContext, 'findAppDir').mockReturnValue(dir)
-  vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
+  vi.spyOn(console, 'log').mockImplementation((line?: unknown) => {
+    logLines.push(String(line))
+    lines.push(String(line))
+  })
+  // Human-mode asides print on stderr (the suite runner owns stdout) — the
+  // harness collects both for `lines`, while the JSON envelope still parses
+  // from stdout alone.
+  vi.spyOn(console, 'error').mockImplementation((line?: unknown) => lines.push(String(line)))
   vi.spyOn(preflightModule, 'preflightNodeVersion').mockImplementation(() => {})
   vi.spyOn(preflightModule, 'preflightWindowsWorkerd').mockImplementation(() => {})
   vi.spyOn(installStatusModule, 'ensureInstallReady').mockImplementation(() => {})
@@ -82,7 +90,7 @@ async function runDefaultSuite(
   await command.run({ args: { json, ...extraArgs } })
   return {
     lines,
-    envelope: json ? (JSON.parse(lines[lines.length - 1]) as Record<string, unknown>) : null,
+    envelope: json ? (JSON.parse(logLines[logLines.length - 1]) as Record<string, unknown>) : null,
   }
 }
 

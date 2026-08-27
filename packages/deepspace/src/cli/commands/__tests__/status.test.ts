@@ -181,6 +181,43 @@ describe('status --json session and trunk facts', () => {
     } as unknown as ReturnType<typeof repoApiModule.repoApi>)
   }
 
+  it('an UNCLAIMED app reports its next-deploy inference — deepspace without a GitHub remote', async () => {
+    // v0.26.0 AX: the old line said "defaults to DeepSpace", false for a
+    // GitHub-remote checkout; the JSON mirror must carry the same fact.
+    clearAuthFiles()
+    writeToken({ email: 'dev@example.com', sub: 'user_1' })
+    stageCheckout('main', null)
+    authFixture.ensureToken.mockResolvedValue('token')
+    vi.spyOn(sourceApiModule, 'getAppSource').mockResolvedValue({
+      appId: APP_ID,
+      source: null,
+      revision: 0,
+      registered: true,
+    })
+    const json = await runStatusJson()
+    expect(json.source).toBeNull()
+    expect(json.sourceInference).toBe('deepspace')
+  })
+
+  it('an UNCLAIMED app with a GitHub remote infers github and labels the trunk external+inferred', async () => {
+    clearAuthFiles()
+    writeToken({ email: 'dev@example.com', sub: 'user_1' })
+    stageCheckout('main', null)
+    authFixture.ensureToken.mockResolvedValue('token')
+    git(repo!, ['remote', 'add', 'origin', 'https://github.com/acme/rockets.git'])
+    vi.spyOn(sourceApiModule, 'getAppSource').mockResolvedValue({
+      appId: APP_ID,
+      source: null,
+      revision: 0,
+      registered: true,
+    })
+    const json = await runStatusJson()
+    expect(json.sourceInference).toBe('github')
+    // The trunk row must not compare the checkout against the intentionally
+    // empty cloud repo and report `differs` (v0.26.0 github AX-8).
+    expect(json.trunk).toMatchObject({ state: 'external', provider: 'github', inferred: true })
+  })
+
   it('reports NOT logged in with a coded sessionError and no user', async () => {
     clearAuthFiles()
     vi.spyOn(appContext, 'findAppDir').mockReturnValue(null)

@@ -38,6 +38,7 @@ import {
   spaceTrackingRef,
 } from '../lib/vc-remote'
 import { repoApi } from '../lib/repo-api'
+import { githubInferredRefusal, inferredGitHubRepository } from '../lib/source-api'
 import { createSpinner } from '../lib/spinner'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import type { CliAction } from '../lib/output'
@@ -206,11 +207,19 @@ export default defineDeepspaceCommand({
     // bare 422 with no sentence.
     spinner?.message(`Checking the cloud ${branch} ref…`)
     const remote = await repoApi(deployUrl, token, appId).getRefs()
-    // The token goes in: a diverged pull hands back `git merge
-    // refs/remotes/space/<branch>`, which writes a commit — and a fresh clone
-    // with no global git identity dies on `unable to auto-detect email
-    // address`. `ensureSpaceRemote` is the identity seam.
-    ensureSpaceRemote(appDir, appId, undefined, token)
+    if (!remote || remote.refs.length === 0) {
+      // Empty means two different things: a DeepSpace app nobody pushed yet,
+      // or a GitHub-inferred app whose emptiness is the design — and telling
+      // the second kind to `deepspace push` steers them through the permanent
+      // claim (v0.26.0 AX finding). Decide BEFORE ensureSpaceRemote below, so
+      // this read-only refusal also leaves no push-capable remote and no
+      // rewritten git identity behind.
+      const githubRepo = await inferredGitHubRepository(deployUrl, token, appId)
+      if (githubRepo) {
+        spinner?.stop('GitHub source.')
+        throw githubInferredRefusal(appId, githubRepo)
+      }
+    }
     if (!remote) {
       spinner?.stop('No cloud repo yet.')
       const pushCommand = targetedVcCommand('push', appId, branch)
@@ -220,6 +229,12 @@ export default defineDeepspaceCommand({
         { action: targetedVcAction('push', appDir, appId, branch) },
       )
     }
+    // The token goes in: a diverged pull hands back `git merge
+    // refs/remotes/space/<branch>`, which writes a commit — and a fresh clone
+    // with no global git identity dies on `unable to auto-detect email
+    // address`. `ensureSpaceRemote` is the identity seam. After the empty-repo
+    // decision above: a refusal must not mutate the checkout it refuses.
+    ensureSpaceRemote(appDir, appId, undefined, token)
 
     // A workspace branch can't be pulled like an ordinary branch — refuse
     // BEFORE the branch-existence check (its visible ref usually doesn't even
@@ -429,10 +444,18 @@ export default defineDeepspaceCommand({
         break
       case 'fetched_only_unborn':
         codeForState = 'dirty_worktree'
+        // The branch was CREATED at the remote tip before this prints, so
+        // the files read as "dirty" only because the index has not adopted
+        // it — committing everything first would author a redundant
+        // duplicate-content commit on top (v0.26.0 collab AX). `reset
+        // --mixed` adopts the created branch and usually leaves nothing to
+        // preserve; the caution stays for files that genuinely differ.
         line =
-          `Fetched ${SPACE_REMOTE}/${branch} and created ${branch}, but the worktree has uncommitted files. ` +
-          `Preserve them in a commit or stash (including untracked files), then restore the checkout; ` +
-          `do not run reset --hard until \`git status\` confirms nothing worth keeping remains.`
+          `Fetched ${SPACE_REMOTE}/${branch} and created ${branch} at the remote tip. The uncommitted ` +
+          `files here are likely the SAME content — run \`git reset --mixed ${branch}\` and check ` +
+          `\`git status\`; commit or stash only what still shows as changed. Do not blindly commit ` +
+          `everything first (that authors a redundant duplicate commit), and do not run reset --hard ` +
+          `until \`git status\` confirms nothing worth keeping remains.`
         break
       case 'fetched_only_worktree':
         codeForState = 'branch_in_worktree'

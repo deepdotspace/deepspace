@@ -1,4 +1,5 @@
 import { afterEach, describe, it, expect, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -335,5 +336,67 @@ describe('resolveAppSelector', () => {
     await expect(resolveAppSelector('https://deploy.test', 'tok', 'ghost')).rejects.toThrow(
       /No app "ghost" found, or you don't have access/,
     )
+  })
+})
+
+describe('committed-placeholder healing (placeholder_committed)', () => {
+  const git = (cwd: string, args: string[]) =>
+    execFileSync('git', args, { cwd, stdio: 'ignore' })
+
+  /** A git repo whose wrangler.toml `content` is COMMITTED. */
+  const committedRepo = (content: string): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'ds-placeholder-'))
+    writeFileSync(join(dir, 'wrangler.toml'), content)
+    git(dir, ['init', '-q', '-b', 'main'])
+    git(dir, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '-A'])
+    git(dir, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'scaffold'])
+    return dir
+  }
+
+  it('a committed placeholder refuses with its own code and an executable app init action', () => {
+    const dir = committedRepo('name = "my-app"\n[vars]\nDEEPSPACE_APP_ID = "__APP_ID__"\n')
+    try {
+      expect(appRegistration.healBlocker(dir)).toBe('placeholder_committed')
+      const refusal = appRegistration.healRefusal(dir, undefined)
+      expect(refusal.code).toBe('placeholder_committed')
+      expect(refusal.action).toEqual({ cwd: dir, argv: ['deepspace', 'app', 'init'] })
+      // The GitHub lane's exact hazard: the message must never imply this is
+      // not a DeepSpace app (it is — its own scaffold, pushed to GitHub).
+      expect(refusal.message).not.toContain('does not look like')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('is scoped to the TARGET SECTION: a real top-level id with a committed staging placeholder', () => {
+    const dir = committedRepo(
+      `name = "my-app"\n[vars]\nDEEPSPACE_APP_ID = "${APP}"\n` +
+        '[env.staging]\nname = "my-app-staging"\n[env.staging.vars]\nDEEPSPACE_APP_ID = "__APP_ID__"\n',
+    )
+    try {
+      // Top level: the committed id is REAL — no placeholder evidence there.
+      expect(appRegistration.healBlocker(dir)).toBeNull()
+      // Staging: the committed placeholder blocks, and the remedy carries
+      // --env — a bare `app init` reads the top level, finds the real id, and
+      // says "already initialized" forever (adversarial review, PR #324).
+      expect(appRegistration.healBlocker(dir, 'staging')).toBe('placeholder_committed')
+      const refusal = appRegistration.healRefusal(dir, 'staging')
+      expect(refusal.code).toBe('placeholder_committed')
+      expect(refusal.action?.argv).toEqual(['deepspace', 'app', 'init', '--env', 'staging'])
+      expect(refusal.message).toContain('[env.staging.vars]')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('an UNCOMMITTED placeholder (fresh scaffold, unborn HEAD) still heals', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ds-placeholder-'))
+    writeFileSync(join(dir, 'wrangler.toml'), 'name = "a"\n[vars]\nDEEPSPACE_APP_ID = "__APP_ID__"\n')
+    git(dir, ['init', '-q', '-b', 'main'])
+    try {
+      expect(appRegistration.healBlocker(dir)).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

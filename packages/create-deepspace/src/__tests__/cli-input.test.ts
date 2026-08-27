@@ -28,13 +28,24 @@ describe('parseArgs', () => {
     })
   })
 
-  it('accepts --no-register and explains --yes instead of calling it unknown', () => {
-    expect(parseArgs(argv('my-app', '--no-register'))).toMatchObject({
+  // `--yes` / `-y` is the npm-create reflex. It asks for behavior this
+  // scaffolder already has, so it is a no-op — never exit 1 on the literal
+  // first command of the journey.
+  it.each(['--yes', '-y'])('accepts %s as a no-op', (flag) => {
+    expect(parseArgs(argv('my-app', flag))).toMatchObject({
       appName: 'my-app',
-      noRegister: true,
+      interactive: false,
       invalid: undefined,
     })
-    expect(parseArgs(argv('my-app', '--yes')).invalid).toContain('non-interactive by default')
+  })
+
+  it('accepts --no-register as a deprecated no-op: scaffolds never register anyway', () => {
+    // Refusing it would exit-1 every script that passed it — the flag asks
+    // for what already always happens (same lesson as --yes).
+    expect(parseArgs(argv('my-app', '--no-register'))).toMatchObject({
+      appName: 'my-app',
+      invalid: undefined,
+    })
   })
 
   it('rejects a second positional app name', () => {

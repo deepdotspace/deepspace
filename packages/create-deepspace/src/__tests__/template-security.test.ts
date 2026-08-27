@@ -74,6 +74,47 @@ describe('base scaffold dependency contract', () => {
   })
 })
 
+describe('base scaffold API 404 guard', () => {
+  const routes = readFileSync(
+    fileURLToPath(new URL('../../templates/base/src/server/http-routes.ts', import.meta.url)),
+    'utf8',
+  )
+
+  it('answers an unmatched /api call with JSON on every method, not just GET', () => {
+    // A GET-only guard let a POST to a mistyped or rolled-back API route fall
+    // through to Hono's plain-text 404 — the "text parsed as JSON" failure the
+    // guard's own comment says must never happen.
+    const guard = routes.slice(routes.indexOf('export function registerStaticRoutes'))
+    const methodAgnostic = guard.indexOf("app.all('*'")
+    const assetFallback = guard.indexOf("app.get('*'")
+    expect(methodAgnostic).toBeGreaterThan(-1)
+    expect(methodAgnostic).toBeLessThan(assetFallback)
+    expect(guard).toContain("return c.json({ error: 'not_found' }, 404)")
+  })
+
+  it('keeps the prefix test in one place rather than re-checking it per method', () => {
+    const assetFallback = routes.slice(routes.indexOf("app.get('*'"))
+    expect(assetFallback).not.toContain('API_PREFIXES')
+  })
+})
+
+describe('base scaffold toast viewport', () => {
+  const toast = readFileSync(
+    fileURLToPath(new URL('../../templates/base/src/components/ui/Toast.tsx', import.meta.url)),
+    'utf8',
+  )
+
+  it('does not intercept clicks on the page underneath it', () => {
+    // The viewport is a fixed z-100 layer over one corner of every page; without
+    // this it swallowed real clicks for the lifetime of every toast.
+    expect(toast).toContain('pointer-events-none fixed z-[100]')
+  })
+
+  it('still lets each toast take its own clicks, so dismiss works', () => {
+    expect(toast.slice(toast.indexOf('function ToastItem'))).toContain('pointer-events-auto')
+  })
+})
+
 describe('base scaffold route loading', () => {
   it('code-splits route modules so public pages do not preload the app graph', () => {
     const entry = readFileSync(

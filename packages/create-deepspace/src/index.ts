@@ -1,8 +1,9 @@
 /**
  * create-deepspace
  *
- * Scaffolds a new DeepSpace app from an embedded template, gives it a local
- * immutable identity, installs the agent skill, and starts dependency setup.
+ * Scaffolds a new DeepSpace app from an embedded template, installs the agent
+ * skill, and starts dependency setup. The app's immutable id is NOT minted
+ * here — it is registered on first use by whichever verb needs it.
  * Features remain in the `deepspace` SDK package rather than copied source.
  */
 
@@ -31,7 +32,7 @@ async function main(): Promise<void> {
   )
   const progress = createProgress()
   const project = prepareProject(input, readCreatorVersion(), progress)
-  await completeProjectSetup(project, progress, { noRegister: input.noRegister })
+  await completeProjectSetup(project, progress)
 }
 
 main().catch((error) => {

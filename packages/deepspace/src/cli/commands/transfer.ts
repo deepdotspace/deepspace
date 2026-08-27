@@ -94,6 +94,11 @@ const offer = defineDeepspaceCommand({
         app,
         email,
         expiresAt,
+        // The human path prints this consequence in bold; the machine caller
+        // — the one seat that never sees the screen — must carry it too
+        // (v0.26.0 collab AX): acceptance strips the offerer of ALL access.
+        onAcceptance:
+          'You lose all access to the app — you are not kept on as a collaborator; only the new owner can add you back.',
         ...(replaced ? { replacedPendingTo: pendingTo } : {}),
       },
     }

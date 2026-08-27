@@ -227,9 +227,9 @@ function copyTemplate(template: string, appDir: string, appName: string): string
     // Substitute only template-owned bytes. In-place targets may contain
     // README/docs/agent files whose literal placeholder text belongs to the
     // user and must survive the merge unchanged. `__APP_ID__` deliberately
-    // survives this pass: the id is server-minted by the authed
-    // `deepspace app init` step at the end of setup, which writes it to
-    // wrangler.toml (the client resolves it from there at build time).
+    // survives this pass: it is the declared-but-unset slot that marks this as
+    // a DeepSpace app awaiting its id, and the first verb that needs one mints
+    // it into wrangler.toml (the client resolves it from there at build time).
     replaceInDir(stagingDirectory, '__APP_NAME__', appName)
     for (const entry of readdirSync(stagingDirectory)) {
       const source = join(stagingDirectory, entry)
@@ -337,8 +337,10 @@ function packLocal(monorepoRoot: string, appDir: string): string {
   return tarballPath
 }
 
-/** Create the repo when the target isn't one (and isn't inside one); the
- *  initial commit is made by the CLI's `app init` once identity exists. */
+/** Create the repo when the target isn't one (and isn't inside one). No
+ *  initial commit is made here: the first `deploy` (or an explicit
+ *  `app init`) commits the still-unborn scaffold once it has an id, so the
+ *  `__APP_ID__` placeholder never enters history. */
 function initializeGit(appDir: string): boolean {
   if (existsSync(join(appDir, '.git'))) return false
   const insideParent = spawn.sync('git', ['rev-parse', '--is-inside-work-tree'], {

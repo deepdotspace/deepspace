@@ -29,6 +29,7 @@ import { writeDevVars } from '../lib/dev-vars'
 import { assertAppTargetResolvable, parseWranglerEnvArg, resolveAppTarget } from '../lib/app-target'
 import { ApiError } from '../lib/api'
 import { InputError } from '../lib/cli-errors'
+import { Refusal } from '../lib/command'
 import { dedupePositionals } from '../lib/citty-args'
 import { MAX_STDIN_BYTES, readStreamText } from '../lib/stdio'
 import {
@@ -187,26 +188,73 @@ const list = defineCommand({
 })
 
 const set = defineCommand({
-  meta: { name: 'set', description: 'Set secrets from KEY=value pairs' },
+  meta: { name: 'set', description: 'Set secrets from KEY=value pairs, or KEY --stdin' },
   args: {
     ...COMMON_ARGS,
-    secret: { type: 'positional', description: 'KEY=value (repeatable)', required: true },
+    secret: {
+      type: 'positional',
+      description: 'KEY=value (repeatable), or a bare KEY with --stdin',
+      required: true,
+    },
+    stdin: {
+      type: 'boolean',
+      description: 'Read the value for a single bare KEY from stdin (keeps it off argv)',
+      required: false,
+    },
   },
   async run({ args }) {
     const t = await resolveTarget(args, { register: true })
     const pairs = dedupePositionals(args.secret, args._)
     const secrets: Record<string, string> = {}
     const dupes: string[] = []
-    for (const pair of pairs) {
-      const eq = pair.indexOf('=')
-      if (eq <= 0) throw new InputError(`Expected KEY=value, got "${pair}"`, 'invalid_pair')
-      const key = validateSecretName(pair.slice(0, eq))
-      const value = pair.slice(eq + 1)
+    // `--stdin`: one bare KEY, value piped — the CLI's own skill says never
+    // to put a secret on a command line, and `test accounts create` already
+    // honors that with --password-stdin; `secrets set` was the one write
+    // that COULDN'T (v0.26.0 collab AX). KEY=value stays for non-sensitive
+    // wiring and backward compatibility.
+    if (args.stdin === true) {
+      if (pairs.length !== 1 || pairs[0].includes('=')) {
+        throw new InputError(
+          '--stdin takes exactly one bare KEY (the value is read from stdin): `deepspace secrets set KEY --stdin`.',
+          'invalid_pair',
+        )
+      }
+      if (process.stdin.isTTY) {
+        throw new Refusal(
+          '--stdin expects the value piped on stdin, e.g. `printf %s "$VALUE" | deepspace secrets set KEY --stdin`.',
+          'stdin_needs_pipe',
+        )
+      }
+      const key = validateSecretName(pairs[0])
+      const value = (await readStreamText(process.stdin, MAX_STDIN_BYTES)).replace(/\r?\n$/, '')
+      // Empty stdin is almost always an unset shell variable, and --stdin is
+      // the spelling most likely to be fed one — storing "" silently would
+      // bury the mistake until the app misbehaves.
+      if (value === '') {
+        throw new InputError(
+          `--stdin received an empty value for ${key} (an unset variable?). Pipe the value: \`printf %s "$VALUE" | deepspace secrets set ${key} --stdin\`.`,
+          'empty_input',
+        )
+      }
       validateSecretValue(key, value)
-      // The same KEY given twice (with different values) silently keeps the
-      // last — surface it instead of dropping a value without a word.
-      if (key in secrets && !dupes.includes(key)) dupes.push(key)
       secrets[key] = value
+    } else {
+      for (const pair of pairs) {
+        const eq = pair.indexOf('=')
+        if (eq <= 0) {
+          throw new InputError(
+            `Expected KEY=value, got "${pair}" — or pipe the value: \`deepspace secrets set ${pair.split('=')[0] || 'KEY'} --stdin\`.`,
+            'invalid_pair',
+          )
+        }
+        const key = validateSecretName(pair.slice(0, eq))
+        const value = pair.slice(eq + 1)
+        validateSecretValue(key, value)
+        // The same KEY given twice (with different values) silently keeps the
+        // last — surface it instead of dropping a value without a word.
+        if (key in secrets && !dupes.includes(key)) dupes.push(key)
+        secrets[key] = value
+      }
     }
     if (dupes.length) {
       console.warn(

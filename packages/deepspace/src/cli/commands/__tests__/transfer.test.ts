@@ -174,4 +174,22 @@ describe('offer', () => {
     expect(out).toContain('not kept on as a')
     expect(out).toContain('deepspace app list')
   })
+
+  it('the --json envelope carries the same consequence as onAcceptance', async () => {
+    // v0.26.0 collab AX F7: the seat most likely to fire this verb without a
+    // human reading the screen was the one that never saw the warning.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) =>
+        init?.method === 'POST'
+          ? Response.json({ toUserId: 'user-2', expiresAt: '2026-08-08T00:00:00.000Z' })
+          : Response.json({ transfer: null }),
+      ),
+    )
+    const lines = captureLog()
+    await sub('offer').run({ args: { email: 'them@acme.com', app: APP, json: true } })
+    const envelope = JSON.parse(lines[lines.length - 1]) as Record<string, unknown>
+    expect(envelope).toMatchObject({ ok: true, app: APP, email: 'them@acme.com' })
+    expect(String(envelope.onAcceptance)).toContain('lose all access')
+  })
 })

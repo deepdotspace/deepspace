@@ -24,7 +24,6 @@ import {
 // and blows the default 5s wall under parallel vitest workers — the drifting
 // 18-24 failures in docs/audits/2026-08-06-e2e-0.13.0. Headroom, not a
 // license to hang.
-vi.setConfig({ testTimeout: 30_000 })
 
 let dir: string
 let first: string

@@ -149,6 +149,49 @@ describe('secrets refusals carry codes', () => {
   })
 })
 
+describe('secrets set --stdin guards', () => {
+  const app = () => {
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(
+      appWith(`name = "x"\n[vars]\nDEEPSPACE_APP_ID = "${APP_ID}"\n`),
+    )
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('tok')
+  }
+
+  it('--stdin with more than one KEY, or a KEY=value pair, refuses invalid_pair', async () => {
+    app()
+    expect(await runJson('set', { secret: 'A', _: ['B'], stdin: true })).toMatchObject({
+      ok: false,
+      code: 'invalid_pair',
+    })
+    expect(await runJson('set', { secret: 'A=1', stdin: true })).toMatchObject({
+      ok: false,
+      code: 'invalid_pair',
+    })
+  })
+
+  it('a KEY=value refusal names the piped alternative', async () => {
+    app()
+    const out = await runJson('set', { secret: 'JUSTAKEY' })
+    expect(out).toMatchObject({ ok: false, code: 'invalid_pair' })
+    expect(String(out.error)).toContain('--stdin')
+  })
+
+  it('--stdin on a TTY refuses stdin_needs_pipe instead of hanging on EOF', async () => {
+    app()
+    const prior = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY')
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true })
+    try {
+      expect(await runJson('set', { secret: 'A', stdin: true })).toMatchObject({
+        ok: false,
+        code: 'stdin_needs_pipe',
+      })
+    } finally {
+      if (prior) Object.defineProperty(process.stdin, 'isTTY', prior)
+      else Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true })
+    }
+  })
+})
+
 describe('secrets upload -', () => {
   function stubStdin(chunks: string[]): void {
     let index = 0

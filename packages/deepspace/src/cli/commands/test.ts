@@ -169,8 +169,13 @@ export default defineDeepspaceCommand({
     // One switch for every child this run spawns — the dependency preflight
     // and the suite runner alike.
     routeChildStdoutToStderr(args.json === true)
+    // stderr, not stdout: the suite runner owns stdout in human mode, and a
+    // note printed there is lost in (or scrolled off by) its output — the
+    // v0.26.0 linux AX pass captured a run's stderr and found the
+    // skipped-specs correction missing entirely. stderr is where this CLI's
+    // human-facing asides live.
     const say = (line: string) => {
-      if (!args.json) console.log(line)
+      if (!args.json) console.error(line)
     }
     preflightNodeVersion('test run')
     const suite = (args.suite as string | undefined) ?? 'default'
@@ -299,7 +304,17 @@ export default defineDeepspaceCommand({
         break
       case 'all':
         exitCode = runVitest(appDir, wranglerEnv)
-        if (exitCode === 0) exitCode = runPlaywright(appDir, [], port, wranglerEnv, forwarded)
+        if (exitCode === 0) {
+          // Between the two suites, not only at command start: vitest's
+          // runtime can still be winding down on the port when Playwright
+          // starts its own web server, and the leftover listener turned the
+          // run into a phantom app bug (stale route table, 404 on a route
+          // just added; v0.26.0 collab AX). Same guard as the start: a
+          // bounded wait for a dying listener to release the port, an
+          // immediate port_in_use refusal for one that still answers.
+          await ensurePortFree(port, '0.0.0.0')
+          exitCode = runPlaywright(appDir, [], port, wranglerEnv, forwarded)
+        }
         break
       case 'default':
         skippedSpecs = specsSkippedByDefaultSuite(appDir)

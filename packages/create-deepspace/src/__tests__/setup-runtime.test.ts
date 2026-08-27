@@ -40,51 +40,35 @@ describe('installedSdkVersion', () => {
   })
 })
 
+/**
+ * Every scaffold now leaves here identity-less — nothing is registered during
+ * `npm create`, logged in or not — so Next steps has no registration branch
+ * left to take. What it MUST still carry is the ownership fact: the app is
+ * claimed by whichever login the shell holds when the first id-needing verb
+ * runs, which is no longer necessarily the shell that scaffolded it.
+ */
 describe('nextStepsLines', () => {
   const project = { appName: 'demo', isInPlace: false }
 
-  it('omits the login/init recovery pair once the identity registered', () => {
-    const lines = nextStepsLines(project, { status: 'registered', plane: 'production' })
+  it('never lists registration as a step of its own', () => {
+    const lines = nextStepsLines(project)
+    expect(lines).not.toContain('npx deepspace app init')
+    // `auth login` is named inside the ownership note, never as a command an
+    // already-signed-in user is told to run.
     expect(lines).not.toContain('npx deepspace auth login')
-    expect(lines).not.toContain('npx deepspace app init')
+    expect(lines.slice(0, 1)).toEqual(['cd demo'])
     expect(lines).toContain('npx deepspace dev start')
+    expect(lines).toContain('  npx deepspace deploy')
   })
 
-  it('lists only login when the scaffold has no identity yet — deploy registers', () => {
-    // The first `deploy` mints the id itself; login is the one true
-    // prerequisite (deploy needs it anyway), so `app init` is never a step.
-    expect(
-      nextStepsLines(project, {
-        status: 'failed',
-        code: 'not_authenticated',
-        error: 'Not logged in.',
-        plane: 'production',
-      }).slice(0, 2),
-    ).toEqual(['cd demo', 'npx deepspace auth login'])
+  it('says which account first use will register the app to', () => {
+    const note = nextStepsLines(project).join('\n')
+    expect(note).toContain('registers this app')
+    expect(note).toContain('npx deepspace auth login')
   })
 
-  it('offers no recovery step when registration failed for a non-login reason', () => {
-    // A quota (or ownership, or network) refusal surfaces again — coded — at
-    // the first deploy, which is already on the list; nothing to add.
-    const quota = nextStepsLines(project, {
-      status: 'failed',
-      code: 'app_quota_exceeded',
-      error: 'Active app quota exceeded.',
-      plane: 'production',
-    })
-    expect(quota.slice(0, 2)).toEqual(['cd demo', 'npx deepspace dev start'])
-    expect(quota).not.toContain('npx deepspace auth login')
-    expect(quota).not.toContain('npx deepspace app init')
-  })
-
-  it('warns --no-register scaffolds that first use registers under the active login', () => {
-    // The flag exists to keep the app OFF this shell's login; with first-use
-    // registration, ANY later verb under the wrong login would claim it — so
-    // the next steps must say so before naming the login step.
-    const lines = nextStepsLines(project, { status: 'skipped' })
-    expect(lines.join('\n')).toContain('WILL')
-    expect(lines).toContain('npx deepspace auth login')
-    expect(lines).not.toContain('npx deepspace app init')
+  it('drops the cd line when scaffolding in place', () => {
+    expect(nextStepsLines({ appName: 'demo', isInPlace: true })[0]).not.toContain('cd ')
   })
 })
 

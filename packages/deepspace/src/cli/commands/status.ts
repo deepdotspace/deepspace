@@ -301,6 +301,12 @@ export default defineCommand({
           const sourceResult = await observeRemote(getAppSource(deployBaseUrl(), token, appId))
           const source = sourceResult.ok ? sourceResult.value.source : null
           const githubSource = source?.provider === 'github'
+          // Inferred-GitHub is external too: comparing the checkout against
+          // the (intentionally empty) DeepSpace cloud repo and reporting
+          // `differs` invents a trunk this app does not have (v0.26.0 AX).
+          const inferredGithub =
+            sourceResult.ok && source === null && externalGitSource(appDir, null)
+          const externalSource = githubSource || inferredGithub
           if (!sourceResult.ok) {
             reportRemoteFailure('Source', 'source', sourceResult.error)
           } else if (githubSource) {
@@ -316,11 +322,10 @@ export default defineCommand({
             // Inference, not a default: with a GitHub remote in the checkout
             // the next deploy ships as GitHub; without one it syncs to
             // DeepSpace (and that sync claims, permanently).
-            const github = externalGitSource(appDir, null)
             lines.push([
               'Source',
               `unclaimed · ${
-                github
+                inferredGithub
                   ? 'next deploy infers GitHub from this checkout’s remote'
                   : 'next deploy syncs to DeepSpace and claims it, permanently'
               }`,
@@ -328,8 +333,13 @@ export default defineCommand({
             json.source = null
             // The machine mirror of the prose above — `source: null` alone
             // would know less than the human line.
-            json.sourceInference = github ? 'github' : 'deepspace'
+            json.sourceInference = inferredGithub ? 'github' : 'deepspace'
           }
+          // Reads are suppressed only for CLAIMED GitHub apps: an UNCLAIMED
+          // checkout with a GitHub remote may still be a live DeepSpace
+          // workspace worktree (a mirror remote is not evidence), so its
+          // refs/workspace state must stay visible even while the trunk row
+          // below is labeled as inferred-external.
           const [refsResult, wsResult, releaseResult, appsResult] = await Promise.all([
             githubSource
               ? Promise.resolve({ ok: true, value: null } as const)
@@ -382,7 +392,7 @@ export default defineCommand({
           // exactly where "what does `workspace land` merge into?" is the
           // question. Absent, rather than null, when the refs read failed or
           // the source is external: unknown is not "there is no default".
-          if (!githubSource && refsResult.ok && defaultBranch) json.defaultBranch = defaultBranch
+          if (!externalSource && refsResult.ok && defaultBranch) json.defaultBranch = defaultBranch
           if (!facts.workspaceId && branch) {
             // With the default branch unknown (GitHub-owned source, refs
             // unfetched, or a repo with no HEAD yet) `isTrunk` is null and
@@ -395,12 +405,21 @@ export default defineCommand({
             // what the default branch is. Not for GitHub-owned source, where
             // `refs.head` is the DeepSpace repo's head rather than the
             // authority — and where the arm below already prints a Trunk row.
-            if (isTrunk === false && defaultBranch && !githubSource) {
+            if (isTrunk === false && defaultBranch && !externalSource) {
               lines.push(['Trunk', `${defaultBranch} (this checkout is on ${branch})`])
             }
-            if (githubSource) {
-              lines.push([label, `${branch} is owned through normal Git/GitHub`])
-              json.trunk = { state: 'external', provider: 'github', branch, isTrunk }
+            if (externalSource) {
+              lines.push([
+                label,
+                `${branch} is owned through normal Git/GitHub${githubSource ? '' : ' (inferred from this checkout)'}`,
+              ])
+              json.trunk = {
+                state: 'external',
+                provider: 'github',
+                branch,
+                isTrunk,
+                ...(githubSource ? {} : { inferred: true }),
+              }
             } else if (!refsResult.ok) reportRemoteFailure(label, 'trunk', refsResult.error)
             else {
               const remoteOid = trunkRef?.oid ?? null

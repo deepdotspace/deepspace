@@ -13,7 +13,7 @@ import * as p from '@clack/prompts'
 import { createSpinner } from '../lib/spinner'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
-import { resolveAppSelector } from '../lib/app-target'
+import { listApps, resolveAppSelector } from '../lib/app-target'
 import { hasWranglerConfig, readWranglerConfig } from '../lib/wrangler-env'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 
@@ -83,6 +83,29 @@ export default defineDeepspaceCommand({
       )
     }
 
+    const target = label && label !== appId ? `${label} (${appId})` : appId
+
+    // Ownership BEFORE consent: the consent refusal says "re-run with
+    // --yes", and saying that to a collaborator invites a non-owner to
+    // re-run the most destructive verb with the destructive flag attached —
+    // only to hit the server's not_app_owner (v0.26.0 collab AX). One list
+    // read settles it; an app not in the caller's list at all is left to the
+    // server's authoritative check (admin and race cases).
+    try {
+      const mine = await listApps(DEPLOY_URL, token)
+      const entry = mine.find((app) => app.appId === appId)
+      if (entry?.role === 'collaborator') {
+        throw new Refusal(
+          `Only the app owner can undeploy ${target} — you are a collaborator. Ask the owner, or fork your own copy with \`deepspace app init --new-id\`.`,
+          'not_app_owner',
+          { extra: { appId } },
+        )
+      }
+    } catch (error) {
+      if (error instanceof Refusal) throw error
+      // The listing is advisory; the server still enforces ownership.
+    }
+
     // The most destructive app command, so consent is never implicit. A
     // prompt is a permanent hang for a machine caller — `--json` promises one
     // document on stdout and a non-TTY stdin has nobody to answer — so both
@@ -90,7 +113,6 @@ export default defineDeepspaceCommand({
     // delete`. "The command itself is consent" was the old rule here, and it
     // made `--yes` decorative precisely where a typo'd app id is most
     // destructive (both 0.25.0 AX audits flagged it independently).
-    const target = label && label !== appId ? `${label} (${appId})` : appId
     if (args.yes !== true && (args.json === true || !process.stdin.isTTY)) {
       throw new Refusal(
         `Undeploying ${target} takes its URL offline immediately and destroys its live data — records, messages, canvas state, cron history — with the worker (secrets and the registration stay). Re-run with --yes to confirm.`,

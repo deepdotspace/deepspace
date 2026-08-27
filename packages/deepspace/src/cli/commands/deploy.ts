@@ -5,7 +5,7 @@ import { defineCommand } from 'citty'
 import { join, resolve } from 'node:path'
 import { ensureToken, refreshTokenFromSession } from '../auth'
 import { PLATFORM_URLS } from '../env'
-import { commitScaffoldIfUnborn, ensureAppRegistered } from '../lib/app-registration'
+import { commitScaffoldIfUnborn, ensureAppRegistered, healRefusal } from '../lib/app-registration'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { readAppId } from '../lib/app-identity'
 import { ensureInstallReady } from '../lib/install-status'
@@ -211,15 +211,15 @@ async function runLockedDeploy(
     // (`invalid_app_id`), so this only ever fills a genuinely absent slot.
     const ensured = await ensureAppRegistered(appDir, token, envName, { commitScaffold: true })
     if (!ensured) {
-      // Only reachable with a wranglerEnv whose block is undeclared, or a
-      // wrangler.toml that never mentions DEEPSPACE_APP_ID (not a DeepSpace
-      // app — minting must not rewrite a stranger's config).
-      return output.die(
-        envName
-          ? `No app id for [env.${envName}] — declare the [env.${envName}] block with its own DEEPSPACE_APP_ID entry (the \`__APP_ID__\` placeholder is enough), or run \`deepspace app init --env ${envName}\`.`
-          : 'wrangler.toml declares no DEEPSPACE_APP_ID — this does not look like a DeepSpace app. Run `deepspace app init` to register it as one.',
-        envName ? 'no_app_id_for_env' : 'app_not_initialized',
-      )
+      // healRefusal diagnoses WHICH state blocked minting — an undeclared
+      // env block, a config that never mentions DEEPSPACE_APP_ID, or a
+      // placeholder committed to history (the GitHub lane's first deploy,
+      // where the true remedy is `app init`, not "wrong directory").
+      const refusal = healRefusal(appDir, envName)
+      return output.die(refusal.message, refusal.code, {
+        action: refusal.action,
+        actionRequired: refusal.action !== undefined,
+      })
     }
     appId = ensured.appId
   }
@@ -271,6 +271,12 @@ async function runLockedDeploy(
   // keeps both checks; these only move the refusal to where it costs nothing.
   const ownerJwtRefusal = ownerJwtMissingRefusal(sourceState)
   if (ownerJwtRefusal) output.die(ownerJwtRefusal.error, ownerJwtRefusal.code)
+  // The platform answers `onBehalf` only to a non-owner: say so here, since
+  // nothing else in a deploy's output tells a collaborator they are shipping
+  // an app that belongs to another account (v0.26.0 collab AX).
+  if (sourceState.onBehalf) {
+    process.stderr.write('Deploying on behalf of the owner — this app belongs to another account.\n')
+  }
 
   let confirmRename = args.rename === true
   const rename = pendingRename(sourceState.registeredHost, appName)
@@ -355,7 +361,14 @@ async function runLockedDeploy(
   // code); under GitHub source they are the ONLY record of it — that path ships
   // the working tree from any branch, uncommitted edits included, and records
   // no commit, so nothing else can say afterwards what went live.
-  const worktree = { branch: repository.branch, dirty: repository.dirty }
+  const worktree = {
+    branch: repository.branch,
+    dirty: repository.dirty,
+    // What authority shipped, in the envelope the deployer already has — the
+    // human stream announces it, and without this a script had to make a
+    // second call (`releases --json`) to log it (v0.26.0 github AX).
+    source: shippedSourceEvidence(repository),
+  }
 
   // A rename that landed. Two mutually exclusive paths settle one: the
   // pre-build check above (whenever the platform reported `registeredHost`) or
@@ -466,6 +479,26 @@ async function syncPostDeployCommerce(
   }
 }
 
+/** The source evidence a deploy's `--json` envelope carries — the same shape
+ *  `releases --json` uses; `inferred: true` marks unclaimed-GitHub evidence.
+ *  Pure + exported for tests. */
+export function shippedSourceEvidence(repository: {
+  source: { provider: 'deepspace' } | { provider: 'github'; repository: string } | null
+  observedRepository: string | null
+}):
+  | { provider: 'github'; repository: string; inferred?: true }
+  | { provider: 'deepspace' }
+  | null {
+  if (repository.source?.provider === 'github') {
+    return { provider: 'github', repository: repository.source.repository }
+  }
+  if (repository.source?.provider === 'deepspace') return { provider: 'deepspace' }
+  if (repository.observedRepository) {
+    return { provider: 'github', repository: repository.observedRepository, inferred: true }
+  }
+  return null
+}
+
 /**
  * A collaborator's (or admin's) deploy of an app the owner has never deployed:
  * the platform cannot preserve secrets it has no live version to inherit them
@@ -479,11 +512,25 @@ async function syncPostDeployCommerce(
  */
 export function ownerJwtMissingRefusal(state: {
   onBehalf?: { ownerJwtLive: boolean }
+  registeredHost?: string | null
 }): { code: string; error: string } | null {
   // Absent means the platform did not answer (older platform, or Cloudflare
   // was unreadable). Unknown is not "missing": let the deploy proceed to the
   // server's authoritative guard.
   if (state.onBehalf?.ownerJwtLive !== false) return null
+  // Never deployed at all (no live host) vs. a live deployment predating the
+  // owner JWT: the first is the collaborator-first path v0.26.0 opened, and
+  // "redeploy"/"existing secrets" named things that had never happened —
+  // advice a fresh agent cannot act on (v0.26.0 collab AX).
+  if (state.registeredHost == null) {
+    return {
+      code: 'owner_jwt_missing',
+      error:
+        'This app has no live deployment to inherit an owner credential from (it has never been ' +
+        'deployed, or is currently undeployed). The owner must run `deepspace deploy` first; ' +
+        'after that, collaborators can deploy it.',
+    }
+  }
   return {
     code: 'owner_jwt_missing',
     error:

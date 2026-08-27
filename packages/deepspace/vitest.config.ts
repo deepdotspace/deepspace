@@ -20,10 +20,16 @@ export default defineConfig({
     maxWorkers: 4,
     // The CLI suites are process-spawning integration tests (real git against
     // real repos). Their per-test P99 under a full `pnpm check` legitimately
-    // exceeds vitest's 5s default — measured: three >5s timeouts across two
-    // forced gate runs, unchanged by worker caps — so the budget matches the
-    // workload class, same as deploy-worker's config and for the same reason.
-    testTimeout: 20_000,
+    // exceeds vitest's 5s default, and 0.27.0's ~20 added real-git tests
+    // pushed the heaviest files past the old 20-30s caps under full-suite
+    // worker contention (~5s solo, ~35s parallel — deterministic timeouts on
+    // an otherwise idle machine, not hangs). One budget HERE, not per-file
+    // vi.setConfig raises scattered as each file tips over: 60s per test,
+    // 30s per hook (vi.setConfig never covers hooks, and the real-git
+    // beforeAll in git-repository.test.ts ran on vitest's 10s default).
+    // Headroom, not a license to hang.
+    testTimeout: 60_000,
+    hookTimeout: 30_000,
     // Console output from PASSING tests is noise that buries real failures
     // in gate logs; failing tests keep their full output.
     silent: 'passed-only',
