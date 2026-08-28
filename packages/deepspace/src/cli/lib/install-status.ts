@@ -11,16 +11,21 @@ import { Refusal } from './command'
  * did NOT complete is told apart from one still in progress:
  *
  *   install.started — created before the package manager is spawned
- *   install.pid     — the installing process's pid; the liveness check that
- *                     separates "still installing" from "died without
- *                     finishing" (a dead pid retries on the next command)
  *   install.done    — written on successful completion
  *   install.err     — written on failure (contains the error message)
  *   install.log     — combined stdout/stderr, quoted in the refusal
  *
- * `install.pid` and `install.log` were once described here as legacy, left for
- * an older detached installer. They are not: the current installer writes both
- * and this module reads both on every refusal path.
+ * "Still installing" is age alone: install.started without install.done,
+ * younger than the 6-minute bound. Live installers keep or fit the mtime
+ * inside it — this module's heal times its spawn out at 5 minutes, and the
+ * scaffolder (which has no hard timeout — a cold cache on a slow link is
+ * legitimate) refreshes the mtime while its child runs, bounded at 30
+ * minutes so a hung package manager cannot hold the refusal forever. The
+ * old install.pid liveness protocol is gone: every part of it was a solved
+ * bug — our own pid needed exempting (an earlier interrupted attempt), a
+ * recycled pid false-positived (containers recycle from 1), and a zombie
+ * pid answered `kill 0` as alive forever (v0.27.0 r1 AX BUG-2). A crashed
+ * install heals on the first command after the age bound.
  *
  * "Ready" is `node_modules/deepspace/package.json` resolving AND no
  * interrupted-install evidence (`install.started` without `install.done`).
@@ -49,6 +54,24 @@ import { repoToplevel } from './git/repository'
 import { detectPackageManager } from './package-manager'
 
 export type InstallState = 'ready' | 'installing' | 'failed' | 'missing'
+
+/** How long install.started's mtime may be trusted as "still installing":
+ *  the heal's own spawn times out at 5 minutes, and the scaffolder's
+ *  unbounded install refreshes the mtime while it runs. */
+const INSTALLING_MAX_AGE_MS = 6 * 60 * 1000
+
+/** install.started with no terminal sentinel (done = finished, err = failed;
+ *  each installer removes err before a fresh attempt), young enough to be a
+ *  live install. */
+function installLikelyRunning(sentinelDir: string): boolean {
+  const startedPath = join(sentinelDir, 'install.started')
+  return (
+    existsSync(startedPath) &&
+    !existsSync(join(sentinelDir, 'install.done')) &&
+    !existsSync(join(sentinelDir, 'install.err')) &&
+    sentinelAgeMs(startedPath) < INSTALLING_MAX_AGE_MS
+  )
+}
 
 /** `install.started` without `install.done`: an install began and never
  *  finished — the tree may RESOLVE (npm writes package.json early) while
@@ -88,10 +111,7 @@ export function installState(appDir: string): InstallState {
   const sentinelDir = join(appDir, '.deepspace')
   if (existsSync(join(sentinelDir, 'install.err'))) return 'failed'
   if (existsSync(join(sentinelDir, 'install.started'))) {
-    if (!existsSync(join(sentinelDir, 'install.done')) && installWorkerAlive(sentinelDir)) {
-      return 'installing'
-    }
-    return 'failed'
+    return installLikelyRunning(sentinelDir) ? 'installing' : 'failed'
   }
   return 'missing'
 }
@@ -106,8 +126,6 @@ export function ensureInstallReady(appDir: string): void {
   if (resolvesDeepspace(appDir) && !installInterrupted(appDir)) return
 
   const sentinelDir = join(appDir, '.deepspace')
-  const startedPath = join(sentinelDir, 'install.started')
-  const donePath = join(sentinelDir, 'install.done')
   const logPath = join(sentinelDir, 'install.log')
 
   // Opt-out for callers who want to review before anything executes (an
@@ -127,21 +145,11 @@ export function ensureInstallReady(appDir: string): void {
     )
   }
 
-  // ANOTHER process's live install: wait-refuse rather than run a second
-  // package manager into the same node_modules. Our own recorded pid is never
-  // "another process" — it is a leftover from an interrupted earlier run of
-  // this very pid slot (or a recycled pid), and treating it as live wedged
-  // the checkout forever. Age-bounded for the same reason: a RECYCLED pid can
-  // belong to an unrelated live process (container restarts recycle from 1),
-  // and without a bound that false positive also wedged forever — no real
-  // install outlives the 5-minute timeout by much, so a sentinel past 30
-  // minutes is stale evidence, not a live installer.
-  if (
-    existsSync(startedPath) &&
-    !existsSync(donePath) &&
-    installWorkerAlive(sentinelDir) &&
-    sentinelAgeMs(startedPath) < 30 * 60 * 1000
-  ) {
+  // A concurrent live install (this command racing the scaffolder, or a
+  // second command): wait-refuse rather than run a second package manager
+  // into the same node_modules. Age is the only evidence — see the header
+  // for why the pid liveness check is gone.
+  if (installLikelyRunning(sentinelDir)) {
     const tail = existsSync(logPath) ? ` Tail progress: ${tailHint(logPath)}.` : ''
     throw new Refusal(
       `Dependencies are still installing.${tail} Retry once it finishes (or remove ${sentinelDir}/install.started if no install is actually running).`,
@@ -150,7 +158,7 @@ export function ensureInstallReady(appDir: string): void {
   }
 
   // Everything else — plain missing, a previous attempt's install.err, an
-  // interrupted install (started, no done, dead pid) — is healed by trying
+  // interrupted install (started, no done, past the age bound) — is healed by trying
   // again NOW. A transient failure (registry blip, offline laptop) must not
   // permanently convert "installs on first use" back into a manual step;
   // each command invocation makes exactly one bounded attempt, so a
@@ -196,8 +204,10 @@ function healMissingInstall(appDir: string): void {
   ensureSentinelsIgnored(appDir)
   rmSync(errPath, { force: true })
   rmSync(join(sentinelDir, 'install.done'), { force: true })
+  // Older versions wrote an install.pid; clear the leftover so nothing on
+  // disk suggests the deleted liveness protocol is still in force.
+  rmSync(join(sentinelDir, 'install.pid'), { force: true })
   writeFileSync(join(sentinelDir, 'install.started'), new Date().toISOString())
-  writeFileSync(join(sentinelDir, 'install.pid'), String(process.pid))
   const logFd = openSync(logPath, 'w')
   let result: ReturnType<typeof spawnSync>
   try {
@@ -310,24 +320,8 @@ function canonicalPath(path: string): string {
   }
 }
 
-/**
- * Is the detached install worker still running? Missing or malformed identity
- * fails closed; a valid pid is alive when signal 0 succeeds.
- */
-function installWorkerAlive(sentinelDir: string): boolean {
-  const pidPath = join(sentinelDir, 'install.pid')
-  if (!existsSync(pidPath)) return false
-  const pid = Number(readFileSync(pidPath, 'utf-8').trim())
-  // Our OWN pid is never a separate live installer — it is this process's
-  // earlier failed/interrupted attempt (or a recycled pid); treating it as
-  // live wedged the checkout in `install_in_progress` forever.
-  if (pid === process.pid) return false
-  return processAlive(pid)
-}
-
 /** Is a process with this pid alive? Signal 0 probes without delivering;
- *  EPERM means "alive, not ours". Shared by every pid-carrying sentinel under
- *  `.deepspace/` (the install worker, the deploy lock). */
+ *  EPERM means "alive, not ours". Used by the deploy lock's pid sentinel. */
 export function processAlive(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false
   try {

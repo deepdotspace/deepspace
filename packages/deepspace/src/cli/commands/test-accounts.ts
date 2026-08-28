@@ -18,15 +18,16 @@
  */
 
 import { defineCommand } from 'citty'
-import * as p from '@clack/prompts'
 import { ensureToken } from '../auth'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
+import { requireConsent } from '../lib/consent'
 import { MAX_STDIN_BYTES, readStreamText } from '../lib/stdio'
 import {
   createRemoteTestAccount,
   deleteRemoteTestAccount,
   fetchRemoteTestAccounts,
   recoverRemoteTestAccount,
+  TestAccountServiceError,
   syncTestAccountStore,
 } from '../lib/test-account-service'
 import {
@@ -36,6 +37,35 @@ import {
   upsertTestAccount,
   type RemoteTestAccount,
 } from '../../testing/accounts'
+
+/** Map platform errors to refusals with a remedy — "Failed: Maximum 10
+ *  test accounts per developer" and "Failed: Unauthorized" told the r1 AX
+ *  pass nothing about what to do next (collab F2). The auth-worker puts a
+ *  machine `code` beside every message (carried by TestAccountServiceError);
+ *  the remedy keys on the code alone. */
+function testAccountFailure(err: unknown, fallbackCode: string): Refusal {
+  const message = err instanceof Error ? err.message : String(err)
+  const code = err instanceof TestAccountServiceError ? err.code : undefined
+  if (code === 'test_account_cap') {
+    return new Refusal(
+      `${message}. The cap is per developer: free a slot with \`deepspace test accounts delete --email <name>@deepspace.test\` (or \`clear\` to drop them all), then retry.`,
+      'test_account_cap',
+    )
+  }
+  if (code === 'test_account_email_taken') {
+    return new Refusal(
+      `${message}. Test-account emails are GLOBAL across all developers, not per-account — your own \`test accounts list\` may not show the holder. Pick a unique address (e.g. suffix a run id).`,
+      'test_account_email_taken',
+    )
+  }
+  if (code === 'not_authenticated') {
+    return new Refusal(
+      `The platform refused this session (${message}) — the login may have expired or the account may have been deleted. Run \`deepspace auth login\` and retry.`,
+      'not_authenticated',
+    )
+  }
+  return new Refusal(`Failed: ${message}`, code ?? fallbackCode)
+}
 
 // ── Subcommands ────────────────────────────────────────────────────
 
@@ -106,10 +136,7 @@ const create = defineDeepspaceCommand({
     try {
       account = await createRemoteTestAccount({ email, password, name, label })
     } catch (error) {
-      throw new Refusal(
-        `Failed: ${error instanceof Error ? error.message : String(error)}`,
-        'test_account_create_failed',
-      )
+      throw testAccountFailure(error, 'test_account_create_failed')
     }
 
     // Save credentials locally
@@ -176,7 +203,7 @@ const list = defineDeepspaceCommand({
     try {
       remote = (await syncTestAccountStore()).accounts
     } catch (err) {
-      throw new Refusal(`Failed: ${(err as Error).message}`, 'test_accounts_list_failed')
+      throw testAccountFailure(err, 'test_accounts_list_failed')
     }
 
     // Merge the local record: selector name + password never leave this
@@ -277,7 +304,7 @@ const del = defineDeepspaceCommand({
       try {
         remote = await fetchRemoteTestAccounts()
       } catch (err) {
-        throw new Refusal(`Failed: ${(err as Error).message}`, 'test_accounts_list_failed')
+        throw testAccountFailure(err, 'test_accounts_list_failed')
       }
       const match = remote.find((a) => a.email === targetEmail)
       if (!match) {
@@ -329,7 +356,7 @@ const clear = defineDeepspaceCommand({
     try {
       remote = await fetchRemoteTestAccounts()
     } catch (err) {
-      throw new Refusal(`Failed: ${(err as Error).message}`, 'test_accounts_list_failed')
+      throw testAccountFailure(err, 'test_accounts_list_failed')
     }
 
     const targets = label ? remote.filter((a) => a.label === label) : remote
@@ -340,31 +367,18 @@ const clear = defineDeepspaceCommand({
       return { data: { deleted: 0, requested: 0, failures: [] } }
     }
 
-    if (!args.yes) {
-      // p.confirm needs a TTY it can prompt on. A `--json` caller is a script by
-      // definition, and a piped stdin (agent, `printf 'y' |`) is no better:
-      // clack resolves off the pipe, but its paused pipe stays a ref'd open
-      // handle that hangs the naturally-exiting process AFTER the accounts are
-      // deleted. Refuse with the flag that resolves it instead of hanging
-      // (same gate as transfer.ts).
-      if (!process.stdin.isTTY || args.json) {
-        throw new Refusal(
-          'Deleting test accounts needs confirmation. Pass --yes to confirm non-interactively.',
-          'confirmation_required',
-        )
-      }
-      const subject = label
-        ? `${targets.length} test account(s) labeled '${label}'`
-        : `all ${targets.length} test account(s)`
-      const confirmed = await p.confirm({
-        message: `Delete ${subject}? This is not reversible.`,
-        initialValue: false,
-      })
-      if (p.isCancel(confirmed) || !confirmed) {
-        console.log('Cancelled.')
-        return { data: { deleted: 0, requested: targets.length, cancelled: true, failures: [] } }
-      }
-    }
+    const subject = label
+      ? `${targets.length} test account(s) labeled '${label}'`
+      : `all ${targets.length} test account(s)`
+    // The shared gate (lib/consent.ts): --yes, refuse under --json/non-TTY,
+    // else a default-No prompt.
+    await requireConsent({
+      yes: args.yes === true,
+      json: args.json === true,
+      message: `Deleting ${subject} is not reversible.`,
+      prompt: `Delete ${subject}? This is not reversible.`,
+      extra: { requested: targets.length },
+    })
 
     let ok = 0
     const failures: Array<{ email: string; error: string }> = []
@@ -399,7 +413,7 @@ const clear = defineDeepspaceCommand({
 const recover = defineDeepspaceCommand({
   meta: {
     name: 'recover',
-    description: 'Re-issue the local credential for a test account you own',
+    description: 'Fetch the credential for a test account you own (e.g. one created on another machine)',
   },
   args: {
     email: {
@@ -433,7 +447,7 @@ const recover = defineDeepspaceCommand({
     try {
       remote = await fetchRemoteTestAccounts()
     } catch (err) {
-      throw new Refusal(`Failed: ${(err as Error).message}`, 'test_accounts_list_failed')
+      throw testAccountFailure(err, 'test_accounts_list_failed')
     }
 
     const localAccounts = loadAllTestAccounts()
@@ -468,7 +482,7 @@ const recover = defineDeepspaceCommand({
       targets = [match]
     }
 
-    const recovered: Array<{ id: string; email: string }> = []
+    const recovered: Array<{ id: string; email: string; rotated: boolean }> = []
     const failures: Array<{ email: string; error: string }> = []
     for (const target of targets) {
       try {
@@ -483,7 +497,7 @@ const recover = defineDeepspaceCommand({
           ...(name ? { name } : {}),
           createdAt: account.createdAt,
         })
-        recovered.push({ id: account.id, email: account.email })
+        recovered.push({ id: account.id, email: account.email, rotated: account.rotated !== false })
       } catch (err) {
         failures.push({ email: target.email, error: (err as Error).message })
       }
@@ -500,8 +514,14 @@ const recover = defineDeepspaceCommand({
 
     if (!args.json) {
       for (const account of recovered) console.log(`Recovered ${account.email}`)
+      // Recovery is a retrieval; only an account whose row predates the
+      // stored credential rotates, and only THAT invalidates other machines'
+      // copies — say so only when it happened.
+      const rotatedCount = recovered.filter((account) => account.rotated).length
       console.log(
-        `\nStored in ${TEST_ACCOUNTS_PATH}. The previous password (if any machine still holds one) no longer works — recover there too.`,
+        rotatedCount > 0
+          ? `\nStored in ${TEST_ACCOUNTS_PATH}. ${rotatedCount} account(s) had no stored credential and got a fresh password — machines holding their old passwords must recover too.`
+          : `\nStored in ${TEST_ACCOUNTS_PATH}. Passwords were retrieved, not reset — other machines' credentials still work.`,
       )
     }
     return { data: { recovered, requested: targets.length, failures: [] } }

@@ -293,7 +293,10 @@ async function runLockedDeploy(
     if (output.nonInteractive) {
       output.die(renameRefusalMessage(rename), 'rename_required')
     }
-    const confirmed = await p.confirm({ message: renamePromptMessage(rename) })
+    // Default NO: Enter on a rename prompt must not move a live URL (r2 ops
+    // AX-10) — the destructive default was the only consent prompt in the
+    // CLI that leaned yes.
+    const confirmed = await p.confirm({ message: renamePromptMessage(rename), initialValue: false })
     if (p.isCancel(confirmed) || !confirmed) output.die('Deploy cancelled.', 'rename_declined')
     confirmRename = true
   }

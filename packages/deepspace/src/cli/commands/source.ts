@@ -40,9 +40,10 @@ export default defineDeepspaceCommand({
       // there is no declaration left to make, and the two ways an app gets a
       // source are both ordinary commands.
       throw new Refusal(
-        'Source is no longer declared. A checkout with a GitHub remote deploys as GitHub ' +
-          'automatically, and an app becomes DeepSpace-source by publishing to it ' +
-          '(`deepspace push`) — permanently. This command only reports.',
+        "Source is no longer declared — it latches at the app's first release, permanently: " +
+          'a first deploy from a checkout with a GitHub remote fixes GitHub source, and a ' +
+          'first `deepspace push` (or a first deploy without one) fixes DeepSpace source. ' +
+          'This command only reports.',
         'source_inferred',
       )
     }

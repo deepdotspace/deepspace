@@ -1,4 +1,13 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import * as p from '@clack/prompts'
 import spawn from 'cross-spawn'
@@ -54,7 +63,7 @@ export async function completeProjectSetup(
   progress: Progress,
 ): Promise<void> {
   await installAgentSkill(project.appDir, progress)
-  installDependencies(project.appDir)
+  await installDependencies(project.appDir)
   // A scaffold comes out IDENTITY-LESS, always. `wrangler.toml` keeps the
   // `__APP_ID__` placeholder and the repo keeps its unborn HEAD; the first
   // verb that needs an id (deploy, dev, secrets…) mints one under the login
@@ -166,15 +175,50 @@ function lstatExists(path: string): boolean {
   }
 }
 
-function installDependencies(appDir: string): void {
+async function installDependencies(appDir: string): Promise<void> {
   const sentinelDirectory = join(appDir, '.deepspace')
   mkdirSync(sentinelDirectory, { recursive: true })
-  writeFileSync(join(sentinelDirectory, 'install.started'), new Date().toISOString() + '\n')
+  // A fresh attempt clears the previous failure sentinel — the same protocol
+  // the CLI heal follows, so err beside started always means "the attempt
+  // that wrote started has failed".
+  rmSync(join(sentinelDirectory, 'install.err'), { force: true })
+  const startedPath = join(sentinelDirectory, 'install.started')
+  writeFileSync(startedPath, new Date().toISOString() + '\n')
 
   const { cmd, args } = resolveInstall(detectBun(), process.env.npm_config_user_agent)
   p.log.step(`Installing dependencies (${cmd} ${args.join(' ')})…`)
-  writeFileSync(join(sentinelDirectory, 'install.pid'), `${process.pid}\n`)
-  const result = spawn.sync(cmd, args, { cwd: appDir, stdio: 'inherit' })
+  // The CLI reads install.started's AGE as the liveness signal (younger
+  // than 6 minutes = a live install; there is no pid protocol). This
+  // install has no hard timeout — a cold cache on a slow link can
+  // legitimately exceed 6 minutes — so keep the sentinel's mtime fresh
+  // while the child runs, or a concurrent `deepspace dev` would heal a
+  // second package manager into the same node_modules mid-install. BOUNDED
+  // at 30 minutes: a hung-but-alive package manager must not hold
+  // `install_in_progress` forever — past the cap the mtime goes stale, the
+  // CLI's age bound takes over, and the refusal frees itself.
+  const heartbeatDeadline = Date.now() + 30 * 60 * 1000
+  const heartbeat = setInterval(() => {
+    if (Date.now() > heartbeatDeadline) {
+      clearInterval(heartbeat)
+      return
+    }
+    try {
+      const now = new Date()
+      utimesSync(startedPath, now, now)
+    } catch {
+      // Sentinel gone (dir removed?) — nothing to keep fresh.
+    }
+  }, 30_000)
+  let result: { status: number | null; error?: Error }
+  try {
+    result = await new Promise((resolveDone) => {
+      const child = spawn(cmd, args, { cwd: appDir, stdio: 'inherit' })
+      child.on('close', (status) => resolveDone({ status }))
+      child.on('error', (error) => resolveDone({ status: null, error }))
+    })
+  } finally {
+    clearInterval(heartbeat)
+  }
   if (result.error || result.status !== 0) {
     const message = result.error
       ? `${cmd} ${args.join(' ')} failed to start: ${result.error.message}`

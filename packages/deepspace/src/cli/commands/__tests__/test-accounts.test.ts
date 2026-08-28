@@ -107,14 +107,32 @@ describe('test accounts clear confirmation gate', () => {
     expect(mocks.confirm).not.toHaveBeenCalled()
     expect(mocks.deleteRemoteTestAccount).not.toHaveBeenCalled()
   })
+
+  it('an interactive decline refuses consent_declined (exit 1) and deletes nothing', async () => {
+    // The shared gate changed this: declining used to exit 0 with
+    // `cancelled: true` — now every consent decline is a refusal.
+    mocks.confirm.mockResolvedValueOnce(false)
+    const isTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY')
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true })
+    try {
+      await clear.run({ args: { json: false, yes: false } })
+      expect(process.exitCode).toBe(1)
+      expect(mocks.confirm).toHaveBeenCalledTimes(1)
+      expect(mocks.deleteRemoteTestAccount).not.toHaveBeenCalled()
+    } finally {
+      if (isTTY) Object.defineProperty(process.stdin, 'isTTY', isTTY)
+      else Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true })
+    }
+  })
 })
 
 /**
- * `recover` rotates a credential. The platform now joins the Better Auth
- * `user` row into the rotate response, so the display name comes back with it;
- * an older platform sends none, and the local store is the only source left.
- * Writing `email.split('@')[0]` as one invented a name the app never renders —
- * and the shipped collab spec compared the page against exactly that field.
+ * `recover` fetches a credential (rotating only for pre-storage accounts).
+ * The platform joins the Better Auth `user` row into the credential response,
+ * so the display name comes back with it; an older platform sends none, and
+ * the local store is the only source left. Writing `email.split('@')[0]` as
+ * one invented a name the app never renders — and the shipped collab spec
+ * compared the page against exactly that field.
  */
 describe('test accounts recover display names', () => {
   const remote = { id: 'ta_1', email: 'collab-a@deepspace.test', userId: 'u_1', label: null, createdAt: 0 }

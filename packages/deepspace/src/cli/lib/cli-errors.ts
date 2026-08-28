@@ -200,12 +200,20 @@ const API_ERROR_HINTS: Record<string, string> = {
     'access at all (`deepspace app list` shows your standing). Ask the owner to run it, have ' +
     'them transfer the app (`deepspace app transfer offer`), or fork your checkout as your ' +
     'own app (`deepspace app init --new-id`).',
-  app_not_found:
-    'App not found on the service this command asked. Check the app id — the DEEPSPACE_APP_ID ' +
-    'value in wrangler.toml, usually `app_…` (a legacy app\'s id is its name); list your apps ' +
-    'with `deepspace app list`. If you are overriding DEEPSPACE_DEPLOY_URL (staging), note that ' +
-    'account/collaborator commands go to the PLATFORM API — an app registered only on a staging ' +
-    'deploy service is unknown there. (`domain` commands take the deployed app *name* instead.)',
+  // The staging paragraph appended only when an override is actually live:
+  // gluing it onto every production miss buried the useful half (r1 collab
+  // AX F9-adjacent).
+  get app_not_found() {
+    const base =
+      'App not found on the service this command asked. Check the app id — the DEEPSPACE_APP_ID ' +
+      "value in wrangler.toml, usually `app_…` (a legacy app's id is its name); list your apps " +
+      'with `deepspace app list`. (`domain` commands take the deployed app *name* instead.)'
+    return process.env.DEEPSPACE_DEPLOY_URL
+      ? base +
+          ' You are overriding DEEPSPACE_DEPLOY_URL (staging): account/collaborator commands go ' +
+          'to the PLATFORM API — an app registered only on a staging deploy service is unknown there.'
+      : base
+  },
   not_app_owner_or_collaborator: 'You must be the app owner or a collaborator to do this.',
   test_account_cannot_be_collaborator:
     'Test accounts cannot be added as collaborators. Use a real DeepSpace account.',

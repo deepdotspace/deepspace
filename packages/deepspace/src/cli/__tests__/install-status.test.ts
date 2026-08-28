@@ -1,18 +1,18 @@
 /**
  * ensureInstallReady's pre-ready states under the first-use heal: only a
- * LIVE install owned by ANOTHER process wait-refuses; every terminal state —
- * a previous failure (install.err), an interrupted install (dead, missing,
- * malformed, or self-owned install.pid) — retries the install right here.
- * Sticky wedges were the old behavior's failure mode: a killed install (or a
- * recycled pid) re-imposed the manual `npm install` the heal exists to
- * remove.
+ * LIVE install wait-refuses — install.started with no terminal sentinel
+ * (install.done / install.err), younger than the 6-minute age bound. Every
+ * terminal state — a previous failure (install.err), an attempt older than
+ * the bound — retries the install right here. Sticky wedges were the old
+ * pid-liveness behavior's failure mode: a killed install (or a recycled or
+ * zombie pid) re-imposed the manual `npm install` the heal exists to remove;
+ * a leftover install.pid is ignored entirely.
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import * as nodeChildProcess from 'node:child_process'
 
 // cross-spawn is CJS (not spyable); intercept only `<pm> install` and pass
 // everything else (git) through to the real implementation.
@@ -69,42 +69,45 @@ afterEach(() => {
   spawnMock.install.mockReset()
 })
 
+/** Backdate a sentinel past the 6-minute "still installing" age bound. */
+function backdate(dir: string, name: string): void {
+  const stale = new Date(Date.now() - 10 * 60 * 1000)
+  utimesSync(join(dir, '.deepspace', name), stale, stale)
+}
+
 describe('ensureInstallReady', () => {
-  it("wait-refuses only for ANOTHER process's live install", () => {
-    // A genuinely-alive foreign pid: a sleeping child we own.
-    const child = nodeChildProcess.spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], {
-      stdio: 'ignore',
-    })
-    try {
-      const dir = scaffoldDir({ 'install.started': 'x\n', 'install.pid': `${child.pid}\n` })
-      const out = runGuard(dir)
-      expect(out.code).toBe('install_in_progress')
-      expect(out.message).toContain('still installing')
-      expect(spawnMock.install).not.toHaveBeenCalled()
-    } finally {
-      child.kill()
-    }
+  it('wait-refuses for a fresh install.started with no terminal sentinel', () => {
+    const dir = scaffoldDir({ 'install.started': 'x\n' })
+    const out = runGuard(dir)
+    expect(out.code).toBe('install_in_progress')
+    expect(out.message).toContain('still installing')
+    expect(spawnMock.install).not.toHaveBeenCalled()
   })
 
-  it('our OWN recorded pid is an interrupted attempt, not a live installer — retried', () => {
-    // The interrupted-heal wedge: this process wrote the pid, died mid-install
-    // (or the pid was recycled), and the old code refused forever.
+  it('a failed attempt (install.err beside install.started) is terminal — retried NOW', () => {
+    // The heal writes err and leaves started behind; age alone would call
+    // that "installing" for 6 minutes. The err sentinel says the attempt
+    // ended, so the retry happens on this very command.
     vi.spyOn(process.stderr, 'write').mockReturnValue(true)
     failingInstall()
-    const dir = scaffoldDir({ 'install.started': 'x\n', 'install.pid': `${process.pid}\n` })
+    const dir = scaffoldDir({ 'install.started': 'x\n', 'install.err': 'ERR_SOMETHING\n' })
     expect(runGuard(dir).code).toBe('install_failed')
     expect(spawnMock.install).toHaveBeenCalledTimes(1)
   })
 
   it.each([
-    ['a dead pid', { 'install.started': 'x\n', 'install.pid': '999999999\n' }],
-    ['a missing pid', { 'install.started': 'x\n' }],
-    ['a malformed pid', { 'install.started': 'x\n', 'install.pid': 'not-a-pid\n' }],
-    ['a previous failure', { 'install.err': 'ERR_SOMETHING\n' }],
-  ])('retries an install left behind by %s', (_label, sentinels) => {
+    ['an attempt older than the age bound', { 'install.started': 'x\n' }, 'install.started'],
+    [
+      'a stale attempt with a leftover install.pid (the deleted protocol is ignored)',
+      { 'install.started': 'x\n', 'install.pid': `${process.pid}\n` },
+      'install.started',
+    ],
+    ['a previous failure', { 'install.err': 'ERR_SOMETHING\n' }, null],
+  ])('retries an install left behind by %s', (_label, sentinels, staleName) => {
     vi.spyOn(process.stderr, 'write').mockReturnValue(true)
     failingInstall()
     const dir = scaffoldDir(sentinels as Record<string, string>)
+    if (staleName) backdate(dir, staleName as string)
     const out = runGuard(dir)
     expect(out.code).toBe('install_failed')
     expect(out.message).toContain('retried on the next command')

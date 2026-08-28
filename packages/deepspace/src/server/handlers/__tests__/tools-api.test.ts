@@ -954,3 +954,41 @@ describe('user.list', () => {
     db.close()
   })
 })
+
+describe('records.update is an update, never an upsert', () => {
+  // v0.27.0 r1 AX AX-7: putRecord creates absent ids, so a typo'd (or
+  // stringified-undefined) recordId silently authored a phantom record and
+  // reported success while the record the caller watched never changed —
+  // five green no-op writes in one request.
+  it('refuses an absent recordId instead of creating a phantom record', async () => {
+    const db = new Database(':memory:')
+    const sql = makeSql(db)
+    const ctx = makeToolsContext(sql, [companies])
+    ensureCollectionTable(sql, companies)
+    const created = await execTool(ctx, 'records.create', {
+      collection: 'companies',
+      data: { name: 'acme', blob: 'x' },
+    })
+    expect(created.success).toBe(true)
+
+    const miss = await execTool(ctx, 'records.update', {
+      collection: 'companies',
+      recordId: 'undefined',
+      data: { name: 'ghost' },
+    })
+    expect(miss.success).toBe(false)
+    expect(String(miss.error)).toContain('updates never create')
+    // Nothing phantom was written.
+    const all = await execTool(ctx, 'records.query', { collection: 'companies' })
+    expect(all.data.records).toHaveLength(1)
+
+    // A real id still updates.
+    const id = (all.data.records[0] as { recordId: string }).recordId
+    const hit = await execTool(ctx, 'records.update', {
+      collection: 'companies',
+      recordId: id,
+      data: { name: 'acme-2' },
+    })
+    expect(hit.success).toBe(true)
+  })
+})

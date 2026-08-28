@@ -16,6 +16,7 @@ import { PLATFORM_URLS } from '../env'
 import { listApps, resolveAppSelector } from '../lib/app-target'
 import { hasWranglerConfig, readWranglerConfig } from '../lib/wrangler-env'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
+import { requireConsent } from '../lib/consent'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
@@ -106,35 +107,22 @@ export default defineDeepspaceCommand({
       // The listing is advisory; the server still enforces ownership.
     }
 
-    // The most destructive app command, so consent is never implicit. A
-    // prompt is a permanent hang for a machine caller — `--json` promises one
-    // document on stdout and a non-TTY stdin has nobody to answer — so both
-    // refuse with the flag to re-run with, exactly like `secrets configs
-    // delete`. "The command itself is consent" was the old rule here, and it
-    // made `--yes` decorative precisely where a typo'd app id is most
-    // destructive (both 0.25.0 AX audits flagged it independently).
-    if (args.yes !== true && (args.json === true || !process.stdin.isTTY)) {
-      throw new Refusal(
-        `Undeploying ${target} takes its URL offline immediately and destroys its live data — records, messages, canvas state, cron history — with the worker (secrets and the registration stay). Re-run with --yes to confirm.`,
-        'confirmation_required',
-        { extra: { appId } },
-      )
-    }
-    // The sentence must match what undeploy does (docs: app-identity guide):
-    // the worker and its Durable Objects go, so the app's data goes with
-    // them; secrets and the registration stay.
-    if (!args.json && !args.yes && process.stdin.isTTY) {
-      p.intro(`Undeploying ${target}`)
-      const confirmed = await p.confirm({
-        message: `Take ${target} offline now? Its URL stops serving immediately and its data — records, messages, canvas state, cron history — is destroyed with the worker. Secrets and the registration stay (the name is reserved for you for 30 days).`,
-        initialValue: false,
-      })
-      if (p.isCancel(confirmed) || !confirmed) {
-        throw new Refusal('Undeploy cancelled.', 'undeploy_declined')
-      }
-    } else if (!args.json) {
-      p.intro(`Undeploying ${target}`)
-    }
+    // The most destructive app command, so consent is never implicit — the
+    // shared gate (lib/consent.ts): --yes, or refuse under --json/non-TTY,
+    // or a default-No prompt. The sentence must match what undeploy does
+    // (docs: app-identity guide): the worker and its Durable Objects go, so
+    // the app's data goes with them; secrets, app files, and the
+    // registration stay.
+    await requireConsent({
+      yes: args.yes === true,
+      json: args.json === true,
+      message: `Undeploying ${target} takes its URL offline immediately and destroys its live data — records, messages, canvas state, cron history — with the worker (secrets, app files, and the registration stay).`,
+      prompt: `Take ${target} offline now? Its URL stops serving immediately and its data — records, messages, canvas state, cron history — is destroyed with the worker. Secrets, app files, and the registration stay (the name is reserved for you for 30 days).`,
+      declineMessage: 'Undeploy cancelled.',
+      declineCode: 'undeploy_declined',
+      extra: { appId },
+    })
+    if (!args.json) p.intro(`Undeploying ${target}`)
     const s = args.json ? null : createSpinner()
     s?.start('Removing...')
 

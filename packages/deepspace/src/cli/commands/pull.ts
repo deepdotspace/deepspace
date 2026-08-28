@@ -14,7 +14,7 @@ import { realpathSync } from 'node:fs'
 import { ensureToken } from '../auth'
 import { findAppDir } from '../lib/app-context'
 import { noWranglerConfigMessage } from '../lib/wrangler-env'
-import { resolveAppTarget, assertAppTargetResolvable } from '../lib/app-target'
+import { resolveAppTarget, assertAppTargetResolvable, parseWranglerEnvArg } from '../lib/app-target'
 import {
   assertNoOperationInProgress,
   assertSyncableRepo,
@@ -38,7 +38,6 @@ import {
   spaceTrackingRef,
 } from '../lib/vc-remote'
 import { repoApi } from '../lib/repo-api'
-import { githubInferredRefusal, inferredGitHubRepository } from '../lib/source-api'
 import { createSpinner } from '../lib/spinner'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import type { CliAction } from '../lib/output'
@@ -155,6 +154,13 @@ export default defineDeepspaceCommand({
         'App id or subdomain name (default: DEEPSPACE_APP_ID from the nearest wrangler.toml)',
       required: false,
     },
+    env: {
+      type: 'string',
+      alias: 'e',
+      description:
+        "wrangler.toml [env.<name>] block — pulls that environment's app (r1 AX: pull was the one checkout verb without it)",
+      required: false,
+    },
   },
   async run({ args }) {
     const branchArg = args.branch === undefined ? undefined : String(args.branch)
@@ -193,10 +199,14 @@ export default defineDeepspaceCommand({
 
     // Blank --app / missing app context is a client-side error — reject it
     // BEFORE the token read so it never surfaces as not_authenticated.
-    assertAppTargetResolvable(appArg)
+    const { wranglerEnv, error: envError } = parseWranglerEnvArg(
+      typeof args.env === 'string' ? args.env : undefined,
+    )
+    if (envError) throw new Refusal(envError, 'invalid_env')
+    assertAppTargetResolvable(appArg, { wranglerEnv })
     const token = await ensureToken()
     const deployUrl = deployBaseUrl()
-    const appId = await resolveAppTarget(deployUrl, token, appArg)
+    const appId = await resolveAppTarget(deployUrl, token, appArg, { wranglerEnv })
 
     // JSON refs first: "no repo" and "no such branch" get actionable
     // messages instead of git's couldn't-find-remote-ref stderr — and a
@@ -205,26 +215,25 @@ export default defineDeepspaceCommand({
     // leave a push-capable remote behind on a refusal: with it installed, a
     // raw `git push space` walks around `push`'s own preflight and gets git's
     // bare 422 with no sentence.
+    // A GitHub-source app is refused by the SERVER at this read
+    // (`source_managed_by_github` — one registry field check in repoAccess,
+    // so it also holds for raw `git pull space` against a leftover remote).
+    // Source latches permanently at the app's first release, so an unclaimed
+    // app here has no history yet and falls to `no_cloud_repo` below. The
+    // refusal fires BEFORE ensureSpaceRemote, leaving no push-capable remote
+    // and no rewritten git identity behind.
     spinner?.message(`Checking the cloud ${branch} ref…`)
     const remote = await repoApi(deployUrl, token, appId).getRefs()
     if (!remote || remote.refs.length === 0) {
-      // Empty means two different things: a DeepSpace app nobody pushed yet,
-      // or a GitHub-inferred app whose emptiness is the design — and telling
-      // the second kind to `deepspace push` steers them through the permanent
-      // claim (v0.26.0 AX finding). Decide BEFORE ensureSpaceRemote below, so
-      // this read-only refusal also leaves no push-capable remote and no
-      // rewritten git identity behind.
-      const githubRepo = await inferredGitHubRepository(deployUrl, token, appId)
-      if (githubRepo) {
-        spinner?.stop('GitHub source.')
-        throw githubInferredRefusal(appId, githubRepo)
-      }
-    }
-    if (!remote) {
-      spinner?.stop('No cloud repo yet.')
+      // One code for both empty shapes (absent repo, zero refs), matching
+      // `clone` — the r1 AX pass got `no_cloud_repo` from clone and
+      // `branch_not_found` ("It is empty — push first") from pull for the
+      // SAME state, and pull had already written the space remote and git
+      // identity by then. Refusing here mutates nothing.
+      spinner?.stop('No cloud repo history yet.')
       const pushCommand = targetedVcCommand('push', appId, branch)
       throw new Refusal(
-        `This app has no cloud repo yet — run \`${pushCommand}\` from the repo that has the history.`,
+        `This app has no cloud repo history yet — run \`${pushCommand}\` from the repo that has the history.`,
         'no_cloud_repo',
         { action: targetedVcAction('push', appDir, appId, branch) },
       )

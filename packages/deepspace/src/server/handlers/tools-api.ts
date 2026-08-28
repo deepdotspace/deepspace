@@ -234,7 +234,15 @@ async function executeTool(
       if (!collection) return { success: false, error: 'Missing required param: collection' }
       if (!recordId) return { success: false, error: 'Missing required param: recordId' }
       if (!data) return { success: false, error: 'Missing required param: data' }
-      return putRecord(ctx, collection, recordId, data, userId, userRole, skipUserRbac)
+      // UPDATE is not upsert: a typo'd or stringified-undefined recordId used
+      // to silently author a phantom record and report success while the
+      // record the caller watched never changed (v0.27.0 r1 AX AX-7 — five
+      // green no-ops in one request). `updateOnly` makes putRecord's own
+      // existence read the decision point, so the RBAC posture stays
+      // canUpdate's (a read-denied but update-allowed role — the
+      // `unclaimed-or-own` claim pattern — can still update) and the record
+      // is read once; `records.create` remains the spelling that creates.
+      return putRecord(ctx, collection, recordId, data, userId, userRole, skipUserRbac, false, true)
     }
 
     case 'records.delete': {

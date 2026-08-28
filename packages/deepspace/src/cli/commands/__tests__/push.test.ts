@@ -13,6 +13,7 @@ import push, { forcePushOrphansWork, workspaceBranchPushRefusal } from '../push'
 import * as appContext from '../../lib/app-context'
 import * as authModule from '../../auth'
 import * as appTargetModule from '../../lib/app-target'
+import * as repoApiModule from '../../lib/repo-api'
 import * as sourceApiModule from '../../lib/source-api'
 import * as vcPushModule from '../../lib/vc-push'
 import * as vcRemoteModule from '../../lib/vc-remote'
@@ -221,6 +222,54 @@ describe('GitHub-source preflight', () => {
     expect(ensureRemote).not.toHaveBeenCalled()
     expect(push).not.toHaveBeenCalled()
     expect(exits).toEqual([1])
+  })
+})
+
+describe('the source latch announcement (source fixes at the first release/push)', () => {
+  // A committed pack on an unclaimed app means the server latched DeepSpace
+  // (the pack POST is the latch; a legacy GitHub-evidence app is refused
+  // there instead) — so the CLI states the fact only once the pack actually
+  // committed, and never predicts it.
+  const stage = () => {
+    const branch = 'main'
+    const appId = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
+    repo = makeRepo(branch)
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(appId)
+    vi.spyOn(appTargetModule, 'warnIfPhantomApp').mockResolvedValue()
+    vi.spyOn(sourceApiModule, 'getAppSource').mockResolvedValue({
+      appId,
+      source: null,
+      revision: 0,
+      registered: true,
+    })
+    vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
+      getRefs: vi.fn().mockResolvedValue(null),
+    } as never)
+    vi.spyOn(vcRemoteModule, 'ensureSpaceRemote').mockReturnValue('https://example.invalid/repo')
+    return { branch, appId }
+  }
+
+  it('a committed push on a previously-unclaimed app announces the permanent DeepSpace claim', async () => {
+    const { branch } = stage()
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    vi.spyOn(vcPushModule, 'pushToSpace').mockReturnValue({ status: 'committed' } as never)
+    await runPushJson({ app: 'selected-app', branch }, repo)
+    const notice = stderrSpy.mock.calls.map((call) => String(call[0])).join('')
+    expect(notice).toContain('now DeepSpace')
+    expect(notice).toContain('permanently')
+  })
+
+  it('a rejected push announces nothing — no pack landed, so nothing latched', async () => {
+    const { branch } = stage()
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    vi.spyOn(vcPushModule, 'pushToSpace').mockReturnValue({
+      status: 'rejected',
+      summary: 'rejected',
+    } as never)
+    await runPushJson({ app: 'selected-app', branch }, repo)
+    const notice = stderrSpy.mock.calls.map((call) => String(call[0])).join('')
+    expect(notice).not.toContain('now DeepSpace')
   })
 })
 

@@ -32,10 +32,12 @@ export async function ensurePortFree(port: number, host: string, waitMs = 15_000
       if (!(await isPortListening(port, host))) return
     }
   }
-  const killArgv =
-    port === DEFAULT_PORT
-      ? ['deepspace', 'dev', 'kill']
-      : ['deepspace', 'dev', 'kill', '--port', String(port)]
+  // ALWAYS explicit: bare `dev kill` resolves its target through dev's own
+  // precedence (worktree port, the app's last launch.json port, …), which
+  // can name a DIFFERENT port than the one that just refused — the r2 AX
+  // pass looped exactly there: refuse on 5173 → kill targets 5310 →
+  // "portFree: true" about a port nobody asked about → refuse on 5173.
+  const killArgv = ['deepspace', 'dev', 'kill', '--port', String(port)]
   throw new Refusal(
     `Port ${port} is already in use.\n` +
       `Free it with \`${killArgv.join(' ')}\`, or use another port: \`--port <other>\`.`,
@@ -100,6 +102,31 @@ export async function waitForPortListening(
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
   return false
+}
+
+/**
+ * THE dev-server port precedence, shared by `dev start`, `test run`, and
+ * `dev kill` so all three name the same server (DEV-2, and the r2 AX loop
+ * where `kill` freed a different port than the one `dev` refused on):
+ *
+ *   explicit --port > $DEEPSPACE_PORT > the checkout's worktree port >
+ *   the app's last launch.json port (kill only) > DEFAULT_PORT
+ *
+ * Callers supply the worktree/launch sources (they differ in HOW those are
+ * found — dev derives a fresh worktree port, test and kill read the recorded
+ * one); only the ORDER lives here. The sources are thunks, consulted only
+ * when nothing above them answers: an explicit --port run must not spawn the
+ * git/launch.json lookups it will never use (test-runner pins that no
+ * process is spawned before a port refusal).
+ */
+export function resolveDevServerPort(opts: {
+  arg?: string
+  worktree?: () => number | null
+  appLaunch?: () => number | null
+}): number {
+  if (opts.arg) return resolvePort(opts.arg)
+  if (process.env.DEEPSPACE_PORT) return resolvePort()
+  return opts.worktree?.() ?? opts.appLaunch?.() ?? DEFAULT_PORT
 }
 
 export function resolvePort(arg?: string): number {

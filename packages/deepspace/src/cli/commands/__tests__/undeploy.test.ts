@@ -153,7 +153,7 @@ describe('undeploy consent', () => {
       const message = String(mocks.confirm.mock.calls[0]?.[0]?.message)
       expect(message).toContain('my-shop')
       expect(message).toContain('destroyed')
-      expect(message).toContain('Secrets and the registration stay')
+      expect(message).toContain('Secrets, app files, and the registration stay')
       expect(fetchSpy).not.toHaveBeenCalled()
     } finally {
       Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true })

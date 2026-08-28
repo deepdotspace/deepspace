@@ -245,8 +245,7 @@ export function findTestAccountByName(name: string): TestAccount {
   if (!match) {
     throw new Error(
       `No test account named "${name}" is usable from ${TEST_ACCOUNTS_PATH}.\n` +
-        `If it exists in the pool but was created on another machine, its password is not ` +
-        `stored here — re-issue it:\n` +
+        `If it exists in the pool but was created on another machine, fetch its credential:\n` +
         `  deepspace test accounts recover --all (note: --all only covers accounts missing a local credential; recover a stale one by its email)\n` +
         `Otherwise create it:\n` +
         `  deepspace test accounts create --email ${testAccountEmailSlug(name)}@deepspace.test --password <pw> --name "${name}"\n` +

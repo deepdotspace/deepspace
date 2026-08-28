@@ -302,8 +302,11 @@ export default defineCommand({
           const source = sourceResult.ok ? sourceResult.value.source : null
           const githubSource = source?.provider === 'github'
           // Inferred-GitHub is external too: comparing the checkout against
-          // the (intentionally empty) DeepSpace cloud repo and reporting
+          // the DeepSpace cloud repo (not the app's authority) and reporting
           // `differs` invents a trunk this app does not have (v0.26.0 AX).
+          // The checkout's remote is the one signal — it is exactly what the
+          // first release would latch from (source fixes permanently at the
+          // first deploy or push; a claimed app never reaches this branch).
           const inferredGithub =
             sourceResult.ok && source === null && externalGitSource(appDir, null)
           const externalSource = githubSource || inferredGithub
@@ -319,15 +322,15 @@ export default defineCommand({
             ])
             json.source = { ...source, revision: sourceResult.value.revision }
           } else {
-            // Inference, not a default: with a GitHub remote in the checkout
-            // the next deploy ships as GitHub; without one it syncs to
-            // DeepSpace (and that sync claims, permanently).
+            // Unclaimed = pre-first-release: the FIRST deploy or push latches
+            // the source, permanently — a GitHub remote in the checkout
+            // latches github, none latches deepspace.
             lines.push([
               'Source',
               `unclaimed · ${
                 inferredGithub
-                  ? 'next deploy infers GitHub from this checkout’s remote'
-                  : 'next deploy syncs to DeepSpace and claims it, permanently'
+                  ? 'first release claims GitHub (from this checkout’s remote), permanently'
+                  : 'first deploy or push claims DeepSpace, permanently'
               }`,
             ])
             json.source = null

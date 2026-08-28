@@ -26,32 +26,11 @@ import { readFileSync, readdirSync, readlinkSync } from 'node:fs'
 import { setTimeout as wait } from 'node:timers/promises'
 import { findAppDir } from '../lib/app-context'
 import { resolveWorktreePort, resolveAppLaunchPort } from '../lib/launch-config'
-import { DEFAULT_PORT, resolvePort } from '../lib/port'
+import { DEFAULT_PORT, resolveDevServerPort } from '../lib/port'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 
 const SIGTERM_GRACE_MS = 1500
 const IS_WIN = process.platform === 'win32'
-
-/**
- * Pick the port `kill` targets, mirroring `dev`'s binding precedence so the two
- * always agree (DEV-2). Pure for testing.
- *   1. explicit --port
- *   2. $DEEPSPACE_PORT
- *   3. generic linked-worktree port
- *   4. the app's launch.json port (kept in sync by `dev --port`)
- *   5. the default
- */
-export function pickKillPort(opts: {
-  explicit: number | null
-  worktree: number | null
-  env: number | null
-  appLaunch: number | null
-}): number {
-  if (opts.explicit != null) return opts.explicit
-  if (opts.env != null) return opts.env
-  if (opts.worktree != null) return opts.worktree
-  return opts.appLaunch ?? DEFAULT_PORT
-}
 
 export default defineDeepspaceCommand({
   meta: {
@@ -61,7 +40,7 @@ export default defineDeepspaceCommand({
   args: {
     port: {
       type: 'string',
-      description: `Port the dev server is bound to (default ${DEFAULT_PORT}, or $DEEPSPACE_PORT)`,
+      description: `Port to free. Without it, kill resolves its target through the shared precedence ($DEEPSPACE_PORT > worktree port > the app's last recorded launch port > ${DEFAULT_PORT}; dev itself never reads the launch port, so after \`dev --port N\` a bare kill targets N while a bare dev binds ${DEFAULT_PORT}) — pass --port to free any other.`,
       required: false,
     },
     all: {
@@ -76,16 +55,14 @@ export default defineDeepspaceCommand({
     const say = (line: string) => {
       if (!args.json) console.log(line)
     }
-    // Resolve which port to target, mirroring `dev`'s own precedence so `kill`
-    // always targets the server `dev` bound (DEV-2). Without this, no-arg `kill`
-    // hit :5173 even when `dev --port 8790` was running elsewhere.
+    // The shared precedence (lib/port.ts resolveDevServerPort) targets the
+    // server `dev` bound (DEV-2). Without it, no-arg `kill` hit :5173 even
+    // when `dev --port 8790` was running elsewhere.
     const cwd = process.cwd()
-    const port = pickKillPort({
-      explicit: portArg ? resolvePort(portArg) : null,
-      worktree: resolveWorktreePort(cwd),
-      // resolvePort() reads + validates $DEEPSPACE_PORT; only consult it when set.
-      env: process.env.DEEPSPACE_PORT ? resolvePort() : null,
-      appLaunch: resolveAppLaunchPort(findAppDir(cwd) ?? cwd),
+    const port = resolveDevServerPort({
+      arg: portArg,
+      worktree: () => resolveWorktreePort(cwd),
+      appLaunch: () => resolveAppLaunchPort(findAppDir(cwd) ?? cwd),
     })
     const targets = new Set<number>()
 

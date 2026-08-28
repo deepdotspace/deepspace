@@ -161,7 +161,7 @@ describe('assembled templates', () => {
         expect(agentGuide).toContain('npx deepspace auth login')
         expect(agentGuide).toContain('npx deepspace dev start')
         expect(agentGuide).toMatch(/default DeepSpace\s+source/)
-        expect(agentGuide).toMatch(/explicit GitHub source claim/)
+        expect(agentGuide).toMatch(/ships from GitHub \(latched from the checkout/)
         expect(agentGuide).toContain('dirty or unpushed bytes')
         expect(readFileSync(join(app, 'CLAUDE.md'), 'utf-8').trim()).toBe(
           'See [AGENTS.md](./AGENTS.md).',

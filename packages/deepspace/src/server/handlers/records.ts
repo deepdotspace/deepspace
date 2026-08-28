@@ -244,6 +244,8 @@ export function handleDelete(
  *   that have already been authorized at the app level.
  * @param systemUpdate - When true, also skip system-managed field stripping.
  *   Used for server-initiated updates to system fields (e.g. user profile sync).
+ * @param updateOnly - When true, an absent recordId is refused instead of
+ *   created. `records.update`'s mode: updates never create.
  */
 export function putRecord(
   ctx: RecordContext,
@@ -254,6 +256,7 @@ export function putRecord(
   userRole: string,
   skipUserRbac = false,
   systemUpdate = false,
+  updateOnly = false,
 ): ToolResult {
   const resolved = resolveCollection(ctx, collection)
   if (!resolved.ok) return { success: false, error: resolved.error }
@@ -276,6 +279,12 @@ export function putRecord(
   }
   const existing = getRecord(ctx.sql, collection, recordId, schema)
   const isUpdate = existing !== null
+  if (updateOnly && !isUpdate) {
+    return {
+      success: false,
+      error: `records.update: no record "${recordId}" in ${collection} — updates never create; use records.create.`,
+    }
+  }
 
   const mergedData = isUpdate ? { ...existing!.data, ...data } : { ...data }
 

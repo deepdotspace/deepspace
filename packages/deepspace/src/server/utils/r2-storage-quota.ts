@@ -282,15 +282,26 @@ async function ensureQuotaSummary(
   bucket: R2Bucket,
   storage: StorageAdmission,
   prefixes: string[],
-  forceMeasure = false,
+  /** 'reuse' trusts any well-formed summary; 'force' always re-measures;
+   *  'repairDirty' re-measures a DIRTY summary past the repair cooldown —
+   *  the one policy for "a stale high-water mark may not be reported", kept
+   *  here so reporting and admission cannot drift, and cooldown-guarded so
+   *  concurrent readers in a dirty window don't each launch a full-bucket
+   *  measure. */
+  measure: 'reuse' | 'force' | 'repairDirty' = 'reuse',
   excludedMarkerKey?: string,
 ): Promise<QuotaSnapshot | null> {
   for (let attempt = 0; attempt < 4; attempt++) {
     const current = await readQuotaSummary(bucket, storage.quotaKey)
     if (
-      !forceMeasure &&
+      measure !== 'force' &&
       current.summary &&
-      accountPrefixesEqual(current.summary.prefixes, prefixes)
+      accountPrefixesEqual(current.summary.prefixes, prefixes) &&
+      !(
+        measure === 'repairDirty' &&
+        current.summary.dirty &&
+        Date.now() - current.summary.measuredAt >= QUOTA_REPAIR_COOLDOWN_MS
+      )
     ) {
       return current
     }
@@ -552,7 +563,7 @@ async function reserveQuotaSummary(
         bucket,
         storage,
         prefixes,
-        false,
+        'reuse',
         markerKey ?? undefined,
       )
       if (!ensured) {
@@ -577,7 +588,7 @@ async function reserveQuotaSummary(
         bucket,
         storage,
         prefixes,
-        true,
+        'force',
         markerKey ?? undefined,
       )
       if (!refreshed?.summary) {
@@ -687,7 +698,13 @@ export async function storageUsage(
   try {
     const prefixes = await allocationPrefixes(storage)
     if (prefixes === null) return null
-    const current = await ensureQuotaSummary(bucket, storage, prefixes)
+    // The summary is a high-water mark repaired lazily; admission repairs at
+    // the would-refuse boundary, but REPORTING read the stale figure forever
+    // after deletes (r2 ops AX: rm-everything left usedBytes pinned at 26 MB
+    // across six polls and a redeploy). 'repairDirty' re-measures a dirty
+    // summary inside ensureQuotaSummary — cooldown-guarded, one read — so
+    // the number a user sees converges as fast as the number that gates.
+    const current = await ensureQuotaSummary(bucket, storage, prefixes, 'repairDirty')
     return current?.summary?.usedBytes ?? null
   } catch (error) {
     console.error('[files:quota] usage:', error)

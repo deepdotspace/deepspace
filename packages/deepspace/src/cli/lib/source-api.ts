@@ -24,53 +24,6 @@ export function githubSourceRefusal(appId: string, repository: string): Refusal 
   )
 }
 
-/**
- * The INFERRED twin of {@link githubSourceRefusal}, for apps that are not
- * claimed as anything: their releases record GitHub, so an empty DeepSpace
- * cloud repo is not "push first" — it is "the source lives on GitHub". The
- * v0.26.0 AX pass caught `pull`, `clone`, and `workspace new`
- * all prescribing `deepspace push` here, which is the PERMANENT DeepSpace
- * claim: three verbs steering GitHub users through a one-way door. Same code
- * as the claimed refusal, so parsers need no new case; the sentence carries
- * the one fact that changes the decision — pushing claims, permanently.
- */
-export function githubInferredRefusal(appId: string, repository: string): Refusal {
-  return new Refusal(
-    `This app ships from GitHub (${repository}) — inferred from its releases; ` +
-      'its DeepSpace cloud repo is intentionally empty. Use normal Git/GitHub for source ' +
-      'operations. (`deepspace push` would permanently claim DeepSpace source for this app — ' +
-      'only run it to adopt DeepSpace source on purpose.)',
-    'source_managed_by_github',
-    { extra: { appId, repository, inferred: true } },
-  )
-}
-
-/**
- * The repository an UNCLAIMED app's GitHub inference points at, or null when
- * nothing does. Evidence is the RELEASE LEDGER only — the latest release's
- * recorded source. Deliberately not the checkout's remotes: with no releases
- * at all there is no evidence the app "ships from GitHub", and a real
- * DeepSpace app whose owner merely keeps a GitHub mirror must not be refused
- * its first `pull`/`workspace new` on the strength of a remote name. One
- * bounded read, only ever consulted on refusal paths — never the happy path.
- */
-export async function inferredGitHubRepository(
-  deployUrl: string,
-  token: string,
-  appId: string,
-): Promise<string | null> {
-  try {
-    // Dynamic: repo-api imports this module's refusal, so a static import
-    // back at it would cycle.
-    const { repoApi } = await import('./repo-api')
-    const { release } = await repoApi(deployUrl, token, appId).latestRelease()
-    if (release?.source?.provider === 'github') return release.source.repository
-  } catch {
-    // No release ledger to consult: no evidence.
-  }
-  return null
-}
-
 export interface AppSourceState {
   appId: string
   source: AppSource | null

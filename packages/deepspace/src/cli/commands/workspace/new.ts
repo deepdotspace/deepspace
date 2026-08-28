@@ -5,8 +5,7 @@ import { mintUlid } from '../../../server/utils/registry-client'
 import { defineDeepspaceCommand, Refusal } from '../../lib/command'
 import { resolveCommit } from '../../lib/git/repository'
 import { workspaceBranchName } from '../../lib/workspace-id'
-import { deployBaseUrl, ensureSpaceRemote } from '../../lib/vc-remote'
-import { githubInferredRefusal, inferredGitHubRepository } from '../../lib/source-api'
+import { ensureSpaceRemote } from '../../lib/vc-remote'
 import { mintIdempotencyKey } from '../../lib/repo-api'
 import { createSpinner } from '../../lib/spinner'
 import { detectPackageManager } from '../../lib/package-manager'
@@ -64,21 +63,13 @@ export const newWorkspaceCommand = defineDeepspaceCommand({
     )
     spinner?.message('Creating workspace…')
 
+    // A GitHub-source app is refused by the SERVER at this read
+    // (`source_managed_by_github` — a registry field check; source latches
+    // permanently at the first release), before ensureSpaceRemote below, so
+    // the refusal mutates nothing.
     // Prefer the requested revision, then cloud trunk, then local HEAD for an empty cloud repo.
     let baseOid: string | null = null
     const refs = await api.getRefs()
-    // An empty cloud repo on a GitHub-inferred app is the design, not a
-    // missing push — refusing here beats the server's later "push it first
-    // (deepspace push)", which prescribes the PERMANENT DeepSpace claim
-    // (v0.26.0 AX finding). Checked before ensureSpaceRemote below so the
-    // refusal mutates nothing.
-    if (!refs || refs.refs.length === 0) {
-      const githubRepo = await inferredGitHubRepository(deployBaseUrl(), token, appId)
-      if (githubRepo) {
-        spinner?.stop('GitHub source.')
-        throw githubInferredRefusal(appId, githubRepo)
-      }
-    }
     // The new worktree exists to be committed in ("Then: commit as usual"),
     // so the token goes in: ensureSpaceRemote gives it an identity too.
     ensureSpaceRemote(appDir, appId, undefined, token)

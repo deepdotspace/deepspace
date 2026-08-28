@@ -60,6 +60,19 @@ describe('landIndex + formatEvent land labeling', () => {
     expect(formatEvent(landPush, undefined, new Map())).toContain('  u  ')
   })
 
+  it('names WHICH workspace a synced event belongs to (r2 workspaces AX F6)', () => {
+    // The id is the event's SUBJECT — the server records the summary as
+    // { headOid } only (do/workspaces.ts), so a summary field would render
+    // nothing, which is exactly how the line was anonymous before.
+    const synced = ev({
+      seq: 4,
+      kind: 'workspace.synced',
+      subjectId: 'ws_01TEST',
+      summary: { headOid: OID },
+    })
+    expect(formatEvent(synced)).toContain(`ws_01TEST → ${OID.slice(0, 10)}`)
+  })
+
   it('renders an unknown event kind as a plain line instead of crashing', () => {
     const unknown = ev({ seq: 5, kind: 'some.future.kind', summary: { x: 1 } })
     expect(formatEvent(unknown)).toContain('some.future.kind')

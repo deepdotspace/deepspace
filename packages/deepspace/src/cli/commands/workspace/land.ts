@@ -10,7 +10,7 @@ import {
   listWorktrees,
   resolveCommit,
 } from '../../lib/git/repository'
-import { committedSecretRefusal } from '../../lib/git/safety'
+import { committedSecretRefusal, unmergedIndexRefusal } from '../../lib/git/safety'
 import {
   classifyRejection,
   parseRefusalCode,
@@ -213,6 +213,19 @@ export const landWorkspaceCommand = defineDeepspaceCommand({
     }
 
     if (!isWorkTreeClean(appDir)) {
+      // An UNRESOLVED merge is a dirty tree, but "commit them" would commit
+      // the conflict markers and land them (r2 workspaces AX F2: sync's
+      // merge_conflict action led here, and this refusal's advice would have
+      // published `<<<<<<<`). Same merge-aware seam deploy uses.
+      const conflicted = unmergedIndexRefusal(appDir, {
+        ours: 'The merge the last workspace sync started',
+        resume: resumeNext,
+      })
+      if (conflicted) {
+        throw new Refusal(conflicted.message, conflicted.code, {
+          extra: { workspaceId: id, conflict: true, operation: conflicted.operation },
+        })
+      }
       throw new Refusal(
         `The worktree has uncommitted changes, and landing publishes committed HEAD only. Commit them to this workspace branch, then re-run \`${resumeNext}\`.`,
         'dirty_worktree',

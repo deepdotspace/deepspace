@@ -23,6 +23,7 @@ import * as appContext from '../../lib/app-context'
 import * as authModule from '../../auth'
 import * as appTargetModule from '../../lib/app-target'
 import * as repoApiModule from '../../lib/repo-api'
+import { ApiError } from '../../lib/api'
 import * as vcRemoteModule from '../../lib/vc-remote'
 // The remote NAME is derived from DEEPSPACE_ENV at module load (`space` in
 // production, `space-staging` in staging), so asserting the production
@@ -307,7 +308,6 @@ describe('pull gives a fresh clone an identity before handing back a merge', () 
     vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
     vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
       getRefs: vi.fn().mockResolvedValue(null),
-      latestRelease: vi.fn().mockResolvedValue({ release: null }),
     } as never)
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
 
@@ -327,12 +327,12 @@ describe('pull gives a fresh clone an identity before handing back a merge', () 
     expect(localConfig('remote.space.url')).toBe('')
   })
 
-  it('a GitHub-INFERRED app (ledger evidence) refuses source_managed_by_github, not "push first"', async () => {
-    // v0.26.0 github AX-3: on an app whose releases record GitHub evidence,
-    // the empty cloud repo is the design — prescribing `deepspace push`
-    // steers the caller through the PERMANENT DeepSpace claim. Evidence is
-    // the release ledger ONLY: a mirror remote on a never-released app is
-    // not evidence (adversarial review, PR #324).
+  it("the SERVER's GitHub-source refusal at the refs read surfaces as source_managed_by_github, mutating nothing", async () => {
+    // Source latches at the first release, so the refusal is one registry
+    // field check in the deploy worker's repoAccess; the CLI's refs read
+    // gets the shaped 422 and its details reach the --json envelope. It
+    // fires before ensureSpaceRemote, so the refusal leaves no push-capable
+    // remote and no rewritten git identity behind.
     const dir = mkdtempSync(join(tmpdir(), 'ds-pull-ghinfer-'))
     repo = dir
     git(dir, ['init', '-q', '-b', 'main'])
@@ -341,11 +341,17 @@ describe('pull gives a fresh clone an identity before handing back a merge', () 
     git(dir, ['-c', 'user.email=s@t', '-c', 'user.name=s', 'commit', '-q', '-m', 'i'])
     vi.spyOn(authModule, 'ensureToken').mockResolvedValue('tok')
     vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    const ensureRemote = vi.spyOn(vcRemoteModule, 'ensureSpaceRemote')
     vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({
-      getRefs: vi.fn().mockResolvedValue(null),
-      latestRelease: vi.fn().mockResolvedValue({
-        release: { source: { provider: 'github', repository: 'acme/rockets' } },
-      }),
+      getRefs: vi.fn().mockRejectedValue(
+        new ApiError(
+          'This app ships from GitHub (acme/rockets) — inferred from its releases.',
+          422,
+          'source_managed_by_github',
+          undefined,
+          { appId: APP_ID, repository: 'acme/rockets', inferred: true },
+        ),
+      ),
     } as never)
     const { output, exits } = await runPullJson({ app: 'selected-app', branch: 'main' }, dir)
     expect(output).toMatchObject({
@@ -354,6 +360,7 @@ describe('pull gives a fresh clone an identity before handing back a merge', () 
       repository: 'acme/rockets',
       inferred: true,
     })
+    expect(ensureRemote).not.toHaveBeenCalled()
     expect(exits).toEqual([1])
   })
 })

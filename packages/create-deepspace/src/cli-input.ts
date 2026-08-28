@@ -70,7 +70,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
       // Deprecated no-op: scaffolds never register anymore (apps register on
       // first use), so the flag asks for what already happens. Refusing it
       // would exit-1 every existing script that passed it — same lesson as
-      // --yes.
+      // --yes. One stderr note, not silence: a silent deprecation teaches
+      // nothing (r1 linux AX).
+      process.stderr.write(
+        'note: --no-register is a deprecated no-op — scaffolds never register; apps register on first use.\n',
+      )
     } else if (!argument.startsWith('-')) {
       if (appName === undefined) appName = argument
       else {

@@ -19,7 +19,6 @@
  */
 
 import { defineCommand } from 'citty'
-import * as p from '@clack/prompts'
 import { readFileSync } from 'node:fs'
 import { ensureToken } from '../auth'
 import { decodeJwtPayload } from '../../shared/jwt'
@@ -29,6 +28,7 @@ import { writeDevVars } from '../lib/dev-vars'
 import { assertAppTargetResolvable, parseWranglerEnvArg, resolveAppTarget } from '../lib/app-target'
 import { ApiError } from '../lib/api'
 import { InputError } from '../lib/cli-errors'
+import { requireConsent } from '../lib/consent'
 import { Refusal } from '../lib/command'
 import { dedupePositionals } from '../lib/citty-args'
 import { MAX_STDIN_BYTES, readStreamText } from '../lib/stdio'
@@ -155,7 +155,7 @@ function warnIfDebugRoutesEnabled(secrets: Record<string, string>): boolean {
 const APPLY_HINT = 'Run `deepspace deploy` to apply — secrets take effect at deploy time.'
 /** The same fact for `--json`, which never sees APPLY_HINT: a store write is
  *  not live until the next deploy. */
-const APPLIES_AT_DEPLOY = { appliesAtDeploy: true as const }
+const APPLIES_AT_DEPLOY = { appliesAtDeploy: true as const, devRestartRequired: true as const }
 // `deepspace dev start` regenerates .dev.vars from the store only at startup, so a
 // secret changed mid-session isn't picked up until dev restarts (DEV-4).
 const LOCAL_DEV_HINT = 'Running `deepspace dev start`? Restart it to load the change locally.'
@@ -601,59 +601,48 @@ const configsDelete = defineCommand({
   async run({ args }) {
     const t = await resolveTarget(args)
     const name = validateConfigName(args.name)
-    // A prompt is a permanent hang for a machine caller — `--json` promises one
-    // document on stdout, and a non-TTY stdin has nobody to answer — so both
-    // refuse with the flag to re-run with. Refused BEFORE the listing: the
-    // count exists only to feed the interactive sentence, so listing first
-    // would let a missing config answer this path with the store's own error
-    // instead of the `confirmation_required` it documents.
-    if (args.yes !== true && (args.json === true || !process.stdin.isTTY)) {
-      throw new InputError(
-        `Deleting config ${name} removes every secret in it permanently. Re-run with --yes to confirm.`,
-        'confirmation_required',
-      )
-    }
-    // This destroys every secret in the config and there is no undo, so the
-    // confirmation names how many go with it. With --yes the caller has already
-    // decided, so a transient failure to list must not block the delete — the
-    // count is reported as unknown instead.
-    let secrets: Array<{ key: string }> = []
-    let counted = true
-    try {
-      secrets = (await listSecrets(DEPLOY_URL, t.token, t.appId, name)).secrets
-    } catch (error) {
-      if (args.yes !== true) throw error
-      counted = false
-    }
-    const count = secrets.length
-    if (args.yes !== true) {
-      const detail =
-        count === 0
-          ? `Config ${name} is empty.`
-          : `Config ${name} holds ${count} secret${count === 1 ? '' : 's'}: ${secrets
-              .map((secret) => secret.key)
-              .slice(0, 8)
-              .join(', ')}${count > 8 ? `, …` : ''}.`
-      const confirmed = await p.confirm({
-        message: `${detail} Deleting it removes ${count === 1 ? 'that secret' : 'them all'} permanently.`,
-        initialValue: false,
-      })
-      // isCancel covers Ctrl-C and Esc — an interrupted prompt is a refusal to
-      // consent, not consent.
-      if (p.isCancel(confirmed) || !confirmed) {
-        throw new InputError('Cancelled.', 'confirmation_required')
+    // The shared gate (lib/consent.ts). The lazy prompt lists the config's
+    // secrets only when the gate is about to ask, so machine callers are
+    // refused BEFORE the listing (a missing config must answer this path with
+    // `confirmation_required`, not the store's own error) and a `--yes`
+    // caller never blocks on it.
+    let count: number | null = null
+    await requireConsent({
+      yes: args.yes === true,
+      json: args.json === true,
+      message: `Deleting config ${name} removes every secret in it permanently.`,
+      prompt: async () => {
+        const { secrets } = await listSecrets(DEPLOY_URL, t.token, t.appId, name)
+        count = secrets.length
+        const detail =
+          count === 0
+            ? `Config ${name} is empty.`
+            : `Config ${name} holds ${count} secret${count === 1 ? '' : 's'}: ${secrets
+                .map((secret) => secret.key)
+                .slice(0, 8)
+                .join(', ')}${count > 8 ? `, …` : ''}.`
+        return `${detail} Deleting it removes ${count === 1 ? 'that secret' : 'them all'} permanently.`
+      },
+      declineMessage: 'Cancelled.',
+      declineCode: 'confirmation_required',
+    })
+    // Under --yes the prompt never ran, so count the loss for the report —
+    // but the caller has already decided, so a transient failure to list must
+    // not block the delete; the count is reported as unknown instead.
+    if (count === null) {
+      try {
+        count = (await listSecrets(DEPLOY_URL, t.token, t.appId, name)).secrets.length
+      } catch {
+        // reported as secretsDeleted: null
       }
     }
     await deleteConfig(DEPLOY_URL, t.token, t.appId, name)
-    ok(
-      args.json === true,
-      { appId: t.appId, config: name, deleted: true, secretsDeleted: counted ? count : null },
-      () =>
-        console.log(
-          counted
-            ? `Deleted ${name} and ${count} secret${count === 1 ? '' : 's'}.`
-            : `Deleted ${name}.`,
-        ),
+    ok(args.json === true, { appId: t.appId, config: name, deleted: true, secretsDeleted: count }, () =>
+      console.log(
+        count === null
+          ? `Deleted ${name}.`
+          : `Deleted ${name} and ${count} secret${count === 1 ? '' : 's'}.`,
+      ),
     )
   },
 })

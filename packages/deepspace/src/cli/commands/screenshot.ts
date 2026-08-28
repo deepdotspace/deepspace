@@ -103,11 +103,26 @@ export default defineDeepspaceCommand({
     if (waitForSelector) playwrightArgs.push('--wait-for-selector', waitForSelector)
     if (waitForTimeout !== 0) playwrightArgs.push('--wait-for-timeout', String(waitForTimeout))
 
+    // Wall-bounded: playwright's own --wait-for-selector wait is UNBOUNDED
+    // (the r2 AX pass sat >90s, twice, with no output) — a capture must
+    // surface a missing selector as a fast failure, never a stall. The bound
+    // is the caller's own wait budget plus generous launch/paint headroom.
+    const wallMs = (waitForTimeout || 0) + 60_000
     const result = spawnSync('npx', playwrightArgs, {
       cwd: appDir,
       stdio: childStdio(),
+      timeout: wallMs,
     })
 
+    if (result.error && (result.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+      throw new Refusal(
+        `Screenshot timed out after ${Math.round(wallMs / 1000)}s` +
+          (waitForSelector
+            ? ` waiting for \`${waitForSelector}\` to become visible — the selector never matched. Check it against the live page, or drop --wait-for-selector to capture the page as it is.`
+            : '.'),
+        'screenshot_timeout',
+      )
+    }
     // Playwright already printed the reason; the refusal adds the slug an
     // agent branches on. Its own exit code collapses to 1 — the contract
     // reserves 0/1/2, and playwright only ever means "failed" here.

@@ -220,9 +220,15 @@ export const attachWorkspaceCommand = defineDeepspaceCommand({
           const failure = rematerializeWorkspaceWorktree(appDir, worktreeRoot, branch, id)
           if (failure) {
             spinner?.stop('Branch exists.')
+            // The usual cause is git's own stale worktree registration (a
+            // hand-deleted directory still registered) — git's embedded error
+            // even names `git worktree prune`; hand it back as the action
+            // instead of "check it out yourself" (r2 workspaces AX F5, where
+            // prune-then-retry was the verified one-step fix).
             throw new Refusal(
-              `Branch ${branch} exists locally with no worktree, and re-materializing it failed: ${failure}. Inspect it (\`git log ${branch}\`) and check it out yourself.`,
+              `Branch ${branch} exists locally with no worktree, and re-materializing it failed: ${failure}. If a deleted worktree is still registered, prune it and re-run; otherwise inspect the branch (\`git log ${branch}\`) and check it out yourself.`,
               'branch_exists',
+              { action: { cwd: appDir, argv: ['git', 'worktree', 'prune'] } },
             )
           }
           spinner?.stop(`Re-attached ${id}.`)

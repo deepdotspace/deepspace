@@ -174,12 +174,22 @@ export async function syncDeployRepository(options: {
         // Local git-config cleanup must never fail a deploy.
       }
     }
-    // Evidence, not registration: an unclaimed app's release is labeled with
-    // the repository its checkout actually points at, so the ledger reads
-    // `GitHub · owner/repo` with no claim step ever taken. Carried as its own
-    // field, never as claimed `source` (see DeployRepositoryState — a 0.25.0
-    // worker would trust it and skip its stale guard).
+    // The observed repository is the LATCH input: an unclaimed app's first
+    // release fixes its source permanently, and the server's deploy commit
+    // route latches `github` from exactly this field (none ⇒ deepspace).
+    // Carried as its own field, never as claimed `source` (see
+    // DeployRepositoryState — a 0.25.0 worker would trust it and skip its
+    // stale guard).
     const observedRepository = source === null ? observedGitHubRepository(appDir) : null
+    if (observedRepository) {
+      // stderr: the permanent-latch fact must reach --json callers too.
+      process.stderr.write(
+        `This app's source is unclaimed — this deploy's release claims GitHub source ` +
+          `(${observedRepository}) for it, permanently. DeepSpace source verbs ` +
+          `(push/pull/clone/workspace) will refuse from now on; if this checkout's GitHub ` +
+          `remote is accidental, deploy as a fresh app instead (\`deepspace app init --new-id\`).\n`,
+      )
+    }
     // This release records no commit, so the branch and the dirty flag are the
     // only trace of what it shipped. Say them — the deploy is NOT refused
     // (shipping the working tree is what GitHub source means), but an
@@ -264,16 +274,14 @@ export async function syncDeployRepository(options: {
           `this release's source isn't recoverable until the push works.`,
       )
     } else {
-      // The push below CLAIMS DeepSpace source on an unclaimed app —
-      // permanent. Say so at the moment it happens, and only on the path
-      // that actually pushes (the secret-files skip and the workspace path
-      // above never send the pack, so the sentence would be false there).
-      // stderr: the fact must reach --json callers without touching stdout.
-      if (sourceState.source === null) {
-        process.stderr.write(
-          "This app's source is unclaimed — this deploy's push claims DeepSpace source for it, permanently.\n",
-        )
-      }
+      // The push below LATCHES DeepSpace source on an unclaimed app —
+      // permanent (the server's pack POST is the latch; a legacy app whose
+      // ledger records GitHub latches github there and the push is refused
+      // instead). Announced only after the pack actually committed, and only
+      // on the path that pushed (the secret-files skip and the workspace
+      // path above never send the pack, so the sentence would be false
+      // there). stderr: the fact must reach --json callers too.
+      const wasUnclaimed = sourceState.source === null
       const pushResult = await pushWithTransientRetry(() =>
         pushToSpace(appDir, token, `refs/heads/${branch}:refs/heads/${branch}`, {
           remote: sourceRemote,
@@ -283,6 +291,11 @@ export async function syncDeployRepository(options: {
         recoverable = true
         if (pushResult.status === 'committed') {
           p.log.info(`Pushed ${branch} → ${tip.slice(0, 10)}.`)
+          if (wasUnclaimed) {
+            process.stderr.write(
+              "This app's source is now DeepSpace — claimed by this deploy's push, permanently.\n",
+            )
+          }
         }
       } else if (pushResult.status === 'rejected') {
         // The SAME rendering `deepspace push` gives, so an oversized object

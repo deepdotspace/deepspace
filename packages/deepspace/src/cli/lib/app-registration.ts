@@ -293,9 +293,22 @@ export function commitScaffoldIfUnborn(appDir: string, token: string): boolean {
     // through `ensureSpaceRemote`, which folds this in.
     ensureGitIdentity(appDir, token)
     if (runGit(appDir, ['add', '-A'], { allowFail: true }).status !== 0) return false
-    const commit = runGit(appDir, ['commit', '-m', 'Initial DeepSpace scaffold', '--no-verify'], {
-      allowFail: true,
-    })
+    // The commit takes the WHOLE worktree — on the normal flow the user has
+    // already built their app before the first deploy, so calling it
+    // "scaffold" misdescribed their own code as generated output, and the
+    // silence made deploy #1 (auto-commits everything, reports dirty:false)
+    // read inconsistent with deploy #2 (refuses dirty_worktree) — r1 linux
+    // AX F-3. Say what is happening, name the count, keep one commit.
+    const staged = runGit(appDir, ['diff', '--cached', '--name-only'], { allowFail: true })
+    const count = staged.status === 0 ? staged.stdout.toString('utf-8').split('\n').filter(Boolean).length : 0
+    process.stderr.write(
+      `Creating the initial commit (${count} file${count === 1 ? '' : 's'} — the scaffold plus everything currently in the worktree).\n`,
+    )
+    const commit = runGit(
+      appDir,
+      ['commit', '-m', 'Initial commit (DeepSpace scaffold + working tree)', '--no-verify'],
+      { allowFail: true },
+    )
     return commit.status === 0
   } catch {
     // No git on PATH (or an unreadable repo): identity is registered either

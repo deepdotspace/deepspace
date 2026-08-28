@@ -1,6 +1,6 @@
 /** Secret-path redaction, committed-secret refusal, and oversized-object diagnostics. */
 
-import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest'
+import { describe, expect, it, beforeAll, afterAll } from 'vitest'
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'

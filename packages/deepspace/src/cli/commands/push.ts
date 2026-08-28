@@ -374,16 +374,15 @@ export default defineDeepspaceCommand({
       if (sourceState.source?.provider === 'github') {
         throw githubSourceRefusal(appId, sourceState.source.repository)
       }
-      // The first push CLAIMS DeepSpace source, and the claim is permanent —
-      // say so at the moment it happens, not only in `app source`'s output.
-      // stderr: the fact must reach --json callers without touching stdout.
-      if (sourceState.source === null) {
-        process.stderr.write(
-          `This app's source is unclaimed — this push claims DeepSpace source for it, ` +
-            `permanently (a checkout that deploys from GitHub instead should not run ` +
-            `\`deepspace push\`).\n`,
-        )
-      }
+      // A push to an unclaimed app LATCHES DeepSpace source at the server's
+      // pack POST, permanently — announced below only once the pack actually
+      // committed (a committed push on an unclaimed app means the latch
+      // fired; a refused or failed one means it did not, so nothing is
+      // predicted). A legacy app whose release ledger records GitHub latches
+      // github at that same POST and the push is refused instead — a push
+      // can never wrongly claim DeepSpace on an app that ships from GitHub
+      // (r1 github AX URGENT-2).
+      const wasUnclaimed = sourceState.source === null
       const pullRecoveryCwd = selectedBranchCheckout(appDir, branch) ?? appDir
       // The token goes in: every recovery this command hands back (`deepspace
       // pull`, then a merge) writes a commit, and a fresh clone with no global
@@ -514,6 +513,15 @@ export default defineDeepspaceCommand({
         // never published, and a later `--force` — waved through as "your own
         // line" — then drops the peer's commit.
         updateRef(appDir, spacePrivateRef(`pushed/${branch}`), tipOid)
+      }
+      // The latch fact (see wasUnclaimed above): a committed pack on an
+      // unclaimed app means the server claimed DeepSpace source. stderr: it
+      // must reach --json callers without touching stdout.
+      if (wasUnclaimed && result.status === 'committed') {
+        process.stderr.write(
+          "This app's source is now DeepSpace — claimed by this push, permanently (a checkout " +
+            'that deploys from GitHub instead should not run `deepspace push`).\n',
+        )
       }
       // A moved/diverged ref is a recovery state, not a dead end: nothing was
       // pushed, and `deepspace pull` is the one re-entry command. Carry that as

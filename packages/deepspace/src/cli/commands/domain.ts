@@ -31,6 +31,7 @@ import { apiFetch } from '../lib/api'
 import { openBrowser } from '../lib/open-browser'
 import { resolveAppTarget } from '../lib/app-target'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
+import { requireConsent } from '../lib/consent'
 
 const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
@@ -91,31 +92,6 @@ function fmtDate(iso: string | null | undefined): string {
   if (!iso) return '—'
   return iso.slice(0, 10)
 }
-
-/**
- * Plain stdin Y/N prompt — no clack. Only ever reached on the interactive
- * human path: callers refuse with `confirmation_required` when there is no
- * TTY or `--json` is set, so a prompt can never hang a machine caller.
- */
-async function confirm(message: string): Promise<boolean> {
-  process.stdout.write(`${message} [y/N] `)
-  const answer = await new Promise<string>((resolve) => {
-    process.stdin.setEncoding('utf-8')
-    process.stdin.once('data', (data) => resolve(data.toString().trim().toLowerCase()))
-  })
-  // `once('data')` put stdin into flowing mode — a ref'd handle that keeps the
-  // naturally-exiting process (lib/command.ts finishCommand) alive forever
-  // after the command finishes. Release it HERE, after the await: a pause()
-  // inside the 'data' handler does not stick because the stream is re-resumed
-  // when the handler returns (verified by measurement). Assumes one prompt per
-  // command run (`buy` and `detach` are separate commands); a second
-  // sequential prompt after this release would need re-verification.
-  process.stdin.pause()
-  return answer === 'y' || answer === 'yes'
-}
-
-/** True when asking a question would hang the caller (agent, pipe, `--json`). */
-const cannotPrompt = (json: boolean): boolean => json || !process.stdin.isTTY
 
 // ============================================================================
 // search
@@ -206,24 +182,17 @@ const buy = defineDeepspaceCommand({
         ? '~60-90 seconds'
         : '15-60 minutes (registry NS propagation)'
 
-    if (!args.yes) {
-      // A purchase is irreversible, so it must be confirmed — but a prompt
-      // would hang an agent or a `--json` caller. Refuse and name the flag.
-      if (cannotPrompt(args.json)) {
-        throw new Refusal(
-          `Buying ${domain} for ${price}/yr (auto-renews; non-refundable) and attaching it to ` +
-            `${appId} needs confirmation. Provisioning takes ${expectedTime}. Re-run with --yes.`,
-          'confirmation_required',
-        )
-      }
-      const ok = await confirm(
-        `Buy ${domain} for ${price}/yr (auto-renews; non-refundable), attach to ${appId}? Provisioning takes ${expectedTime}.`,
-      )
-      if (!ok) {
-        console.log('Cancelled.')
-        return { data: { domain, cancelled: true } }
-      }
-    }
+    // A purchase is irreversible, so the shared gate (lib/consent.ts):
+    // --yes, refuse under --json/non-TTY, else a default-No prompt.
+    await requireConsent({
+      yes: args.yes === true,
+      json: args.json === true,
+      message:
+        `Buying ${domain} for ${price}/yr (auto-renews; non-refundable) and attaching it to ` +
+        `${appId} is irreversible. Provisioning takes ${expectedTime}.`,
+      prompt: `Buy ${domain} for ${price}/yr (auto-renews; non-refundable), attach to ${appId}? Provisioning takes ${expectedTime}.`,
+      extra: { domain, appId },
+    })
 
     const checkout = await api<{
       purchaseId: string
@@ -422,22 +391,13 @@ const detach = defineDeepspaceCommand({
     const domain = String(args.domain)
     const token = await ensureToken()
     const found = await requireDomain(token, domain)
-    if (!args.yes) {
-      if (cannotPrompt(args.json)) {
-        throw new Refusal(
-          `Detaching ${domain} stops routing (the domain stays registered; auto-renew is ` +
-            'unchanged) and needs confirmation. Re-run with --yes.',
-          'confirmation_required',
-        )
-      }
-      const ok = await confirm(
-        `Detach ${domain}? Routing will stop; the domain stays registered (auto-renew is unchanged).`,
-      )
-      if (!ok) {
-        console.log('Cancelled.')
-        return { data: { domain, cancelled: true } }
-      }
-    }
+    await requireConsent({
+      yes: args.yes === true,
+      json: args.json === true,
+      message: `Detaching ${domain} stops routing; the domain stays registered (auto-renew is unchanged).`,
+      prompt: `Detach ${domain}? Routing will stop; the domain stays registered (auto-renew is unchanged).`,
+      extra: { domain },
+    })
     await api(token, `/api/domains/${found.id}`, { method: 'DELETE' })
     if (!args.json) {
       console.log(

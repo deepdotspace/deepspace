@@ -46,7 +46,7 @@ import { preflightNodeVersion, preflightWindowsWorkerd } from '../lib/preflight'
 import { removeMacosJunk } from '../lib/macos-junk'
 import { refreshSecretsCache } from '../lib/secrets'
 import { lintProjectSchemas, formatSchemaLintFindings } from '../lib/schema-lint'
-import { DEFAULT_PORT, ensurePortFree, resolvePort, waitForPortListening } from '../lib/port'
+import { DEFAULT_PORT, ensurePortFree, resolveDevServerPort, waitForPortListening } from '../lib/port'
 
 /** What vite's bare `--host` means: every interface. */
 const DEFAULT_DEV_HOST = '0.0.0.0'
@@ -148,10 +148,10 @@ export default defineDeepspaceCommand({
     const linkedWorktree = detectLinkedWorktree(appDir)
     const explicitPort = Boolean(args.port)
     const configuredPort = explicitPort || Boolean(process.env.DEEPSPACE_PORT)
-    let port =
-      linkedWorktree && !configuredPort
-        ? deriveWorktreePort(linkedWorktree.worktreeRoot)
-        : resolvePort(args.port as string | undefined)
+    let port = resolveDevServerPort({
+      arg: args.port as string | undefined,
+      worktree: () => (linkedWorktree ? deriveWorktreePort(linkedWorktree.worktreeRoot) : null),
+    })
     if (worktree) {
       const upserted = upsertWorktreeLaunchConfig(
         worktree.mainRepoRoot,

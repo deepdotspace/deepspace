@@ -164,7 +164,7 @@ export function formatSignInFailure(email: string, failure: SignInFailure): stri
   const nextStep =
     failure.code === 'INVALID_ORIGIN'
       ? 'Add this app origin to the auth allowlist, then retry.'
-      : 'The stored password may be stale — re-issue it with `deepspace test accounts recover --email <email>` (--all only covers accounts with no local credential), or create a new account with `deepspace test accounts create`.'
+      : 'The stored password may be stale — fetch the current credential with `deepspace test accounts recover --email <email>` (--all only covers accounts with no local credential), or create a new account with `deepspace test accounts create`.'
   return `Sign-in failed for ${email} (HTTP ${failure.status}${code})${detail}. ${nextStep}`
 }
 

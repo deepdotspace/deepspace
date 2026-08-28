@@ -20,7 +20,6 @@ import { resolve, basename, join } from 'node:path'
 import { ensureToken } from '../auth'
 import { resolveAppSelector, assertAppTargetResolvable } from '../lib/app-target'
 import { currentBranch, resolveCommit } from '../lib/git/repository'
-import { githubInferredRefusal, inferredGitHubRepository } from '../lib/source-api'
 import {
   deployBaseUrl,
   ensureSpaceRemote,
@@ -115,18 +114,14 @@ export default defineDeepspaceCommand({
 
     // Probe the JSON refs first: cloning an unregistered/empty repo would
     // "succeed" as an empty checkout — an actionable message beats that.
+    // A GitHub-source app is refused by the SERVER at this read
+    // (`source_managed_by_github` — a registry field check; source latches
+    // permanently at the app's first release, so no ledger consult exists).
     spinner?.message(`Checking ${selector}'s cloud repo…`)
     const remote = await repoApi(deployUrl, token, appId).getRefs()
     const branches = (remote?.refs ?? []).filter((r) => r.name.startsWith('refs/heads/'))
     if (!remote || branches.length === 0) {
       spinner?.stop('Nothing to clone.')
-      // An empty cloud repo has two very different meanings: a DeepSpace app
-      // nobody pushed yet, or a GitHub-inferred app whose emptiness is the
-      // design. Telling the second kind to `deepspace push` steers them
-      // through the permanent claim (v0.26.0 AX finding), so consult the
-      // release ledger before prescribing it.
-      const githubRepo = await inferredGitHubRepository(deployUrl, token, appId)
-      if (githubRepo) throw githubInferredRefusal(appId, githubRepo)
       throw new Refusal(
         `${selector} has no cloud repo history yet. Its owner (or their agent) needs to run \`deepspace push\` from the app's repo first.`,
         'no_cloud_repo',

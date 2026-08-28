@@ -95,7 +95,7 @@ describe('normalizeViewportSize', () => {
         '--wait-for-timeout',
         String(DEFAULT_SCREENSHOT_WAIT_MS),
       ],
-      { cwd: expect.any(String), stdio: ['inherit', 2, 2] },
+      { cwd: expect.any(String), stdio: ['inherit', 2, 2], timeout: expect.any(Number) },
     )
     expect(JSON.parse(logs.at(-1) ?? '{}')).toMatchObject({
       ok: true,
@@ -134,7 +134,7 @@ describe('normalizeViewportSize', () => {
         '--wait-for-selector',
         '#ready',
       ],
-      { cwd: expect.any(String), stdio: 'inherit' },
+      { cwd: expect.any(String), stdio: 'inherit', timeout: expect.any(Number) },
     )
   })
 })

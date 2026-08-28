@@ -379,13 +379,24 @@ export async function deployBuiltBundle(options: {
   }
 
   if (response.status === 409 && body.code === 'stale_base') {
+    // NO action, deliberately: the recoveries are a DECISION — integrate the
+    // live tip (`pull` when it lives on trunk, `workspace land` when it came
+    // from a workspace branch), or `--ignore-stale` to replace it. The old
+    // `deepspace pull` action looped forever after a workspace-branch
+    // release: pull answered up_to_date (the live commit sits on a ws/* ref
+    // trunk can never fast-forward to) and the next deploy refused
+    // identically — two r2 AX lanes hit it independently. Per the contract,
+    // a refusal naming a choice ships no action — but it KEEPS exit 2 /
+    // `actionRequired: true`: a local step remains (which one is the
+    // decision), and demoting it to exit 1 reads as a hard failure to
+    // wrappers built on the three-exit contract.
     await bail(
       body.error ??
-        'A newer release landed while you worked — pull, integrate, and redeploy (or --ignore-stale).',
+        'A newer release landed while you worked. Integrate it — `deepspace pull` when the live ' +
+          'commit is on trunk, or land/`--ignore-stale` past a workspace-branch release — then redeploy.',
       'Deploy failed',
       'stale_base',
       true,
-      { cwd: appDir, argv: ['deepspace', 'pull'] },
     )
   }
   // Backstop for the race the early check can't see: the config existed when

@@ -35,7 +35,7 @@
  */
 
 import { ensureAppRegistered } from '../lib/app-registration'
-import { readdirSync, type Dirent } from 'node:fs'
+import { existsSync, readdirSync, type Dirent } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
 import { sync as spawnSync } from 'cross-spawn'
 import { ensureToken } from '../auth'
@@ -48,7 +48,7 @@ import { ensureInstallReady } from '../lib/install-status'
 import { childStdio, ensurePlaywright, routeChildStdoutToStderr } from '../lib/playwright'
 import { preflightNodeVersion, preflightWindowsWorkerd } from '../lib/preflight'
 import { refreshSecretsCache } from '../lib/secrets'
-import { ensurePortFree, DEFAULT_PORT, resolvePort } from '../lib/port'
+import { ensurePortFree, DEFAULT_PORT, resolveDevServerPort } from '../lib/port'
 import {
   prepareWranglerEnvConfig,
   wranglerViteEnv,
@@ -195,10 +195,12 @@ export default defineDeepspaceCommand({
     }
 
     // Inside any linked Git worktree use that checkout's stable port by
-    // default. The suite still starts and owns the server on that port.
-    const configuredPort = Boolean(args.port) || Boolean(process.env.DEEPSPACE_PORT)
-    const worktreePort = configuredPort ? null : resolveWorktreePort(appDir)
-    const port = worktreePort ?? resolvePort(args.port as string | undefined)
+    // default (shared precedence: lib/port.ts resolveDevServerPort). The
+    // suite still starts and owns the server on that port.
+    const port = resolveDevServerPort({
+      arg: args.port as string | undefined,
+      worktree: () => resolveWorktreePort(appDir),
+    })
 
     // The runner owns its server (reuseExistingServer: false), so any live
     // listener on the port is refused before auth/install work; a previous
@@ -333,6 +335,19 @@ export default defineDeepspaceCommand({
         break
       default:
         if (suite.endsWith('.spec.ts')) {
+          // A mistyped path used to surface as `tests_failed`,
+          // indistinguishable from a red suite (r2 testing AX-6). Only
+          // PATH-shaped args are checked (a separator, or absolute — resolve
+          // handles both against appDir): a bare `collab.spec.ts` is a
+          // Playwright FILTER that may match nested specs, so it passes
+          // through to the runner untouched.
+          const pathShaped = suite.includes('/') || suite.includes('\\')
+          if (pathShaped && !existsSync(resolve(appDir, suite))) {
+            throw new Refusal(
+              `No spec file at ${suite}. Paths are relative to the app dir — list them with \`ls tests/\`.`,
+              'spec_not_found',
+            )
+          }
           exitCode = runPlaywright(appDir, [suite], port, wranglerEnv, forwarded)
         } else {
           // Whoever typed a name that is not a suite usually wanted one part

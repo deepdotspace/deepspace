@@ -28,7 +28,7 @@ test.skip(
   usableTestAccounts < 2,
   `Needs 2 usable test accounts, found ${usableTestAccounts}. Create them with ` +
     '`npx deepspace test accounts create --email <name>@deepspace.test --name "<name>" ' +
-    '--password-stdin` (or `npx deepspace test accounts recover --all` if they exist elsewhere).',
+    '--password-stdin`, or fetch existing pool accounts with `npx deepspace test accounts recover --all`.',
 )
 
 test('each browser renders its own signed-in account', async ({ users }) => {

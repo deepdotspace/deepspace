@@ -118,10 +118,11 @@ The hierarchy shown by `deepspace --help` keeps durable app lifecycle under
 operations stay top-level. The historical `deepspace app migrate` command was
 removed in 0.15.0; it is not an upgrade or recovery path.
 
-Every app has one authoritative Git repository, and which one it is follows
-from what you do rather than from anything you declare. DeepSpace source is the
-packaged default: on a checkout with no GitHub remote, the first
-`deepspace push` — or the source sync inside the first normal deploy — claims
+Every app has one authoritative Git repository — DeepSpace's packaged repo or
+GitHub — fixed permanently at the app's FIRST release, and which one it is
+follows from what you do rather than from anything you declare. DeepSpace
+source is the packaged default: on a checkout with no GitHub remote, the first
+`deepspace push` — or the first normal deploy — claims
 it and publishes automatically. `deepspace push` publishes the current branch
 and `deepspace clone <app>` checks it out; both configure a `space` remote and
 credential helper, so normal `git fetch space` and `git push space` work
@@ -136,10 +137,11 @@ npx deepspace deploy
 ```
 
 Nothing to declare: a checkout with a GitHub remote deploys as GitHub
-automatically — DeepSpace never reads or writes the GitHub repository, and
-each release records which repository the checkout pointed at (and whether
-the tree was dirty). The first `deepspace push` instead claims DeepSpace
-source, permanently — using it is choosing it; there are no transfers.
+automatically, and the first deploy fixes GitHub source permanently —
+DeepSpace never reads or writes the GitHub repository, and each release
+records which repository the checkout pointed at (and whether the tree was
+dirty). The first `deepspace push` instead claims DeepSpace source,
+permanently — using it is choosing it; there are no transfers.
 Inspect with `deepspace app source` (read-only). Commands support `--json`
 for agents. Use `deepspace --help`, command-specific `--help`, and the
 [public manual](https://docs.deep.space) for workspaces, releases, and
@@ -164,3 +166,12 @@ env binding on your Worker to emit per-connection `[DO Perf]` timing logs.
 ## License
 
 Apache-2.0
+
+## Verifying a signed webhook
+
+`deepspace/server` exports the two halves of HMAC verification so apps never
+hand-roll them: `computeHmacHex(secret, payload)` and
+`timingSafeEqualHex(a, b)` (constant-time compare). Verify the raw request
+body against the signature header before parsing, and reject stale
+timestamps yourself — the r1 AX pass built exactly this and could not
+discover either export from the docs.

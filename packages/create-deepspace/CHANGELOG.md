@@ -1,5 +1,55 @@
 # create-deepspace
 
+## 0.28.0
+
+### Minor Changes
+
+- Every confirmed finding from the v0.27.0 AX round-1 pass. Records: `records.update` (and the action-tools `tools.update` built on it) is an UPDATE, never an upsert — a typo'd or stringified-undefined recordId used to silently create a phantom record and report success; it now refuses naming `records.create` as the spelling that creates. Source: it now LATCHES at the app's first release, permanently — the first `deepspace push` claims DeepSpace at the pack POST, the first deploy latches GitHub or DeepSpace from the checkout's selected remote, and every later check is one registry field. No flag and no consent gate; the latch is announced on stderr at the moment it happens, and a wrong latch is escaped like every wrong-source state, with `deepspace app init --new-id`. `pull` on an empty cloud repo refuses `no_cloud_repo` before writing the `space` remote or git identity (it used to mutate, then say `branch_not_found`/"push first" — and now matches `clone`'s code for the same state), and `pull` gains `--env`. Collaboration: `app collaborators list` names the OWNER (`owner: {userId, emailDisplay}` + an `OWNER:` line) — five refusals say "ask the owner" and no surface said who that was; the raw `Failed: <upstream>` family from `test accounts` maps to real refusals (`test_account_cap` with the freeing commands; a dead session says re-login instead of "Unauthorized"). Install healing: a zombie installer pid (containers whose PID 1 does not reap) no longer holds `install_in_progress` for 30 minutes — the sentinel age bound is 6 minutes, just past the install's own 5-minute timeout; if `npx deepspace` ITSELF fails `not found` after an interrupted install, run the package manager's `install` directly (npx cannot resolve a half-installed tree — documented in the contract). First deploy's unborn-HEAD commit says what it does ("Initial commit (DeepSpace scaffold + working tree)", with the file count on stderr) instead of silently labeling the user's own code "scaffold". `app_not_found` appends its staging paragraph only when DEEPSPACE_DEPLOY_URL is actually overridden. Scaffolder: `--no-register` prints a one-line deprecation note instead of silence. Docs: `computeHmacHex`/`timingSafeEqualHex` documented for webhook authors; `test run`'s `skippedSpecs` semantics (suite-level file selection, not runner-level test.skip) stated in the contract; developer deletion documented as auth-side only (registered apps are retained — undeploy first).
+- Every confirmed finding from the v0.27.0 AX round-2 pass (workspaces, operations, testing lanes). Agent-loop killers: `stale_base` ships NO action — its old `deepspace pull` action looped forever after a workspace-branch release (pull answered `up_to_date`; the live commit sits on a ws/\* ref trunk can never fast-forward to; two lanes hit it independently) — the refusal now names the real choices (integrate, land, or `--ignore-stale`); `port_in_use`'s action always says `dev kill --port <n>` explicitly, because bare `dev kill` resolves through dev's own port precedence and could free a different port than the one that refused (`dev kill --help` now describes that precedence honestly). `workspace land` (and the sync recovery path) detect an unresolved merge and refuse with the merge-aware code instead of `dirty_worktree` advice that would commit `<<<<<<<` markers. `workspace attach`'s failed re-materialization hands back `git worktree prune` as the action (the verified one-step fix for a stale registration). `activity`'s human line names WHICH workspace synced (the JSON always did). Consent and honesty: `test accounts recover` is now a RETRIEVAL (the platform stores the credential for these synthetic QA identities), so `--all` from a second machine no longer invalidates the first machine's pool and needs no confirmation; only a pre-storage account rotates, once, reported via `rotated`. The rename prompt defaults to No (Enter must not move a live URL). `undeploy`'s consent text says app files survive too. Storage/billing truth: reported `usedBytes` re-measures when the summary is dirty, so deletes show up in the number users see (admission always self-healed at the refusal boundary; reporting lied at a 26 MB high-water mark indefinitely); a failed integration invoke's 502 says what happened to the money (`billing: 'released' | 'retained'` — retained means the upstream outcome is unknown and the worst-case pre-charge stands). Testing: `test run tests/<file>.spec.ts` with no such file refuses `spec_not_found` instead of `tests_failed`; `test screenshot --wait-for-selector` is wall-bounded (`screenshot_timeout` names the selector that never matched); duplicate test-account emails refuse `test_account_email_taken` stating the GLOBAL namespace; `secrets set/upload --json` carries `devRestartRequired` (the dev-restart fact only the human path stated). Scaffolder: the page `<title>` is the app's name, not "DeepSpace App"; `docs/migrations/` ships a README so `app update`'s `guidanceUrl` stops 404ing on the public mirror.
+- Structural complexity reductions across five surfaces:
+  - One destructive-consent gate (`cli/lib/consent.ts` `requireConsent`) replaces
+    the six hand-rolled copies in `app undeploy`, `secrets configs delete`,
+    `domain buy`/`detach`, `test accounts clear`, and (before its deletion) the
+    `recover --all` gate; `domain`'s bespoke raw-stdin prompt is deleted, and an
+    interactive decline now uniformly refuses (exit 1) — `domain buy`/`detach`
+    and `test accounts clear` previously exited 0 with `cancelled: true`.
+  - The `install.pid` sentinel and its liveness check are gone: "still
+    installing" is `install.started` with no terminal sentinel and younger
+    than 6 minutes; the scaffolder's installer (which has no hard timeout)
+    keeps the sentinel's mtime fresh while it runs, bounded at 30 minutes so
+    a hung-but-alive package manager cannot hold `install_in_progress`
+    forever. The pid check's own-pid, recycled-pid, and zombie-pid bugs go
+    with it; a crashed install heals after the age bound instead of
+    immediately. The test harness's pid-ledger cleanup guard (which watched
+    for a detached installer that no longer exists) is deleted too.
+  - Test-account credentials are stored server-side (synthetic QA identities,
+    on purpose), so `test accounts recover` is a retrieval: other machines'
+    credentials stay valid, `--all` needs no confirmation and loses its
+    `--yes`. Pre-storage accounts rotate once (reported via `rotated`), then
+    are stored.
+  - The auth-worker's test-account endpoints return machine `code` fields
+    (`test_account_cap`, `test_account_email_taken`, `not_authenticated`, …);
+    the CLI keys remedies on the code alone.
+  - One dev-server port precedence (`resolveDevServerPort` in `cli/lib/port.ts`)
+    shared by `dev start`, `test run`, and `dev kill`, replacing `kill`'s
+    duplicated `pickKillPort`.
+  - Source LATCHES at the app's FIRST release, permanently — either DeepSpace
+    or GitHub, decided once, server-side, then one registry field forever:
+    the first `deepspace push` claims DeepSpace at the pack POST; the first
+    deploy latches from the checkout's selected GitHub remote (present ⇒
+    GitHub with the repository recorded, absent ⇒ DeepSpace) at the deploy
+    commit route, announced on stderr at the moment it happens. `push`'s
+    `--claim-source` flag and its pre-push refusal are deleted, and so is the
+    whole evidence-inference apparatus: no verb consults the release ledger
+    anymore — `pull`/`clone`/`workspace new` refusals on a GitHub app are the
+    server's field check (`source_managed_by_github`), which raw `git pull`
+    against a leftover remote gets too. Admin pushes
+    stay refused on every unclaimed app, and admin on-behalf deploys never
+    latch. A first release that latched from an accidental remote is escaped
+    the same way as every wrong-source state: `deepspace app init --new-id`.
+    Apps that deployed from GitHub before this release and never pushed are
+    simply still unclaimed — their next deploy latches GitHub.
+
 ## 0.27.1
 
 ### Patch Changes

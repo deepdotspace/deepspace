@@ -67,10 +67,14 @@ const list = defineDeepspaceCommand({
   async run({ args }) {
     const token = await ensureToken()
     const app = await resolveAppTarget(DEPLOY_URL, token, args.app as string | undefined)
-    const { collaborators, pending = [] } = await api<{
+    const { owner, collaborators, pending = [] } = await api<{
+      owner?: { userId: string; emailDisplay: string }
       collaborators: Collaborator[]
       pending?: PendingInvite[]
     }>(token, `/api/app-collaborators/${encodeURIComponent(app)}`)
+    // The owner leads the roster: five refusals say "ask the owner", and this
+    // list is where a collaborator finds out who that is (r1 collab AX F1).
+    if (!args.json && owner) console.log(`OWNER: ${owner.emailDisplay}`)
     if (!collaborators.length && !pending.length) {
       if (!args.json) {
         // A collaborator reading the roster (readable since 0.27.0) cannot
@@ -83,7 +87,7 @@ const list = defineDeepspaceCommand({
             ` (pending invites are visible to the owner alone).`,
         )
       }
-      return { data: { collaborators, pending } }
+      return { data: { owner: owner ?? null, collaborators, pending } }
     }
     // COL-4: print a header and the resolved email (emailDisplay). The raw
     // userId is dropped from the human view — it's still in --json, a human
@@ -102,7 +106,7 @@ const list = defineDeepspaceCommand({
         }
       }
     }
-    return { data: { collaborators, pending } }
+    return { data: { owner: owner ?? null, collaborators, pending } }
   },
 })
 
