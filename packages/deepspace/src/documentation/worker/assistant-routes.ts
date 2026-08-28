@@ -13,7 +13,7 @@ import {
   resolveDocumentationPublishedCorpus,
 } from './published-corpus'
 import { checkDocumentationPublicLimit, documentationPublicClientKey } from './public-limiter'
-import { readBoundedRequestText, RequestBodyTooLargeError } from './request-body'
+import { readBoundedBodyText, BodyTooLargeError } from '../../shared/bounded-body'
 export interface DocumentationAssistantRouteEnv extends DeepSpaceAIEnv {
   ASSETS: Fetcher
   APP_NAME: string
@@ -80,13 +80,13 @@ export function registerDocumentationAssistantRoutes<Env extends DocumentationAs
 
     let body: DocumentationAssistantRequestBody | null = null
     try {
-      const raw = await readBoundedRequestText(c.req.raw, MAX_REQUEST_BYTES)
+      const raw = await readBoundedBodyText(c.req.raw, MAX_REQUEST_BYTES)
       const parsed = JSON.parse(raw) as unknown
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         body = parsed as DocumentationAssistantRequestBody
       }
     } catch (error) {
-      if (error instanceof RequestBodyTooLargeError) {
+      if (error instanceof BodyTooLargeError) {
         return c.json({ error: `request exceeds ${MAX_REQUEST_BYTES} bytes` }, 413)
       }
       return c.json({ error: 'request body must be valid JSON' }, 400)

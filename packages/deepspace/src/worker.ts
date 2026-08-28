@@ -27,6 +27,22 @@ export { SYSTEM_COLLECTIONS } from './server/handlers/yjs'
 export { registerClientErrorRoute, handleClientErrorReport } from './server/client-errors'
 export { CLIENT_LOG_MARKER } from './shared/client-errors'
 export type { ClientErrorReport, ClientErrorKind } from './shared/client-errors'
+export {
+  registerAgentToolRoutes,
+  createUserToolExecutor,
+  AGENT_TOOL_REQUEST_BODY_CAP,
+  AGENT_TOOL_RESPONSE_BODY_CAP,
+  type AgentToolAccessResult,
+  type AgentToolRouteEnv,
+  type AgentToolRouteOptions,
+  type UserToolExecutorEnv,
+} from './server/agent-tools'
+export {
+  normalizeAgentTargetOrigin,
+  PRODUCTION_OFFICIAL_AGENT_ORIGINS,
+  type AgentTargetPolicy,
+} from './server/agent-target'
+export { SESSION_COOKIE } from './shared/auth-session'
 // `deepspace logs` wire DTO — the single source of truth shared with the CLI,
 // the dashboard, and the platform telemetry reader (deploy-worker).
 export * from './shared/log-events'

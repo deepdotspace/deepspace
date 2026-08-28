@@ -1,23 +1,25 @@
 /**
- * CLI session helpers — exchange a Better Auth session cookie for a short-lived
- * JWT against the auth worker. Shared by `auth.ts` (token refresh for all
- * authenticated commands) and `login.ts` (email/password flow).
+ * CLI session helpers — exchange a Better Auth session cookie for short-lived
+ * ordinary or target-bound JWTs against the auth worker.
  */
 
 import { ApiError } from './lib/api'
 import { fetchWithTransientRetry } from './lib/fetch-retry'
+import { SESSION_COOKIE } from '../shared/auth-session'
 
-export const SESSION_COOKIE = '__Secure-better-auth.session_token'
+export { SESSION_COOKIE }
 
 /**
  * Exchange a Better Auth session token for a fresh JWT.
  * Returns null if the session is invalid or expired.
  */
-export async function exchangeSession(
+async function exchangeSessionToken(
   authUrl: string,
   sessionToken: string,
+  path: string,
+  action: string,
+  body?: string,
 ): Promise<string | null> {
-  const path = '/api/auth/token'
   let res: Response
   try {
     res = await fetchWithTransientRetry(
@@ -27,7 +29,9 @@ export async function exchangeSession(
         headers: {
           Cookie: `${SESSION_COOKIE}=${encodeURIComponent(sessionToken)}`,
           Origin: authUrl,
+          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },
+        body,
       }),
       { timeoutMs: 15_000 },
     )
@@ -43,7 +47,7 @@ export async function exchangeSession(
   if (res.status === 401) return null
   if (!res.ok) {
     throw new ApiError(
-      `The auth service could not refresh the CLI token (HTTP ${res.status}). Retry without logging in again.`,
+      `The auth service could not ${action} (HTTP ${res.status}). Retry without logging in again.`,
       res.status,
       res.status === 429 ? 'rate_limited' : 'auth_service_unavailable',
       path,
@@ -69,4 +73,24 @@ export async function exchangeSession(
     )
   }
   return data.token
+}
+
+/** Exchange a Better Auth session token for a fresh general platform JWT. */
+export function exchangeSession(authUrl: string, sessionToken: string): Promise<string | null> {
+  return exchangeSessionToken(authUrl, sessionToken, '/api/auth/token', 'refresh the CLI token')
+}
+
+/** Mint an in-memory credential usable only at one exact agent target. */
+export function exchangeAgentSession(
+  authUrl: string,
+  sessionToken: string,
+  target: string,
+): Promise<string | null> {
+  return exchangeSessionToken(
+    authUrl,
+    sessionToken,
+    '/api/auth/agent-token',
+    'mint the app-specific agent token',
+    JSON.stringify({ target }),
+  )
 }

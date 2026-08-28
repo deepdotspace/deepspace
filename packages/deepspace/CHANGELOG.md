@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.28.1
+
+### Patch Changes
+
+- Let apps share one authenticated tool set between their in-app assistant and local assistants through stateless `deepspace agent` commands.
+
 ## 0.28.0
 
 ### Minor Changes

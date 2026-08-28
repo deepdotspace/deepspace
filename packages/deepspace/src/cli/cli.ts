@@ -53,6 +53,7 @@ import appFiles from './commands/app-files'
 import collaborators from './commands/collaborators'
 import transfer from './commands/transfer'
 import integrations from './commands/integrations'
+import agent from './commands/agent'
 import feedback from './commands/feedback'
 import secrets from './commands/secrets'
 import init from './commands/init'
@@ -229,6 +230,7 @@ const main = defineCommand({
     add,
     secrets,
     integrations,
+    agent,
     auth,
     app,
     feedback,

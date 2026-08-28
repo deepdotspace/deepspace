@@ -15,6 +15,8 @@ import {
   isPlatformReservedPath,
   platformWorkerFetch,
   resolveAppRole,
+  SESSION_COOKIE,
+  verifyAgentToken,
   verifyJwt,
 } from 'deepspace/worker'
 import type { JwtVerifierConfig, VerifyResult } from 'deepspace/worker'
@@ -30,6 +32,14 @@ export async function resolveAuth(req: Request, env: Env): Promise<VerifyResult 
   const token = header?.startsWith('Bearer ') ? header.slice(7) : null
   if (!token) return null
   return (await verifyJwt(jwtConfig(env), token)).result
+}
+
+/** Agent credentials are valid only at the exact origin receiving the request. */
+export async function resolveAgentAuth(req: Request, env: Env): Promise<VerifyResult | null> {
+  const header = req.headers.get('Authorization')
+  const token = header?.startsWith('Bearer ') ? header.slice(7) : null
+  if (!token) return null
+  return (await verifyAgentToken(jwtConfig(env), token, new URL(req.url).origin)).result
 }
 
 /**
@@ -85,7 +95,7 @@ export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
       status: 302,
       headers: {
         Location: appHome,
-        'Set-Cookie': `__Secure-better-auth.session_token=${encodeURIComponent(sessionToken)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`,
+        'Set-Cookie': `${SESSION_COOKIE}=${encodeURIComponent(sessionToken)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`,
       },
     })
   })
@@ -106,8 +116,7 @@ export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
       status: 200,
       headers: {
         'Content-Type': 'application/json',
-        'Set-Cookie':
-          '__Secure-better-auth.session_token=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0',
+        'Set-Cookie': `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`,
       },
     })
   })

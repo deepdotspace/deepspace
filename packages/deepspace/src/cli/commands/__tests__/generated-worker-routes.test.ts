@@ -1,9 +1,13 @@
-import { beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Hono } from 'hono'
+import { asSchema, tool } from 'ai'
+import type { ToolSet } from 'ai'
 import { importPKCS8, SignJWT } from 'jose'
-import { TEMPLATES_DIR } from './template-assembly'
+import { z } from 'zod/v4'
+import { assembleTemplate, TEMPLATES_DIR } from './template-assembly'
 import { resolveDeployRunWorkerFirst } from '../deploy/build'
 import {
   isAssetNotFoundHandling,
@@ -18,6 +22,7 @@ import { decodeRoomIdentityHeader } from '../../../shared/room-identity-headers'
 
 interface TestEnv {
   ASSETS?: Fetcher
+  APP_NAME?: string
   AUTH_JWT_ISSUER?: string
   AUTH_JWT_PUBLIC_KEY?: string
   AUTH_WORKER_URL?: string
@@ -37,26 +42,57 @@ type RegisterAuthenticatedRoutes = (
 ) => void
 
 let registerActionRoutes: RegisterAuthenticatedRoutes
+let registerAgent: (
+  app: Hono<TestContext>,
+  options: {
+    tools: (
+      executor: (toolName: string, params: Record<string, unknown>) => Promise<unknown>,
+    ) => ToolSet
+    inApp?: boolean
+    local?: boolean
+    authorize?: (context: { userId: string }) => boolean | Promise<boolean>
+  },
+) => void
+let buildGeneratedTools: (
+  executor: (toolName: string, params: Record<string, unknown>) => Promise<unknown>,
+) => ToolSet
 let registerAuthAndIntegrationRoutes: RegisterRoutes
 let registerPlatformProxyRoutes: RegisterRoutes
 let registerRealtimeRoutes: RegisterRoutes
 let registerStaticRoutes: RegisterRoutes
+let agentTemplateDir: string
 
 beforeAll(async () => {
   // A computed file URL keeps generated-app sources outside this package's
   // TypeScript rootDir while Vitest still executes the real modules.
   const serverDirectory = join(TEMPLATES_DIR, 'base', 'src', 'server')
   const actionRoutes = await import(pathToFileURL(join(serverDirectory, 'action-routes.ts')).href)
+  // Keep the assembled copy under this package so its `deepspace/*` imports
+  // resolve through the package's self-reference during Vitest execution.
+  agentTemplateDir = mkdtempSync(join(process.cwd(), '.tmp-ds-agent-routes-'))
+  assembleTemplate('copilot', join(agentTemplateDir, 'app'))
+  const agentRoutes = await import(
+    pathToFileURL(join(agentTemplateDir, 'app', 'src', 'ai', 'agent.ts')).href
+  )
+  const generatedTools = await import(
+    pathToFileURL(join(agentTemplateDir, 'app', 'src', 'ai', 'tools.ts')).href
+  )
   const httpRoutes = await import(pathToFileURL(join(serverDirectory, 'http-routes.ts')).href)
   const realtimeRoutes = await import(
     pathToFileURL(join(serverDirectory, 'realtime-routes.ts')).href
   )
 
   registerActionRoutes = actionRoutes.registerActionRoutes as RegisterAuthenticatedRoutes
+  registerAgent = agentRoutes.registerAgent as typeof registerAgent
+  buildGeneratedTools = generatedTools.buildTools as typeof buildGeneratedTools
   registerAuthAndIntegrationRoutes = httpRoutes.registerAuthAndIntegrationRoutes as RegisterRoutes
   registerPlatformProxyRoutes = httpRoutes.registerPlatformProxyRoutes as RegisterRoutes
   registerStaticRoutes = httpRoutes.registerStaticRoutes as RegisterRoutes
   registerRealtimeRoutes = realtimeRoutes.registerRealtimeRoutes as RegisterRoutes
+})
+
+afterAll(() => {
+  rmSync(agentTemplateDir, { recursive: true, force: true })
 })
 
 function env(bindings: TestEnv = {}): TestEnv {
@@ -86,6 +122,26 @@ async function signTestJwt(subject = 'verified-user'): Promise<string> {
     .setIssuer(TEST_JWT_ISSUER)
     .setIssuedAt()
     .setExpirationTime('5m')
+    .sign(privateKey)
+}
+
+async function signAgentJwt(
+  target: string,
+  subject = 'verified-user',
+  expiresIn = '5m',
+): Promise<string> {
+  const privateKey = await importPKCS8(TEST_JWT_PRIVATE_KEY, 'ES256')
+  return new SignJWT({
+    scope: 'agent',
+    name: 'Agent user',
+    email: 'agent@example.test',
+  })
+    .setProtectedHeader({ alg: 'ES256' })
+    .setSubject(subject)
+    .setIssuer(`${TEST_JWT_ISSUER}/agent`)
+    .setAudience(target)
+    .setIssuedAt()
+    .setExpirationTime(expiresIn)
     .sign(privateKey)
 }
 
@@ -130,6 +186,328 @@ function spaAssetLayer(present: Record<string, [body: string, contentType: strin
 }
 
 describe('generated worker route owners', () => {
+  it('advertises free-form record objects without weakening input validation', async () => {
+    const tools = buildGeneratedTools(async () => ({ success: true }))
+    const createSchema = asSchema(tools.records_create.inputSchema)
+    const querySchema = asSchema(tools.records_query.inputSchema)
+
+    // Free-form record params must advertise an open object (`{}` is the
+    // any-value schema); a closed `additionalProperties: false` would tell
+    // the model the objects are empty.
+    expect(createSchema.jsonSchema).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      required: ['collection', 'data'],
+      properties: {
+        data: { type: 'object', additionalProperties: {} },
+      },
+    })
+    expect(querySchema.jsonSchema).toMatchObject({
+      properties: {
+        where: { type: 'object', additionalProperties: {} },
+      },
+    })
+
+    await expect(
+      createSchema.validate?.({ collection: 'notes', data: { title: 'Hello' } }),
+    ).resolves.toMatchObject({ success: true })
+    await expect(createSchema.validate?.({ collection: 'notes' })).resolves.toMatchObject({
+      success: false,
+    })
+  })
+
+  it('shares the owner/member gate between website AI and local assistant tools', async () => {
+    interface RoomCall {
+      request: Request
+      body: { tool?: string; params?: { collection?: string; recordId?: string } }
+    }
+    const roomCalls: RoomCall[] = []
+    let memberActive = true
+    const rooms = {
+      idFromName: (name: string) => name,
+      get: () => ({
+        fetch: async (request: Request) => {
+          const body = (await request.clone().json()) as RoomCall['body']
+          roomCalls.push({ request, body })
+          if (body.tool === 'records.get' && body.params?.collection === 'users') {
+            return Response.json(
+              memberActive
+                ? { success: true, data: { record: { data: { role: 'editor' } } } }
+                : { success: false, error: 'Record not found' },
+            )
+          }
+          return Response.json({ success: true, data: { echoed: body } })
+        },
+      }),
+    } as unknown as DurableObjectNamespace
+    const app = new Hono<TestContext>()
+    registerAgent(app, {
+      tools: (executor) => ({
+        echo: tool({
+          description: 'Echoes a value through the app tool executor.',
+          inputSchema: z.object({ value: z.string() }),
+          execute: ({ value }) => executor('records.query', { value }),
+        }),
+      }),
+    })
+    const bindings = env({
+      APP_NAME: 'Test app',
+      AUTH_JWT_ISSUER: TEST_JWT_ISSUER,
+      AUTH_JWT_PUBLIC_KEY: TEST_JWT_PUBLIC_KEY,
+      DEEPSPACE_APP_ID: 'app_test',
+      OWNER_USER_ID: 'owner-user',
+      RECORD_ROOMS: rooms,
+    })
+
+    const signedOut = await app.request(
+      'https://app.test/_deepspace/agent/tools',
+      undefined,
+      bindings,
+    )
+    expect(signedOut.status).toBe(401)
+
+    const ordinaryMemberToken = await signTestJwt('member-user')
+    const ordinaryAtAgentRoute = await app.request(
+      'https://app.test/_deepspace/agent/tools',
+      { headers: { Authorization: `Bearer ${ordinaryMemberToken}` } },
+      bindings,
+    )
+    expect(ordinaryAtAgentRoute.status).toBe(401)
+
+    const memberToken = await signAgentJwt('https://app.test', 'member-user')
+    const discovered = await app.request(
+      'https://app.test/_deepspace/agent/tools',
+      { headers: { Authorization: `Bearer ${memberToken}` } },
+      bindings,
+    )
+    expect(discovered.status).toBe(200)
+    const listedTools = ((await discovered.json()) as { tools: Array<{ name: string }> }).tools
+    expect(listedTools).toHaveLength(1)
+    expect(listedTools[0]?.name).toBe('echo')
+
+    const invoked = await app.request(
+      'https://app.test/_deepspace/agent/tools/echo',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${memberToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: { value: 'hello' } }),
+      },
+      bindings,
+    )
+    expect(invoked.status).toBe(200)
+
+    const wrongTarget = await app.request(
+      'https://other.test/_deepspace/agent/tools',
+      { headers: { Authorization: `Bearer ${memberToken}` } },
+      bindings,
+    )
+    expect(wrongTarget.status).toBe(401)
+
+    const expired = await app.request(
+      'https://app.test/_deepspace/agent/tools',
+      {
+        headers: {
+          Authorization: `Bearer ${await signAgentJwt('https://app.test', 'member-user', '-10s')}`,
+        },
+      },
+      bindings,
+    )
+    expect(expired.status).toBe(401)
+
+    memberActive = false
+    const revoked = await app.request(
+      'https://app.test/_deepspace/agent/tools',
+      { headers: { Authorization: `Bearer ${memberToken}` } },
+      bindings,
+    )
+    expect(revoked.status).toBe(403)
+
+    expect(roomCalls).toHaveLength(4)
+    // Membership is the shared owner-context read of the caller's users row
+    // (the same primitive that gates admin and realtime routes)...
+    const membershipReads = roomCalls.filter(({ body }) => body.tool === 'records.get')
+    expect(membershipReads).toHaveLength(3)
+    expect(
+      membershipReads.every(
+        ({ request, body }) =>
+          request.headers.get('X-App-Action') === 'true' &&
+          request.headers.get('X-User-Id') === 'owner-user' &&
+          body.params?.recordId === 'member-user',
+      ),
+    ).toBe(true)
+    // ...while tool execution stays strictly user-scoped, never app-action.
+    const executions = roomCalls.filter(({ body }) => body.tool === 'records.query')
+    expect(executions).toHaveLength(1)
+    expect(
+      executions.every(
+        ({ request }) =>
+          request.headers.get('X-App-Action') === null &&
+          request.headers.get('X-User-Id') === 'member-user',
+      ),
+    ).toBe(true)
+
+    const ownerRequests: Request[] = []
+    const ownerRooms = {
+      idFromName: (name: string) => name,
+      get: () => ({
+        fetch: async (request: Request) => {
+          ownerRequests.push(request)
+          return Response.json({ success: false, error: 'owner should not need membership lookup' })
+        },
+      }),
+    } as unknown as DurableObjectNamespace
+    const ownerToken = await signAgentJwt('https://app.test', 'owner-user')
+    const owner = await app.request(
+      'https://app.test/_deepspace/agent/tools',
+      { headers: { Authorization: `Bearer ${ownerToken}` } },
+      env({ ...bindings, RECORD_ROOMS: ownerRooms }),
+    )
+    expect(owner.status).toBe(200)
+    expect(ownerRequests).toEqual([])
+
+    const missingMember = new Hono<TestContext>()
+    registerAgent(missingMember, { tools: () => ({}) })
+    const denied = await missingMember.request(
+      'https://app.test/_deepspace/agent/tools',
+      {
+        headers: {
+          Authorization: `Bearer ${await signAgentJwt('https://app.test', 'not-a-member')}`,
+        },
+      },
+      env({
+        ...bindings,
+        RECORD_ROOMS: {
+          idFromName: (name: string) => name,
+          get: () => ({
+            fetch: () =>
+              Promise.resolve(Response.json({ success: false, error: 'User not found' })),
+          }),
+        } as unknown as DurableObjectNamespace,
+      }),
+    )
+    expect(denied.status).toBe(403)
+  })
+
+  it('answers 503, not 403, when the membership read cannot complete', async () => {
+    const app = new Hono<TestContext>()
+    registerAgent(app, { tools: () => ({}) })
+    const bindings = env({
+      APP_NAME: 'Test app',
+      AUTH_JWT_ISSUER: TEST_JWT_ISSUER,
+      AUTH_JWT_PUBLIC_KEY: TEST_JWT_PUBLIC_KEY,
+      DEEPSPACE_APP_ID: 'app_test',
+      OWNER_USER_ID: 'owner-user',
+      RECORD_ROOMS: {
+        idFromName: (name: string) => name,
+        get: () => ({ fetch: () => Promise.reject(new Error('room unavailable')) }),
+      } as unknown as DurableObjectNamespace,
+    })
+
+    const agent = await app.request(
+      'https://app.test/_deepspace/agent/tools',
+      {
+        headers: {
+          Authorization: `Bearer ${await signAgentJwt('https://app.test', 'member-user')}`,
+        },
+      },
+      bindings,
+    )
+    expect(agent.status).toBe(503)
+    expect(((await agent.json()) as { code: string }).code).toBe('access_check_unavailable')
+
+    const website = await app.request(
+      'https://app.test/api/ai/chats',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${await signTestJwt('member-user')}`,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      },
+      bindings,
+    )
+    expect(website.status).toBe(503)
+    expect(((await website.json()) as { error: string }).error).toBe('Temporarily unavailable')
+  })
+
+  it('applies custom agent authorization before both assistant surfaces execute', async () => {
+    let authorizations = 0
+    const app = new Hono<TestContext>()
+    registerAgent(app, {
+      tools: () => ({}),
+      authorize: () => {
+        authorizations++
+        return false
+      },
+    })
+    const ownerToken = await signTestJwt('owner-user')
+    const agentToken = await signAgentJwt('https://app.test', 'owner-user')
+    const bindings = env({
+      AUTH_JWT_ISSUER: TEST_JWT_ISSUER,
+      AUTH_JWT_PUBLIC_KEY: TEST_JWT_PUBLIC_KEY,
+      DEEPSPACE_APP_ID: 'app_test',
+      OWNER_USER_ID: 'owner-user',
+    })
+    const websiteHeaders = {
+      Authorization: `Bearer ${ownerToken}`,
+      'Content-Type': 'application/json',
+    }
+    const agentHeaders = {
+      Authorization: `Bearer ${agentToken}`,
+      'Content-Type': 'application/json',
+    }
+
+    const website = await app.request(
+      'https://app.test/api/ai/chat',
+      { method: 'POST', headers: websiteHeaders, body: '{}' },
+      bindings,
+    )
+    const agentAtWebsite = await app.request(
+      'https://app.test/api/ai/chat',
+      { method: 'POST', headers: agentHeaders, body: '{}' },
+      bindings,
+    )
+    const discovery = await app.request(
+      'https://app.test/_deepspace/agent/tools',
+      { headers: agentHeaders },
+      bindings,
+    )
+    const invoke = await app.request(
+      'https://app.test/_deepspace/agent/tools/nope',
+      { method: 'POST', headers: agentHeaders, body: JSON.stringify({ input: {} }) },
+      bindings,
+    )
+
+    expect(website.status).toBe(403)
+    expect(agentAtWebsite.status).toBe(401)
+    expect(discovery.status).toBe(403)
+    expect(invoke.status).toBe(403)
+    expect(authorizations).toBe(3)
+  })
+
+  it('allows the website and local assistant registrations to be configured independently', async () => {
+    const websiteOnly = new Hono<TestContext>()
+    registerAgent(websiteOnly, { tools: () => ({}), local: false })
+    const localOnly = new Hono<TestContext>()
+    registerAgent(localOnly, { tools: () => ({}), inApp: false })
+
+    expect(
+      (await websiteOnly.request('https://app.test/api/ai/chats', { method: 'POST' }, env()))
+        .status,
+    ).toBe(401)
+    expect(
+      (await websiteOnly.request('https://app.test/_deepspace/agent/tools', undefined, env()))
+        .status,
+    ).toBe(404)
+    expect(
+      (await localOnly.request('https://app.test/api/ai/chats', undefined, env())).status,
+    ).toBe(404)
+    expect(
+      (await localOnly.request('https://app.test/_deepspace/agent/tools', undefined, env())).status,
+    ).toBe(401)
+  })
+
   it('keeps auth special cases ahead of the wildcard proxy', async () => {
     const app = new Hono<TestContext>()
     registerAuthAndIntegrationRoutes(app)

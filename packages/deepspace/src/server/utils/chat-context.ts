@@ -163,6 +163,11 @@ function locateTrimmableArray(result: ResultObj): { path: string[]; items: unkno
   return undefined
 }
 
+/** UTF-8 byte length of a JSON string — the unit every tool-result cap uses. */
+export function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).byteLength
+}
+
 /**
  * Keep an individual tool result under `byteCap`.
  *
@@ -188,7 +193,7 @@ export function capToolResultSize(result: unknown, byteCap: number): unknown {
   // to do with non-serializable shapes; this function's job is only to
   // cap oversized payloads.
   if (typeof serialized !== 'string') return result
-  if (serialized.length <= byteCap) return result
+  if (utf8ByteLength(serialized) <= byteCap) return result
 
   if (result && typeof result === 'object') {
     const located = locateTrimmableArray(result as ResultObj)
@@ -199,7 +204,7 @@ export function capToolResultSize(result: unknown, byteCap: number): unknown {
         setPath(result, path, items.slice(0, k), { truncated: true, returned: k, total })
       const fits = (k: number): boolean => {
         try {
-          return JSON.stringify(build(k)).length <= byteCap
+          return utf8ByteLength(JSON.stringify(build(k))) <= byteCap
         } catch {
           return false
         }
@@ -228,7 +233,7 @@ export function capToolResultSize(result: unknown, byteCap: number): unknown {
     success: false,
     truncated: true,
     error:
-      `Tool result exceeded ${byteCap} bytes (was ${serialized.length}). ` +
+      `Tool result exceeded ${byteCap} bytes (was ${utf8ByteLength(serialized)}). ` +
       `Retry with a narrower query (e.g. add a \`where\` filter, reduce \`limit\`, ` +
       `or call records.get for a single record).`,
     preview: serialized.slice(0, 2_000),
@@ -482,10 +487,15 @@ export async function prepareMessagesWithCompaction(
         newSummary: { text, throughId },
       }
     } catch (err) {
-      console.error('prepareMessagesWithCompaction: summarizer failed, falling back to sliding window', err)
+      console.error(
+        'prepareMessagesWithCompaction: summarizer failed, falling back to sliding window',
+        err,
+      )
     }
   } else {
-    console.warn('prepareMessagesWithCompaction: messages lack ids; cannot anchor a summary, falling back to sliding window')
+    console.warn(
+      'prepareMessagesWithCompaction: messages lack ids; cannot anchor a summary, falling back to sliding window',
+    )
   }
 
   return {
@@ -519,7 +529,8 @@ function formatTranscript(messages: ChatTurn[]): string {
         ? m.parts
             .filter((p) => (p as { type?: string } | null)?.type === 'tool-invocation')
             .map((p) => {
-              const name = (p as { toolInvocation?: { toolName?: string } }).toolInvocation?.toolName
+              const name = (p as { toolInvocation?: { toolName?: string } }).toolInvocation
+                ?.toolName
               return `  [tool: ${name ?? 'unknown'}]`
             })
             .join('\n')

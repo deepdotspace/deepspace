@@ -12,7 +12,7 @@
  * is co-located rather than scattered through the entry file.
  */
 
-import type { Hono } from 'hono'
+import type { Context, Hono } from 'hono'
 import type { ModelMessage } from 'ai'
 import {
   deepSpaceAgentErrorSummary,
@@ -23,7 +23,7 @@ import {
   turnsToCoreMessages,
   buildUiParts,
   makeDefaultSummarizer,
-  capToolResultSize,
+  createUserToolExecutor,
   DEFAULT_CONTEXT_CONFIG,
   getChat,
   createChat,
@@ -32,14 +32,16 @@ import {
   loadMessages,
   appendMessage,
 } from 'deepspace/worker'
-import type { ChatTurn, VerifyResult } from 'deepspace/worker'
+import type { AgentToolAccessResult, ChatTurn, VerifyResult } from 'deepspace/worker'
 import { schemas } from '../schemas.js'
-import { buildSystemPrompt, buildTools } from './tools.js'
+import { buildSystemPrompt } from './tools.js'
+import type { buildTools } from './tools.js'
 // Type-only — TypeScript strips these at runtime, so no circular import
 // with worker.ts (which imports `registerAiChatRoutes` from this file).
 import type { Env, AppContext } from '../../worker.js'
 
-type ResolveAuth = (req: Request, env: Env) => Promise<VerifyResult | null>
+type ResolveAccess = (req: Request, env: Env) => Promise<AgentToolAccessResult>
+type ToolFactory = typeof buildTools
 
 function recordRoomStub(env: Env): DurableObjectStub {
   // Rooms are keyed by the immutable app id — the same `app:${DEEPSPACE_APP_ID}`
@@ -55,20 +57,39 @@ const MAX_USER_CONTENT_LENGTH = 100_000
 // Derive a chat title from the first user message — first non-empty line,
 // trimmed to ~50 chars with an ellipsis.
 function deriveTitle(content: string): string {
-  const first = content.trim().split('\n').map((l) => l.trim()).find(Boolean) ?? 'Untitled'
+  const first =
+    content
+      .trim()
+      .split('\n')
+      .map((l) => l.trim())
+      .find(Boolean) ?? 'Untitled'
   return first.length <= 50 ? first : first.slice(0, 47).trimEnd() + '…'
 }
 
 export function registerAiChatRoutes(
   app: Hono<AppContext>,
-  resolveAuth: ResolveAuth,
+  resolveAccess: ResolveAccess,
+  buildTools: ToolFactory,
 ): void {
+  // One chokepoint for the access-decision → HTTP mapping on every chat route.
+  const requireAccess = async (c: Context<AppContext>): Promise<VerifyResult | Response> => {
+    const access = await resolveAccess(c.req.raw, c.env)
+    if (access.ok) return access.auth
+    const error =
+      access.status === 401
+        ? 'Unauthorized'
+        : access.status === 403
+          ? 'Forbidden'
+          : 'Temporarily unavailable'
+    return c.json({ error }, access.status)
+  }
+
   // Create a new chat row owned by the caller.
   app.post('/api/ai/chats', async (c) => {
-    const auth = await resolveAuth(c.req.raw, c.env)
-    if (!auth) return c.json({ error: 'Unauthorized' }, 401)
+    const auth = await requireAccess(c)
+    if (auth instanceof Response) return auth
 
-    const body = await c.req.json<{ title?: string }>().catch(() => ({} as { title?: string }))
+    const body = await c.req.json<{ title?: string }>().catch(() => ({}) as { title?: string })
     const stub = recordRoomStub(c.env)
     const chat = await createChat(stub, auth.userId, {
       title: body.title ?? 'New chat',
@@ -78,27 +99,28 @@ export function registerAiChatRoutes(
 
   // Rename / patch a chat. Ownership enforced via getChat.
   app.patch('/api/ai/chats/:id', async (c) => {
-    const auth = await resolveAuth(c.req.raw, c.env)
-    if (!auth) return c.json({ error: 'Unauthorized' }, 401)
+    const auth = await requireAccess(c)
+    if (auth instanceof Response) return auth
 
     const id = c.req.param('id')
     const stub = recordRoomStub(c.env)
     const chat = await getChat(stub, id, auth.userId)
     if (!chat) return c.json({ error: 'Not found' }, 404)
 
-    const body = await c.req.json<{ title?: string }>().catch(() => ({} as { title?: string }))
+    const body = await c.req.json<{ title?: string }>().catch(() => ({}) as { title?: string })
     const patch: { title?: string } = {}
     if (typeof body.title === 'string') patch.title = body.title
     // `updateChat` re-checks the chat; a delete racing this PATCH answers 404
     // instead of `ok: true` for a write that never landed.
-    if (!(await updateChat(stub, id, auth.userId, patch))) return c.json({ error: 'Not found' }, 404)
+    if (!(await updateChat(stub, id, auth.userId, patch)))
+      return c.json({ error: 'Not found' }, 404)
     return c.json({ ok: true })
   })
 
   // Delete chat + cascade messages.
   app.delete('/api/ai/chats/:id', async (c) => {
-    const auth = await resolveAuth(c.req.raw, c.env)
-    if (!auth) return c.json({ error: 'Unauthorized' }, 401)
+    const auth = await requireAccess(c)
+    if (auth instanceof Response) return auth
 
     const id = c.req.param('id')
     const stub = recordRoomStub(c.env)
@@ -116,8 +138,8 @@ export function registerAiChatRoutes(
   // out of scope for this PR. Realistic impact: rare (multi-tab same-chat
   // usage); recoverable by user (one tab works correctly going forward).
   app.post('/api/ai/chat', async (c) => {
-    const auth = await resolveAuth(c.req.raw, c.env)
-    if (!auth) return c.json({ error: 'Unauthorized' }, 401)
+    const auth = await requireAccess(c)
+    if (auth instanceof Response) return auth
 
     const authHeader = c.req.header('Authorization') ?? ''
     const jwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
@@ -130,8 +152,10 @@ export function registerAiChatRoutes(
       modelId?: string
     }>()
     if (typeof chatId !== 'string' || !chatId) return c.json({ error: 'chatId is required' }, 400)
-    if (typeof userMessageId !== 'string' || !userMessageId) return c.json({ error: 'userMessageId is required' }, 400)
-    if (typeof content !== 'string' || content.trim() === '') return c.json({ error: 'content is required' }, 400)
+    if (typeof userMessageId !== 'string' || !userMessageId)
+      return c.json({ error: 'userMessageId is required' }, 400)
+    if (typeof content !== 'string' || content.trim() === '')
+      return c.json({ error: 'content is required' }, 400)
     if (content.length > MAX_USER_CONTENT_LENGTH) {
       return c.json({ error: `content exceeds ${MAX_USER_CONTENT_LENGTH} chars` }, 413)
     }
@@ -140,7 +164,11 @@ export function registerAiChatRoutes(
       // Name the valid ids: the caller has no other way to learn them here.
       const modelIds = listDeepSpaceAgentModels('application').map((model) => model.id)
       return c.json(
-        { error: `Unknown modelId: ${modelId}. Valid: ${modelIds.join(', ')}`, code: 'unknown_model', modelIds },
+        {
+          error: `Unknown modelId: ${modelId}. Valid: ${modelIds.join(', ')}`,
+          code: 'unknown_model',
+          modelIds,
+        },
         400,
       )
     }
@@ -181,9 +209,10 @@ export function registerAiChatRoutes(
       turns.push(allTurns[i])
     }
 
-    const cachedSummary = chat.compactedSummary && chat.compactedThroughId
-      ? { text: chat.compactedSummary, throughId: chat.compactedThroughId }
-      : undefined
+    const cachedSummary =
+      chat.compactedSummary && chat.compactedThroughId
+        ? { text: chat.compactedSummary, throughId: chat.compactedThroughId }
+        : undefined
 
     // User-billed: compaction is part of the user's chat experience, not infra.
     const summarizer = makeDefaultSummarizer(c.env, { authToken: jwt })
@@ -216,22 +245,11 @@ export function registerAiChatRoutes(
     const systemText = summary ? `${baseSystem}\n\n${summary.content}` : baseSystem
     const messages = turnsToCoreMessages(summary ? rest : prepared)
 
-    const tools = buildTools(async (toolName, params) => {
-      const res = await stub.fetch(new Request('https://internal/api/tools/execute', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-User-Id': auth.userId,
-        },
-        body: JSON.stringify({ tool: toolName, params }),
-        // Forward the route's abort signal so a tool fetch in flight is
-        // cancelled if the client navigates away mid-stream — without this,
-        // the LLM stream cancels but the per-tool DO call runs to completion.
-        signal: c.req.raw.signal,
-      }))
-      const raw = await res.json()
-      return capToolResultSize(raw, DEFAULT_CONTEXT_CONFIG.toolResultCap)
-    })
+    // The SDK executor runs each tool as the verified user and forwards the
+    // route's abort signal, so a tool fetch in flight is cancelled if the
+    // client navigates away mid-stream. The local assistant routes use the
+    // same executor, keeping both surfaces' tool behavior identical.
+    const tools = buildTools(createUserToolExecutor(c.env, auth.userId, c.req.raw.signal))
 
     // Allocate the assistant row id BEFORE streaming starts so we can echo it
     // back via a response header. The client tags its in-flight overlay with
@@ -273,7 +291,10 @@ export function registerAiChatRoutes(
         // The helpers return `false` (no throw) when the chat no longer exists
         // — deleted mid-stream — and nothing was written; that is not retried,
         // and it stops the sequence the same way an exhausted retry does.
-        const writeWithRetry = async (label: string, fn: () => Promise<boolean | void>): Promise<boolean> => {
+        const writeWithRetry = async (
+          label: string,
+          fn: () => Promise<boolean | void>,
+        ): Promise<boolean> => {
           for (let attempt = 1; attempt <= 2; attempt++) {
             try {
               if ((await fn()) === false) {
@@ -282,31 +303,40 @@ export function registerAiChatRoutes(
               }
               return true
             } catch (err) {
-              console.error(`[ai-chat] ${label} ${attempt === 1 ? 'failed, retrying once' : 'retry failed'}:`, err)
+              console.error(
+                `[ai-chat] ${label} ${attempt === 1 ? 'failed, retrying once' : 'retry failed'}:`,
+                err,
+              )
             }
           }
           return false
         }
 
-        const userOk = await writeWithRetry('user message', () => appendMessage(stub, {
-          id: userMessageId,
-          chatId,
-          userId: auth.userId,
-          role: 'user',
-          content,
-        }))
+        const userOk = await writeWithRetry('user message', () =>
+          appendMessage(stub, {
+            id: userMessageId,
+            chatId,
+            userId: auth.userId,
+            role: 'user',
+            content,
+          }),
+        )
         if (!userOk) {
-          console.error('[ai-chat] FINISH aborting — user write did not land; skipping assistant + metadata to avoid orphan rows')
+          console.error(
+            '[ai-chat] FINISH aborting — user write did not land; skipping assistant + metadata to avoid orphan rows',
+          )
           return
         }
-        const assistantOk = await writeWithRetry('assistant message', () => appendMessage(stub, {
-          id: asstId,
-          chatId,
-          userId: auth.userId,
-          role: 'assistant',
-          content: text,
-          ...(parts.length > 0 ? { parts } : {}),
-        }))
+        const assistantOk = await writeWithRetry('assistant message', () =>
+          appendMessage(stub, {
+            id: asstId,
+            chatId,
+            userId: auth.userId,
+            role: 'assistant',
+            content: text,
+            ...(parts.length > 0 ? { parts } : {}),
+          }),
+        )
         if (!assistantOk) return
         await writeWithRetry('chat metadata', async () => {
           // Re-fetch so a mid-stream rename by the user isn't clobbered by a

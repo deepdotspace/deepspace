@@ -109,13 +109,24 @@ describe('assembled templates', () => {
           'registerAuthAndIntegrationRoutes(app)',
           'registerRealtimeRoutes(app)',
           'registerActionRoutes(app, resolveAuth)',
-          'registerAiChatRoutes(app, resolveAuth)',
+          'registerAgent(app, { tools: buildTools })',
           'registerPlatformProxyRoutes(app)',
           'registerStaticRoutes(app)',
         ]
         const positions = registrations.map((registration) => worker.indexOf(registration))
         expect(positions.every((position) => position >= 0)).toBe(true)
         expect(positions).toEqual([...positions].sort((left, right) => left - right))
+        expect(worker).toContain('schemas.some((schema) => schema.name === AI_CHATS_SCHEMA.name)')
+        expect(worker).toContain("import { registerAgent } from './src/ai/agent.js'")
+        expect(worker).toContain("import { buildTools } from './src/ai/tools.js'")
+
+        const schemas = readFileSync(join(app, 'src', 'schemas.ts'), 'utf-8')
+        if (overlay === 'starter') {
+          expect(schemas).not.toContain('AI_CHATS_SCHEMA')
+        } else if (overlay === 'copilot') {
+          expect(schemas).toContain("import { aiChatSchemas } from './schemas/ai-chat-schema'")
+          expect(schemas).toContain('...aiChatSchemas')
+        }
 
         const httpRoutes = readFileSync(join(app, 'src/server/http-routes.ts'), 'utf-8')
         expect(httpRoutes.indexOf("app.all('/api/auth/sign-out'")).toBeLessThan(

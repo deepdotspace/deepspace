@@ -33,9 +33,16 @@ npx deepspace auth login   # authenticate with app.space
 npx deepspace dev start    # local dev server (vite + miniflare)
 npx deepspace deploy       # deploy to <app>.app.space
 npx deepspace push         # publish committed code to the app's cloud repo
+npx deepspace agent tools <app> --json # discover tools and their input schemas
+npx deepspace agent invoke <app> <tool> --input-file tool-input.json --json
 npx deepspace add --list   # list optional features (messaging, etc.)
 npx deepspace add <feature>
 ```
+
+For local app tools, always run `agent tools` first and follow the returned
+description and input schema rather than guessing arguments. `agent invoke`
+reuses the current CLI login and requires no separate connection. If it reports
+`not_authenticated`, run `npx deepspace auth login`.
 
 Use the DeepSpace cloud repo as the default version control; no external Git
 host is required. Start parallel work with

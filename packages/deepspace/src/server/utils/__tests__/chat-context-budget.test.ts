@@ -87,6 +87,16 @@ describe('capToolResultSize', () => {
     expect(capToolResultSize(payload, 1000)).toBe(payload)
   })
 
+  it('measures the cap in UTF-8 bytes, not UTF-16 length', () => {
+    // 1,000 leaf emoji = 2,000 UTF-16 units but ~4,000 UTF-8 bytes. A cap of
+    // 3,000 bytes must engage even though the string length is under it —
+    // consumers (the agent tool route, HTTP bodies) all measure bytes.
+    const big = { data: '🍃'.repeat(1000) }
+    const out = capToolResultSize(big, 3000) as Record<string, unknown>
+    expect(out.success).toBe(false)
+    expect(out.truncated).toBe(true)
+  })
+
   it('replaces with error + preview only for a non-array payload over cap', () => {
     // No trimmable array here (the bloat is a string), so there is nothing to
     // degrade — falls back to the informative error.

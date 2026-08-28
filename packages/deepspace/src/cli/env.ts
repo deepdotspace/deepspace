@@ -38,6 +38,11 @@ const INVALID_URLS = {
   deploy: 'http://127.0.0.1:9',
 } as const
 
+/** Canonical app-hosting domain for a plane (deployed apps live on `<name>.<domain>`). */
+export function appDomainForEnv(env: DeepSpaceEnvironment): string | null {
+  return env === 'production' ? 'app.space' : env === 'staging' ? 'spacestest.com' : null
+}
+
 export const PLATFORM_URLS =
   DEEPSPACE_ENV === 'production'
     ? PROD_URLS

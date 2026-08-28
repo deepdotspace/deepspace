@@ -7,7 +7,7 @@
  * Trim entries below if you want a stricter assistant for your app.
  */
 
-import { tool } from 'ai'
+import { jsonSchema, tool } from 'ai'
 import type { ToolSet } from 'ai'
 import { z } from 'zod/v4'
 import { BUILT_IN_TOOLS, applyAiToolDefaults } from 'deepspace/worker'
@@ -55,8 +55,8 @@ export function buildSystemPrompt(appName: string, schemas: CollectionSchema[]):
 
   return [
     `You are the assistant for the "${appName}" app on DeepSpace.`,
-    'You can read and modify the user\'s data via the available tools. The',
-    'user\'s own role and permissions still apply at the data layer — your',
+    "You can read and modify the user's data via the available tools. The",
+    "user's own role and permissions still apply at the data layer — your",
     'tool calls run as the calling user, so you can only do what they could.',
     '',
     'Be careful with mutations:',
@@ -85,7 +85,7 @@ export function buildTools(executor: ToolExecutor): ToolSet {
     const safeName = def.name.replace('.', '_')
     tools[safeName] = tool({
       description: def.description,
-      inputSchema: buildZodSchema(def),
+      inputSchema: buildInputSchema(def),
       // Apply assistant-only param defaults (e.g. records.query page size) here
       // in the AI tool layer, so internal record readers that hit the tools
       // dispatch directly stay unbounded.
@@ -98,26 +98,53 @@ export function buildTools(executor: ToolExecutor): ToolSet {
 }
 
 // ============================================================================
-// Convert ToolSchema params → Zod object schema
+// Convert ToolSchema params → Zod validator + derived provider JSON Schema
 // ============================================================================
 
-function buildZodSchema(def: ToolSchema) {
+/**
+ * The Zod validator is the single source; the provider-facing JSON Schema is
+ * derived from it with Zod's native conversion, which keeps z.record()
+ * objects open (`additionalProperties: {}`). The AI SDK's own Zod conversion
+ * closes every object, which would incorrectly advertise the free-form
+ * `data` and `where` objects as empty — so the conversion happens here.
+ */
+function buildInputSchema(def: ToolSchema) {
   const shape: Record<string, z.ZodTypeAny> = {}
 
   for (const [name, param] of Object.entries(def.params)) {
     let s: z.ZodTypeAny
     switch (param.type) {
-      case 'string':  s = z.string(); break
-      case 'number':  s = z.number(); break
-      case 'boolean': s = z.boolean(); break
-      case 'object':  s = z.record(z.string(), z.unknown()); break
-      case 'array':   s = z.array(z.unknown()); break
-      default:        s = z.unknown(); break
+      case 'string':
+        s = z.string()
+        break
+      case 'number':
+        s = z.number()
+        break
+      case 'boolean':
+        s = z.boolean()
+        break
+      case 'object':
+        s = z.record(z.string(), z.unknown())
+        break
+      case 'array':
+        s = z.array(z.unknown())
+        break
     }
     if (param.description) s = s.describe(param.description)
     if (!param.required) s = s.optional()
     shape[name] = s
   }
 
-  return z.object(shape)
+  const validator = z.object(shape)
+  return jsonSchema<Record<string, unknown>>(
+    z.toJSONSchema(validator) as Parameters<typeof jsonSchema>[0],
+    {
+      validate: async (value) => {
+        const result = await validator.safeParseAsync(value)
+        return result.success
+          ? { success: true, value: result.data }
+          : { success: false, error: result.error }
+      },
+    },
+  )
 }

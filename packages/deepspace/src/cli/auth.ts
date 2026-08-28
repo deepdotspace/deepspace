@@ -11,7 +11,7 @@ import { homedir } from 'node:os'
 
 import { DEEPSPACE_ENV, PLANE_AUTH_URLS, PLATFORM_URLS } from './env'
 import { decodeJwtPayload } from '../shared/jwt'
-import { exchangeSession } from './session'
+import { exchangeAgentSession, exchangeSession } from './session'
 import { registerAuthRefresh } from './lib/api'
 import { cliAction, Refusal } from './lib/command'
 import { writeSecretFileSync } from './lib/secure-file'
@@ -151,6 +151,19 @@ function isTokenValid(jwt: string, minimumValidityMs: number): boolean {
  */
 export async function refreshTokenFromSession(): Promise<string | null> {
   return await exchangeStoredSession()
+}
+
+/**
+ * Mint a target-bound agent token from the stored session without reading or
+ * replacing the CLI's ordinary platform-token cache.
+ */
+export async function mintAgentToken(target: string): Promise<string> {
+  if (!existsSync(SESSION_PATH)) throw notAuthenticated('Not logged in')
+  const sessionToken = readFileSync(SESSION_PATH, 'utf-8').trim()
+  const token = await exchangeAgentSession(AUTH_URL, sessionToken, target)
+  if (!token)
+    throw notAuthenticated('The stored session is no longer valid (expired or unreadable)')
+  return token
 }
 
 async function exchangeStoredSession(): Promise<string | null> {

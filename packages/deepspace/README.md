@@ -97,7 +97,15 @@ The package ships a `deepspace` binary for local dev and deployment:
 npx deepspace auth login # authenticate
 npx deepspace dev start  # run locally
 npx deepspace deploy     # deploy to *.app.space
+npx deepspace agent tools my-app # discover an app's local-assistant tools
 ```
+
+Apps that register assistant tools can expose the same tool factory to their
+website AI and to a user's local assistant. The stateless
+`deepspace agent tools` and `deepspace agent invoke` commands reuse the CLI
+session to mint a five-minute credential for the exact target app. The
+ordinary platform token is never sent to the app, and no separate connection
+or browser approval is required.
 
 When updating an existing app, run the target CLI rather than the app's old
 installed binary:

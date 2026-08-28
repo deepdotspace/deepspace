@@ -48,3 +48,13 @@ npx deepspace push         # sync code to the app's cloud repo
 npx deepspace add --list   # list optional features (messaging, etc.)
 npx deepspace add <feature>
 ```
+
+This starter does not register local agent tool routes by default. To expose
+the app's tools to a local assistant, add
+`registerAgent(app, { tools: buildTools, inApp: false })` in `worker.ts`
+(imports from `src/ai/agent.ts` and `src/ai/tools.ts`) and deploy. After that,
+`npx deepspace agent tools <app> --json` discovers the tools and their input
+schemas, and `npx deepspace agent invoke <app> <tool> --input-file input.json
+--json` runs one — always run `agent tools` first and follow the returned
+schema rather than guessing arguments. Both reuse the current CLI login; if
+they report `not_authenticated`, run `npx deepspace auth login`.

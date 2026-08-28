@@ -8,7 +8,7 @@ import {
   type DocumentationPublishedManifest,
 } from './published-corpus'
 import { checkDocumentationPublicLimit, documentationPublicClientKey } from './public-limiter'
-import { readBoundedRequestText, RequestBodyTooLargeError } from './request-body'
+import { readBoundedBodyText, BodyTooLargeError } from '../../shared/bounded-body'
 import {
   CURRENT_PROTOCOL_VERSION,
   MCP_SERVER_VERSION,
@@ -62,9 +62,9 @@ export function registerDocumentationMcpRoutes<Env extends DocumentationMcpRoute
 
     let raw: string
     try {
-      raw = await readBoundedRequestText(c.req.raw, MAX_REQUEST_BYTES)
+      raw = await readBoundedBodyText(c.req.raw, MAX_REQUEST_BYTES)
     } catch (error) {
-      if (error instanceof RequestBodyTooLargeError) {
+      if (error instanceof BodyTooLargeError) {
         return mcpError(null, -32600, `Request exceeds ${MAX_REQUEST_BYTES} bytes`, 413)
       }
       return mcpError(null, -32700, 'Unable to read request body', 400)

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { exchangeSession } from '../session'
+import { exchangeAgentSession, exchangeSession, SESSION_COOKIE } from '../session'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -63,5 +63,29 @@ describe('exchangeSession', () => {
     })
     await vi.runAllTimersAsync()
     await refusal
+  })
+})
+
+describe('exchangeAgentSession', () => {
+  it('sends the saved session cookie and target without a platform bearer', async () => {
+    const fetchMock = vi.fn<
+      (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+    >(async () => Response.json({ token: 'target-token' }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      exchangeAgentSession('https://auth.test', 'session secret', 'https://alpha.app.space'),
+    ).resolves.toBe('target-token')
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const [url, init = {}] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://auth.test/api/auth/agent-token')
+    expect(init.headers).toMatchObject({
+      Cookie: `${SESSION_COOKIE}=session%20secret`,
+      Origin: 'https://auth.test',
+      'Content-Type': 'application/json',
+    })
+    expect(init.headers).not.toHaveProperty('Authorization')
+    expect(JSON.parse(init.body as string)).toEqual({ target: 'https://alpha.app.space' })
   })
 })

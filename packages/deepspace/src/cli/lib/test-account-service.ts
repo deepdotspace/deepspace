@@ -6,8 +6,7 @@ import {
 } from '../../testing/accounts'
 import { SESSION_PATH } from '../auth'
 import { PLATFORM_URLS } from '../env'
-
-const SESSION_COOKIE = '__Secure-better-auth.session_token'
+import { SESSION_COOKIE } from '../../shared/auth-session'
 
 /** A platform refusal that carried a machine `code` (newer auth-workers put
  *  one beside `error`); callers key remedies on the code and fall back to
@@ -21,9 +20,13 @@ export class TestAccountServiceError extends Error {
   }
 }
 
-function serviceError(data: { error?: string; code?: string }, fallback: string): TestAccountServiceError {
+function serviceError(
+  data: { error?: string; code?: string },
+  fallback: string,
+): TestAccountServiceError {
   return new TestAccountServiceError(data.error ?? fallback, data.code)
 }
+
 const AUTH_URL = process.env.DEEPSPACE_AUTH_URL ?? PLATFORM_URLS.auth
 
 export interface CreateRemoteTestAccountInput {
@@ -42,7 +45,7 @@ export async function fetchRemoteTestAccounts(): Promise<RemoteTestAccount[]> {
   const response = await fetch(`${AUTH_URL}/api/auth/test-accounts`, {
     headers: { Cookie: sessionCookie(), Origin: AUTH_URL },
   })
-  const data = await response.json().catch(() => ({})) as {
+  const data = (await response.json().catch(() => ({}))) as {
     accounts?: RemoteTestAccount[]
     error?: string
     code?: string
@@ -65,7 +68,7 @@ export async function createRemoteTestAccount(
     },
     body: JSON.stringify(input),
   })
-  const data = await response.json().catch(() => ({})) as Partial<RemoteTestAccount> & {
+  const data = (await response.json().catch(() => ({}))) as Partial<RemoteTestAccount> & {
     error?: string
     code?: string
   }
@@ -104,7 +107,7 @@ export async function recoverRemoteTestAccount(id: string): Promise<RecoveredTes
     method: 'POST',
     headers: { Cookie: sessionCookie(), Origin: AUTH_URL },
   })
-  const data = await response.json().catch(() => ({})) as Partial<RecoveredTestAccount> & {
+  const data = (await response.json().catch(() => ({}))) as Partial<RecoveredTestAccount> & {
     error?: string
     code?: string
   }
@@ -140,7 +143,7 @@ export async function deleteRemoteTestAccount(id: string): Promise<void> {
     headers: { Cookie: sessionCookie(), Origin: AUTH_URL },
   })
   if (!response.ok) {
-    const data = await response.json().catch(() => ({})) as { error?: string; code?: string }
+    const data = (await response.json().catch(() => ({}))) as { error?: string; code?: string }
     throw serviceError(data, `DELETE returned ${response.status}`)
   }
 }

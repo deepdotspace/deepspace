@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   exists: vi.fn<(path: string) => boolean>(),
   read: vi.fn<(path: string) => string>(() => 'session'),
   exchange: vi.fn(async () => null as string | null),
+  exchangeAgent: vi.fn(async () => null as string | null),
   write: vi.fn(),
   chmod: vi.fn(),
 }))
@@ -16,17 +17,37 @@ vi.mock('node:fs', () => ({
   mkdirSync: vi.fn(),
 }))
 vi.mock('node:os', () => ({ homedir: () => '/tmp/deepspace-auth-action-test' }))
-vi.mock('../session', () => ({ exchangeSession: mocks.exchange }))
+vi.mock('../session', () => ({
+  exchangeSession: mocks.exchange,
+  exchangeAgentSession: mocks.exchangeAgent,
+}))
 vi.mock('../lib/api', () => ({ registerAuthRefresh: vi.fn() }))
 
-import { ensureToken, SESSION_PATH, TOKEN_PATH } from '../auth'
+import { ensureToken, mintAgentToken, SESSION_PATH, TOKEN_PATH } from '../auth'
 
 beforeEach(() => {
   mocks.exists.mockReset()
   mocks.read.mockClear()
   mocks.exchange.mockClear()
+  mocks.exchangeAgent.mockClear()
   mocks.write.mockClear()
   mocks.chmod.mockClear()
+})
+
+describe('mintAgentToken', () => {
+  it('uses only the saved session and never writes the ordinary token cache', async () => {
+    mocks.exists.mockImplementation((path) => path === SESSION_PATH)
+    mocks.exchangeAgent.mockResolvedValueOnce('target-token')
+
+    await expect(mintAgentToken('https://alpha.app.space')).resolves.toBe('target-token')
+    expect(mocks.exchangeAgent).toHaveBeenCalledWith(
+      'https://auth.deep.space',
+      'session',
+      'https://alpha.app.space',
+    )
+    expect(mocks.write).not.toHaveBeenCalled()
+    expect(mocks.chmod).not.toHaveBeenCalled()
+  })
 })
 
 const loginRefusal = {

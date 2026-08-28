@@ -19,7 +19,8 @@ import {
 } from 'deepspace/worker'
 import type { DOBindings, DOManifest, Job, JobContext } from 'deepspace/worker'
 import { AI_CHATS_SCHEMA } from 'deepspace/schema'
-import { registerAiChatRoutes } from './src/ai/chat-routes.js'
+import { registerAgent } from './src/ai/agent.js'
+import { buildTools } from './src/ai/tools.js'
 import { tasks as cronTasks, runTask as runCronTask } from './src/cron.js'
 import { runJob } from './src/jobs.js'
 import { schemas } from './src/schemas.js'
@@ -133,11 +134,12 @@ app.use('*', async (c, next) => {
 registerAuthAndIntegrationRoutes(app)
 registerRealtimeRoutes(app)
 registerActionRoutes(app, resolveAuth)
-// The chat routes read and write the `ai-chats` / `ai-messages` collections,
-// which only the copilot overlay declares in src/schemas.ts. Without them the
-// routes could only ever answer 500 (tools-api refuses the unknown
-// collection), so an app that has not adopted the schemas gets an honest 404.
-if (schemas.some((schema) => schema.name === AI_CHATS_SCHEMA.name)) registerAiChatRoutes(app, resolveAuth)
+// The in-app assistant stores chat history in `ai-chats` / `ai-messages`,
+// which only the copilot overlay declares. When present, registerAgent enables
+// both that website AI and the user's local Codex/Claude/etc. assistant.
+if (schemas.some((schema) => schema.name === AI_CHATS_SCHEMA.name)) {
+  registerAgent(app, { tools: buildTools })
+}
 registerPlatformProxyRoutes(app)
 registerStaticRoutes(app)
 
@@ -145,7 +147,10 @@ registerStaticRoutes(app)
 // the runtime renders as its stack frames only — the message never reaches
 // `deepspace logs`. Log the message as text, then answer 500 as before.
 app.onError((err, c) => {
-  console.error(`[error] ${c.req.method} ${new URL(c.req.url).pathname}: ${err.message}`, err.stack ?? '')
+  console.error(
+    `[error] ${c.req.method} ${new URL(c.req.url).pathname}: ${err.message}`,
+    err.stack ?? '',
+  )
   return c.text('Internal Server Error', 500)
 })
 
