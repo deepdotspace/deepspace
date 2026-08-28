@@ -37,7 +37,7 @@ export const MSG = {
 
   // ---- Auth signal -----------------------------------------------------
   // Server → client one-shot on connect from rooms that enforce role-based
-  // writes (Canvas, Game, Cron). Tells the client whether this connection
+  // writes (Canvas, Cron). Tells the client whether this connection
   // can write so its hook can disable local write APIs and the UI can
   // render controls accordingly. Without this, a viewer's click would
   // round-trip to the server and silently come back as ERROR.
@@ -51,7 +51,6 @@ export const MSG = {
   ACK: 'records.ack',
   LIST_SCHEMAS: 'records.list_schemas',
   RESUBSCRIBE: 'records.resubscribe',
-
 
   // ---- CanvasRoom ------------------------------------------------------
   CANVAS_SHAPES: 'canvas.shapes',
@@ -89,13 +88,6 @@ export const MSG = {
   PRESENCE_JOIN: 'presence.join',
   PRESENCE_LEAVE: 'presence.leave',
   PRESENCE_UPDATE: 'presence.update',
-
-  // ---- Gateway multiplexing --------------------------------------------
-  GW_SCOPE_CONNECT: 'gateway.scope_connect',
-  GW_SCOPE_DISCONNECT: 'gateway.scope_disconnect',
-  GW_SCOPE_ERROR: 'gateway.scope_error',
-  GW_TOKEN_REFRESH: 'gateway.token_refresh',
-  GW_USER_UPDATE: 'gateway.user_update',
 } as const
 
 /**

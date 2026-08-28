@@ -11,7 +11,7 @@
  * runtime. This module pairs every constant with its payload type, so
  * that:
  *
- *   1. Building a message with `clientBuild.gameInput(...)` is payload-
+ *   1. Building a message with `clientBuild.canvasAdd(...)` is payload-
  *      checked at the call site — the compiler refuses to ship a wrong
  *      shape.
  *
@@ -60,7 +60,7 @@
  *
  * Where payload shapes are stable + narrow (ids, flags), we type them
  * precisely. Where they're opaque or escape the protocol layer (record
- * data blobs, Yjs binary frames, game-engine state), we use `unknown` and
+ * data blobs, Yjs binary frames, canvas shapes), we use `unknown` and
  * defer narrowing to the caller. This is intentional: over-typing opaque
  * payloads would require the protocol layer to import application types
  * and defeat the "thin wire contract" goal.
@@ -74,7 +74,7 @@ import { MSG } from './constants'
 
 /**
  * The outer shape of every wire message. `T` is the string discriminator
- * (e.g. `"game.input"`) — keeping it as a generic literal type lets the
+ * (e.g. `"canvas.add"`) — keeping it as a generic literal type lets the
  * discriminated-union narrowing in `dispatch()` pick the right payload.
  *
  * Callers extending the protocol should pass a string-literal type for
@@ -115,10 +115,7 @@ export type ClientMessage =
       typeof MSG.PUT,
       { collection: string; recordId: string; data: Record<string, unknown>; requestId?: string }
     >
-  | BaseMessage<
-      typeof MSG.DELETE,
-      { collection: string; recordId: string; requestId?: string }
-    >
+  | BaseMessage<typeof MSG.DELETE, { collection: string; recordId: string; requestId?: string }>
   // ---- Users ------------------------------------------------------------
   | BaseMessage<typeof MSG.USER_LIST, EmptyPayload>
   | BaseMessage<typeof MSG.SET_ROLE, { userId: string; role: string }>
@@ -130,7 +127,6 @@ export type ClientMessage =
   // Binary yjs sync/awareness frames use numeric `MSG_YJS_SYNC` /
   // `MSG_YJS_AWARENESS` envelope ids from `./constants.ts` and ride the
   // binary WebSocket channel. They bypass this typed layer entirely.
-  // ---- Game -------------------------------------------------------------
   // ---- Canvas -----------------------------------------------------------
   // `CANVAS_ADD` sends a flat shape dict as the payload (not `{ shape }`);
   // the server wraps it in `{ shape }` on its rebroadcast. Keep the types
@@ -145,10 +141,7 @@ export type ClientMessage =
       { shapeId: string; width: number; height: number; x?: number; y?: number }
     >
   | BaseMessage<typeof MSG.CANVAS_DELETE, { shapeId: string }>
-  | BaseMessage<
-      typeof MSG.CANVAS_UPDATE,
-      { shapeId: string; props: Record<string, unknown> }
-    >
+  | BaseMessage<typeof MSG.CANVAS_UPDATE, { shapeId: string; props: Record<string, unknown> }>
   // Flat payload in the client→server direction, matching `CANVAS_ADD`.
   | BaseMessage<typeof MSG.CANVAS_VIEWPORT, unknown>
   | BaseMessage<typeof MSG.CANVAS_UNDO, EmptyPayload>
@@ -177,10 +170,6 @@ export type ClientMessage =
   // Flat state object — the server merges incoming fields into the peer's
   // stored state; there's no `{ state }` wrapper in the client direction.
   | BaseMessage<typeof MSG.PRESENCE_UPDATE, Record<string, unknown>>
-  // ---- Gateway ----------------------------------------------------------
-  | BaseMessage<typeof MSG.GW_SCOPE_CONNECT, { scopeType: string; scopeId: string }>
-  | BaseMessage<typeof MSG.GW_SCOPE_DISCONNECT, { scopeType: string; scopeId: string }>
-  | BaseMessage<typeof MSG.GW_TOKEN_REFRESH, { token: string }>
 
 // =============================================================================
 // Server → Client messages
@@ -195,10 +184,7 @@ export type ClientMessage =
  */
 export type ServerMessage =
   // ---- Records / CRUD ---------------------------------------------------
-  | BaseMessage<
-      typeof MSG.QUERY_RESULT,
-      { subscriptionId: string; records: unknown[] }
-    >
+  | BaseMessage<typeof MSG.QUERY_RESULT, { subscriptionId: string; records: unknown[] }>
   | BaseMessage<
       typeof MSG.RECORD_CHANGE,
       {
@@ -225,7 +211,7 @@ export type ServerMessage =
   | BaseMessage<typeof MSG.LIST_SCHEMAS, { schemas: unknown }>
   // ---- Auth -------------------------------------------------------------
   // Emitted once per connection by rooms that enforce role-based writes
-  // (Canvas, Game, Cron). Client hooks store `canWrite` in state and
+  // (Canvas, Cron). Client hooks store `canWrite` in state and
   // disable write APIs when false. See useCanvas /
   // useCronMonitor for the consumer side.
   | BaseMessage<typeof MSG.AUTH, { canWrite: boolean }>
@@ -239,15 +225,11 @@ export type ServerMessage =
       typeof MSG.YJS_JOIN,
       { collection: string; recordId: string; fieldName: string; canWrite: boolean }
     >
-  // ---- Game -------------------------------------------------------------
   // ---- Canvas -----------------------------------------------------------
   // `CANVAS_SHAPES` carries both the shape list and the viewports snapshot
   // so new connections can restore a multi-user view in one message. See
   // server/rooms/canvas-room.ts:onConnect.
-  | BaseMessage<
-      typeof MSG.CANVAS_SHAPES,
-      { shapes: unknown[]; viewports: unknown[] }
-    >
+  | BaseMessage<typeof MSG.CANVAS_SHAPES, { shapes: unknown[]; viewports: unknown[] }>
   | BaseMessage<typeof MSG.CANVAS_ADD, { shape: unknown }>
   | BaseMessage<typeof MSG.CANVAS_MOVE, { shapeId: string; x: number; y: number }>
   | BaseMessage<
@@ -255,10 +237,7 @@ export type ServerMessage =
       { shapeId: string; width: number; height: number; x?: number; y?: number }
     >
   | BaseMessage<typeof MSG.CANVAS_DELETE, { shapeId: string }>
-  | BaseMessage<
-      typeof MSG.CANVAS_UPDATE,
-      { shapeId: string; props: Record<string, unknown> }
-    >
+  | BaseMessage<typeof MSG.CANVAS_UPDATE, { shapeId: string; props: Record<string, unknown> }>
   | BaseMessage<
       typeof MSG.CANVAS_VIEWPORT,
       { viewport: unknown } | { userId: string; removed: true }
@@ -305,16 +284,7 @@ export type ServerMessage =
   | BaseMessage<typeof MSG.PRESENCE_SYNC, { peers: unknown[] }>
   | BaseMessage<typeof MSG.PRESENCE_JOIN, { peer: unknown }>
   | BaseMessage<typeof MSG.PRESENCE_LEAVE, { userId: string }>
-  | BaseMessage<
-      typeof MSG.PRESENCE_UPDATE,
-      { userId: string; state: Record<string, unknown> }
-    >
-  // ---- Gateway ----------------------------------------------------------
-  | BaseMessage<
-      typeof MSG.GW_SCOPE_ERROR,
-      { scopeType: string; scopeId: string; error: string }
-    >
-  | BaseMessage<typeof MSG.GW_USER_UPDATE, unknown>
+  | BaseMessage<typeof MSG.PRESENCE_UPDATE, { userId: string; state: Record<string, unknown> }>
 
 /**
  * Any wire message, regardless of direction. Use this only when the code
@@ -332,7 +302,7 @@ export type ProtocolMessage = ClientMessage | ServerMessage
 // `JSON.stringify` ship exactly what the wire protocol expects.
 //
 // `as const` on every return preserves the literal string `type` value
-// (e.g. `"game.input"`), which is what the discriminated-union narrowing
+// (e.g. `"canvas.add"`), which is what the discriminated-union narrowing
 // in `dispatch` keys on. Without it TS widens to `string` and the handler
 // map collapses to a single untyped key.
 // =============================================================================
@@ -344,12 +314,7 @@ export const clientBuild = {
     ({ type: MSG.SUBSCRIBE, payload: { subscriptionId, query } }) as const,
   unsubscribe: (subscriptionId: string) =>
     ({ type: MSG.UNSUBSCRIBE, payload: { subscriptionId } }) as const,
-  put: (
-    collection: string,
-    recordId: string,
-    data: Record<string, unknown>,
-    requestId?: string,
-  ) =>
+  put: (collection: string, recordId: string, data: Record<string, unknown>, requestId?: string) =>
     ({
       type: MSG.PUT,
       payload: { collection, recordId, data, requestId },
@@ -373,16 +338,9 @@ export const clientBuild = {
     ({ type: MSG.CANVAS_ADD, payload: shape }) as const,
   canvasMove: (shapeId: string, x: number, y: number) =>
     ({ type: MSG.CANVAS_MOVE, payload: { shapeId, x, y } }) as const,
-  canvasResize: (
-    shapeId: string,
-    width: number,
-    height: number,
-    x?: number,
-    y?: number,
-  ) =>
+  canvasResize: (shapeId: string, width: number, height: number, x?: number, y?: number) =>
     ({ type: MSG.CANVAS_RESIZE, payload: { shapeId, width, height, x, y } }) as const,
-  canvasDelete: (shapeId: string) =>
-    ({ type: MSG.CANVAS_DELETE, payload: { shapeId } }) as const,
+  canvasDelete: (shapeId: string) => ({ type: MSG.CANVAS_DELETE, payload: { shapeId } }) as const,
   canvasUpdate: (shapeId: string, props: Record<string, unknown>) =>
     ({ type: MSG.CANVAS_UPDATE, payload: { shapeId, props } }) as const,
   canvasViewport: (viewport: Record<string, unknown>) =>
@@ -397,30 +355,16 @@ export const clientBuild = {
   cronResume: (taskName: string, requestId?: string) =>
     ({ type: MSG.CRON_RESUME, payload: { taskName, requestId } }) as const,
   // Jobs
-  jobEnqueue: (
-    requestId: string,
-    type: string,
-    payload?: unknown,
-    maxAttempts?: number,
-  ) =>
+  jobEnqueue: (requestId: string, type: string, payload?: unknown, maxAttempts?: number) =>
     ({
       type: MSG.JOB_ENQUEUE,
       payload: { requestId, type, payload, maxAttempts },
     }) as const,
-  jobCancel: (jobId: string) =>
-    ({ type: MSG.JOB_CANCEL, payload: { jobId } }) as const,
-  jobRetry: (jobId: string) =>
-    ({ type: MSG.JOB_RETRY, payload: { jobId } }) as const,
+  jobCancel: (jobId: string) => ({ type: MSG.JOB_CANCEL, payload: { jobId } }) as const,
+  jobRetry: (jobId: string) => ({ type: MSG.JOB_RETRY, payload: { jobId } }) as const,
   // Presence
   presenceUpdate: (state: Record<string, unknown>) =>
     ({ type: MSG.PRESENCE_UPDATE, payload: state }) as const,
-  // Gateway
-  gwScopeConnect: (scopeType: string, scopeId: string) =>
-    ({ type: MSG.GW_SCOPE_CONNECT, payload: { scopeType, scopeId } }) as const,
-  gwScopeDisconnect: (scopeType: string, scopeId: string) =>
-    ({ type: MSG.GW_SCOPE_DISCONNECT, payload: { scopeType, scopeId } }) as const,
-  gwTokenRefresh: (token: string) =>
-    ({ type: MSG.GW_TOKEN_REFRESH, payload: { token } }) as const,
 }
 
 /** Factories for every server → client message. Used by room DOs and
@@ -432,11 +376,7 @@ export const serverBuild = {
   // Records / CRUD
   queryResult: (subscriptionId: string, records: unknown[]) =>
     ({ type: MSG.QUERY_RESULT, payload: { subscriptionId, records } }) as const,
-  recordChange: (
-    collection: string,
-    record: unknown,
-    changeType: 'create' | 'update' | 'delete',
-  ) =>
+  recordChange: (collection: string, record: unknown, changeType: 'create' | 'update' | 'delete') =>
     ({ type: MSG.RECORD_CHANGE, payload: { collection, record, changeType } }) as const,
   error: (error: string, subscriptionId?: string) =>
     ({ type: MSG.ERROR, payload: { error, subscriptionId } }) as const,
@@ -451,13 +391,10 @@ export const serverBuild = {
       payload: { requestId, success: false as const, error },
     }) as const,
   resubscribe: () => ({ type: MSG.RESUBSCRIBE, payload: EMPTY }) as const,
-  schemas: (schemas: unknown) =>
-    ({ type: MSG.LIST_SCHEMAS, payload: { schemas } }) as const,
+  schemas: (schemas: unknown) => ({ type: MSG.LIST_SCHEMAS, payload: { schemas } }) as const,
   // Users
-  userInfo: (user: unknown) =>
-    ({ type: MSG.USER_INFO, payload: user }) as const,
-  userList: (users: unknown[]) =>
-    ({ type: MSG.USER_LIST, payload: { users } }) as const,
+  userInfo: (user: unknown) => ({ type: MSG.USER_INFO, payload: user }) as const,
+  userList: (users: unknown[]) => ({ type: MSG.USER_LIST, payload: { users } }) as const,
   // Yjs
   yjsJoin: (collection: string, recordId: string, fieldName: string, canWrite: boolean) =>
     ({
@@ -467,20 +404,12 @@ export const serverBuild = {
   // Canvas
   canvasShapes: (shapes: unknown[], viewports: unknown[]) =>
     ({ type: MSG.CANVAS_SHAPES, payload: { shapes, viewports } }) as const,
-  canvasAdd: (shape: unknown) =>
-    ({ type: MSG.CANVAS_ADD, payload: { shape } }) as const,
+  canvasAdd: (shape: unknown) => ({ type: MSG.CANVAS_ADD, payload: { shape } }) as const,
   canvasMove: (shapeId: string, x: number, y: number) =>
     ({ type: MSG.CANVAS_MOVE, payload: { shapeId, x, y } }) as const,
-  canvasResize: (
-    shapeId: string,
-    width: number,
-    height: number,
-    x?: number,
-    y?: number,
-  ) =>
+  canvasResize: (shapeId: string, width: number, height: number, x?: number, y?: number) =>
     ({ type: MSG.CANVAS_RESIZE, payload: { shapeId, width, height, x, y } }) as const,
-  canvasDelete: (shapeId: string) =>
-    ({ type: MSG.CANVAS_DELETE, payload: { shapeId } }) as const,
+  canvasDelete: (shapeId: string) => ({ type: MSG.CANVAS_DELETE, payload: { shapeId } }) as const,
   canvasUpdate: (shapeId: string, props: Record<string, unknown>) =>
     ({ type: MSG.CANVAS_UPDATE, payload: { shapeId, props } }) as const,
   canvasViewport: (viewport: unknown) =>
@@ -491,10 +420,8 @@ export const serverBuild = {
       payload: { userId, removed: true as const },
     }) as const,
   // Cron
-  cronTasks: (tasks: unknown) =>
-    ({ type: MSG.CRON_TASKS, payload: { tasks } }) as const,
-  cronHistory: (history: unknown) =>
-    ({ type: MSG.CRON_HISTORY, payload: { history } }) as const,
+  cronTasks: (tasks: unknown) => ({ type: MSG.CRON_TASKS, payload: { tasks } }) as const,
+  cronHistory: (history: unknown) => ({ type: MSG.CRON_HISTORY, payload: { history } }) as const,
   cronStatus: (tasks: unknown, recentHistory: unknown) =>
     ({ type: MSG.CRON_STATUS, payload: { tasks, recentHistory } }) as const,
   cronAckSuccess: (requestId: string, taskName: string) =>
@@ -531,22 +458,11 @@ export const serverBuild = {
   jobRetried: (job: unknown) =>
     ({ type: MSG.JOB_UPDATE, payload: { kind: 'retried' as const, job } }) as const,
   // Presence
-  presenceSync: (peers: unknown[]) =>
-    ({ type: MSG.PRESENCE_SYNC, payload: { peers } }) as const,
-  presenceJoin: (peer: unknown) =>
-    ({ type: MSG.PRESENCE_JOIN, payload: { peer } }) as const,
-  presenceLeave: (userId: string) =>
-    ({ type: MSG.PRESENCE_LEAVE, payload: { userId } }) as const,
+  presenceSync: (peers: unknown[]) => ({ type: MSG.PRESENCE_SYNC, payload: { peers } }) as const,
+  presenceJoin: (peer: unknown) => ({ type: MSG.PRESENCE_JOIN, payload: { peer } }) as const,
+  presenceLeave: (userId: string) => ({ type: MSG.PRESENCE_LEAVE, payload: { userId } }) as const,
   presenceUpdate: (userId: string, state: Record<string, unknown>) =>
     ({ type: MSG.PRESENCE_UPDATE, payload: { userId, state } }) as const,
-  // Gateway
-  gwScopeError: (scopeType: string, scopeId: string, error: string) =>
-    ({
-      type: MSG.GW_SCOPE_ERROR,
-      payload: { scopeType, scopeId, error },
-    }) as const,
-  gwUserUpdate: (user: unknown) =>
-    ({ type: MSG.GW_USER_UPDATE, payload: user }) as const,
 }
 
 // =============================================================================
@@ -619,9 +535,7 @@ export function dispatch<M extends BaseMessage<string, unknown> = ProtocolMessag
     return false
   }
   if (typeof msg.type !== 'string') return false
-  const handler = (handlers as Record<string, ((payload: unknown) => void) | undefined>)[
-    msg.type
-  ]
+  const handler = (handlers as Record<string, ((payload: unknown) => void) | undefined>)[msg.type]
   if (!handler) return false
   handler(msg.payload)
   return true
@@ -630,7 +544,7 @@ export function dispatch<M extends BaseMessage<string, unknown> = ProtocolMessag
 /**
  * Serialise a typed-built message for `ws.send`. A tiny wrapper around
  * `JSON.stringify` kept around so call sites read as
- * `ws.send(encode(clientBuild.gameInput(...)))` rather than paying
+ * `ws.send(encode(clientBuild.canvasAdd(...)))` rather than paying
  * attention to stringify arguments.
  */
 export function encode<M extends BaseMessage<string, unknown>>(message: M): string {

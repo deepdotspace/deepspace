@@ -92,10 +92,12 @@ export default defineDeepspaceCommand({
       } catch (error) {
         if (error instanceof ApiError && error.code === 'forbidden') {
           // The id exists but belongs to someone else (e.g. a cloned repo).
+          // Env-aware remedy: a bare --new-id under --env would fork the
+          // TOP-LEVEL slot, not the env that refused.
           throw new Refusal(
             `wrangler.toml carries ${existing}, which is registered to another user. ` +
-              'Run `deepspace app init --new-id` to fork this repo as your own app ' +
-              '(new data and secrets; the original is untouched).',
+              `Run \`deepspace app init --new-id${envName ? ` --env ${envName}` : ''}\` to fork ` +
+              'this repo as your own app (new data and secrets; the original is untouched).',
             'not_app_owner',
           )
         }
@@ -108,7 +110,8 @@ export default defineDeepspaceCommand({
         throw new Refusal(
           `wrangler.toml carries ${existing}, but that id was never registered — it was ` +
             `minted locally by an older SDK. Ids are server-minted at registration now, and an ` +
-            `existing unregistered id cannot be claimed. Run \`deepspace app init --new-id\` to ` +
+            `existing unregistered id cannot be claimed. Run ` +
+            `\`deepspace app init --new-id${envName ? ` --env ${envName}` : ''}\` to ` +
             `register this repo as a fresh app (new data and secrets; nothing to migrate — the ` +
             `old id never had server-side state).`,
           'app_not_registered',
@@ -204,7 +207,14 @@ export default defineDeepspaceCommand({
         ? {
             action: {
               cwd: appDir,
-              argv: ['git', 'commit', '-m', existing ? `Fork as ${appId}` : `Register ${appId}`, '--', 'wrangler.toml'],
+              argv: [
+                'git',
+                'commit',
+                '-m',
+                existing ? `Fork as ${appId}` : `Register ${appId}`,
+                '--',
+                'wrangler.toml',
+              ],
             },
           }
         : {}),

@@ -29,13 +29,14 @@ import {
   deployBuiltBundle,
   renamePromptMessage,
   renameRefusalMessage,
+  requireDeployCapabilities,
   STALE_DISPLAY_NAME_LOCATIONS,
 } from './deploy/request'
 // Re-exported so the rename wording keeps one import site for tests and callers.
 export { renamePromptMessage, renameRefusalMessage }
 import { preflightDeployRepository, syncDeployRepository } from './deploy/repository'
 import { getAppSource } from '../lib/source-api'
-import { loadDeploySecrets, prepareDeploySecrets } from './deploy/secrets'
+import { loadDeploySecrets } from './deploy/secrets'
 import { acquireDeployLock } from './deploy/lock'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
@@ -250,12 +251,18 @@ async function runLockedDeploy(
   if (!sourceState.registered) {
     output.die(
       `${appId} is not registered. If this repo's id came from an older SDK's scaffold, run ` +
-        `\`deepspace app init --new-id\` to register it as a fresh app; a brand-new app dir ` +
-        `registers with \`deepspace app init\`.`,
+        `\`deepspace app init --new-id${envName ? ` --env ${envName}` : ''}\` to register it as ` +
+        `a fresh app; a brand-new app dir registers with ` +
+        `\`deepspace app init${envName ? ` --env ${envName}` : ''}\`.`,
       'app_not_registered',
     )
   }
-  const secretsCache = await loadDeploySecrets({
+  // The capability handshake runs BEFORE anything with a cost: the secrets
+  // refresh, the build, and — the irreversible one — the repo push. Against
+  // an old server this refuses with the repo untouched.
+  await requireDeployCapabilities(DEPLOY_URL, null, output)
+
+  const { configName: secretsConfig } = await loadDeploySecrets({
     deployUrl: DEPLOY_URL,
     appDir,
     appId,
@@ -275,7 +282,9 @@ async function runLockedDeploy(
   // nothing else in a deploy's output tells a collaborator they are shipping
   // an app that belongs to another account (v0.26.0 collab AX).
   if (sourceState.onBehalf) {
-    process.stderr.write('Deploying on behalf of the owner — this app belongs to another account.\n')
+    process.stderr.write(
+      'Deploying on behalf of the owner — this app belongs to another account.\n',
+    )
   }
 
   let confirmRename = args.rename === true
@@ -333,12 +342,6 @@ async function runLockedDeploy(
     sourceState,
   })
 
-  const secrets = prepareDeploySecrets({
-    cache: secretsCache,
-    customBindings: bundle.customBindings,
-    doManifest: bundle.doManifest,
-    output,
-  })
   const body = await deployBuiltBundle({
     deployUrl: DEPLOY_URL,
     appDir,
@@ -350,7 +353,8 @@ async function runLockedDeploy(
     claimReleased: args['claim-released'] === true,
     ignoreStale: Boolean(args['ignore-stale']),
     bundle,
-    secrets,
+    secretsConfig,
+    envName,
     repository,
     output,
     spinner,
@@ -485,10 +489,7 @@ async function syncPostDeployCommerce(
 export function shippedSourceEvidence(repository: {
   source: { provider: 'deepspace' } | { provider: 'github'; repository: string } | null
   observedRepository: string | null
-}):
-  | { provider: 'github'; repository: string; inferred?: true }
-  | { provider: 'deepspace' }
-  | null {
+}): { provider: 'github'; repository: string; inferred?: true } | { provider: 'deepspace' } | null {
   if (repository.source?.provider === 'github') {
     return { provider: 'github', repository: repository.source.repository }
   }

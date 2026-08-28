@@ -56,9 +56,8 @@ import { createDeployOutput, deployFailureEnvelope, type DeployOutput } from '..
 import type { PushRefResult } from '../../lib/vc-push'
 import { ApiError } from '../../lib/api'
 import { GitError } from '../../lib/git/process'
-import { loadDeploySecrets, prepareDeploySecrets } from '../deploy/secrets'
+import { loadDeploySecrets } from '../deploy/secrets'
 import { writeDevVars } from '../../lib/dev-vars'
-
 
 vi.mock('../../lib/dev-vars', () => ({ writeDevVars: vi.fn(async () => undefined) }))
 
@@ -186,9 +185,9 @@ describe('external git source is inferred, never registered', () => {
       g(['commit', '-q', '-m', 'base'])
       writeFileSync(join(repo, 'f.txt'), 'dirty\n')
 
-      expect(
-        preflightDeployRepository({ appDir: repo, push: true, source: null }),
-      ).toMatchObject({ code: 'dirty_worktree' })
+      expect(preflightDeployRepository({ appDir: repo, push: true, source: null })).toMatchObject({
+        code: 'dirty_worktree',
+      })
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
@@ -327,7 +326,8 @@ describe('on-behalf deploy attribution', () => {
         compatibilityFlags: [],
         notFoundHandling: null,
       },
-      secrets: { authoritative: false, values: {}, names: [] },
+      secretsConfig: 'prd',
+      envName: undefined,
       repository: {
         commitOid: null,
         recoverable: false,
@@ -402,7 +402,8 @@ describe('on-behalf deploy attribution', () => {
         compatibilityFlags: [],
         notFoundHandling: null,
       },
-      secrets: { authoritative: false, values: {}, names: [] },
+      secretsConfig: 'prd',
+      envName: undefined,
       repository: {
         commitOid: null,
         recoverable: false,
@@ -479,7 +480,8 @@ describe('on-behalf deploy attribution', () => {
           compatibilityFlags: [],
           notFoundHandling: null,
         },
-        secrets: { authoritative: false, values: {}, names: [] },
+        secretsConfig: 'prd',
+        envName: undefined,
         repository: {
           commitOid: null,
           recoverable: false,
@@ -557,7 +559,8 @@ describe('on-behalf deploy attribution', () => {
         compatibilityFlags: [],
         notFoundHandling: null,
       },
-      secrets: { authoritative: false, values: {}, names: [] },
+      secretsConfig: 'prd',
+      envName: undefined,
       repository: {
         commitOid: null,
         recoverable: false,
@@ -630,7 +633,8 @@ describe('on-behalf deploy attribution', () => {
           compatibilityFlags: [],
           notFoundHandling: null,
         },
-        secrets: { authoritative: false, values: {}, names: [] },
+        secretsConfig: 'prd',
+        envName: undefined,
         repository: {
           commitOid: null,
           recoverable: false,
@@ -732,12 +736,98 @@ describe('deploy secret authority', () => {
     )
   })
 
-  it('treats an explicitly existing empty config as authoritative', async () => {
+  it('the empty-set removal warning prints for an existing empty config — and NEVER on the refusal path', async () => {
+    // The warn line and the 404 refusal are contradictory sentences; the
+    // gate between them vanished once without a test noticing. Pin both
+    // directions: 200-empty (ships authoritative-empty) warns; 404
+    // (refuses, deploys nothing, removes nothing) must not.
+    const { log } = await import('@clack/prompts')
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    try {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => Response.json({ secrets: {} })),
+      )
+      await loadDeploySecrets({
+        deployUrl: 'https://deploy.test',
+        appDir: '/tmp/app',
+        appId,
+        envName: undefined,
+        ownerId: 'owner',
+        token: 'token',
+        output: output(),
+      })
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      expect(String(warnSpy.mock.calls[0][0])).toContain('App secrets: none')
+
+      warnSpy.mockClear()
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => Response.json({ error: 'config_not_found' }, { status: 404 })),
+      )
+      await expect(
+        loadDeploySecrets({
+          deployUrl: 'https://deploy.test',
+          appDir: '/tmp/app',
+          appId,
+          envName: undefined,
+          ownerId: 'owner',
+          token: 'token',
+          output: output(),
+        }),
+      ).rejects.toMatchObject({ code: 'secrets_config_missing' })
+      expect(warnSpy).not.toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('a dev-vars/app-token failure keeps its own code — never secrets_refresh_failed', async () => {
+    // The catch split is the point: an agent branching on
+    // secrets_refresh_failed would go create a secrets config for what is
+    // actually an auth or wrong-URL fault. An ApiError keeps its server
+    // code; anything else gets dev_vars_failed.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ secrets: { API_KEY: 'v1' } })),
+    )
+    vi.mocked(writeDevVars).mockRejectedValueOnce(
+      new ApiError('App not found', 404, 'app_not_found'),
+    )
+    await expect(
+      loadDeploySecrets({
+        deployUrl: 'https://deploy.test',
+        appDir: '/tmp/app',
+        appId,
+        envName: undefined,
+        ownerId: 'owner',
+        token: 'token',
+        output: output(),
+      }),
+    ).rejects.toMatchObject({ code: 'app_not_found' })
+
+    vi.mocked(writeDevVars).mockRejectedValueOnce(new Error('EACCES: permission denied'))
+    await expect(
+      loadDeploySecrets({
+        deployUrl: 'https://deploy.test',
+        appDir: '/tmp/app',
+        appId,
+        envName: undefined,
+        ownerId: 'owner',
+        token: 'token',
+        output: output(),
+      }),
+    ).rejects.toMatchObject({ code: 'dev_vars_failed' })
+  })
+
+  it('resolves an existing config to the name the deploy form sends', async () => {
+    // No values travel: the platform reads its own store at commit; the CLI's
+    // whole contribution is the config name (wranglerEnv ?? 'prd').
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => Response.json({ secrets: {} })),
     )
-    const cache = await loadDeploySecrets({
+    const result = await loadDeploySecrets({
       deployUrl: 'https://deploy.test',
       appDir: '/tmp/app',
       appId,
@@ -746,26 +836,7 @@ describe('deploy secret authority', () => {
       token: 'token',
       output: output(),
     })
-    expect(
-      prepareDeploySecrets({ cache, customBindings: [], doManifest: undefined, output: output() }),
-    ).toEqual({ values: {}, names: [], authoritative: true })
-  })
-
-  it('refuses a secret that collides with a non-secret Wrangler var', () => {
-    expect(() =>
-      prepareDeploySecrets({
-        cache: {
-          linked: {
-            appId,
-            configName: 'prd',
-            values: { AWS_REGION: 'secret-value' },
-          },
-        },
-        customBindings: [{ type: 'plain_text', name: 'AWS_REGION', text: 'us-east-1' }],
-        doManifest: undefined,
-        output: output(),
-      }),
-    ).toThrow(/collides with a binding declared in wrangler\.toml/)
+    expect(result).toEqual({ configName: 'prd' })
   })
 })
 
@@ -944,8 +1015,7 @@ describe('clientAppIdRefusal', () => {
     // site itself from deploying. App-owned assets stay scanned.
     withClient(
       {
-        '_documentation/assets/documentation-page-AWFCDME6.js':
-          `const s="declare const __DEEPSPACE_APP_ID__: string";const x="${OTHER}"`,
+        '_documentation/assets/documentation-page-AWFCDME6.js': `const s="declare const __DEEPSPACE_APP_ID__: string";const x="${OTHER}"`,
         '_documentation/cli-reference/overview/index.html':
           '<td><code>__DEEPSPACE_APP_ID__</code></td>',
         // A root-mounted docs site writes the same output under
@@ -1907,12 +1977,10 @@ describe('deployBuiltBundle codes a codeless server failure', () => {
     // emits the envelope through that captured reference, so the spy has to
     // be installed before createDeployOutput runs.
     const lines: string[] = []
-    const stdoutSpy = vi
-        .spyOn(process.stdout, 'write')
-        .mockImplementation(((chunk: unknown) => {
-          lines.push(String(chunk))
-          return true
-        }) as never)
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+      lines.push(String(chunk))
+      return true
+    }) as never)
     vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
     vi.spyOn(console, 'error').mockImplementation(() => {})
     // URL-aware: the capabilities preflight (`/api/health`) must succeed so
@@ -1920,10 +1988,13 @@ describe('deployBuiltBundle codes a codeless server failure', () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: unknown) => {
       const url = String(input)
       if (url.includes('/api/health')) {
-        return new Response(JSON.stringify({ capabilities: { assetTransport: 'content-addressed-v1' } }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        })
+        return new Response(
+          JSON.stringify({ capabilities: { assetTransport: 'content-addressed-v1' } }),
+          {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          },
+        )
       }
       if (url.includes('/asset-plan')) {
         return new Response(JSON.stringify({ missing: [] }), {
@@ -1937,7 +2008,7 @@ describe('deployBuiltBundle codes a codeless server failure', () => {
         status: 400,
         headers: { 'content-type': 'application/json' },
       })
-    }) as never    )
+    }) as never)
 
     const output = createDeployOutput(true)
     const spinner = { start: () => {}, stop: () => {}, message: () => {} }
@@ -1968,7 +2039,8 @@ describe('deployBuiltBundle codes a codeless server failure', () => {
         claimReleased: false,
         ignoreStale: false,
         bundle: bundle as never,
-        secrets: { authoritative: false, values: {} } as never,
+        secretsConfig: 'prd',
+        envName: undefined,
         repository: { commitOid: null, recoverable: false } as never,
         output,
         spinner: spinner as never,
@@ -2087,16 +2159,21 @@ describe('deploy lock (one deploy per checkout)', () => {
 describe('shippedSourceEvidence — the deploy envelope names what authority shipped', () => {
   it('claimed GitHub, claimed DeepSpace, inferred evidence, and no evidence', () => {
     expect(
-      shippedSourceEvidence({ source: { provider: 'github', repository: 'acme/x' }, observedRepository: null }),
+      shippedSourceEvidence({
+        source: { provider: 'github', repository: 'acme/x' },
+        observedRepository: null,
+      }),
     ).toEqual({ provider: 'github', repository: 'acme/x' })
     expect(
       shippedSourceEvidence({ source: { provider: 'deepspace' }, observedRepository: null }),
     ).toEqual({ provider: 'deepspace' })
     // Unclaimed with observed evidence: same shape, marked inferred so a
     // consumer can tell a claim from a per-release observation.
-    expect(
-      shippedSourceEvidence({ source: null, observedRepository: 'acme/y' }),
-    ).toEqual({ provider: 'github', repository: 'acme/y', inferred: true })
+    expect(shippedSourceEvidence({ source: null, observedRepository: 'acme/y' })).toEqual({
+      provider: 'github',
+      repository: 'acme/y',
+      inferred: true,
+    })
     expect(shippedSourceEvidence({ source: null, observedRepository: null })).toBeNull()
   })
 })

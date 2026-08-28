@@ -27,7 +27,6 @@
     "path": "/tasks",
     "protected": true
   },
-  "requires": [],
   "instructions": [],
   "patterns": []
 }

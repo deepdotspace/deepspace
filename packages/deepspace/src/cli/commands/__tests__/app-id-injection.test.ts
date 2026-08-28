@@ -49,9 +49,9 @@ describe('resolveAppId', () => {
         '[vars]',
         `DEEPSPACE_APP_ID = "${STAGING_ID}"`,
       ])
-      expect(resolveAppId({ appDir: dir, env: { CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH: path } })).toBe(
-        STAGING_ID,
-      )
+      expect(
+        resolveAppId({ appDir: dir, env: { CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH: path } }),
+      ).toBe(STAGING_ID)
     })
   })
 
@@ -164,13 +164,8 @@ describe('scaffold wiring', () => {
     expect(vite).toContain("from 'deepspace/build'")
     expect(vite).toMatch(/deepspaceBuild\(\{\s*appDir/)
 
-    for (const config of [
-      join(BASE, 'vitest.config.ts'),
-      join(TEMPLATES_DIR, 'starter', 'vitest.config.ts'),
-    ]) {
-      const source = readFileSync(config, 'utf-8')
-      expect(source, config).toContain("from 'deepspace/build'")
-      expect(source, config).toMatch(/define:\s*appIdDefine\(\{\s*appDir/)
-    }
+    const vitest = readFileSync(join(BASE, 'vitest.config.ts'), 'utf-8')
+    expect(vitest).toContain("from 'deepspace/build'")
+    expect(vitest).toMatch(/define:\s*appIdDefine\(\{\s*appDir/)
   })
 })

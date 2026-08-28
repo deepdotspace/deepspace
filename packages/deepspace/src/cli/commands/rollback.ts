@@ -24,9 +24,14 @@ import { defineDeepspaceCommand, Refusal } from '../lib/command'
 
 const REL_ID_RE = /^rel_[0-9A-HJKMNP-TV-Z]{26}$/
 
-export function unavailableDoGuardRefusal(message: string): Refusal {
+export function unavailableDoGuardRefusal(message: string, detail?: unknown): Refusal {
+  // The server's `detail` names the CF-side cause — "read failed (403)" means
+  // a platform-token problem an operator must fix; "invalid body"/5xx means
+  // retry really is the remedy. Without it a persistent refusal is
+  // undiagnosable from the CLI.
+  const cause = typeof detail === 'string' && detail !== '' ? `\nCause: ${detail}` : ''
   return new Refusal(
-    `${message}\nRetry in a moment, or re-run with --allow-do-deletion to accept the risk.`,
+    `${message}${cause}\nRetry in a moment, or re-run with --allow-do-deletion to accept the risk.`,
     'do_guard_unavailable',
   )
 }
@@ -59,7 +64,8 @@ export function pickPreviousRelease(
 export default defineDeepspaceCommand({
   meta: {
     name: 'rollback',
-    description: "Re-deploy a prior release's exact bundle (no rebuild); the live secrets are kept, not the release's",
+    description:
+      "Re-deploy a prior release's exact bundle (no rebuild); the live secrets are kept, not the release's",
   },
   args: {
     release: {
@@ -156,7 +162,7 @@ export default defineDeepspaceCommand({
       // Fail-closed guard: the platform couldn't verify which Durable Object
       // classes are live, so it refused rather than risk deleting one's data.
       if (err instanceof ApiError && err.code === 'do_guard_unavailable') {
-        throw unavailableDoGuardRefusal(err.message)
+        throw unavailableDoGuardRefusal(err.message, err.details?.detail)
       }
       throw err
     }
@@ -190,7 +196,8 @@ export default defineDeepspaceCommand({
     const doClassGuard = result.doClassGuard === 'unverified' ? ('unverified' as const) : undefined
     if (!args.json) {
       if (result.url) {
-        if (serving === 'unconfirmed') p.log.warn(`URL: ${result.url} (accepted; serving not yet verified)`)
+        if (serving === 'unconfirmed')
+          p.log.warn(`URL: ${result.url} (accepted; serving not yet verified)`)
         else p.log.success(`Live at: ${result.url}`)
       }
       if (result.bundleRetained === false) {

@@ -15,10 +15,12 @@
  * deleted all of it.
  */
 
-import { PLATFORM_URLS } from '../env'
+import { effectivePlatformUrls } from '../env'
+import { ApiError } from './api'
 import { readAppId } from './app-identity'
 import { appTargetMissingError } from './app-target'
 import { fetchAppIdentityToken, fetchPublicKey, mintAppOwnerJwt } from './app-tokens'
+import { Refusal } from './cli-errors'
 import { writeSecretFileSync } from './secure-file'
 import { devVarsPathFor } from './wrangler-env'
 
@@ -50,11 +52,42 @@ export async function writeDevVars(
   wranglerEnv?: string,
   opts: WriteDevVarsOptions = {},
 ): Promise<void> {
-  const urls = PLATFORM_URLS
+  // Override-aware, NOT the static preset: with DEEPSPACE_DEPLOY_URL (the
+  // bench/self-hosted recipe) the identity-token mint must hit the SAME
+  // service the app is registered on — the preset 404s there, and since the
+  // 404 became a loud app_not_found refusal that misdiagnosis would hard-fail
+  // dev/deploy and even hand agents an `app init` action against the wrong
+  // platform. The .dev.vars URLs below inherit the overrides for the same
+  // reason.
+  const urls = effectivePlatformUrls()
   const publicKey = await fetchPublicKey(urls.auth)
   const appId = opts.appId ?? requireAppIdFor(appDir, wranglerEnv)
-  const appOwnerJwt = await mintAppOwnerJwt(urls.auth, callerJwt, appId)
-  const appIdentityToken = await fetchAppIdentityToken(urls.deploy, callerJwt, appId)
+  let appOwnerJwt: string
+  let appIdentityToken: string
+  try {
+    appOwnerJwt = await mintAppOwnerJwt(urls.auth, callerJwt, appId)
+    appIdentityToken = await fetchAppIdentityToken(urls.deploy, callerJwt, appId)
+  } catch (err: unknown) {
+    // CLI-001, raised at the ONE place the unresolvable-id ApiError
+    // originates so every caller (dev, test, deploy, secrets pull) hands out
+    // the same executable remedy. First hop only: `app init` verifies with
+    // the server and, for an unregistered EXISTING id, refuses again with
+    // the --new-id fork — that second, destructive hop stays a human
+    // decision.
+    if (err instanceof ApiError && err.code === 'app_not_found') {
+      throw new Refusal(err.message, 'app_not_found', {
+        actionRequired: true,
+        action: {
+          cwd: appDir,
+          // Env-scoped like every upstream step: a bare `app init` reads and
+          // writes the TOP-LEVEL [vars] slot — under --env it would either
+          // no-op on the prod id or mint a new app into the wrong scope.
+          argv: ['deepspace', 'app', 'init', ...(wranglerEnv ? ['--env', wranglerEnv] : [])],
+        },
+      })
+    }
+    throw err
+  }
 
   // Wrangler requires quotes around multi-line PEM values. ALLOW_DEBUG_ROUTES
   // is dev-only here: deploys ship the store, so this value never reaches
@@ -68,7 +101,7 @@ export async function writeDevVars(
     `PLATFORM_WORKER_URL=${urls.platform}`,
     `OWNER_USER_ID=${ownerId}`,
     `APP_OWNER_JWT=${appOwnerJwt}`,
-    ...(appIdentityToken ? [`APP_IDENTITY_TOKEN=${appIdentityToken}`] : []),
+    `APP_IDENTITY_TOKEN=${appIdentityToken}`,
     `ALLOW_DEBUG_ROUTES=true`,
   ].join('\n')
 

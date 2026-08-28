@@ -23,7 +23,6 @@
     "path": "/items",
     "protected": true
   },
-  "requires": [],
   "instructions": [],
   "patterns": []
 }

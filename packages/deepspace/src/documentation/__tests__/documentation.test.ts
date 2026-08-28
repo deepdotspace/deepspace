@@ -62,8 +62,6 @@ describe('DeepSpace documentation compiler', () => {
     expect(result.files).toContain('llms.txt')
     expect(result.files).toContain('llms-full.txt')
     expect(result.files).toContain('skill.md')
-    expect(result.files).toContain('.well-known/skills/test-documentation/SKILL.md')
-    expect(result.files).toContain('.well-known/skills/index.json')
     expect(result.files).toContain('.well-known/agent-skills/test-documentation/skill.md')
     expect(result.files).toContain('.well-known/agent-skills/index.json')
     expect(result.files).toContain('old-guide/index.html')
@@ -93,10 +91,16 @@ describe('DeepSpace documentation compiler', () => {
     )
     // The launcher sticks inside the reading column instead of being fixed to
     // the viewport, so the pagination needs no reserved space beneath it.
-    expect(documentationCss).not.toContain('.documentation-app.has-assistant .documentation-pagination')
+    expect(documentationCss).not.toContain(
+      '.documentation-app.has-assistant .documentation-pagination',
+    )
     expect(documentationCss).toContain('.documentation-launcher-dock { position: sticky;')
-    expect(documentationCss).toContain('.documentation-launcher-dock + .documentation-pagination { margin-top: 0; }')
-    expect(documentationCss).toContain('.documentation-app.is-assistant-open .documentation-main { margin-right: var(--documentation-assistant-width); }')
+    expect(documentationCss).toContain(
+      '.documentation-launcher-dock + .documentation-pagination { margin-top: 0; }',
+    )
+    expect(documentationCss).toContain(
+      '.documentation-app.is-assistant-open .documentation-main { margin-right: var(--documentation-assistant-width); }',
+    )
     expect(readFileSync(join(result.outputDir, 'old-guide/index.html'), 'utf8')).toContain(
       'url=/docs/guide',
     )
@@ -112,7 +116,9 @@ describe('DeepSpace documentation compiler', () => {
       readFileSync(join(result.outputDir, '.well-known/agent-skills/index.json'), 'utf8'),
     ) as { $schema: string; skills: Array<{ digest: string; url: string }> }
     expect(discovery.$schema).toBe('https://schemas.agentskills.io/discovery/0.2.0/schema.json')
-    expect(discovery.skills[0]?.url).toBe('/docs/.well-known/agent-skills/test-documentation/skill.md')
+    expect(discovery.skills[0]?.url).toBe(
+      '/docs/.well-known/agent-skills/test-documentation/skill.md',
+    )
     expect(discovery.skills[0]?.digest).toMatch(/^sha256:[a-f0-9]{64}$/)
     const guideData = JSON.parse(
       readFileSync(join(result.outputDir, 'data', 'guide.json'), 'utf8'),
@@ -159,8 +165,9 @@ describe('DeepSpace documentation compiler', () => {
     expect(home).toContain('Connect to Cursor')
     expect(home).toContain('Connect to VS Code')
     expect(home).not.toContain('documentation-context-orbit')
-    expect(readFileSync(join(result.outputDir, '404.html'), 'utf8'))
-      .not.toContain('aria-label="Page actions"')
+    expect(readFileSync(join(result.outputDir, '404.html'), 'utf8')).not.toContain(
+      'aria-label="Page actions"',
+    )
   })
 
   it('rejects duplicate native page actions', () => {
@@ -298,11 +305,16 @@ describe('DeepSpace documentation compiler', () => {
     expect(result.files).toContain('assets/fonts/inter-variable.woff2')
     expect(result.files).toContain('assets/fonts/geist-mono-variable.woff2')
     expect(home).toContain('font-family:"Inter";src:url("/docs/assets/fonts/inter-variable.woff2")')
-    expect(home).toContain('font-family:"Geist Mono";src:url("/docs/assets/fonts/geist-mono-variable.woff2")')
+    expect(home).toContain(
+      'font-family:"Geist Mono";src:url("/docs/assets/fonts/geist-mono-variable.woff2")',
+    )
     expect(home).toContain('font-weight:100 900')
     expect(home).toContain('rel="preload" href="/docs/assets/fonts/inter-variable.woff2" as="font"')
-    expect(readFileSync(join(result.outputDir, 'assets/fonts/inter-variable.woff2')).subarray(0, 4).toString())
-      .toBe('wOF2')
+    expect(
+      readFileSync(join(result.outputDir, 'assets/fonts/inter-variable.woff2'))
+        .subarray(0, 4)
+        .toString(),
+    ).toBe('wOF2')
   })
 
   it('emits default tab and share metadata when the theme configures none', () => {
@@ -536,7 +548,10 @@ describe('DeepSpace documentation compiler', () => {
       join(appDir, 'node_modules', 'tiny-widget', 'index.js'),
       'import { createElement } from "react"\nexport default function BareWidget() { return createElement("span", { "data-bare-widget": "true" }, "Bare package import") }\n',
     )
-    writeFileSync(join(appDir, 'documentation-custom.css'), '.custom-documentation-site { --custom-documentation: true; }\n')
+    writeFileSync(
+      join(appDir, 'documentation-custom.css'),
+      '.custom-documentation-site { --custom-documentation: true; }\n',
+    )
     writeFileSync(
       join(appDir, 'documentation.tsx'),
       'import { DefaultDocumentation, type DocumentationSiteProps } from "deepspace/documentation/react"\n' +
@@ -560,7 +575,9 @@ describe('DeepSpace documentation compiler', () => {
     expect(home).toContain('href="/docs/assets/documentation-custom-runtime.css"')
     expect(result.files).toContain('assets/documentation-custom-runtime.js')
     expect(result.files).toContain('assets/documentation-custom-runtime.css')
-    expect(result.files.some((file) => /^assets\/documentation-page-[A-Z0-9]+\.js$/.test(file))).toBe(true)
+    expect(
+      result.files.some((file) => /^assets\/documentation-page-[A-Z0-9]+\.js$/.test(file)),
+    ).toBe(true)
     expect(search).toContain('Authored prose stays searchable.')
     expect(search).toContain('npx deepspace deploy')
     expect(search).not.toContain('implementationSecret')
@@ -592,9 +609,12 @@ describe('DeepSpace documentation compiler', () => {
   })
 
   it('keeps fenced H1 examples while the shell owns the first authored H1', () => {
-    const appDir = fixture({}, {
-      'index.md': '# Page title\n\n```md\n# Example heading\n```\n\n## Section',
-    })
+    const appDir = fixture(
+      {},
+      {
+        'index.md': '# Page title\n\n```md\n# Example heading\n```\n\n## Section',
+      },
+    )
     const result = buildDocumentation({ appDir })
     const page = result.graph.pages[0]
     expect(page?.title).toBe('Page title')
@@ -720,8 +740,9 @@ describe('DeepSpace documentation compiler', () => {
         description: 'Operation override',
       }),
     ])
-    expect(operation?.codeSamples.find((sample) => sample.language === 'curl')?.code)
-      .toContain('https://api.example.test/widgets/new')
+    expect(operation?.codeSamples.find((sample) => sample.language === 'curl')?.code).toContain(
+      'https://api.example.test/widgets/new',
+    )
   })
 
   it('normalizes Mintlify API settings into deterministic request samples', () => {
@@ -821,11 +842,17 @@ describe('DeepSpace documentation compiler', () => {
   })
 
   it('copies local media under the reserved documentation asset root', () => {
-    const appDir = fixture({}, {
-      'index.md': '# Media\n\n![Diagram](./diagram.svg)',
-      'café guide.md': '# Encoded route',
-    })
-    writeFileSync(join(appDir, 'documentation', 'diagram.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>')
+    const appDir = fixture(
+      {},
+      {
+        'index.md': '# Media\n\n![Diagram](./diagram.svg)',
+        'café guide.md': '# Encoded route',
+      },
+    )
+    writeFileSync(
+      join(appDir, 'documentation', 'diagram.svg'),
+      '<svg xmlns="http://www.w3.org/2000/svg"/>',
+    )
     writeFileSync(join(appDir, 'documentation', 'café logo wide.png'), 'png')
     const result = buildDocumentation({ appDir })
     expect(result.files).toContain('media/diagram.svg')

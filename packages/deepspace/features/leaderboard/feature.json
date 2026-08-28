@@ -23,7 +23,6 @@
     "path": "/leaderboard",
     "protected": true
   },
-  "requires": [],
   "instructions": [],
   "patterns": []
 }

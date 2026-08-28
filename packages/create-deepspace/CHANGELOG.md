@@ -1,5 +1,11 @@
 # create-deepspace
 
+## 0.27.1
+
+### Patch Changes
+
+- Merge the starter template's drifted `vitest.config.ts` override into the base template's config: starter apps now keep the `@` path alias (its absence broke unit tests importing `components/ui/*`) and run both `*.test.*` and `*.spec.*` unit files. One config, both templates.
+
 ## 0.27.0
 
 ### Minor Changes

@@ -258,6 +258,8 @@ export default defineDeepspaceCommand({
       }
     }
 
+    // CLI-001: an unresolvable id surfaces as writeDevVars' own Refusal,
+    // already carrying the env-aware `app init` action.
     await writeDevVars(appDir, ownerId, token, wranglerEnv, {
       generatedSecretsCache,
     })

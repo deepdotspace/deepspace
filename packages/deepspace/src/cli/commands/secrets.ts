@@ -505,10 +505,21 @@ const pull = defineCommand({
       wranglerEnv,
       t.configName,
     )
-    await writeDevVars(appDir, ownerId, t.token, wranglerEnv, {
-      appId: t.appId,
-      generatedSecretsCache: refreshed.rendered,
-    })
+    try {
+      await writeDevVars(appDir, ownerId, t.token, wranglerEnv, {
+        appId: t.appId,
+        generatedSecretsCache: refreshed.rendered,
+      })
+    } catch (err: unknown) {
+      // writeDevVars raises the env-aware `app init` remedy itself — but it
+      // only applies when the id came from wrangler.toml: under --app <id>
+      // that action would target a different app than the one that refused,
+      // so strip it and keep the bare refusal.
+      if (args.app && err instanceof Refusal && err.code === 'app_not_found') {
+        throw new Refusal(err.message, err.code)
+      }
+      throw err
+    }
     const count = Object.keys(refreshed.pulled?.values ?? {}).length
     ok(args.json === true, { appId: t.appId, config: t.configName, pulled: count }, () =>
       console.log(

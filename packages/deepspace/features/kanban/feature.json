@@ -10,7 +10,6 @@
       "dest": "src/components/kanban/Kanban.tsx"
     }
   ],
-  "requires": [],
   "instructions": [
     "Import KanbanBoard and useKanban from 'src/components/kanban/Kanban' (adjust the relative path to match where you use it)"
   ],

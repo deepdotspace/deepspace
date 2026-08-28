@@ -14,7 +14,6 @@
       "dest": "src/components/search/InlineSearch.tsx"
     }
   ],
-  "requires": [],
   "instructions": [
     "Import InlineSearch from @/components/search/InlineSearch and useSearchIndex from @/components/search/search-model.",
     "Keep source data, async fetching, navigation, and persistence in the page that owns the search experience."

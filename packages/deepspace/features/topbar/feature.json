@@ -10,9 +10,6 @@
       "dest": "src/components/topbar/Topbar.tsx"
     }
   ],
-  "requires": [],
-  "instructions": [
-    "Import Topbar into your layout and configure navItems, logo, and user props"
-  ],
+  "instructions": ["Import Topbar into your layout and configure navItems, logo, and user props"],
   "patterns": []
 }

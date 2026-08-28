@@ -49,6 +49,39 @@ describe('writeDevVars', () => {
     expect(body).toContain('API_KEY=v1')
   })
 
+  it('resolves token mints and file URLs through DEEPSPACE_*_URL overrides', async () => {
+    // The round-1 fix: with DEEPSPACE_DEPLOY_URL (bench/self-hosted recipe)
+    // the identity-token mint must hit the SAME service the app is
+    // registered on. A revert to the static PLATFORM_URLS preset would pass
+    // every other test here — this is the pin that fails it.
+    const savedAuth = process.env.DEEPSPACE_AUTH_URL
+    const savedDeploy = process.env.DEEPSPACE_DEPLOY_URL
+    process.env.DEEPSPACE_AUTH_URL = 'https://auth.override.test'
+    process.env.DEEPSPACE_DEPLOY_URL = 'https://deploy.override.test'
+    try {
+      dir = mkdtempSync(join(tmpdir(), 'ds-devvars-'))
+      await writeDevVars(dir, 'user-1', 'caller-jwt', undefined, { appId: APP_ID })
+      const { mintAppOwnerJwt, fetchAppIdentityToken } = await import('../app-tokens')
+      expect(vi.mocked(mintAppOwnerJwt)).toHaveBeenCalledWith(
+        'https://auth.override.test',
+        'caller-jwt',
+        APP_ID,
+      )
+      expect(vi.mocked(fetchAppIdentityToken)).toHaveBeenCalledWith(
+        'https://deploy.override.test',
+        'caller-jwt',
+        APP_ID,
+      )
+      const body = readFileSync(join(dir, '.dev.vars'), 'utf-8')
+      expect(body).toContain('AUTH_WORKER_URL=https://auth.override.test')
+    } finally {
+      if (savedAuth === undefined) delete process.env.DEEPSPACE_AUTH_URL
+      else process.env.DEEPSPACE_AUTH_URL = savedAuth
+      if (savedDeploy === undefined) delete process.env.DEEPSPACE_DEPLOY_URL
+      else process.env.DEEPSPACE_DEPLOY_URL = savedDeploy
+    }
+  })
+
   it('does not preserve hand edits — the file is a materialization, not a source', async () => {
     // The old three-zone writer kept lines below a divider across runs, which
     // made the file a second source of truth and a de-facto deploy input

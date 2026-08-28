@@ -71,12 +71,24 @@ export function buildDocumentation(options: BuildDocumentationOptions): Document
       navigation: validation.graph.navigation,
     }
     const runtime = createPageRuntime(renderOptions)
-    write(artifactPaths.html, renderPage(renderOptions, customRuntime ? {
-      customStylesheets: customRuntime.stylesheets,
-      markup: customRuntime.render(runtime.data, page.route),
-      runtimeModule: true,
-      runtimeScript: documentationPublicPath(basePath, '/assets/documentation-custom-runtime.js'),
-    } : {}, runtime))
+    write(
+      artifactPaths.html,
+      renderPage(
+        renderOptions,
+        customRuntime
+          ? {
+              customStylesheets: customRuntime.stylesheets,
+              markup: customRuntime.render(runtime.data, page.route),
+              runtimeModule: true,
+              runtimeScript: documentationPublicPath(
+                basePath,
+                '/assets/documentation-custom-runtime.js',
+              ),
+            }
+          : {},
+        runtime,
+      ),
+    )
     write(artifactPaths.data, stableJson(runtime.document))
     write(artifactPaths.markdown, pageMarkdown(page, basePath))
   }
@@ -93,19 +105,33 @@ export function buildDocumentation(options: BuildDocumentationOptions): Document
     navigation: validation.graph.navigation,
   }
   const notFoundRuntime = createPageRuntime(notFoundOptions)
-  write('404.html', renderPage(notFoundOptions, customRuntime ? {
-    customStylesheets: customRuntime.stylesheets,
-    markup: customRuntime.render(notFoundRuntime.data, notFoundPage.route),
-    runtimeModule: true,
-    runtimeScript: documentationPublicPath(basePath, '/assets/documentation-custom-runtime.js'),
-  } : {}, notFoundRuntime))
+  write(
+    '404.html',
+    renderPage(
+      notFoundOptions,
+      customRuntime
+        ? {
+            customStylesheets: customRuntime.stylesheets,
+            markup: customRuntime.render(notFoundRuntime.data, notFoundPage.route),
+            runtimeModule: true,
+            runtimeScript: documentationPublicPath(
+              basePath,
+              '/assets/documentation-custom-runtime.js',
+            ),
+          }
+        : {},
+      notFoundRuntime,
+    ),
+  )
   write('assets/documentation.css', DOCUMENTATION_CSS.trimStart())
   write('assets/documentation-theme.js', DOCUMENTATION_THEME_BOOTSTRAP)
   for (const font of resolveDocumentationFonts(renderConfig.theme, basePath)) {
     if (font.bundled) write(`assets/fonts/${font.bundled.fileName}`, readBundledFont(font.bundled))
   }
-  if (!renderConfig.theme.favicon) write('assets/favicon.svg', renderDocumentationFavicon(renderConfig.theme))
-  if (!customRuntime) write('assets/documentation-runtime.js', buildDocumentationRuntime().trimStart())
+  if (!renderConfig.theme.favicon)
+    write('assets/favicon.svg', renderDocumentationFavicon(renderConfig.theme))
+  if (!customRuntime)
+    write('assets/documentation-runtime.js', buildDocumentationRuntime().trimStart())
   write('search.json', stableJson(createSearchEntries(validation.graph.pages)))
   write('assistant-index.json', stableJson(createAssistantChunks(validation.graph.pages)))
   const openApiOperations = validation.graph.pages.flatMap((page) =>
@@ -117,8 +143,6 @@ export function buildDocumentation(options: BuildDocumentationOptions): Document
   write('llms-full.txt', renderLlmsFull(machinePages, validation.graph.config.name, basePath))
   const skill = createDocumentationSkillArtifacts(validation.graph, renderConfig.url, basePath)
   write('skill.md', skill.markdown)
-  write(`.well-known/skills/${skill.name}/SKILL.md`, skill.markdown)
-  write('.well-known/skills/index.json', stableJson(skill.legacyIndex))
   write(`.well-known/agent-skills/${skill.name}/skill.md`, skill.markdown)
   write('.well-known/agent-skills/index.json', stableJson(skill.discoveryIndex))
   write('sitemap.xml', renderSitemap(validation.graph.pages, renderConfig.url))
@@ -147,7 +171,9 @@ export function buildDocumentation(options: BuildDocumentationOptions): Document
     routes: [
       ...validation.graph.pages.map((page) => page.route),
       ...Object.keys(validation.graph.config.redirects),
-    ].map(encodeNativeDocumentationPath).sort(),
+    ]
+      .map(encodeNativeDocumentationPath)
+      .sort(),
     resources,
     assistant: validation.graph.config.assistant,
     mcp: validation.graph.config.mcp,
@@ -186,7 +212,10 @@ function buildDocumentationRuntime(): string {
   })
   const output = result.outputFiles?.[0]?.text
   if (!output) {
-    throw new DocumentationError('Unable to compile the documentation browser runtime', 'documentation_runtime_build_failed')
+    throw new DocumentationError(
+      'Unable to compile the documentation browser runtime',
+      'documentation_runtime_build_failed',
+    )
   }
   return output
 }

@@ -67,7 +67,6 @@
     "path": "/documents",
     "protected": true
   },
-  "requires": [],
   "dependencies": {
     "@tiptap/react": "^3.22.0",
     "@tiptap/pm": "^3.22.0",

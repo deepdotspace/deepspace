@@ -59,7 +59,6 @@
     "path": "/chat",
     "protected": true
   },
-  "requires": [],
   "instructions": [
     "The included schemas and UI are for public channels. Add server-enforced tenant or participant scoping before implementing private groups or direct messages."
   ],

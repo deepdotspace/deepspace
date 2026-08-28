@@ -259,6 +259,8 @@ export default defineDeepspaceCommand({
       }
     }
 
+    // CLI-001: an unresolvable id surfaces as writeDevVars' own Refusal,
+    // already carrying the env-aware `app init` action.
     await writeDevVars(appDir, payload.sub, token, wranglerEnv, {
       generatedSecretsCache,
     })
@@ -309,24 +311,26 @@ export default defineDeepspaceCommand({
     // old process.exit: vite's exit envelope is the caller's signal then.
     const readiness = new AbortController()
     if (args.json) {
-      void waitForPortListening(port, host, READINESS_TIMEOUT_MS, readiness.signal).then((ready) => {
-        if (readiness.signal.aborted) return
-        console.log(
-          JSON.stringify(
-            ready
-              ? { ok: true, ready: true, url, port, host, appDir }
-              : {
-                  ok: false,
-                  code: 'dev_server_not_ready',
-                  error: `The dev server did not answer on ${url} within ${READINESS_TIMEOUT_MS / 1000}s.`,
-                  url,
-                  port,
-                  host,
-                  appDir,
-                },
-          ),
-        )
-      })
+      void waitForPortListening(port, host, READINESS_TIMEOUT_MS, readiness.signal).then(
+        (ready) => {
+          if (readiness.signal.aborted) return
+          console.log(
+            JSON.stringify(
+              ready
+                ? { ok: true, ready: true, url, port, host, appDir }
+                : {
+                    ok: false,
+                    code: 'dev_server_not_ready',
+                    error: `The dev server did not answer on ${url} within ${READINESS_TIMEOUT_MS / 1000}s.`,
+                    url,
+                    port,
+                    host,
+                    appDir,
+                  },
+            ),
+          )
+        },
+      )
     }
     let stopping = false
     const stop = () => {

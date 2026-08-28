@@ -20,7 +20,6 @@
     "path": "/assistant",
     "protected": true
   },
-  "requires": [],
   "dependencies": {
     "react-markdown": "^9.0.0",
     "remark-gfm": "^4.0.0",

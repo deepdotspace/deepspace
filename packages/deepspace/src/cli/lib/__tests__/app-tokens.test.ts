@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fetchAppIdentityToken, fetchPublicKey, mintAppOwnerJwt } from '../app-tokens'
+import { ApiError } from '../api'
 
 const fetchMock = vi.fn()
 
@@ -50,12 +51,15 @@ describe('mintAppOwnerJwt', () => {
     })
   })
 
-  it('includes the response detail on failure', async () => {
+  it('includes the response detail on failure, as a status-carrying ApiError', async () => {
     fetchMock.mockResolvedValue(new Response('not allowed', { status: 403 }))
 
-    await expect(
-      mintAppOwnerJwt('https://auth.example.test', 'caller-token', 'app_123'),
-    ).rejects.toThrow('Failed to mint APP_OWNER_JWT (403): not allowed')
+    const failure = mintAppOwnerJwt('https://auth.example.test', 'caller-token', 'app_123')
+    await expect(failure).rejects.toThrow('Failed to mint APP_OWNER_JWT (403): not allowed')
+    // The status is what deploy's friendly not-authorized branch matches on —
+    // a plain Error here silently killed that message.
+    await expect(failure).rejects.toMatchObject({ status: 403 })
+    await expect(failure).rejects.toBeInstanceOf(ApiError)
   })
 
   it('rejects a successful response without a token', async () => {
@@ -68,12 +72,35 @@ describe('mintAppOwnerJwt', () => {
 })
 
 describe('fetchAppIdentityToken', () => {
-  it('returns null before the app has a deployment', async () => {
-    fetchMock.mockResolvedValue(new Response('', { status: 404 }))
+  it('refuses a 404 loudly — an unresolvable id is wrong, never "not deployed yet"', async () => {
+    // Registration happens at `app init`, so a 404 means the id does not
+    // exist on THIS platform (wrong environment, hand-edited wrangler.toml).
+    // Returning null here made `dev start` write a .dev.vars with no
+    // APP_IDENTITY_TOKEN and every platform call fail silently at runtime.
+    fetchMock.mockResolvedValue(
+      Response.json({ error: 'App not found', code: 'app_not_found' }, { status: 404 }),
+    )
 
-    await expect(
-      fetchAppIdentityToken('https://deploy.example.test', 'caller-token', 'app_123'),
-    ).resolves.toBeNull()
+    const failure = fetchAppIdentityToken('https://deploy.example.test', 'caller-token', 'app_123')
+    await expect(failure).rejects.toThrow('is not registered on this platform')
+    await expect(failure).rejects.toMatchObject({ status: 404, code: 'app_not_found' })
+    // The remedy is the CALLER's structured, env-aware action — prose from
+    // this env-blind lib must not embed a command (a bare `app init` under
+    // --env targets the top-level [vars] slot).
+    await expect(failure).rejects.not.toThrow(/`/)
+  })
+
+  it('a 404 WITHOUT the registry code gets no confident diagnosis', async () => {
+    // A wrong DEEPSPACE_DEPLOY_URL answers 404 from Hono's notFound with no
+    // `app_not_found` — telling the user their valid app id doesn't exist
+    // (and to run `app init`) would be exactly wrong. Point at the URL.
+    fetchMock.mockImplementation(async () => Response.json({ error: 'Not found' }, { status: 404 }))
+
+    const failure = fetchAppIdentityToken('https://deploy.example.test', 'caller-token', 'app_123')
+    await expect(failure).rejects.toThrow(
+      'DEEPSPACE_DEPLOY_URL pointing at the right deploy service',
+    )
+    await expect(failure).rejects.not.toThrow('is not registered on this platform')
   })
 
   it('encodes the app id and returns the identity token', async () => {
@@ -91,12 +118,12 @@ describe('fetchAppIdentityToken', () => {
     )
   })
 
-  it('includes the response detail on failure', async () => {
+  it('includes the response detail on failure, as a status-carrying ApiError', async () => {
     fetchMock.mockResolvedValue(new Response('unavailable', { status: 503 }))
 
-    await expect(
-      fetchAppIdentityToken('https://deploy.example.test', 'caller-token', 'app_123'),
-    ).rejects.toThrow('Failed to fetch APP_IDENTITY_TOKEN (503): unavailable')
+    const failure = fetchAppIdentityToken('https://deploy.example.test', 'caller-token', 'app_123')
+    await expect(failure).rejects.toThrow('Failed to fetch APP_IDENTITY_TOKEN (503): unavailable')
+    await expect(failure).rejects.toMatchObject({ status: 503 })
   })
 
   it('rejects a successful response without a token', async () => {

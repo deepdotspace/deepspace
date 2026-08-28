@@ -24,7 +24,6 @@
     "protected": true,
     "roles": ["admin"]
   },
-  "requires": [],
   "instructions": [],
   "patterns": []
 }

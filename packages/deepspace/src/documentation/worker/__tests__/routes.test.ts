@@ -57,7 +57,6 @@ describe('native documentation route facade', () => {
     registerDeepSpaceDocumentation(app, { resolveAuth: async () => null })
     const resources = [
       '/skill.md',
-      '/.well-known/skills/example/SKILL.md',
       '/.well-known/agent-skills/example/skill.md',
       '/.well-known/agent-skills/index.json',
     ]
@@ -90,7 +89,6 @@ describe('native documentation route facade', () => {
       expect(response.status, resource).toBe(200)
     }
     expect(requested).toContain('/_documentation/skill.md')
-    expect(requested).toContain('/_documentation/.well-known/skills/example/SKILL.md')
     expect(requested).toContain('/_documentation/.well-known/agent-skills/example/skill.md')
   })
 
@@ -144,7 +142,11 @@ describe('native documentation route facade', () => {
     expect((await app.request('https://app.test/docs/guides/missing', undefined, env)).status).toBe(
       404,
     )
-    const markdownMiss = await app.request('https://app.test/docs/guides/missing.md', undefined, env)
+    const markdownMiss = await app.request(
+      'https://app.test/docs/guides/missing.md',
+      undefined,
+      env,
+    )
     expect(markdownMiss.status).toBe(404)
     expect(markdownMiss.headers.get('Content-Type')).toBe('text/plain; charset=utf-8')
     expect(await markdownMiss.text()).toBe(

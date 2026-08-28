@@ -8,6 +8,7 @@ import type { Spinner } from '../../lib/spinner'
 import type { DeployAsset, DeployBundle } from './build'
 import type { DeployOutput } from './output'
 import { shouldSendLineage, type DeployRepositoryState } from './repository'
+import { secretsConfigCreateAction } from './secrets'
 
 // Kept as this module's public name for existing callers and tests.
 export const postWithRetry = fetchWithTransientRetry
@@ -54,7 +55,6 @@ export function renamePromptMessage(rename: { fromHost: string; toHost: string }
     '(Meant a separate app? Run `deepspace app init --new-id` instead.) Rename?'
   )
 }
-import type { DeploySecretsPayload } from './secrets'
 
 const CLOUDFLARE_DEPLOY_ERROR_HINT =
   "Deployment reached the DeepSpace deploy worker, but Cloudflare's deployment " +
@@ -69,15 +69,19 @@ const DEPLOY_SERVICE_LIMIT_HINT =
   'changed. Retry; if it keeps happening, report the app id and asset count.'
 
 /**
- * The asset-transport contract this CLI speaks. A deploy worker that does not
- * advertise it cannot accept these uploads at all.
+ * The deploy-worker capabilities this CLI hard-requires from /api/health
+ * before doing anything. Bespoke handshake pending the general CLI-staleness
+ * check; each entry names a protocol, not a version bump.
  *
- * This is a bespoke handshake because it is the only version gate the CLI has
- * today; the general CLI-staleness check being built alongside it will
- * subsume the "which platform am I talking to" half, leaving this to name the
- * one capability the upload path depends on.
+ *  - assetTransport: the content-addressed plan/stream/manifest upload path.
+ *  - secretsSource: the platform reads the app's secrets store at commit (the
+ *    form names a config, carries no values). An older server would read the
+ *    ABSENCE of the retired `userSecrets` field as an upload carrying no
+ *    secret bindings: an owner deploy would strip EVERY live user secret
+ *    (only on-behalf deploys keep_bindings them) — so refuse it up front.
  */
 const REQUIRED_ASSET_TRANSPORT = 'content-addressed-v1'
+const REQUIRED_SECRETS_SOURCE = 'store-read-v1'
 const REQUIRED_WORKER_MODULE_TRANSPORT = 'multipart-v1'
 
 /** Parallel asset uploads. Small files pay a full round trip each, so the
@@ -173,7 +177,9 @@ export async function deployBuiltBundle(options: {
   claimReleased: boolean
   ignoreStale: boolean
   bundle: DeployBundle
-  secrets: DeploySecretsPayload
+  /** Name of the secrets config the platform reads at commit. */
+  secretsConfig: string
+  envName: string | undefined
   repository: DeployRepositoryState
   output: DeployOutput
   spinner: Spinner
@@ -188,7 +194,8 @@ export async function deployBuiltBundle(options: {
     claimReleased,
     ignoreStale,
     bundle,
-    secrets,
+    secretsConfig,
+    envName,
     repository,
     output,
     spinner,
@@ -202,7 +209,12 @@ export async function deployBuiltBundle(options: {
     p.log.info(`Custom worker-first routes: ${bundle.extraRoutes.join(', ')}`)
   }
 
-  await requireDeployCapabilities(deployUrl, bundle.worker.modules.length > 1, spinner, output)
+  // The unconditional capability gate (assetTransport + secretsSource) runs
+  // in deploy.ts BEFORE the secrets refresh, the build, and the repo push —
+  // failing there costs nothing. Only the workerModules arm waits here: it
+  // cannot be decided before the built bundle says whether the Vite graph
+  // emitted imported Worker chunks.
+  await requireWorkerModulesCapability(deployUrl, bundle.worker.modules.length > 1, spinner, output)
   await uploadDeployAssetsWithAuth(
     { deployUrl, appId, assets: bundle.assets, output, spinner },
     auth,
@@ -268,7 +280,7 @@ export async function deployBuiltBundle(options: {
     if (bundle.customBindings.length) {
       form.append('bindingManifest', JSON.stringify(bundle.customBindings))
     }
-    if (secrets.authoritative) form.append('userSecrets', JSON.stringify(secrets.values))
+    form.append('secretsConfig', secretsConfig)
     if (bundle.extraRoutes === true || bundle.extraRoutes.length) {
       form.append('extraRunWorkerFirst', JSON.stringify(bundle.extraRoutes))
     }
@@ -376,6 +388,27 @@ export async function deployBuiltBundle(options: {
       { cwd: appDir, argv: ['deepspace', 'pull'] },
     )
   }
+  // Backstop for the race the early check can't see: the config existed when
+  // loadDeploySecrets looked but was deleted before the server's commit-time
+  // read. Same executable fix as the early refusal.
+  if (response.status === 409 && body.code === 'secrets_config_missing') {
+    // Our own sentence, not body.error: the server cannot know the wrangler
+    // env, so its embedded remedy prose lacks --env and, followed as
+    // printed, would create the config on the WRONG app (--env = separate
+    // app). The structured action below is the same fix, env-aware.
+    await bail(
+      `Secrets config "${secretsConfig}" does not exist on the platform (it was ` +
+        'deleted after the pre-deploy check). Create it explicitly before deploying' +
+        (envName
+          ? ` (run the action below — plain \`configs create\` targets the top-level app)`
+          : '') +
+        '.',
+      'Deploy failed',
+      'secrets_config_missing',
+      true,
+      secretsConfigCreateAction(appDir, secretsConfig, envName),
+    )
+  }
   // Another deploy of this app (from another checkout — the local lock rules
   // out this one) is between prepared and live. Nothing here is wrong and
   // nothing needs changing: retrying once it lands is the whole remedy, so
@@ -433,49 +466,118 @@ export function assetManifest(
 }
 
 /**
- * Refuse to start against a deploy service that predates this transport.
+ * Refuse to start against a deploy service missing a required capability.
  * Failing here costs nothing; failing halfway through an upload wastes the
- * user's bandwidth and leaves them guessing.
+ * user's bandwidth — and an old server would misread the new secrets shape
+ * silently rather than fail at all.
  */
-async function requireDeployCapabilities(
+/** Stateless by design: the post-build workerModules arm re-probes rather
+ *  than sharing module state with the pre-build gate — one extra bounded GET,
+ *  only on multi-module builds, and nothing to reset between tests. */
+type DeployCapabilities = {
+  assetTransport?: unknown
+  secretsSource?: unknown
+  workerModules?: unknown
+}
+
+async function probeDeployCapabilities(
   deployUrl: string,
-  needsWorkerModules: boolean,
-  spinner: Spinner,
+  spinner: Spinner | null,
   output: DeployOutput,
-): Promise<void> {
-  let capabilities: { assetTransport?: unknown; workerModules?: unknown } | undefined
+): Promise<DeployCapabilities> {
+  let capabilities: DeployCapabilities = {}
   try {
+    // Bounded and retried like every other deploy call — otherwise one
+    // transient blip hard-refuses the deploy and a hung service stalls the
+    // CLI for undici's ~5 minutes.
     const response = await postWithRetry(`${deployUrl}/api/health`, () => ({}), {
-      timeoutMs: 15_000,
+      attempts: 2,
+      timeoutMs: 10_000,
     })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const body = (await response.json()) as { capabilities?: typeof capabilities }
-    capabilities = body.capabilities
+    const body = (await response.json()) as { capabilities?: DeployCapabilities }
+    capabilities = body.capabilities ?? {}
   } catch (error: unknown) {
-    spinner.stop('Deploy failed')
+    spinner?.stop('Deploy failed')
     output.die(
       `Could not reach the DeepSpace deploy service at ${deployUrl} to check its ` +
         `capabilities: ${errorMessage(error)}`,
       'deploy_service_unreachable',
     )
   }
-  if (capabilities?.assetTransport !== REQUIRED_ASSET_TRANSPORT) {
-    spinner.stop('Deploy failed')
-    output.die(
-      `The DeepSpace deploy service at ${deployUrl} does not support this CLI's asset ` +
-        `transport (needs "${REQUIRED_ASSET_TRANSPORT}", found ` +
-        `${capabilities?.assetTransport === undefined ? 'none' : `"${String(capabilities.assetTransport)}"`}). ` +
-        'Wait for the platform to finish updating, or pin an older deepspace CLI.',
-      'asset_transport_unsupported',
-    )
-  }
-  if (needsWorkerModules && capabilities?.workerModules !== REQUIRED_WORKER_MODULE_TRANSPORT) {
-    spinner.stop('Deploy failed')
+  return capabilities
+}
+
+function requireCapability(
+  deployUrl: string,
+  spinner: Spinner | null,
+  output: DeployOutput,
+  name: string,
+  advertised: unknown,
+  required: string,
+  code: string,
+  // Only arms where an older CLI actually helps name a version — pinning
+  // the last pre-cutover CLI (0.23) fixes a missing secretsSource, but it
+  // requires assetTransport just the same, so that arm must not suggest it.
+  pinHint = '',
+): void {
+  if (advertised === required) return
+  spinner?.stop('Deploy failed')
+  output.die(
+    `The DeepSpace deploy service at ${deployUrl} does not support this CLI's ${name} ` +
+      `(needs "${required}", found ` +
+      `${advertised === undefined ? 'none' : `"${String(advertised)}"`}). ` +
+      `Wait for the platform to finish updating${pinHint}.`,
+    code,
+  )
+}
+
+/** The unconditional arms, hoisted pre-cost: deploy.ts calls this BEFORE the
+ *  secrets refresh, the build, and the repo push. */
+export async function requireDeployCapabilities(
+  deployUrl: string,
+  spinner: Spinner | null,
+  output: DeployOutput,
+): Promise<void> {
+  const capabilities = await probeDeployCapabilities(deployUrl, spinner, output)
+  requireCapability(
+    deployUrl,
+    spinner,
+    output,
+    'asset transport',
+    capabilities.assetTransport,
+    REQUIRED_ASSET_TRANSPORT,
+    'asset_transport_unsupported',
+  )
+  requireCapability(
+    deployUrl,
+    spinner,
+    output,
+    'secrets source',
+    capabilities.secretsSource,
+    REQUIRED_SECRETS_SOURCE,
+    'secrets_source_unsupported',
+    ', or pin the last pre-cutover CLI (`npm i -g deepspace@0.23`)',
+  )
+}
+
+/** The one arm that needs the BUILT bundle: whether the Vite graph emitted
+ *  imported Worker chunks cannot be known pre-build, so it gates here. */
+export async function requireWorkerModulesCapability(
+  deployUrl: string,
+  needsWorkerModules: boolean,
+  spinner: Spinner | null,
+  output: DeployOutput,
+): Promise<void> {
+  if (!needsWorkerModules) return
+  const capabilities = await probeDeployCapabilities(deployUrl, spinner, output)
+  if (capabilities.workerModules !== REQUIRED_WORKER_MODULE_TRANSPORT) {
+    spinner?.stop('Deploy failed')
     output.die(
       `This build contains multiple Worker modules, but the DeepSpace deploy service at ` +
         `${deployUrl} does not support their transport (needs ` +
         `"${REQUIRED_WORKER_MODULE_TRANSPORT}", found ` +
-        `${capabilities?.workerModules === undefined ? 'none' : `"${String(capabilities.workerModules)}"`}). ` +
+        `${capabilities.workerModules === undefined ? 'none' : `"${String(capabilities.workerModules)}"`}). ` +
         'Wait for the platform to finish updating before retrying this deploy.',
       'worker_module_transport_unsupported',
     )
@@ -653,9 +755,19 @@ export function formatDeployWorkerError(
   code?: string,
 ): string {
   const detail = error ?? `Deployment error (${status})`
-  // The platform's own upgrade instruction is the whole message; wrapping it
-  // in incident boilerplate would bury the one action that fixes it.
-  if (code === 'cli_outdated') return detail
+  // The platform's own instruction is the whole message; wrapping it in
+  // incident boilerplate would bury the one action that fixes it. The 503s
+  // secrets_read_failed (DeepSpace store fault) and
+  // release_reconciliation_pending ("rerun the same deploy unchanged" is the
+  // server's whole instruction) are not Cloudflare incidents — the same
+  // misattribution the 1101/1102 guard below exists to prevent.
+  if (
+    code === 'cli_outdated' ||
+    code === 'secrets_read_failed' ||
+    code === 'release_reconciliation_pending'
+  ) {
+    return detail
+  }
   if (isDeployServiceResourceLimit(status, error)) {
     return `${DEPLOY_SERVICE_LIMIT_HINT}\n\nUnderlying error: ${detail}`
   }

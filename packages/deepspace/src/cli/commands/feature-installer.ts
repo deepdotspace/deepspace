@@ -25,6 +25,7 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { editDistance } from '../lib/command-suggestions'
 import { detectPackageManager } from '../lib/package-manager'
 
 const NAV_MARKER = '// ── Features add nav items below this line ──'
@@ -32,7 +33,6 @@ const NAV_MARKER = '// ── Features add nav items below this line ──'
 interface FeatureFile {
   src: string
   dest: string
-  overwrite?: boolean
 }
 
 interface FeatureSchema {
@@ -83,7 +83,6 @@ export interface FeatureConfig {
   actions?: FeatureAction[]
   code?: FeatureCodeInsertion[]
   wrangler?: FeatureWranglerIntegration
-  css?: string[]
   dependencies?: Record<string, string>
   devDependencies?: Record<string, string>
   instructions?: string[]
@@ -108,7 +107,7 @@ interface DependencyAddition {
   version: unknown
 }
 
-type IntegrationArea = 'schema' | 'actions' | 'code' | 'css' | 'nav' | 'wrangler'
+type IntegrationArea = 'schema' | 'actions' | 'code' | 'nav' | 'wrangler'
 
 interface UnresolvedIntegration {
   area: IntegrationArea
@@ -233,20 +232,6 @@ export function featureCatalog(packageRoot: string = featurePackageRoot()): Feat
   }))
 }
 
-function editDistance(a: string, b: string): number {
-  const row = Array.from({ length: b.length + 1 }, (_, index) => index)
-  for (let i = 1; i <= a.length; i++) {
-    let previous = row[0]
-    row[0] = i
-    for (let j = 1; j <= b.length; j++) {
-      const current = row[j]
-      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1))
-      previous = current
-    }
-  }
-  return row[b.length]
-}
-
 export function suggestFeature(
   featureId: string,
   packageRoot: string = featurePackageRoot(),
@@ -320,7 +305,7 @@ function installFiles(
       continue
     }
 
-    if (existed && !file.overwrite) {
+    if (existed) {
       emit(`   Exists (skipped): ${resolvedDest}`)
       skipped++
       continue
@@ -330,8 +315,8 @@ function installFiles(
     const shiftLevels = resolvedDest.split('/').length - file.dest.split('/').length
     if (wasRedirected) copyFileWithImportShift(srcPath, destPath, shiftLevels)
     else copyFile(srcPath, destPath)
-    emit(`   ${existed ? 'Overwrote' : 'Copied'}: ${resolvedDest}`)
-    if (!existed) created.push(resolvedDest)
+    emit(`   Copied: ${resolvedDest}`)
+    created.push(resolvedDest)
     copied++
   }
 
@@ -654,57 +639,6 @@ function rateLimitBindingBlock(
   ].join('\n')
 }
 
-function integrateCss(
-  packageRoot: string,
-  config: FeatureConfig,
-  targetDir: string,
-  emit: FeatureInstallerOutput,
-): UnresolvedIntegration[] {
-  if (!config.css?.length) return []
-  const stylesPath = join(targetDir, 'src', 'styles.css')
-  if (!existsSync(stylesPath)) {
-    emit('   Warning: Cannot integrate CSS — src/styles.css not found')
-    return [
-      {
-        area: 'css',
-        reason: 'src/styles.css was not found.',
-        steps: config.css.map(
-          (cssFile) =>
-            `Append node_modules/deepspace/features/${config.id}/${cssFile} to src/styles.css.`,
-        ),
-      },
-    ]
-  }
-
-  let styles = readFileSync(stylesPath, 'utf-8')
-  let integrated = 0
-  const unresolved: UnresolvedIntegration[] = []
-  for (const cssFile of config.css) {
-    const srcPath = join(packageRoot, 'features', config.id, cssFile)
-    if (!existsSync(srcPath)) {
-      emit(`   Warning: CSS source not found: ${cssFile}`, 'stderr')
-      unresolved.push({
-        area: 'css',
-        reason: `Feature CSS source '${cssFile}' was not found in the installed package.`,
-        steps: ['Reinstall the current deepspace package, then retry this feature installation.'],
-      })
-      continue
-    }
-    const css = readFileSync(srcPath, 'utf-8')
-    const fingerprint = css.match(/\.([\w-]+)\s*\{|@keyframes\s+([\w-]+)/)
-    const marker = fingerprint?.[1] ?? fingerprint?.[2]
-    if (marker && styles.includes(marker)) {
-      emit(`   CSS already present: ${cssFile} (found .${marker})`)
-      continue
-    }
-    styles += `\n${css}`
-    integrated++
-    emit(`   CSS integrated: ${cssFile} -> styles.css`)
-  }
-  if (integrated > 0) writeFileSync(stylesPath, styles)
-  return unresolved
-}
-
 function unresolvedRoute(
   route: NonNullable<FeatureConfig['route']>,
   config: FeatureConfig,
@@ -998,7 +932,6 @@ export function installFeature(options: FeatureInstallOptions): FeatureInstallOu
     ...integrateActions(config, targetDir, emit),
     ...integrateWrangler(config, targetDir, emit),
     ...integrateCode(config, targetDir, emit),
-    ...integrateCss(packageRoot, config, targetDir, emit),
     ...integrateRoute(config, targetDir, emit),
   ]
   const dependencyResult = integrateDependencies(

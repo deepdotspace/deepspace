@@ -18,9 +18,6 @@
       "dest": "src/components/tree/tree-hooks.ts"
     }
   ],
-  "requires": [],
-  "instructions": [
-    "Configure project nodes and user list to populate the tree"
-  ],
+  "instructions": ["Configure project nodes and user list to populate the tree"],
   "patterns": []
 }

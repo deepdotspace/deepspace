@@ -9,7 +9,6 @@ export interface DocumentationSkillArtifacts {
   name: string
   description: string
   markdown: string
-  legacyIndex: Record<string, unknown>
   discoveryIndex: Record<string, unknown>
 }
 
@@ -29,9 +28,6 @@ export function createDocumentationSkillArtifacts(
     name,
     description,
     markdown,
-    legacyIndex: {
-      skills: [{ name, description, files: ['SKILL.md'] }],
-    },
     discoveryIndex: {
       $schema: AGENT_SKILLS_SCHEMA,
       skills: [
