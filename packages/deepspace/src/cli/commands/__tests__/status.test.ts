@@ -34,6 +34,7 @@ vi.mock('../../auth', async (importOriginal) => {
 
 import { resolveStatusApp, statusRemoteFailure } from '../status'
 import status from '../status'
+import * as authModule from '../../auth'
 import * as appContext from '../../lib/app-context'
 import * as repoApiModule from '../../lib/repo-api'
 import * as sourceApiModule from '../../lib/source-api'
@@ -247,10 +248,9 @@ describe('status --json session and trunk facts', () => {
     expect(json).not.toHaveProperty('sessionError')
   })
 
-  it('omits `user` rather than emitting a placeholder when the identity is unreadable', async () => {
+  it('omits `user` rather than emitting a placeholder when the token carries no email', async () => {
     clearAuthFiles()
-    writeFileSync(authFixture.session, '{}')
-    writeFileSync(authFixture.token, 'not-a-jwt')
+    writeToken({ sub: 'user_1' })
     vi.spyOn(appContext, 'findAppDir').mockReturnValue(null)
 
     const json = await runStatusJson()
@@ -258,6 +258,47 @@ describe('status --json session and trunk facts', () => {
     expect(json.loggedIn).toBe(true)
     // A placeholder string here silently fails an identity comparison.
     expect(json).not.toHaveProperty('user')
+  })
+
+  it('an UNDECODABLE token with a DEAD session is stated as a session error, not read as healthy', async () => {
+    // 2026-08-28 collab AX F1: a garbage credential pair reported
+    // `loggedIn: true` with no `sessionError`, while every other verb
+    // answered not_authenticated. An undecodable token alone is only a
+    // corrupt CACHE — ensureToken() decides, exactly as every verb does.
+    clearAuthFiles()
+    writeFileSync(authFixture.session, 'not-a-real-session-token-garbage')
+    writeFileSync(authFixture.token, 'garbage.not.a.jwt')
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(null)
+    vi.spyOn(authModule, 'ensureToken').mockRejectedValue(
+      new Error('Session expired. Run `deepspace auth login`.'),
+    )
+
+    const json = await runStatusJson()
+
+    expect(json.loggedIn).toBe(false)
+    expect(json).toHaveProperty('sessionError')
+    expect(json).not.toHaveProperty('user')
+  })
+
+  it('an undecodable token beside a VALID session self-heals and reads as logged in', async () => {
+    // The token file is a non-atomically-written cache; a truncated one with
+    // a live session is healthy (ensureToken re-mints). Declaring it dead
+    // would start the interactive login nobody is there to complete — the
+    // exact inversion the first cut of this fix shipped (caught in review).
+    clearAuthFiles()
+    writeFileSync(authFixture.session, 'valid-session-token')
+    writeFileSync(authFixture.token, 'garbage.not.a.jwt')
+    vi.spyOn(appContext, 'findAppDir').mockReturnValue(null)
+    const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url')
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue(
+      `${b64({ alg: 'none' })}.${b64({ email: 'dev@example.com', sub: 'user_1' })}.sig`,
+    )
+
+    const json = await runStatusJson()
+
+    expect(json.loggedIn).toBe(true)
+    expect(json.user).toBe('dev@example.com')
+    expect(json).not.toHaveProperty('sessionError')
   })
 
   it('clears loggedIn and user on an EXPIRED session, and codes it', async () => {

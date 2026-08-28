@@ -173,6 +173,16 @@ export default defineDeepspaceCommand({
         console.log(
           `Registered on ${DEEPSPACE_ENV} as a NEW app under ${accountLabel(token)}; the original is untouched.`,
         )
+        // The fork rewrites ONLY the id — wrangler `name` (and APP_NAME) come
+        // along, so the fork's first deploy targets the ORIGINAL app's
+        // subdomain: it renames onto it if that name is free, or hits the
+        // rename/registered-elsewhere refusal if it is not (2026-08-28 github
+        // AX F5: a --new-id escape went live on the app it escaped from).
+        console.log(
+          'Note: the fork keeps the wrangler `name` — its first deploy targets the SAME ' +
+            'subdomain as the original. For a separate URL, change `name` in wrangler.toml ' +
+            '(and APP_NAME) before deploying.',
+        )
       } else {
         console.log(`Registered ${appId}${envSuffix} on ${DEEPSPACE_ENV} to ${accountLabel(token)}${commitNote}`)
         if (replacedMalformed !== null) {

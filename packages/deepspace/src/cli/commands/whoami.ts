@@ -79,6 +79,11 @@ export default defineDeepspaceCommand({
       // --json, where it is the stable machine handle.
       console.log(`Type:       ${accountType}`)
       if (payload.iss) console.log(`Issuer:     ${payload.iss}`)
+      // Parity with --json's expiresAt: every fact the machine document
+      // carries appears in the sentences too (2026-08-28 lifecycle AX F1).
+      if (payload.exp) {
+        console.log(`Expires:    ${new Date(payload.exp * 1000).toISOString()} (renews on use)`)
+      }
       console.log(`Dashboard:  ${DASHBOARD_URL}`)
       if (isTestAccount) {
         console.log('')

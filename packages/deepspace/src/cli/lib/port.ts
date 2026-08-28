@@ -42,7 +42,11 @@ export async function ensurePortFree(port: number, host: string, waitMs = 15_000
     `Port ${port} is already in use.\n` +
       `Free it with \`${killArgv.join(' ')}\`, or use another port: \`--port <other>\`.`,
     'port_in_use',
-    { extra: { port } },
+    // The machine action the contract documents for this refusal — the prose
+    // named it while `--json` carried none (2026-08-28 coldstart AX). Not
+    // actionRequired: freeing the port and choosing another port are both
+    // legitimate, so the choice stays the caller's.
+    { extra: { port }, action: { cwd: process.cwd(), argv: killArgv } },
   )
 }
 

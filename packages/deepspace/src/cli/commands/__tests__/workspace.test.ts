@@ -902,6 +902,10 @@ describe('workspace checkout placement', () => {
 describe('shared workspace command boundary', () => {
   it.each([
     ['new', {}, 'invalid_task'],
+    // A flag-shaped task is the next flag swallowed by a bare -t: the old
+    // behavior created a real server-side workspace named "--json" while
+    // printing prose to a JSON caller (2026-08-28 lifecycle AX BUG-2).
+    ['new', { task: '--json' }, 'invalid_task'],
     ['attach', { id: 'bad' }, 'invalid_workspace'],
     ['sync', { workspace: 'bad' }, 'invalid_workspace'],
     ['list', { limit: 'nope' }, 'invalid_limit'],

@@ -39,9 +39,14 @@ export const newWorkspaceCommand = defineDeepspaceCommand({
   },
   async run({ args }) {
     const task = typeof args.task === 'string' ? args.task.trim() : ''
-    if (!task) {
+    // A flag-shaped task is the NEXT flag swallowed by a bare `-t`
+    // (`workspace new -t --json` created a real server-side workspace
+    // literally named "--json" — 2026-08-28 lifecycle AX BUG-2). No real
+    // task starts with `-`; one message covers both empty and swallowed.
+    if (!task || task.startsWith('-')) {
       throw new Refusal(
-        'A workspace needs a task — pass -t "<what this workspace is for>" (it is shown to every collaborator and agent).',
+        'A workspace needs a task — pass -t "<what this workspace is for>" (quote it, and put ' +
+          'flags like --json after it; it is shown to every collaborator and agent).',
         'invalid_task',
       )
     }

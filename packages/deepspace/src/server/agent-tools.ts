@@ -80,10 +80,18 @@ function errorResponse(
     | 'tool_execution_failed'
     | 'invalid_tool_result'
     | 'tool_result_too_large',
+  /** Appended to the base sentence — the stated cause an exit-1 caller is
+   *  told to fix (2026-08-28 agent-tools AX F1: "The tool input is invalid."
+   *  named no field, no type, nothing to diff against). */
+  detail?: string,
 ): Response {
   const errors = {
     unauthenticated: 'Authentication is required.',
-    forbidden: 'You are not allowed to use assistant tools.',
+    // The remedy is documented and single-step (local-agent-tools.md): a
+    // signed-in app visit creates or refreshes the caller's user row.
+    forbidden:
+      'You are not allowed to use assistant tools. Sign in to the app once in a browser ' +
+      '(a signed-in visit creates your user row), or ask the app owner for access.',
     access_check_unavailable: 'Access could not be verified. Try again.',
     tool_not_found: 'The requested tool is not available.',
     invalid_json: 'The request body must be valid JSON.',
@@ -94,7 +102,61 @@ function errorResponse(
     invalid_tool_result: 'The tool returned an invalid result.',
     tool_result_too_large: 'The tool returned a result that is too large.',
   } as const
-  return jsonResponse({ ok: false, code, error: errors[code] }, status)
+  const error = detail ? `${errors[code]} ${detail}` : errors[code]
+  return jsonResponse({ ok: false, code, error }, status)
+}
+
+/** One bounded line of a validator's own diagnosis, so the refusal states
+ *  the cause instead of only asserting one exists. A zod error's `message`
+ *  is a raw JSON dump of its issues — render those as `path: message` lines
+ *  instead, with an explicit count when some are elided, so a multi-field
+ *  mistake never silently loses its tail to truncation. */
+function validationDetail(error: unknown): string | undefined {
+  const issues = (error as { issues?: unknown }).issues
+  if (Array.isArray(issues) && issues.length > 0) {
+    const shown = issues.slice(0, 5).map((issue) => {
+      const { path, message } = (issue ?? {}) as { path?: unknown; message?: unknown }
+      const at = Array.isArray(path) && path.length > 0 ? `${path.join('.')}: ` : ''
+      return `${at}${typeof message === 'string' ? message : 'invalid'}`
+    })
+    const more = issues.length - shown.length
+    return `${shown.join('; ')}${more > 0 ? ` (+${more} more)` : ''}`
+  }
+  if (!(error instanceof Error) || !error.message) return undefined
+  const line = error.message.replace(/\s+/g, ' ').trim()
+  return line.length > 400 ? `${line.slice(0, 400)}…` : line
+}
+
+/** Top-level keys the validator silently DROPPED from a schema whose
+ *  published contract is closed (`additionalProperties: false`). Runtime
+ *  truth decides: open schemas keep their extra keys and return none here.
+ *  Failures to read the lazy `jsonSchema` (unrepresentable schemas) mean no
+ *  published contract to enforce — return none. */
+function droppedTopLevelKeys(
+  schema: { jsonSchema: unknown },
+  input: unknown,
+  validated: unknown,
+): string[] {
+  if (
+    input === null ||
+    typeof input !== 'object' ||
+    Array.isArray(input) ||
+    validated === null ||
+    typeof validated !== 'object' ||
+    Array.isArray(validated)
+  ) {
+    return []
+  }
+  try {
+    // Accessed HERE so the lazy getter's throw stays inside this try.
+    const jsonSchema = schema.jsonSchema as
+      | { type?: unknown; additionalProperties?: unknown }
+      | undefined
+    if (jsonSchema?.type !== 'object' || jsonSchema.additionalProperties !== false) return []
+  } catch {
+    return []
+  }
+  return Object.keys(input).filter((key) => !Object.hasOwn(validated, key))
 }
 
 function parseToolRequestBody(text: string): AgentToolRequestBody | null | undefined {
@@ -254,7 +316,23 @@ export function registerAgentToolRoutes<Env extends AgentToolRouteEnv>(
     } catch {
       return errorResponse(500, 'tool_configuration_error')
     }
-    if (!tool) return errorResponse(404, 'tool_not_found')
+    if (!tool) {
+      // Name what IS available: this absorbs both a plain typo and the
+      // dotted-vs-underscored separator confusion (2026-08-28 agent-tools AX
+      // F5 — prose elsewhere says `records.update`, discovery says
+      // `records_update`) without the caller needing a second discovery call.
+      const names = Object.keys(tools)
+        .filter((name) => typeof tools[name]?.execute === 'function')
+        .sort()
+      const listed = names.slice(0, 20).join(', ')
+      return errorResponse(
+        404,
+        'tool_not_found',
+        names.length > 0
+          ? `Available tools: ${listed}${names.length > 20 ? ', …' : ''}.`
+          : undefined,
+      )
+    }
 
     let text: string
     try {
@@ -269,15 +347,36 @@ export function registerAgentToolRoutes<Env extends AgentToolRouteEnv>(
     if (body === null) return errorResponse(400, 'invalid_tool_input')
 
     let input = body.input
+    const schema = asSchema(tool.inputSchema)
     try {
-      const validation = asSchema(tool.inputSchema).validate
+      const validation = schema.validate
       if (validation) {
         const result = await validation(input)
-        if (!result.success) return errorResponse(400, 'invalid_tool_input')
+        if (!result.success) {
+          return errorResponse(400, 'invalid_tool_input', validationDetail(result.error))
+        }
+        // The PUBLISHED contract says `additionalProperties: false`, but
+        // zod's runtime default STRIPS unknown keys — so a typo'd argument
+        // validated and reported success under the defaults (2026-08-28
+        // agent-tools AX F2: `{"limitt":99}` succeeded silently). Refuse a
+        // key the validator DROPPED, named — runtime truth, so deliberately
+        // open schemas (`.passthrough()`, `.catchall()`) whose converted
+        // jsonSchema falsely reads closed keep their extra keys and pass.
+        // Gated on the published closed-ness so reshaping schemas
+        // (transforms) are exempt; the helper contains the lazy jsonSchema
+        // getter's possible throw (unrepresentable schemas enforce nothing).
+        const dropped = droppedTopLevelKeys(schema, input, result.value)
+        if (dropped.length > 0) {
+          return errorResponse(
+            400,
+            'invalid_tool_input',
+            `Unknown input field(s): ${dropped.join(', ')} — the tool's inputSchema lists the accepted fields.`,
+          )
+        }
         input = result.value
       }
-    } catch {
-      return errorResponse(400, 'invalid_tool_input')
+    } catch (error) {
+      return errorResponse(400, 'invalid_tool_input', validationDetail(error))
     }
 
     let output: unknown

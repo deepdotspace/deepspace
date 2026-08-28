@@ -132,7 +132,8 @@ export function renderSummary(summary: UsageSummary): string {
 export default defineDeepspaceCommand({
   meta: {
     name: 'usage',
-    description: 'Show account-wide credits and integration spend (all apps)',
+    description:
+      'Show account-wide credits and integration spend (all apps). Storage is per app: `deepspace app files list`',
   },
   async run({ args }) {
     const token = await ensureToken()

@@ -1,5 +1,42 @@
 # create-deepspace
 
+## 0.28.2
+
+### Patch Changes
+
+- Every fixable finding from the 2026-08-28 five-lane v0.28.1 AX pass (summary
+  and dispositions: `docs/audits/2026-08-28-v0281-ax-summary.md`). Agent-loop
+  killers: the server's `stale_base` sentence names all three recoveries
+  (`workspace land` included — the old text prescribed the exact `pull` loop the
+  0.28.0 action removal closed); a quota-blocked first-use registration refuses
+  with the quota's own code instead of `app_not_initialized` plus an `app init`
+  action the CLI had just been told cannot succeed (one `registerForLocalRun`
+  chokepoint; existing-id checkouts keep local-first warn-and-continue). Agent
+  tools: `invalid_tool_input` states the validator's cause; the published
+  `additionalProperties: false` is enforced at the invoke route (a typo'd key
+  refuses naming it instead of silently succeeding); `tool_not_found` lists the
+  available tools; `forbidden` names the one-step remedy; the agent-endpoint 404
+  distinguishes "wrong app" from "no registerAgent"; `user_current` explains the
+  no-users-row state instead of "User not found". Source latch edges: the
+  `--new-id` fork warns that it inherits the wrangler `name` (its first deploy
+  targets the ORIGINAL subdomain until `name` changes); pre-latch `status` names
+  the repository the latch would record; the claimed-GitHub sentence is
+  byte-identical CLI and server. Sessions and test accounts: a present-but-
+  undecodable token file reports `sessionError` (`status` no longer calls a
+  garbage session healthy); `recover --json` carries `savedTo`; recovered
+  accounts keep their real `createdAt` (the credential endpoint returns it);
+  remedy joins no longer double the period; the internal docs teach
+  `--password-stdin` and retrieval-based `recover`. Operations: a live install
+  is reported before `not_authenticated` on dev/test (the heal stays after
+  auth); `port_in_use` carries the `dev kill --port <n>` machine action the
+  contract documents; `workspace.synced` events record the task and the
+  activity feed prints it; `workspace new -t` refuses a flag-shaped task
+  instead of creating a workspace named `--json`; `whoami`/`app source` human
+  output carries `expiresAt`/`registered` (JSON parity); `app usage` help points
+  at `app files list` for storage; the scaffold's Next steps warn about
+  committing the `__APP_ID__` placeholder; `behind_trunk`/`vc_diverged` are
+  documented beside `stale_base`.
+
 ## 0.28.1
 
 ### Patch Changes

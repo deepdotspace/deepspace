@@ -34,7 +34,7 @@
  * it keeps both). The suite's own exit code collapses to the contract's 0/1.
  */
 
-import { ensureAppRegistered } from '../lib/app-registration'
+import { registerForLocalRun } from '../lib/app-registration'
 import { existsSync, readdirSync, type Dirent } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
 import { sync as spawnSync } from 'cross-spawn'
@@ -202,8 +202,17 @@ export default defineDeepspaceCommand({
       worktree: () => resolveWorktreePort(appDir),
     })
 
+    // A LIVE concurrent install outranks everything else: it costs stat
+    // calls to see, and `not_authenticated` while the scaffolder is visibly
+    // installing hid the state it exists to report — and the heal's work is
+    // never wasted on a logged-out user, because the install has to happen
+    // before the suite can run regardless of how auth turns out. Before the
+    // port check too, so dev and test agree on which refusal the same
+    // directory state gets.
+    ensureInstallReady(appDir)
+
     // The runner owns its server (reuseExistingServer: false), so any live
-    // listener on the port is refused before auth/install work; a previous
+    // listener on the port is refused before auth work; a previous
     // run's server still shutting down gets a bounded grace first.
     if (suite !== 'unit') await ensurePortFree(port, '0.0.0.0')
 
@@ -225,28 +234,13 @@ export default defineDeepspaceCommand({
       )
     }
 
-    // After auth: a logged-out user must not sit through a first-use install
-    // only to hit not_authenticated.
-    ensureInstallReady(appDir)
-
     // Refresh the app-store secrets cache (config = wrangler env, or 'prd').
     // An id-less checkout heals here: apps register on first use, so a fresh
     // scaffold's `test run` needs no `app init` step first.
     let generatedSecretsCache: string | undefined
-    let appIdForSecrets: string | null = null
-    try {
-      appIdForSecrets = (await ensureAppRegistered(appDir, token, wranglerEnv))?.appId ?? null
-    } catch (registrationError) {
-      // Local-first: a failed MINT (quota, offline, 5xx) must not stop a
-      // local dev/test run whose only loss is the app-secrets cache. Warn
-      // loudly and carry on; the same failure surfaces as a hard refusal on
-      // deploy/push, where the registration is actually required.
-      process.stderr.write(
-        `warning: could not register the app (` +
-          `${registrationError instanceof Error ? registrationError.message.split('\n')[0] : String(registrationError)}` +
-          `) — continuing without app secrets.\n`,
-      )
-    }
+    // Local-first for an EXISTING id; an id-less checkout whose mint failed
+    // refuses with the mint's own cause (see registerForLocalRun).
+    const appIdForSecrets = await registerForLocalRun(appDir, token, wranglerEnv)
     if (appIdForSecrets) {
       try {
         const refreshed = await refreshSecretsCache(DEPLOY_URL, token, appIdForSecrets, wranglerEnv)

@@ -78,13 +78,13 @@ export function formatEvent(
       detail = `"${String(s.task ?? '')}" from ${short(s.baseOid)}`
       break
     case 'workspace.synced':
-      // The event records only the tip: changed-file counts are client-side
-      // diffs by design (do/workspaces.ts). Name WHICH workspace — the JSON
-      // always carried it while the human line rendered anonymously, the one
-      // event a parallel team most needs attributed (r2 workspaces AX F6).
-      // The id is the event's SUBJECT (recordActivity's third argument), not
-      // a summary field — same source landIndex reads.
-      detail = `${e.subjectId ? `${e.subjectId} ` : ''}→ ${short(s.headOid)}`
+      // Name WHICH workspace (the event's SUBJECT — same source landIndex
+      // reads; r2 workspaces AX F6) and what it is FOR (`task`, recorded
+      // since 0.28.2 like its landed/created siblings; older events lack it).
+      // Changed-file counts are client-side diffs by design.
+      detail = `${e.subjectId ? `${e.subjectId} ` : ''}${
+        typeof s.task === 'string' && s.task ? `"${s.task}" ` : ''
+      }→ ${short(s.headOid)}`
       break
     case 'workspace.landed':
       detail = `"${String(s.task ?? '')}" → ${short(s.landedOid)} on ${String(s.into ?? 'trunk')}`

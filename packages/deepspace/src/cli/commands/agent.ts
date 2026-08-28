@@ -326,8 +326,15 @@ function httpRefusal(response: { status: number; body: unknown }, tokens: string
     )
   }
   if (response.status === 404 && !server) {
+    // Two states land here and the transport cannot tell them apart: the app
+    // name resolves to nothing at all, or the app exists but never deployed
+    // `registerAgent`. Name both and the check for each (2026-08-28
+    // agent-tools AX F4: the old sentence asserted an endpoint fact about an
+    // app that did not exist).
     return new Refusal(
-      'This app does not expose the requested agent endpoint.',
+      'No agent endpoint answered for this app. Either the app name/id is wrong ' +
+        '(`deepspace app list` shows yours), or the app does not register assistant tools — ' +
+        'its worker needs `registerAgent(app, { tools, inApp: false })` deployed.',
       'agent_endpoint_not_found',
     )
   }

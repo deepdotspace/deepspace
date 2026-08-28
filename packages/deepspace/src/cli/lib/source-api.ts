@@ -16,9 +16,12 @@ export type AppSource = { provider: 'deepspace' } | { provider: 'github'; reposi
  * would be a guess.
  */
 export function githubSourceRefusal(appId: string, repository: string): Refusal {
+  // Byte-identical to the server's 422 sentence (deploy-worker repoAccess):
+  // one refusal code must read as ONE refusal whichever side raised it
+  // (2026-08-28 github AX F2 caught the two wordings drifting).
   return new Refusal(
-    `This app uses GitHub source (${repository}). Use normal Git/GitHub for source operations ` +
-      '(clone, fetch, push); `deepspace deploy` ships the local working tree without changing Git.',
+    `This app uses GitHub source (${repository}). Use normal Git/GitHub for source operations. ` +
+      '`deepspace deploy` ships the local working tree without changing Git.',
     'source_managed_by_github',
     { extra: { appId, repository } },
   )

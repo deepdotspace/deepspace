@@ -91,4 +91,7 @@ function reportSource(appId: string, state: AppSourceState, json: boolean): void
     )
   }
   console.log(`Revision: ${state.revision}`)
+  // Parity with --json's `registered` (2026-08-28 lifecycle AX F1: every
+  // fact the machine document carries appears in the sentences too).
+  console.log(`Registered: ${state.registered ? 'yes' : 'no'}`)
 }

@@ -121,6 +121,50 @@ export function healBlocker(
   return null
 }
 
+/**
+ * First-use registration for LOCAL runs (`dev start`, `test run`) — one
+ * implementation of the local-first rule the two commands were each
+ * hand-rolling. On an EXISTING id a failed re-verification warns and
+ * continues: the only loss is the app-secrets cache, and deploy/push
+ * hard-refuse later where registration is actually required. An ID-LESS
+ * checkout has nothing to continue WITH — every later step refuses
+ * `app_not_initialized`, and its `app init` action would fail for this very
+ * cause — so the mint failure IS the refusal, carrying its own code (e.g.
+ * `app_quota_exceeded`) and no action. (2026-08-28 coldstart AX F2: exit 2
+ * handed an agent an action the CLI had just been told cannot succeed.)
+ */
+export async function registerForLocalRun(
+  appDir: string,
+  token: string,
+  wranglerEnv?: string,
+): Promise<string | null> {
+  try {
+    return (await ensureAppRegistered(appDir, token, wranglerEnv))?.appId ?? null
+  } catch (registrationError) {
+    let hasUsableId = false
+    try {
+      hasUsableId = readAppId(appDir, wranglerEnv) !== null
+    } catch {
+      // An unreadable/invalid id is not a usable one — the mint failure below
+      // is the truer refusal (readAppId's own throw must not displace it).
+    }
+    // Rethrown UNCHANGED, not re-wrapped: an ApiError here carries the
+    // server's code AND its structured details (quota numbers, app lists),
+    // which the failure envelope spreads into --json — a wrapper Refusal
+    // would drop them (caught in review; deploy lets the same error through
+    // and keeps them).
+    if (!hasUsableId) throw registrationError
+    const firstLine =
+      registrationError instanceof Error
+        ? registrationError.message.split('\n')[0]
+        : String(registrationError)
+    process.stderr.write(
+      `warning: could not register the app (${firstLine}) — continuing without app secrets.\n`,
+    )
+    return null
+  }
+}
+
 /** The refusal for a verb that wanted to register on first use and could not
  *  — one builder, so deploy and the resolver agree and each blocked state
  *  gets its true diagnosis and remedy. */

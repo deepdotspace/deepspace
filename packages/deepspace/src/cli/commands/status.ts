@@ -34,7 +34,7 @@ import {
   type RemoteWorkspaceView,
 } from '../lib/repo-api'
 import { errorCode } from '../lib/cli-errors'
-import { externalGitSource } from './deploy/repository'
+import { externalGitSource, observedGitHubRepository } from './deploy/repository'
 import { installState } from '../lib/install-status'
 import { installCommand } from '../lib/package-manager'
 import { createSpinner } from '../lib/spinner'
@@ -185,6 +185,7 @@ export default defineCommand({
       json.sessionError = sessionError('Not logged in. Run `deepspace auth login` first.')
     } else {
       let who: string | null = null
+      let undecodableToken = false
       try {
         const payload = decodeJwtPayload<{ email?: string; sub?: string }>(
           readFileSync(TOKEN_PATH, 'utf-8').trim(),
@@ -192,17 +193,54 @@ export default defineCommand({
         if (payload.email) who = payload.email
         userId = payload.sub ?? null
       } catch {
-        // token file absent/stale — the session still mints on next use
+        // An ABSENT token file is fine — the session still mints on next
+        // use. A PRESENT one that does not decode is suspect, but not
+        // sentence-worthy on its own: the file is a non-atomically-written
+        // CACHE, and a truncated one beside a VALID session self-heals (the
+        // first review of this fix reported that healthy state as dead).
+        undecodableToken = existsSync(TOKEN_PATH)
       }
-      lines.push([
-        'Session',
-        `${who ?? 'logged in'} · renews on use (re-login only after 30 idle days)`,
-      ])
-      json.loggedIn = true
-      // `user` is an email in every run that has an identity, so a placeholder
-      // string there would silently fail an identity comparison. Omit the key
-      // when the identity is genuinely unknown.
-      if (who) json.user = who
+      let sessionLineEmitted = false
+      if (undecodableToken) {
+        // Resolve the truth the way every other verb does: ensureToken()
+        // ignores an unreadable cached token and re-mints from the session
+        // (rewriting the file). Only a real auth failure is a dead session;
+        // offline stays "logged in, unverified" — the same rule the cloud
+        // section applies. This is what makes a garbage credential PAIR
+        // finally read as the not_authenticated every other verb reports
+        // (2026-08-28 collab AX F1), without lying about the healable state.
+        try {
+          const healed = await ensureToken()
+          const payload = decodeJwtPayload<{ email?: string; sub?: string }>(healed)
+          if (payload.email) who = payload.email
+          userId = payload.sub ?? null
+        } catch (err) {
+          sessionLineEmitted = true
+          const offline = err instanceof TypeError || errorCode(err) === 'network_error'
+          if (offline) {
+            lines.push(['Session', 'logged in · stored token unreadable, could not verify offline'])
+            json.loggedIn = true
+          } else {
+            lines.push(['Session', 'stored credentials unusable — run `deepspace auth login`'])
+            facts.loggedIn = false
+            json.loggedIn = false
+            json.sessionError = sessionError(
+              'Stored credentials are unusable. Run `deepspace auth login`.',
+            )
+          }
+        }
+      }
+      if (!sessionLineEmitted) {
+        lines.push([
+          'Session',
+          `${who ?? 'logged in'} · renews on use (re-login only after 30 idle days)`,
+        ])
+        json.loggedIn = true
+        // `user` is an email in every run that has an identity, so a placeholder
+        // string there would silently fail an identity comparison. Omit the key
+        // when the identity is genuinely unknown.
+        if (who) json.user = who
+      }
     }
 
     // ── app (local) ──────────────────────────────────────────────────────
@@ -324,12 +362,16 @@ export default defineCommand({
           } else {
             // Unclaimed = pre-first-release: the FIRST deploy or push latches
             // the source, permanently — a GitHub remote in the checkout
-            // latches github, none latches deepspace.
+            // latches github, none latches deepspace. Name the repository the
+            // latch would record: "permanently" deserves a noun (2026-08-28
+            // github AX F7 — the announcement named it, the prediction here
+            // did not).
+            const observed = inferredGithub ? observedGitHubRepository(appDir) : null
             lines.push([
               'Source',
               `unclaimed · ${
                 inferredGithub
-                  ? 'first release claims GitHub (from this checkout’s remote), permanently'
+                  ? `first release claims GitHub${observed ? ` (${observed})` : ''} from this checkout’s remote, permanently`
                   : 'first deploy or push claims DeepSpace, permanently'
               }`,
             ])

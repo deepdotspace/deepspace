@@ -218,9 +218,94 @@ describe('agent tool routes', () => {
     )
 
     expect(response.status).toBe(400)
-    expect(((await json(response)) as { code: string }).code).toBe('invalid_tool_input')
+    const body = (await json(response)) as { code: string; error: string }
+    expect(body.code).toBe('invalid_tool_input')
+    // The stated cause: exit-1 callers are told to fix it, so the refusal
+    // must name it (2026-08-28 agent-tools AX F1).
+    expect(body.error.length).toBeGreaterThan('The tool input is invalid.'.length)
     expect(execute).not.toHaveBeenCalled()
     expect(requests).toEqual([])
+  })
+
+  it('enforces the published additionalProperties: an unknown top-level key refuses, named', async () => {
+    // Zod's runtime default STRIPS unknown keys, so without the route-level
+    // check a typo'd argument validated and reported success under the
+    // defaults (2026-08-28 agent-tools AX F2: {"limitt":99} succeeded).
+    const { env } = makeEnv()
+    const execute = vi.fn(async () => ({ ok: true }))
+    const app = makeApp(env, {
+      buildTools: () => ({
+        echo: tool({
+          inputSchema: z.object({ message: z.string().optional() }),
+          execute,
+        }),
+      }),
+    })
+
+    const response = await app.request(
+      'https://app.test/_deepspace/agent/tools/echo',
+      { method: 'POST', body: JSON.stringify({ input: { messagee: 'typo' } }) },
+      env,
+    )
+
+    expect(response.status).toBe(400)
+    const body = (await json(response)) as { code: string; error: string }
+    expect(body.code).toBe('invalid_tool_input')
+    expect(body.error).toContain('messagee')
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('a deliberately OPEN schema (catchall) keeps its extra keys — runtime truth, not the converted jsonSchema', async () => {
+    // The AI SDK's zod conversion emits additionalProperties: false even for
+    // .passthrough()/.catchall() objects, so enforcing the CONVERTED schema
+    // would 400 legitimate dynamic-field tools (caught in review). The check
+    // keys on what the validator DROPPED instead: open schemas drop nothing.
+    const { env } = makeEnv()
+    const execute = vi.fn(async () => ({ ok: true }))
+    const app = makeApp(env, {
+      buildTools: () => ({
+        record: tool({
+          inputSchema: z.object({ table: z.string() }).catchall(z.unknown()),
+          execute,
+        }),
+      }),
+    })
+
+    const response = await app.request(
+      'https://app.test/_deepspace/agent/tools/record',
+      { method: 'POST', body: JSON.stringify({ input: { table: 't', extra: 1 } }) },
+      env,
+    )
+
+    expect(response.status).toBe(200)
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({ table: 't', extra: 1 }),
+      expect.anything(),
+    )
+  })
+
+  it('tool_not_found lists the available tools', async () => {
+    // Absorbs typos and the dotted-vs-underscored separator confusion
+    // (2026-08-28 agent-tools AX F5) without a second discovery call.
+    const { env } = makeEnv()
+    const app = makeApp(env, {
+      buildTools: () => ({
+        records_create: tool({ inputSchema: z.object({}), execute: async () => null }),
+        records_query: tool({ inputSchema: z.object({}), execute: async () => null }),
+      }),
+    })
+
+    const response = await app.request(
+      'https://app.test/_deepspace/agent/tools/records.create',
+      { method: 'POST', body: JSON.stringify({ input: {} }) },
+      env,
+    )
+
+    expect(response.status).toBe(404)
+    const body = (await json(response)) as { code: string; error: string }
+    expect(body.code).toBe('tool_not_found')
+    expect(body.error).toContain('records_create')
+    expect(body.error).toContain('records_query')
   })
 
   it('uses the canonical app room as the caller without app-action bypasses', async () => {

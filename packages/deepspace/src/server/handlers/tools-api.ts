@@ -321,7 +321,19 @@ async function executeTool(
     case 'user.current': {
       if (!userId) return { success: false, error: 'No userId provided' }
       const user = getUser(ctx.sql, userId, ctx.schemaRegistry)
-      if (!user) return { success: false, error: 'User not found' }
+      if (!user) {
+        // A coherent state, not a contradiction: the app owner (and any
+        // access-granted caller) is admitted to tools WITHOUT a users row —
+        // the row is created by a signed-in app visit. Say so, or this
+        // four-word miss lands right after a successful records call and
+        // reads as one (2026-08-28 agent-tools AX F6).
+        return {
+          success: false,
+          error:
+            'No users row for this identity yet — it is created by signing in to the app in a ' +
+            'browser. Tool access does not require one, so other tools keep working.',
+        }
+      }
       return { success: true, data: { user } }
     }
 

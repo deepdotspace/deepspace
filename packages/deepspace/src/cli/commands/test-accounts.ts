@@ -44,7 +44,12 @@ import {
  *  machine `code` beside every message (carried by TestAccountServiceError);
  *  the remedy keys on the code alone. */
 function testAccountFailure(err: unknown, fallbackCode: string): Refusal {
-  const message = err instanceof Error ? err.message : String(err)
+  // The server sentence often ends with its own period; the JOINING branches
+  // trim it or the remedy reads "…email.. Test-account…" (2026-08-28 collab
+  // AX F2). The fall-through keeps the sentence untouched — trimming there
+  // just ships an unterminated message (caught in review).
+  const raw = err instanceof Error ? err.message : String(err)
+  const message = raw.replace(/\.\s*$/, '')
   const code = err instanceof TestAccountServiceError ? err.code : undefined
   if (code === 'test_account_cap') {
     return new Refusal(
@@ -64,7 +69,7 @@ function testAccountFailure(err: unknown, fallbackCode: string): Refusal {
       'not_authenticated',
     )
   }
-  return new Refusal(`Failed: ${message}`, code ?? fallbackCode)
+  return new Refusal(`Failed: ${raw}`, code ?? fallbackCode)
 }
 
 // ── Subcommands ────────────────────────────────────────────────────
@@ -466,7 +471,9 @@ const recover = defineDeepspaceCommand({
       targets = remote.filter((account) => !known.has(account.id))
       if (targets.length === 0) {
         if (!args.json) console.log('Every pool account already has a local credential.')
-        return { data: { recovered: [], alreadyLocal: remote.length } }
+        // Same savedTo as the recovering return: a caller branching on it to
+        // find the store must get it on every success shape.
+        return { data: { recovered: [], alreadyLocal: remote.length, savedTo: TEST_ACCOUNTS_PATH } }
       }
     } else {
       const match = args.id
@@ -524,7 +531,9 @@ const recover = defineDeepspaceCommand({
           : `\nStored in ${TEST_ACCOUNTS_PATH}. Passwords were retrieved, not reset — other machines' credentials still work.`,
       )
     }
-    return { data: { recovered, requested: targets.length, failures: [] } }
+    // savedTo: parity with `create --json` — the human line names the store
+    // path; the machine document must too (2026-08-28 collab AX F3).
+    return { data: { recovered, requested: targets.length, failures: [], savedTo: TEST_ACCOUNTS_PATH } }
   },
 })
 

@@ -88,7 +88,7 @@ export function externalGitSource(appDir: string, source: AppSource | null): boo
  *  arbitrary-but-deterministic pick still names A repository the checkout
  *  points at, where null would drop the evidence (and the server's stale
  *  guard with it). */
-function observedGitHubRepository(appDir: string): string | null {
+export function observedGitHubRepository(appDir: string): string | null {
   try {
     return (
       selectGitHubRemote(appDir)?.repository ?? listGitHubRemotes(appDir)[0]?.repository ?? null
