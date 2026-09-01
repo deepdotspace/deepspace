@@ -355,6 +355,27 @@ describe('JobRoom — failure + retry', () => {
   // cutoff at the start of the drain so re-queued rows fall out of the
   // current tick and pick up on the next alarm). Tests fire the alarm
   // once per attempt to mirror that.
+  it('logs the thrown MESSAGE, not a bare Error object', async () => {
+    // Workers Logs drops a logged Error OBJECT's message (frames survive) —
+    // the exact defect loggableError closes. A revert to
+    // `console.error(prefix, e)` re-hides every failed job's reason in every
+    // deployed app, invisibly; this pins the string form at the call site.
+    const db = new Database(':memory:')
+    const room = makeRoom(db, () => {
+      throw new Error('R2 object not found: avatars/u1.png')
+    })
+    await room.dispatch({
+      type: MSG.JOB_ENQUEUE,
+      payload: { requestId: 'r-log', type: 'resize', maxAttempts: 1 },
+    })
+    await room.runAlarm()
+    const logged = errSpy.mock.calls.map((args: unknown[]) => args.join(' ')).join('\n')
+    expect(logged).toContain('R2 object not found: avatars/u1.png')
+    expect(
+      errSpy.mock.calls.every((args: unknown[]) => args.every((a) => typeof a === 'string')),
+    ).toBe(true)
+  })
+
   it('retries a flaky job and eventually succeeds within maxAttempts', async () => {
     const db = new Database(':memory:')
     let calls = 0

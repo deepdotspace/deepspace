@@ -8,6 +8,7 @@
  */
 
 import { generateText, type ModelMessage } from 'ai'
+import { loggableError } from '../../shared/log-events'
 import { createDeepSpaceAI, type DeepSpaceAIEnv } from './ai'
 
 export interface ChatTurn {
@@ -488,8 +489,7 @@ export async function prepareMessagesWithCompaction(
       }
     } catch (err) {
       console.error(
-        'prepareMessagesWithCompaction: summarizer failed, falling back to sliding window',
-        err,
+        `prepareMessagesWithCompaction: summarizer failed, falling back to sliding window: ${loggableError(err)}`,
       )
     }
   } else {

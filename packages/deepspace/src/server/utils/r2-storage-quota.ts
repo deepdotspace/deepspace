@@ -1,6 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import { storageQuotaMessage } from '../../shared/app-files'
+import { loggableError } from '../../shared/log-events'
 
 const CORS_HEADERS = { 'Access-Control-Allow-Origin': '*' } as const
 const QUOTA_SUMMARY_VERSION = 1
@@ -230,7 +231,7 @@ async function measuredAllocationUsage(
   )
   if (budget.staleKeys.length > 0) {
     await bucket.delete(budget.staleKeys).catch((error) => {
-      console.error('[files:quota] stale marker cleanup:', error)
+      console.error(`[files:quota] stale marker cleanup: ${loggableError(error)}`)
     })
   }
   return total
@@ -335,7 +336,7 @@ export async function markQuotaDirty(
     }
     console.error('[files:quota] could not mark summary reclaimable after concurrent writes')
   } catch (error) {
-    console.error('[files:quota] could not mark summary reclaimable:', error)
+    console.error(`[files:quota] could not mark summary reclaimable: ${loggableError(error)}`)
   }
 }
 
@@ -390,7 +391,7 @@ export async function releaseQuotaMarker(
     }
     return true
   } catch (error) {
-    console.error('[files:quota] reservation cleanup:', error)
+    console.error(`[files:quota] reservation cleanup: ${loggableError(error)}`)
     return false
   }
 }
@@ -440,7 +441,7 @@ export async function readMultipartReservation(
   try {
     object = await bucket.get(key)
   } catch (error) {
-    console.error('[files:quota] reservation read:', error)
+    console.error(`[files:quota] reservation read: ${loggableError(error)}`)
     return 'invalid'
   }
   if (!object) return null
@@ -683,7 +684,7 @@ export async function admitStorage(
     }
     return { markerKey: effectiveMarker?.key ?? null }
   } catch (error) {
-    console.error('[files:quota] admission:', error)
+    console.error(`[files:quota] admission: ${loggableError(error)}`)
     await releaseQuotaMarker(bucket, storage, markerKey, true)
     return quotaUnavailable(
       'The storage used by this account could not be verified. Retry shortly.',
@@ -707,7 +708,7 @@ export async function storageUsage(
     const current = await ensureQuotaSummary(bucket, storage, prefixes, 'repairDirty')
     return current?.summary?.usedBytes ?? null
   } catch (error) {
-    console.error('[files:quota] usage:', error)
+    console.error(`[files:quota] usage: ${loggableError(error)}`)
     return null
   }
 }

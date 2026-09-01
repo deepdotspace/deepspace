@@ -20,6 +20,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import { BaseRoom, type UserAttachment } from './base-room'
+import { loggableError } from '../../shared/log-events'
 import { MSG } from '../../shared/protocol/constants'
 import { ROLES } from '../../shared/roles'
 import { serverBuild, type ServerMessage } from '../../shared/protocol/messages'
@@ -28,12 +29,7 @@ import { serverBuild, type ServerMessage } from '../../shared/protocol/messages'
 // Types
 // ============================================================================
 
-export type JobStatus =
-  | 'queued'
-  | 'running'
-  | 'succeeded'
-  | 'failed'
-  | 'canceled'
+export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
 
 /**
  * Job record exposed to `onJob` handlers and clients. Payloads are typed
@@ -163,12 +159,8 @@ export abstract class JobRoom<
       )
     `)
 
-    this.sql.exec(
-      `CREATE INDEX IF NOT EXISTS jobs_status_next_run ON jobs (status, next_run_at)`,
-    )
-    this.sql.exec(
-      `CREATE INDEX IF NOT EXISTS jobs_completed_at ON jobs (completed_at)`,
-    )
+    this.sql.exec(`CREATE INDEX IF NOT EXISTS jobs_status_next_run ON jobs (status, next_run_at)`)
+    this.sql.exec(`CREATE INDEX IF NOT EXISTS jobs_completed_at ON jobs (completed_at)`)
 
     this.recoverStuckRunning()
     this.scheduleNextAlarm()
@@ -302,9 +294,12 @@ export abstract class JobRoom<
     if (request.method !== 'POST' || !url.pathname.endsWith('/enqueue')) {
       return new Response('Not Found', { status: 404 })
     }
-    const body = (await request.json().catch(() => null)) as
-      | { type?: unknown; payload?: unknown; maxAttempts?: unknown; enqueuedBy?: unknown }
-      | null
+    const body = (await request.json().catch(() => null)) as {
+      type?: unknown
+      payload?: unknown
+      maxAttempts?: unknown
+      enqueuedBy?: unknown
+    } | null
     if (!body || typeof body.type !== 'string' || !body.type) {
       return new Response(JSON.stringify({ error: 'type required' }), {
         status: 400,
@@ -395,9 +390,9 @@ export abstract class JobRoom<
   }
 
   private cancelJob(jobId: string): void {
-    const row = this.sql
-      .exec(`SELECT status FROM jobs WHERE id = ?`, jobId)
-      .toArray()[0] as { status: JobStatus } | undefined
+    const row = this.sql.exec(`SELECT status FROM jobs WHERE id = ?`, jobId).toArray()[0] as
+      | { status: JobStatus }
+      | undefined
     if (!row) return
     // Terminal statuses are already resolved.
     if (row.status === 'succeeded' || row.status === 'failed' || row.status === 'canceled') {
@@ -428,9 +423,7 @@ export abstract class JobRoom<
   private retryJob(jobId: string): void {
     const row = this.sql
       .exec(`SELECT status, attempts, max_attempts FROM jobs WHERE id = ?`, jobId)
-      .toArray()[0] as
-      | { status: JobStatus; attempts: number; max_attempts: number }
-      | undefined
+      .toArray()[0] as { status: JobStatus; attempts: number; max_attempts: number } | undefined
     if (!row) return
     // Retry is only meaningful for terminal failures / cancels. Live jobs
     // are already on track; succeeded jobs should be re-enqueued fresh.
@@ -521,10 +514,10 @@ export abstract class JobRoom<
     } catch (e) {
       outcome = 'failed'
       errorMessage = e instanceof Error ? e.message : String(e)
-      // Message in the line, stack as a string: Workers Logs renders an Error
-      // object passed to console.* as its frames only (see CronRoom.executeTask).
-      const stack = e instanceof Error ? e.stack : undefined
-      console.error(`[jobs] ${row.type} (${row.id}) failed: ${errorMessage}`, ...(stack ? [stack] : []))
+      // ONE string: Workers Logs renders an Error object passed to console.*
+      // as its frames only (see CronRoom.executeTask); loggableError carries
+      // message + frames + bounded causes, capped at the reader's budget.
+      console.error(`[jobs] ${row.type} (${row.id}) failed: ${loggableError(e)}`)
     } finally {
       this.inFlight.delete(row.id)
     }
@@ -648,9 +641,9 @@ export abstract class JobRoom<
   }
 
   private readStatus(jobId: string): JobStatus | null {
-    const row = this.sql
-      .exec(`SELECT status FROM jobs WHERE id = ?`, jobId)
-      .toArray()[0] as { status: JobStatus } | undefined
+    const row = this.sql.exec(`SELECT status FROM jobs WHERE id = ?`, jobId).toArray()[0] as
+      | { status: JobStatus }
+      | undefined
     return row?.status ?? null
   }
 

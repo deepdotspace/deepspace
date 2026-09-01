@@ -20,6 +20,7 @@
 
 import { BaseRoom, type UserAttachment } from './base-room'
 import { nextCronFire, validateTask, type CronTask } from './cron-schedule'
+import { loggableError } from '../../shared/log-events'
 import { MSG } from '../../shared/protocol/constants'
 import { serverBuild } from '../../shared/protocol/messages'
 import { ROLES } from '../../shared/roles'
@@ -385,13 +386,14 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
     // One line per run, so `deepspace logs --search cron` finds every run by
     // task name. Workers Logs renders an Error object passed to console.* as
     // its stack frames only — the message never arrives (verified against
-    // production rows, 2026-08-18) — so the message goes in the line itself
-    // and the stack rides along as a plain string.
+    // production rows, 2026-08-18) — so the whole story rides in ONE string:
+    // loggableError renders message-first with frames and the bounded cause
+    // chain (where workerd's `TypeError: fetch failed` hides its reason),
+    // capped at the reader's budget.
     if (success) {
       console.log(`[cron] ${taskName} ok ${durationMs}ms`)
     } else {
-      const stack = thrown instanceof Error ? thrown.stack : undefined
-      console.error(`[cron] ${taskName} failed ${durationMs}ms: ${error}`, ...(stack ? [stack] : []))
+      console.error(`[cron] ${taskName} failed ${durationMs}ms: ${loggableError(thrown)}`)
     }
 
     // Record execution

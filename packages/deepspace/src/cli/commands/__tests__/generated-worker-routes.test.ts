@@ -17,7 +17,6 @@ import {
   SDK_RUN_WORKER_FIRST,
 } from '../../../shared/app-routing'
 import { BROWSER_PROXY_ROUTES } from '../../../shared/platform-proxy'
-import { CLIENT_ERROR_PATH } from '../../../shared/client-errors'
 import { decodeRoomIdentityHeader } from '../../../shared/room-identity-headers'
 
 interface TestEnv {
@@ -1083,9 +1082,6 @@ describe('client hooks and the app proxy allow-list', () => {
         called.add(match[1])
       }
     }
-
-    // Client error reports have their own route, registered ahead of the proxy.
-    called.delete(CLIENT_ERROR_PATH)
 
     // A scan that finds nothing would pass this test vacuously.
     expect(called.size).toBeGreaterThan(0)

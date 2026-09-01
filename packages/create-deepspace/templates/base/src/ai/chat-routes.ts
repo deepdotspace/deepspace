@@ -31,6 +31,7 @@ import {
   deleteChatCascade,
   loadMessages,
   appendMessage,
+  loggableError,
 } from 'deepspace/worker'
 import type { AgentToolAccessResult, ChatTurn, VerifyResult } from 'deepspace/worker'
 import { schemas } from '../schemas.js'
@@ -303,10 +304,7 @@ export function registerAiChatRoutes(
               }
               return true
             } catch (err) {
-              console.error(
-                `[ai-chat] ${label} ${attempt === 1 ? 'failed, retrying once' : 'retry failed'}:`,
-                err,
-              )
+              console.error(`[ai-chat] ${label} ${attempt === 1 ? 'failed, retrying once' : 'retry failed'}: ${loggableError(err)}`)
             }
           }
           return false
@@ -372,7 +370,7 @@ export function registerAiChatRoutes(
         // `tool-input-error` / `tool-output-error` chunk and stream-level
         // error. Surface the real message so RBAC denials and validation
         // failures are debuggable; log full detail server-side.
-        console.error('[ai-chat] response error:', error)
+        console.error(`[ai-chat] response error: ${loggableError(error)}`)
         return error instanceof Error ? error.message : String(error)
       },
     })

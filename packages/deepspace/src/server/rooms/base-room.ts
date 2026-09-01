@@ -21,6 +21,7 @@
 
 import type { ServerMessage } from '../../shared/protocol/messages'
 import { ANONYMOUS_USER_ID_PREFIX } from '../../shared/protocol/constants'
+import { loggableError } from '../../shared/log-events'
 import { decodeRoomIdentityHeader } from '../../shared/room-identity-headers'
 
 // ============================================================================
@@ -172,7 +173,7 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
         try {
           await this.onBinaryMessage(ws, attachment, message)
         } catch (e) {
-          console.error(`[${this.constructor.name}] Binary message error:`, e)
+          console.error(`[${this.constructor.name}] Binary message error: ${loggableError(e)}`)
         }
       }
       return
@@ -183,7 +184,7 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
       const msg = JSON.parse(message)
       await this.onMessage(ws, attachment, msg)
     } catch (e) {
-      console.error(`[${this.constructor.name}] Message error:`, e)
+      console.error(`[${this.constructor.name}] Message error: ${loggableError(e)}`)
     }
   }
 
@@ -199,7 +200,7 @@ export abstract class BaseRoom<E = Record<string, unknown>> {
   }
 
   async webSocketError(_ws: WebSocket, error: unknown): Promise<void> {
-    console.error(`[${this.constructor.name}] webSocketError:`, error)
+    console.error(`[${this.constructor.name}] webSocketError: ${loggableError(error)}`)
   }
 
   async alarm(): Promise<void> {

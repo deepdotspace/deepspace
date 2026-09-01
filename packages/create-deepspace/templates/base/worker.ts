@@ -15,6 +15,7 @@ import {
   PresenceRoom,
   RecordRoom,
   resolveAppRole,
+  workerErrorHandler,
   YjsRoom,
 } from 'deepspace/worker'
 import type { DOBindings, DOManifest, Job, JobContext } from 'deepspace/worker'
@@ -143,15 +144,12 @@ if (schemas.some((schema) => schema.name === AI_CHATS_SCHEMA.name)) {
 registerPlatformProxyRoutes(app)
 registerStaticRoutes(app)
 
-// Hono's default handler logs a thrown Error as `console.error(err)`, which
-// the runtime renders as its stack frames only — the message never reaches
-// `deepspace logs`. Log the message as text, then answer 500 as before.
-app.onError((err, c) => {
-  console.error(
-    `[error] ${c.req.method} ${new URL(c.req.url).pathname}: ${err.message}`,
-    err.stack ?? '',
-  )
-  return c.text('Internal Server Error', 500)
-})
+// Hono registers ONE error handler (last onError wins), and its default is
+// `console.error(err)` — whose message Workers Logs drops, keeping only the
+// stack frames. workerErrorHandler logs the string form instead (message
+// first, frames and bounded cause chain, method + path for context), keeps a
+// response-bearing error's (HTTPException — auth 401s, upload 413s) own
+// answer, and returns a generic 500 for the rest.
+app.onError(workerErrorHandler('error'))
 
 export default app

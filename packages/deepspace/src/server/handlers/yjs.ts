@@ -4,6 +4,7 @@
 
 import * as Y from 'yjs'
 import { resolveCollection } from './subscriptions'
+import { loggableError } from '../../shared/log-events'
 import type { ConnectionAttachment } from '../../shared/protocol/types'
 import type {
   YjsDocKey,
@@ -123,7 +124,7 @@ export function getOrCreateYjsDoc(ctx: YjsContext, docKey: YjsDocKey): Y.Doc {
     try {
       Y.applyUpdate(doc, new Uint8Array(row.state))
     } catch (e) {
-      console.error(`Failed to load Yjs doc ${docKey}:`, e)
+      console.error(`Failed to load Yjs doc ${docKey}: ${loggableError(e)}`)
     }
   }
 

@@ -74,6 +74,23 @@ describe('base scaffold dependency contract', () => {
   })
 })
 
+describe('worker error handler', () => {
+  // Nothing type-checks or executes the template's worker.ts in this repo, so
+  // the wiring is pinned at the source level: dropping the handler would run
+  // Hono's default `console.error(err)`, whose message Workers Logs drops.
+  // The handler's own contract (HTTPException responses kept, string-logged
+  // 500s for the rest) lives in the SDK's workerErrorHandler and is pinned by
+  // packages/deepspace/src/server/__tests__/worker-error.test.ts.
+  it('registers the SDK onError handler', () => {
+    const worker = readFileSync(
+      fileURLToPath(new URL('../../templates/base/worker.ts', import.meta.url)),
+      'utf8',
+    )
+    expect(worker).toContain("app.onError(workerErrorHandler('error'))")
+    expect(worker).toMatch(/import \{[^}]*\bworkerErrorHandler\b[^}]*\} from 'deepspace\/worker'/)
+  })
+})
+
 describe('base scaffold API 404 guard', () => {
   const routes = readFileSync(
     fileURLToPath(new URL('../../templates/base/src/server/http-routes.ts', import.meta.url)),

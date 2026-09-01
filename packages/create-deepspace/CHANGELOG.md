@@ -1,5 +1,12 @@
 # create-deepspace
 
+## 0.29.0
+
+### Patch Changes
+
+- The starter worker now sets `app.onError`: Hono's default handler logs the Error OBJECT, whose message the Workers Logs pipeline drops (only stack frames survive), so uncaught route errors were invisible in `deepspace logs`. The handler logs `loggableError(err)` (message + frames) and keeps Hono's exact response contract. The scaffold's two AI chat-route catch logs switch to `loggableError` the same way. Apps scaffolded earlier keep the old behavior until they add the same handler.
+- New `workerErrorHandler(prefix, respond?)` export (`deepspace/worker`): the one Hono `app.onError` — a response-bearing error (`HTTPException`) keeps its own answer, everything else is logged as one string (`[prefix] METHOD /path: message, frames, bounded cause chain`, via `loggableError`) and answered with a generic 500 (or the worker's own `respond` shape). The scaffold template and the deploy/auth/platform workers now register it instead of carrying hand-copied handler bodies (api-worker's own handler is the billing owner's area, unchanged). Also exported: `truncateLogText(s)`, the single budget-inclusive, surrogate-safe truncation both `loggableError` (write side) and the platform log reader (read side) use — a capped field never exceeds `MAX_LOG_TEXT_LENGTH` anymore. And `--search` now matches the shared `logEventText` rendering (the same corpus the dashboard searches and both renderers display), so an exception's name/message and a request's method/path/status match — not just the raw message field.
+
 ## 0.28.2
 
 ### Patch Changes

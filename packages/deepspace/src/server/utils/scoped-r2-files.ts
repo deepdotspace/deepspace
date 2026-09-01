@@ -37,6 +37,7 @@
 
 /// <reference types="@cloudflare/workers-types" />
 
+import { loggableError } from '../../shared/log-events'
 import {
   ACCOUNT_STORAGE_LIMIT_BYTES,
   DANGEROUS_MIME_TYPES,
@@ -1130,7 +1131,7 @@ async function finishCompletedMultipart(
       if (current?.etag === object.etag) await bucket.delete(session.key)
       remaining = await bucket.head(session.key)
     } catch (error) {
-      console.error('[files:multipart] invalid object cleanup:', error)
+      console.error(`[files:multipart] invalid object cleanup: ${loggableError(error)}`)
       return quotaUnavailable('The invalid assembled file could not be removed. Retry completion.')
     }
     if (remaining?.etag === object.etag) {

@@ -331,7 +331,11 @@ describe('CronRoom mutation receipts', () => {
         throw new Error('task exploded')
       }
     }
-    const room = new FailingCronRoom(state, {}, { tasks: [{ name: 'heartbeat', intervalMinutes: 1 }] })
+    const room = new FailingCronRoom(
+      state,
+      {},
+      { tasks: [{ name: 'heartbeat', intervalMinutes: 1 }] },
+    )
     room.init()
 
     await room.dispatch({
@@ -610,7 +614,9 @@ describe('armCronRoom wakes the room from the app worker', () => {
 
   function makeCtx() {
     const pending: Promise<unknown>[] = []
-    const ctx = { waitUntil: (p: Promise<unknown>) => pending.push(p) } as unknown as ExecutionContext
+    const ctx = {
+      waitUntil: (p: Promise<unknown>) => pending.push(p),
+    } as unknown as ExecutionContext
     return { ctx, pending }
   }
 
@@ -695,7 +701,7 @@ describe('CronRoom logs one structured line per run', () => {
     }
   })
 
-  it('logs the failure message in the line and the stack as a string, never the Error object', async () => {
+  it('logs the failure message and frames in ONE string, never the Error object', async () => {
     const db = new Database(':memory:')
     const { state } = makeState(db)
     class FailingCronRoom extends TestCronRoom {
@@ -703,16 +709,22 @@ describe('CronRoom logs one structured line per run', () => {
         throw new Error('task exploded')
       }
     }
-    const room = new FailingCronRoom(state, {}, { tasks: [{ name: 'heartbeat', intervalMinutes: 1 }] })
+    const room = new FailingCronRoom(
+      state,
+      {},
+      { tasks: [{ name: 'heartbeat', intervalMinutes: 1 }] },
+    )
     room.init()
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       await room.dispatch({ type: MSG.CRON_TRIGGER, payload: { taskName: 'heartbeat' } })
       expect(error).toHaveBeenCalledTimes(1)
-      const [line, stack] = error.mock.calls[0]
-      expect(line).toMatch(/^\[cron\] heartbeat failed \d+ms: task exploded$/)
-      expect(typeof stack).toBe('string')
-      expect(stack).toContain('task exploded')
+      // loggableError renders message-first with the frames in the SAME
+      // string (message + \n + stack), single console.error argument.
+      expect(error.mock.calls[0]).toHaveLength(1)
+      const line = error.mock.calls[0][0] as string
+      expect(line).toMatch(/^\[cron\] heartbeat failed \d+ms: Error: task exploded/)
+      expect(line).toContain('    at ')
     } finally {
       error.mockRestore()
     }

@@ -1,4 +1,5 @@
 import { searchDocumentationCorpus, type DocumentationCorpusChunk } from '../assistant'
+import { loggableError } from '../../../shared/log-events'
 import { documentationPublicPath } from '../../routing'
 import { documentationPageSection, readDocumentationPublishedPage } from '../published-corpus'
 import {
@@ -145,7 +146,7 @@ export async function callDocumentationTool<Env extends DocumentationMcpToolEnv>
         url: new URL(documentationPublicPath(basePath, page.route), origin).toString(),
       })
     } catch (error) {
-      console.error('[documentation-mcp] page unavailable:', error)
+      console.error(`[documentation-mcp] page unavailable: ${loggableError(error)}`)
       return toolError(request.id, 'The documentation page could not be read')
     }
   }

@@ -7,6 +7,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import logs, {
+  fatalFollowStatus,
   parseSince,
   SeenEvents,
   formatEvent,
@@ -114,6 +115,33 @@ describe('formatEvent (color off)', () => {
     expect(line).not.toContain('(ok)') // ok is the quiet default
   })
 
+  it('pins the request and exception line shapes end-to-end — nothing appended', () => {
+    // Fully anchored: the body wording now comes from the shared logEventText
+    // (also the dashboard's search corpus), so a dashboard-motivated tweak
+    // there must fail HERE, not silently change `deepspace logs` output.
+    const req = formatEvent(
+      evt('x', {
+        eventType: 'request',
+        outcome: 'canceled',
+        request: { method: 'GET', path: '/api/items', status: 200 },
+      }),
+      false,
+      NOW,
+    )
+    expect(req).toMatch(/^\d{2}:\d{2}:\d{2}\.\d{3} REQ {3}GET \/api\/items 200 \(canceled\)$/)
+
+    const exc = formatEvent(
+      evt('x', {
+        eventType: 'exception',
+        request: { method: 'POST', path: '/api/x' },
+        exception: { name: 'TypeError', message: 'boom' },
+      }),
+      false,
+      NOW,
+    )
+    expect(exc).toMatch(/^\d{2}:\d{2}:\d{2}\.\d{3} ERROR TypeError: boom — POST \/api\/x$/)
+  })
+
   it('surfaces non-ok outcomes on request events', () => {
     const line = formatEvent(
       evt('x', {
@@ -165,24 +193,6 @@ describe('formatEvent (color off)', () => {
     expect(line).toContain('at Object.fetch (index.js:45240:63)') // the sole frame survives
   })
 
-  it('prefixes a CLIENT tag on browser-forwarded errors', () => {
-    // A client-sourced console line...
-    const logLine = formatEvent(evt('x', { source: 'client', message: 'white screen' }), false, NOW)
-    expect(logLine).toMatch(/^\d{2}:\d{2}:\d{2}\.\d{3} CLIENT LOG {3}white screen$/)
-    // ...and a client-sourced exception both carry the tag; a server one doesn't.
-    const excLine = formatEvent(
-      evt('y', {
-        source: 'client',
-        eventType: 'exception',
-        exception: { name: 'TypeError', message: 'boom' },
-      }),
-      false,
-      NOW,
-    )
-    expect(excLine).toContain('CLIENT ERROR TypeError: boom')
-    expect(formatEvent(evt('z', { message: 'server side' }), false, NOW)).not.toContain('CLIENT')
-  })
-
   it('never drops a real stack frame, even when the header text differs from the message', () => {
     // Wrapped/renamed error: the stack's first line isn't the exception's own
     // "name: message", so the header heuristic can't confirm it. The safe
@@ -205,6 +215,15 @@ describe('formatEvent (color off)', () => {
   })
 })
 
+describe('fatalFollowStatus', () => {
+  it('ends the tail on statuses a retry cannot fix, keeps polling on the rest', () => {
+    // 400 = our own malformed request (used to retry forever at max backoff).
+    for (const fatal of [400, 401, 403, 404]) expect(fatalFollowStatus(fatal)).toBe(true)
+    // 429 is the route's own throttle asking for a retry; 5xx is transient.
+    for (const retryable of [429, 500, 502, 503]) expect(fatalFollowStatus(retryable)).toBe(false)
+  })
+})
+
 /**
  * The NDJSON discriminators. An empty stream is indistinguishable from a
  * crashed one without a record to read, so both modes emit one — and each
@@ -221,12 +240,10 @@ describe('logs --json discriminator frames', () => {
 
   async function runLogs(args: Record<string, unknown>, page: Record<string, unknown>) {
     const out: string[] = []
-    const stdoutSpy = vi
-        .spyOn(process.stdout, 'write')
-        .mockImplementation(((chunk: unknown) => {
-          out.push(String(chunk))
-          return true
-        }) as never)
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+      out.push(String(chunk))
+      return true
+    }) as never)
     vi.spyOn(console, 'log').mockImplementation(() => {})
     vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
     vi.spyOn(appTargetModule, 'assertAppTargetResolvable').mockImplementation(() => {})
@@ -271,12 +288,10 @@ describe('logs --json discriminator frames', () => {
     // refresh that fails is not retryable) rather than by raising SIGINT,
     // which vitest itself handles.
     const out: string[] = []
-    const stdoutSpy = vi
-        .spyOn(process.stdout, 'write')
-        .mockImplementation(((chunk: unknown) => {
-          out.push(String(chunk))
-          return true
-        }) as never)
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+      out.push(String(chunk))
+      return true
+    }) as never)
     vi.spyOn(console, 'log').mockImplementation(() => {})
     vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.spyOn(authModule, 'ensureToken')
@@ -344,7 +359,9 @@ describe('logs on a never-deployed app', () => {
     const lines: string[] = []
     vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    const command = logs as unknown as { run: (ctx: { args: Record<string, unknown> }) => Promise<unknown> }
+    const command = logs as unknown as {
+      run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+    }
     // A plain citty command: cli.ts wraps it so escaped errors reach the
     // shared renderer — do the same here.
     await command.run({ args: { json: true, ...args } }).catch(renderCliError)
@@ -356,7 +373,14 @@ describe('logs on a never-deployed app', () => {
     vi.spyOn(appTargetModule, 'assertAppTargetResolvable').mockImplementation(() => {})
     vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
     vi.spyOn(appTargetModule, 'listApps').mockResolvedValue([
-      { appId: APP_ID, status: 'registered', createdAt: 'x', deployedAt: null, name: null, url: null },
+      {
+        appId: APP_ID,
+        status: 'registered',
+        createdAt: 'x',
+        deployedAt: null,
+        name: null,
+        url: null,
+      },
     ])
     vi.spyOn(appContext, 'findAppDir').mockReturnValue('/apps/demo')
     const fetchSpy = vi.fn()
@@ -375,7 +399,14 @@ describe('logs on a never-deployed app', () => {
     vi.spyOn(appTargetModule, 'assertAppTargetResolvable').mockImplementation(() => {})
     vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
     vi.spyOn(appTargetModule, 'listApps').mockResolvedValue([
-      { appId: APP_ID, status: 'registered', createdAt: 'x', deployedAt: null, name: null, url: null },
+      {
+        appId: APP_ID,
+        status: 'registered',
+        createdAt: 'x',
+        deployedAt: null,
+        name: null,
+        url: null,
+      },
     ])
     const out = await run({ app: APP_ID })
     expect(out).toMatchObject({ ok: false, code: 'app_not_deployed' })

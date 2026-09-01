@@ -21,6 +21,7 @@
 
 import * as Y from 'yjs'
 import { BaseRoom, type UserAttachment } from './base-room'
+import { loggableError } from '../../shared/log-events'
 import type { ConnectionAttachment } from '../../shared/protocol/types'
 import type {
   YjsDocKey,
@@ -365,7 +366,7 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
           new Uint8Array(message),
         )
       } catch (e) {
-        console.error('[RecordRoom] Yjs binary message error:', e)
+        console.error(`[RecordRoom] Yjs binary message error: ${loggableError(e)}`)
       }
       return
     }
@@ -375,9 +376,13 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
       const msg = JSON.parse(message)
       await this.handleRecordMessage(ws, attachment, msg)
     } catch (e) {
+      // The log gets the full render (frames + causes); the client payload
+      // keeps the bare message — frames don't belong on the socket.
       const errMsg = e instanceof Error ? e.message : String(e)
       const msgPreview = typeof message === 'string' ? message.slice(0, 200) : '(non-string)'
-      console.error(`[RecordRoom] Message handler error: ${errMsg}`, { message: msgPreview })
+      console.error(`[RecordRoom] Message handler error: ${loggableError(e)}`, {
+        message: msgPreview,
+      })
       this.send(ws, { type: MSG.ERROR, payload: { error: `Invalid message: ${errMsg}` } })
     }
   }
@@ -392,10 +397,6 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
     } catch {
       /* best-effort */
     }
-  }
-
-  async webSocketError(_ws: WebSocket, error: unknown): Promise<void> {
-    console.error(`[RecordRoom] webSocketError:`, error)
   }
 
   // ============================================================================

@@ -31,7 +31,12 @@ import { Refusal } from '../lib/command'
 import { findAppDir } from '../lib/app-context'
 // Whitelisted wire DTO + level set — shared with the platform reader and the
 // dashboard (packages/deepspace/src/shared/log-events.ts) so they can't drift.
-import { LOG_LEVELS, type AppLogEvent, type AppLogsResponse } from '../../shared/log-events'
+import {
+  LOG_LEVELS,
+  logEventText,
+  type AppLogEvent,
+  type AppLogsResponse,
+} from '../../shared/log-events'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
@@ -62,6 +67,16 @@ const LOG_RETENTION_DAYS = 7
  */
 export function followInitialLimit(limit: number | undefined, maxLimit: number): number {
   return limit ?? maxLimit
+}
+
+/** A follow-poll failure that cannot improve by resending the same request:
+ *  the server refused it as malformed (400 — in a live tail that means the
+ *  platform stopped accepting a shape it used to, e.g. a removed param) or
+ *  auth/authz/absence (401/403/404). Everything else — 429 (the route's own
+ *  throttle asks for a retry), 5xx, network — backs off. A 400 used to be
+ *  retried forever at max backoff. */
+export function fatalFollowStatus(status: number): boolean {
+  return [400, 401, 403, 404].includes(status)
 }
 
 /**
@@ -166,12 +181,14 @@ function formatTime(ts: number, now: number): string {
 export function formatEvent(e: AppLogEvent, color: boolean, now: number = Date.now()): string {
   const time = paint('2', formatTime(e.timestamp, now), color)
 
+  // The un-styled body text is shared with the dashboard (logEventText);
+  // this formatter's own job is tags, color, and stack frames.
+  const text = displayLines(logEventText(e))
   let tag: string
   let body: string
   if (e.eventType === 'exception' && e.exception) {
     tag = paint('31', 'ERROR', color)
-    const where = e.request ? ` — ${e.request.method} ${e.request.path}` : ''
-    body = displayLines(`${e.exception.name}: ${e.exception.message}${where}`)
+    body = text
     if (e.exception.stack) {
       // Drop a leading "Name: message" header line (V8 style) so it isn't
       // shown twice — but Cloudflare worker stacks are often frame-only
@@ -187,25 +204,21 @@ export function formatEvent(e: AppLogEvent, color: boolean, now: number = Date.n
     }
   } else if (e.eventType === 'request' && e.request) {
     tag = paint('36', 'REQ  ', color)
-    const status = e.request.status !== undefined ? ` ${e.request.status}` : ''
-    const outcome = e.outcome && e.outcome !== 'ok' ? ` (${e.outcome})` : ''
-    body = displayLines(`${e.request.method} ${e.request.path}${status}${outcome}`)
+    body = text
   } else {
     const style = LEVEL_STYLE[e.level]
     tag = (e.level.toUpperCase() + '     ').slice(0, 5)
     if (style) tag = paint(style, tag, color)
-    body = style ? paint(style, displayLines(e.message), color) : displayLines(e.message)
+    body = style ? paint(style, text, color) : text
   }
 
-  // A browser-forwarded error is tagged so it's not mistaken for a server log.
-  const client = e.source === 'client' ? paint('35', 'CLIENT', color) + ' ' : ''
-  // `source === 'client'` events are forwarded from a BROWSER, so their
-  // message, stack and request path are written by whoever visited the app —
-  // an `ESC[2K\r` in any of them repaints the developer's terminal with text
-  // of the visitor's choosing. Escaped per PIECE above rather than here:
-  // painting happens on the way out, and escaping after it would turn our own
-  // colour codes into literal `\x1b[31m`. `time`/`tag` are ours already.
-  return `${time} ${client}${tag} ${body}`
+  // Every free-text piece above passes through displayLines: an app echoing
+  // request-supplied text into its own console lines would otherwise let a
+  // third party plant ANSI escapes (`ESC[2K\r` repaints the developer's
+  // terminal with text of the visitor's choosing). Escaped per PIECE rather
+  // than at the end: painting happens on the way out, and escaping after it
+  // would turn our own colour codes into literal `\x1b[31m`.
+  return `${time} ${tag} ${body}`
 }
 
 // ── Command ──────────────────────────────────────────────────────────────────
@@ -250,7 +263,7 @@ export default defineCommand({
     },
     search: {
       type: 'string',
-      description: 'Only events whose message contains this text',
+      description: 'Only events whose rendered text contains this (case-insensitive)',
       required: false,
     },
     limit: {
@@ -345,6 +358,16 @@ export default defineCommand({
       }
     }
 
+    // Every truncation surface emits the same discriminable NDJSON meta record
+    // (events never carry `type`); only the human wording differs per site.
+    const noteTruncation = (humanMessage: string) => {
+      if (args.json) {
+        process.stdout.write(JSON.stringify({ type: 'meta', truncated: true }) + '\n')
+      } else {
+        console.error(humanMessage)
+      }
+    }
+
     // Follow mode tails from the max page too — a first page capped at the
     // default 100 would drop the rest of the initial window and jump the cursor
     // past it. One-shot mode keeps the user's (possibly unset) --limit.
@@ -390,18 +413,11 @@ export default defineCommand({
           )
         }
       } else if (first.truncated) {
-        // A machine consumer reading NDJSON needs the signal too — emit a
-        // discriminable meta record (events never carry a `type` field).
-        if (args.json)
-          process.stdout.write(JSON.stringify({ type: 'meta', truncated: true }) + '\n')
-        else if (args.search)
-          console.error(
-            `(showing the newest ${first.events.length} matches — search scans at most the newest 500 level-filtered events per fetch; narrow with --since/--level or raise --limit)`,
-          )
-        else
-          console.error(
-            `(showing the newest ${first.events.length} events — narrow with --since/--level)`,
-          )
+        noteTruncation(
+          args.search
+            ? `(showing the newest ${first.events.length} matches — search scans at most the newest 500 level-filtered events per fetch; narrow with --since/--level or raise --limit)`
+            : `(showing the newest ${first.events.length} events — narrow with --since/--level)`,
+        )
       }
       return
     }
@@ -440,19 +456,15 @@ export default defineCommand({
     // otherwise `-f` would drop the overflow silently, unlike one-shot mode.
     if (first.truncated) {
       warnedTruncated = true
-      if (args.json) {
-        process.stdout.write(JSON.stringify({ type: 'meta', truncated: true }) + '\n')
-      } else {
-        console.error(
-          paint(
-            '33',
-            args.search
-              ? `(search scanned only the newest ${MAX_LIMIT} level-filtered events in the initial ${windowLabel} window — older matches may be omitted; narrow with --since/--level)`
-              : `(more than ${followLimit} events in the initial ${windowLabel} window — some older events not shown; narrow with --since/--level)`,
-            stderrColor(),
-          ),
-        )
-      }
+      noteTruncation(
+        paint(
+          '33',
+          args.search
+            ? `(search scanned only the newest ${MAX_LIMIT} level-filtered events in the initial ${windowLabel} window — older matches may be omitted; narrow with --since/--level)`
+            : `(more than ${followLimit} events in the initial ${windowLabel} window — some older events not shown; narrow with --since/--level)`,
+          stderrColor(),
+        ),
+      )
     }
 
     for (;;) {
@@ -480,9 +492,7 @@ export default defineCommand({
       } catch (err) {
         // Ctrl+C aborted the in-flight poll — not a fetch failure to report.
         if (tail.signal.aborted) return
-        // Auth/authz/absence is fatal — the situation won't improve by
-        // retrying. Everything else (5xx, 429, network) backs off.
-        if (err instanceof ApiError && [401, 403, 404].includes(err.status)) throw err
+        if (err instanceof ApiError && fatalFollowStatus(err.status)) throw err
         backoff = Math.min(backoff ? backoff * 2 : MIN_POLL_MS, 30_000)
         const msg = err instanceof Error ? err.message : String(err)
         console.error(
@@ -502,19 +512,15 @@ export default defineCommand({
       const realDrop = fresh.length >= followLimit || Boolean(args.search && page.truncated)
       if (realDrop && !warnedTruncated) {
         warnedTruncated = true
-        if (args.json) {
-          process.stdout.write(JSON.stringify({ type: 'meta', truncated: true }) + '\n')
-        } else {
-          console.error(
-            paint(
-              '33',
-              args.search
-                ? `(search scanned only the newest ${MAX_LIMIT} level-filtered events this poll — older matches may be omitted; narrow with --level)`
-                : `(burst exceeded ${followLimit} events/poll — some may be dropped; narrow with --level)`,
-              stderrColor(),
-            ),
-          )
-        }
+        noteTruncation(
+          paint(
+            '33',
+            args.search
+              ? `(search scanned only the newest ${MAX_LIMIT} level-filtered events this poll — older matches may be omitted; narrow with --level)`
+              : `(burst exceeded ${followLimit} events/poll — some may be dropped; narrow with --level)`,
+            stderrColor(),
+          ),
+        )
       } else if (!realDrop) {
         warnedTruncated = false
       }

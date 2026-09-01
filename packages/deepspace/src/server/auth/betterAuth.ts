@@ -5,6 +5,7 @@
  */
 
 import { betterAuth, type BetterAuthOptions } from 'better-auth'
+import { loggableError } from '../../shared/log-events'
 import { organization, twoFactor } from 'better-auth/plugins'
 import { SignJWT, importPKCS8 } from 'jose'
 
@@ -91,7 +92,9 @@ export function createDeepSpaceAuth(config: DeepSpaceAuthConfig) {
       try {
         return { clientId: apple.clientId, clientSecret: await generateAppleClientSecret(apple) }
       } catch (err) {
-        console.error('[deepspace] failed to mint Apple client secret; Apple sign-in disabled', err)
+        console.error(
+          `[deepspace] failed to mint Apple client secret; Apple sign-in disabled: ${loggableError(err)}`,
+        )
         return { clientId: apple.clientId, clientSecret: '' }
       }
     }
@@ -178,7 +181,9 @@ function buildDatabaseHooks(
               ctx ? { request: ctx.request, headers: ctx.headers ?? undefined } : null,
             )
           } catch (err) {
-            console.error('[deepspace] onUserCreated hook failed (signup unaffected)', err)
+            console.error(
+              `[deepspace] onUserCreated hook failed (signup unaffected): ${loggableError(err)}`,
+            )
           }
         },
       },
