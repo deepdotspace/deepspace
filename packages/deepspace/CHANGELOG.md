@@ -1,5 +1,16 @@
 # deepspace
 
+## 0.29.1
+
+### Patch Changes
+
+- Harden the integration catalog fetch used by `deepspace integrations
+list/info/invoke`: the request is now bounded by a 15-second timeout, and an
+  unreachable service, invalid JSON, or a wrong response envelope surfaces as a
+  clean `catalog_unavailable` / `invalid_catalog` refusal instead of a raw
+  network or parse error. One shared fetcher now serves the CLI and the
+  repo-only integration-health scanner.
+
 ## 0.29.0
 
 ### Minor Changes

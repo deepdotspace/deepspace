@@ -50,11 +50,18 @@ export const PLATFORM_URLS =
       ? STAGING_URLS
       : INVALID_URLS
 
+/** The canonical URL set of each real plane, independent of the process's own
+ *  DEEPSPACE_ENV selection — for callers that must pin or verify a plane. */
+export const PLANE_URLS = {
+  production: PROD_URLS,
+  staging: STAGING_URLS,
+} as const
+
 /** Every plane's auth service — the key credentials are stored under (see
  *  cli/auth.ts), so a refusal can name the plane a stored session belongs to. */
 export const PLANE_AUTH_URLS: Record<Exclude<DeepSpaceEnvironment, 'invalid'>, string> = {
-  production: PROD_URLS.auth,
-  staging: STAGING_URLS.auth,
+  production: PLANE_URLS.production.auth,
+  staging: PLANE_URLS.staging.auth,
 }
 
 /** Report per-service process overrides without changing the stable presets. */

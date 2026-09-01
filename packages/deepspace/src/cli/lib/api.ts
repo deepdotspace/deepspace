@@ -201,3 +201,59 @@ function isTransientFailure(error: unknown): error is ApiError {
     (error.status === 0 || error.status === 408 || error.status === 429 || error.status >= 500)
   )
 }
+
+/**
+ * The public (unauthenticated) integration catalog, bounded and shape-checked.
+ * One fetcher serves `deepspace integrations list/info/invoke` and the
+ * repo-only integration-health scanner; `summary` selects the lightweight
+ * names+billing view used by `list`. Throws ApiError with
+ * `catalog_unavailable` (unreachable / non-2xx) or `invalid_catalog`
+ * (unparseable / wrong envelope) for callers to map onto their own error
+ * contracts.
+ */
+export async function fetchIntegrationCatalog<T extends { integrations: Record<string, unknown> }>(
+  baseUrl: string,
+  opts: { summary?: boolean } = {},
+): Promise<T> {
+  const path = opts.summary ? '/api/integrations?summary=1' : '/api/integrations'
+  let res: Response
+  try {
+    res = await fetch(`${baseUrl}${path}`, { signal: AbortSignal.timeout(15_000) })
+  } catch (err) {
+    throw new ApiError(
+      `Could not fetch the integration catalog: ${err instanceof Error ? err.message : String(err)}`,
+      0,
+      'catalog_unavailable',
+      path,
+    )
+  }
+  if (!res.ok) {
+    throw new ApiError(
+      `Failed to fetch integration catalog (${res.status})`,
+      res.status,
+      'catalog_unavailable',
+      path,
+    )
+  }
+  let value: unknown
+  try {
+    value = await res.json()
+  } catch {
+    throw new ApiError(
+      'The integration catalog returned invalid JSON.',
+      res.status,
+      'invalid_catalog',
+      path,
+    )
+  }
+  const integrations = (value as { integrations?: unknown } | null)?.integrations
+  if (!integrations || typeof integrations !== 'object' || Array.isArray(integrations)) {
+    throw new ApiError(
+      'The integration catalog returned an invalid shape.',
+      res.status,
+      'invalid_catalog',
+      path,
+    )
+  }
+  return value as T
+}

@@ -21,6 +21,7 @@ import { readFileSync } from 'node:fs'
 import * as p from '@clack/prompts'
 import { ensureToken } from '../auth'
 import { PLATFORM_URLS } from '../env'
+import { ApiError, fetchIntegrationCatalog } from '../lib/api'
 import { cliAction, Refusal, type CommandResult } from '../lib/command'
 import { normalizeApiError } from '../../shared/api-error'
 import { readStreamText } from '../lib/stdio'
@@ -150,12 +151,12 @@ async function fetchCatalog(opts: { summary?: boolean } = {}): Promise<Catalog> 
   // `list` uses the summary view (names + billing); the full catalog with every
   // endpoint's schema is large enough to be truncated in an agent's terminal.
   // `info` omits the flag so it still gets the schema + example.
-  const url = opts.summary ? `${API_URL}/api/integrations?summary=1` : `${API_URL}/api/integrations`
-  const res = await fetch(url)
-  if (!res.ok) {
-    throw new Refusal(`Failed to fetch integration catalog (${res.status})`, 'catalog_unavailable')
+  try {
+    return await fetchIntegrationCatalog<Catalog>(API_URL, { summary: opts.summary })
+  } catch (err) {
+    if (err instanceof ApiError) throw new Refusal(err.message, err.code ?? 'catalog_unavailable')
+    throw err
   }
-  return (await res.json()) as Catalog
 }
 
 function findEndpoint(
@@ -203,10 +204,7 @@ export function billingUnit(model: string): string {
  * reach the prompt — it would hang waiting for input that can't arrive. Pure so
  * the both-streams rule is testable.
  */
-export function isInteractive(
-  stdin: { isTTY?: boolean },
-  stdout: { isTTY?: boolean },
-): boolean {
+export function isInteractive(stdin: { isTTY?: boolean }, stdout: { isTTY?: boolean }): boolean {
   return Boolean(stdin.isTTY && stdout.isTTY)
 }
 
@@ -254,7 +252,7 @@ export function exampleBody(info: {
           ? prop.default
           : Array.isArray(prop.enum) && prop.enum.length
             ? prop.enum[0]
-            : PLACEHOLDER_BY_TYPE[String(prop.type)] ?? '<value>'
+            : (PLACEHOLDER_BY_TYPE[String(prop.type)] ?? '<value>')
   }
   return body
 }
@@ -319,9 +317,13 @@ function requireEndpoint(catalog: Catalog, integration: string, endpoint: string
   const available = catalog.integrations[integration]
   if (!available) {
     const names = Object.keys(catalog.integrations).sort().join(', ')
-    throw new Refusal(`Unknown integration '${integration}'. Available: ${names}`, 'unknown_integration', {
-      action: cliAction('deepspace', 'integrations', 'list'),
-    })
+    throw new Refusal(
+      `Unknown integration '${integration}'. Available: ${names}`,
+      'unknown_integration',
+      {
+        action: cliAction('deepspace', 'integrations', 'list'),
+      },
+    )
   }
   const endpoints = available.map((e) => e.endpoint).join(', ')
   throw new Refusal(
@@ -341,9 +343,7 @@ export async function runInfo(args: InfoArgs): Promise<CommandResult> {
   if (!args.json) {
     console.log(`${integration}/${endpoint}`)
     if (info.description) console.log(`  ${info.description}`)
-    console.log(
-      `  billing: ${priceLabel(info.billing)}`,
-    )
+    console.log(`  billing: ${priceLabel(info.billing)}`)
     if (info.requiresOAuth) {
       console.log(
         '  Requires OAuth: without a connected account, a call succeeds with data { requiresOAuth: true, authUrl } — open the authUrl, then retry.',
