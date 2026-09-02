@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.30.1
+
+### Patch Changes
+
+- The deploy-worker no longer accepts the retired value-bearing `userSecrets` deploy field — v0.27.1's one-release transition arm for pre-cutover CLIs. Any deploy request still carrying it (or missing `secretsConfig`) now refuses `410 cli_outdated` before the commit route mutates anything; the refusal directs users through the package-manager-aware upgrade guide with `npx deepspace@latest app update`. CLIs 0.27.1 and later already send only the config name and are unaffected. With the arm gone, no request shape can deliver secret values to the platform at all: the secrets store is the single authority, read server-side at commit, and `validateUserSecrets` plus its size constants — the last server-side duplicate of the store's validation rules — are deleted with it (the CLI keeps its intentional pre-flight copy).
+
 ## 0.30.0
 
 ### Minor Changes

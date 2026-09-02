@@ -1479,7 +1479,8 @@ describe('deploy failure reporting', () => {
   })
 
   it('prints the platform’s CLI-update instruction verbatim', () => {
-    const instruction = 'Your deepspace CLI is out of date — update to deploy.'
+    const instruction =
+      'Your deepspace CLI is out of date — run `npx deepspace@latest app update`, follow the upgrade steps, then deploy again.'
     expect(formatDeployWorkerError(410, instruction, 'cli_outdated')).toBe(instruction)
   })
 
