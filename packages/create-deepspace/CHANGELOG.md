@@ -1,5 +1,15 @@
 # create-deepspace
 
+## 0.30.0
+
+### Patch Changes
+
+- Scaffolds carry exactly one copy of the DeepSpace agent skill: the installer
+  is pinned to the canonical `.agents/skills` target, so a host with no
+  detected agents no longer also receives a divergent `agent/skills` copy with
+  rewritten frontmatter. The copilot template's `AGENTS.md` no longer
+  references skill files that were never published.
+
 ## 0.29.1
 
 ### Patch Changes

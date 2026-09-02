@@ -2,7 +2,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -1453,6 +1453,27 @@ describe('deploy failure reporting', () => {
     expect(message).not.toMatch(/DeepSpace deploy service hit a resource limit/)
   })
 
+  it('prints a deterministic upload rejection verbatim instead of the incident hint', () => {
+    // The exact misdiagnosis from AX S1: a permanent input error prescribed
+    // an infinite "wait for Cloudflare to recover and retry" loop.
+    const rejection =
+      "Cloudflare rejected the worker upload: Binding name 'X…' (length 5000) exceeds the limit of 2712."
+    const message = formatDeployWorkerError(409, rejection, 'worker_upload_rejected')
+    expect(message).toBe(rejection)
+  })
+
+  it('passes the new rejection shape through even without its code (defense in depth)', () => {
+    // The server sends code worker_upload_rejected with this message shape;
+    // even code-less, the sentence must reach the user verbatim (409 < 500
+    // and no incident needle matches).
+    const message = formatDeployWorkerError(
+      409,
+      "Cloudflare rejected the worker upload: Binding name 'X' exceeds the limit of 2712.",
+    )
+    expect(message).toMatch(/exceeds the limit of 2712/)
+    expect(message).not.toMatch(/Cloudflare Dashboard\/API/)
+  })
+
   it('does not mistake an app id or byte count containing 1101 for a limit failure', () => {
     expect(isDeployServiceResourceLimit(409, 'assets total 11012 bytes')).toBe(false)
   })
@@ -2117,15 +2138,50 @@ describe('deploy lock (one deploy per checkout)', () => {
     expect(() => readFileSync(deployLockPath(dir))).toThrow()
   })
 
-  it('refuses a stale-looking lock instead of racing another acquirer to reclaim it', () => {
+  it('reclaims a lock whose holder pid is provably dead instead of stalling', () => {
+    // AX C1 (docs/audits/2026-09-01): a SIGINT-killed deploy orphaned the
+    // lock and the refusal prescribed a ten-minute wait for a dead holder.
     mkdirSync(join(dir, '.deepspace'), { recursive: true })
-    const stale = { pid: 2 ** 22 + 1, startedAt: 'yesterday', token: 'stale-token' }
-    writeFileSync(deployLockPath(dir), JSON.stringify(stale))
+    const orphaned = { pid: 2 ** 22 + 1, startedAt: 'yesterday', token: 'stale-token' }
+    writeFileSync(deployLockPath(dir), JSON.stringify(orphaned))
 
-    expect(() => acquireDeployLock(dir)).toThrow(
-      expect.objectContaining({ code: 'deploy_in_progress' }),
-    )
-    expect(JSON.parse(readFileSync(deployLockPath(dir), 'utf-8'))).toEqual(stale)
+    const release = acquireDeployLock(dir)
+    const record = JSON.parse(readFileSync(deployLockPath(dir), 'utf-8')) as { pid: number }
+    expect(record.pid).toBe(process.pid)
+    release()
+  })
+
+  it('reclaims an outlived lock file by mtime even when its pid reads alive', () => {
+    // Zombie pids answer kill-0 as alive forever (v0.27.0 r1 AX BUG-2); the
+    // file's age is the zombie-proof staleness signal.
+    mkdirSync(join(dir, '.deepspace'), { recursive: true })
+    const zombie = { pid: process.pid, startedAt: 'yesterday', token: 'zombie-token' }
+    writeFileSync(deployLockPath(dir), JSON.stringify(zombie))
+    const old = new Date(Date.now() - 11 * 60_000)
+    utimesSync(deployLockPath(dir), old, old)
+
+    const release = acquireDeployLock(dir)
+    expect(
+      (JSON.parse(readFileSync(deployLockPath(dir), 'utf-8')) as { token: string }).token,
+    ).not.toBe('zombie-token')
+    release()
+  })
+
+  it('releases the lock and exits through process.exit on SIGINT', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('exit called')
+    }) as never)
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true)
+    try {
+      acquireDeployLock(dir)
+      expect(() => process.emit('SIGINT' as never)).toThrow('exit called')
+      expect(exitSpy).toHaveBeenCalledWith(130)
+      expect(() => readFileSync(deployLockPath(dir))).toThrow()
+      expect(String(stderrSpy.mock.calls.at(-1)?.[0])).toContain('released the deploy lock')
+    } finally {
+      exitSpy.mockRestore()
+      stderrSpy.mockRestore()
+    }
   })
 
   it('an old release callback cannot delete a replacement holder', () => {
@@ -2141,7 +2197,9 @@ describe('deploy lock (one deploy per checkout)', () => {
     expect(() => readFileSync(deployLockPath(dir))).toThrow()
   })
 
-  it('refuses an unreadable lock file rather than guessing it stale', () => {
+  it('refuses a fresh unreadable lock file rather than guessing it stale', () => {
+    // A young unreadable file may be a concurrent writer mid-create; only
+    // age can prove it abandoned.
     mkdirSync(join(dir, '.deepspace'), { recursive: true })
     writeFileSync(deployLockPath(dir), 'not json')
     let thrown: unknown

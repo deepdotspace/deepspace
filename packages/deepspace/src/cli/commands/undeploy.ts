@@ -11,12 +11,13 @@
 import { readAppId } from '../lib/app-identity'
 import * as p from '@clack/prompts'
 import { createSpinner } from '../lib/spinner'
-import { ensureToken } from '../auth'
+import { ensureToken, loginAction } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { listApps, resolveAppSelector } from '../lib/app-target'
 import { hasWranglerConfig, readWranglerConfig } from '../lib/wrangler-env'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 import { requireConsent } from '../lib/consent'
+import { waitForHostReleased } from '../lib/edge-propagation'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
@@ -55,7 +56,7 @@ export default defineDeepspaceCommand({
       token = await ensureToken()
     } catch (err: unknown) {
       throw new Refusal(err instanceof Error ? err.message : String(err), 'not_authenticated', {
-        action: cliAction('deepspace', 'auth', 'login'),
+        action: loginAction(),
       })
     }
 
@@ -163,14 +164,31 @@ export default defineDeepspaceCommand({
     // reports `alreadyLoggedOut`, instead of claiming a takedown that did not
     // happen; the exit code alone could not tell success from no-op.
     const alreadyUndeployed = hosts.length === 0
-    s?.stop(alreadyUndeployed ? 'Nothing to remove' : 'Removed')
+
+    // Deploy waits until the edge serves the release; the takedown gets the
+    // symmetric wait, since returning while the URL still answered 200
+    // through route-table propagation made "success" unverifiable (AX C2,
+    // docs/audits/2026-09-01). Same caveat as deploy: this proves the edge
+    // THIS machine reaches, not global convergence.
+    let released: 'confirmed' | 'unconfirmed' | null = null
+    if (!alreadyUndeployed) {
+      s?.message('Waiting for the edge to release the host...')
+      released = await waitForHostReleased(`https://${hosts[0]}`, 90_000)
+    }
+    s?.stop(
+      alreadyUndeployed
+        ? 'Nothing to remove'
+        : released === 'confirmed'
+          ? 'Removed (edge confirmed the takedown)'
+          : 'Removed — the edge is still releasing the host',
+    )
     if (!args.json) {
       p.outro(
         alreadyUndeployed
           ? `${target} was already offline — no URL was serving, so nothing changed. The app keeps its id; redeploy to bring it back.`
-          : `${hosts.join(', ')} taken down. The app keeps its id — redeploy to bring it back.`,
+          : `${hosts.join(', ')} taken down${released === 'confirmed' ? '' : ' (cached edges may answer 200 for a short while yet)'}. The app keeps its id — redeploy to bring it back.`,
       )
     }
-    return { data: { appId, releasedHosts: hosts, alreadyUndeployed } }
+    return { data: { appId, releasedHosts: hosts, alreadyUndeployed, released } }
   },
 })

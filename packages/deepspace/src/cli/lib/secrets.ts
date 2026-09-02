@@ -9,7 +9,11 @@
  * projects and no app↔project links — those concepts are gone.
  */
 
-import { RESERVED_BINDING_NAMES } from '../../server/rooms/binding-manifest'
+import {
+  MAX_BINDING_NAME_LENGTH,
+  RESERVED_BINDING_NAMES,
+  SECRET_NAME_RE,
+} from '../../server/rooms/binding-manifest'
 import { ApiError, apiFetch, apiFetchReadWithRetry, apiFetchWithTransientRetry } from './api'
 import { InputError } from './cli-errors'
 
@@ -27,7 +31,7 @@ const RESERVED_SECRET_NAMES = new Set([
   'PLATFORM_WORKER_URL',
 ])
 
-export const SECRET_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+export { SECRET_NAME_RE }
 export const CONFIG_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
 const MAX_SECRET_VALUE_BYTES = 32 * 1024
 
@@ -75,6 +79,15 @@ export function validateConfigName(configName: string): string {
 }
 
 export function validateSecretName(name: string): string {
+  // Length gets its own sentence: the charset message would mislead, and a
+  // too-long name that reaches the store bricks every later deploy at
+  // Cloudflare's binding-name limit (AX S1, docs/audits/2026-09-01).
+  if (name.length > MAX_BINDING_NAME_LENGTH) {
+    throw new InputError(
+      `Secret name "${name.slice(0, 64)}…" is ${name.length} characters; the limit is ${MAX_BINDING_NAME_LENGTH}.`,
+      'invalid_secret_name',
+    )
+  }
   if (!SECRET_NAME_RE.test(name)) {
     throw new InputError(
       `Invalid secret name "${name}". Use letters, numbers, and underscores; start with a letter or underscore.`,

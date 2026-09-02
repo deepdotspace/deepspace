@@ -29,7 +29,7 @@
 import { registerForLocalRun } from '../lib/app-registration'
 import { resolve, basename, join } from 'node:path'
 import spawn from 'cross-spawn'
-import { ensureToken } from '../auth'
+import { ensureToken, loginAction } from '../auth'
 import { detectAppName, findAppDir, findChildApps } from '../lib/app-context'
 import {
   detectClaudeWorktree,
@@ -58,7 +58,7 @@ import {
   wranglerViteEnv,
   type PreparedWranglerEnvConfig,
 } from '../lib/wrangler-env'
-import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
+import { defineDeepspaceCommand, Refusal } from '../lib/command'
 
 const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
@@ -200,7 +200,7 @@ export default defineDeepspaceCommand({
       // Keep ensureToken's canonical wording ("Not logged in…" / "Session
       // expired…") and add the slug + the command that fixes it.
       throw new Refusal(err instanceof Error ? err.message : String(err), 'not_authenticated', {
-        action: cliAction('deepspace', 'auth', 'login'),
+        action: loginAction(),
       })
     }
 
@@ -211,7 +211,7 @@ export default defineDeepspaceCommand({
       throw new Refusal(
         'Malformed session token. Run `npx deepspace auth login`.',
         'not_authenticated',
-        { action: cliAction('deepspace', 'auth', 'login') },
+        { action: loginAction() },
       )
     }
     // `--env` selects which `[env.<name>]` block of wrangler.toml we apply

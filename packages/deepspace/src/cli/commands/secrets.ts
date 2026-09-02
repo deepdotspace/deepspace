@@ -14,17 +14,13 @@
  *   deepspace secrets delete KEY [KEY2 …]
  *   deepspace secrets upload <file>        (dotenv or JSON; --replace)
  *   deepspace secrets download [--format dotenv|json|shell]
- *   deepspace secrets pull                 (refresh the .dev.vars cache)
  *   deepspace secrets configs list|create|delete
  */
 
 import { defineCommand } from 'citty'
 import { readFileSync } from 'node:fs'
 import { ensureToken } from '../auth'
-import { decodeJwtPayload } from '../../shared/jwt'
 import { PLATFORM_URLS } from '../env'
-import { findAppDir } from '../lib/app-context'
-import { writeDevVars } from '../lib/dev-vars'
 import { assertAppTargetResolvable, parseWranglerEnvArg, resolveAppTarget } from '../lib/app-target'
 import { ApiError } from '../lib/api'
 import { InputError } from '../lib/cli-errors'
@@ -43,7 +39,6 @@ import {
   listConfigs,
   listSecrets,
   parseSecretsUpload,
-  refreshSecretsCache,
   setSecret,
   uploadSecrets,
   validateConfigName,
@@ -485,52 +480,6 @@ const download = defineCommand({
   },
 })
 
-const pull = defineCommand({
-  meta: { name: 'pull', description: 'Refresh the .dev.vars cache from the app store' },
-  args: { ...COMMON_ARGS },
-  async run({ args }) {
-    const wranglerEnv = args.env?.trim() || undefined
-    const appDir = findAppDir()
-    if (!appDir)
-      throw new InputError(
-        'Run from a DeepSpace app directory (one containing wrangler.toml).',
-        'not_in_app_repo',
-      )
-    const t = await resolveTarget(args, { register: true })
-    const ownerId = decodeJwtPayload<{ sub: string }>(t.token).sub
-    const refreshed = await refreshSecretsCache(
-      DEPLOY_URL,
-      t.token,
-      t.appId,
-      wranglerEnv,
-      t.configName,
-    )
-    try {
-      await writeDevVars(appDir, ownerId, t.token, wranglerEnv, {
-        appId: t.appId,
-        generatedSecretsCache: refreshed.rendered,
-      })
-    } catch (err: unknown) {
-      // writeDevVars raises the env-aware `app init` remedy itself — but it
-      // only applies when the id came from wrangler.toml: under --app <id>
-      // that action would target a different app than the one that refused,
-      // so strip it and keep the bare refusal.
-      if (args.app && err instanceof Refusal && err.code === 'app_not_found') {
-        throw new Refusal(err.message, err.code)
-      }
-      throw err
-    }
-    const count = Object.keys(refreshed.pulled?.values ?? {}).length
-    ok(args.json === true, { appId: t.appId, config: t.configName, pulled: count }, () =>
-      console.log(
-        refreshed.pulled
-          ? `Pulled ${count} secrets (${t.configName}) into .dev.vars.`
-          : `Config ${t.configName} does not exist yet; regenerated .dev.vars without app secrets.`,
-      ),
-    )
-  },
-})
-
 const configsList = defineCommand({
   meta: { name: 'list', description: 'List the app’s configs' },
   args: { ...COMMON_ARGS },
@@ -637,12 +586,15 @@ const configsDelete = defineCommand({
       }
     }
     await deleteConfig(DEPLOY_URL, t.token, t.appId, name)
-    ok(args.json === true, { appId: t.appId, config: name, deleted: true, secretsDeleted: count }, () =>
-      console.log(
-        count === null
-          ? `Deleted ${name}.`
-          : `Deleted ${name} and ${count} secret${count === 1 ? '' : 's'}.`,
-      ),
+    ok(
+      args.json === true,
+      { appId: t.appId, config: name, deleted: true, secretsDeleted: count },
+      () =>
+        console.log(
+          count === null
+            ? `Deleted ${name}.`
+            : `Deleted ${name} and ${count} secret${count === 1 ? '' : 's'}.`,
+        ),
     )
   },
 })
@@ -661,7 +613,6 @@ export default defineCommand({
     delete: del,
     upload,
     download,
-    pull,
     configs,
   },
 })

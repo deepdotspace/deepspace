@@ -1,5 +1,17 @@
-import { describe, expect, it } from 'vitest'
-import { pickPreviousRelease, unavailableDoGuardRefusal } from '../rollback'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+const mocks = vi.hoisted(() => ({
+  ensureToken: vi.fn(async () => 'token'),
+  resolveAppTarget: vi.fn(async () => 'app_01HZXYABCDEFGHJKMNPQRSTVWX'),
+}))
+vi.mock('../../auth', () => ({ ensureToken: mocks.ensureToken }))
+vi.mock('../../lib/app-target', () => ({
+  resolveAppTarget: mocks.resolveAppTarget,
+  assertAppTargetResolvable: () => {},
+  parseWranglerEnvArg: () => ({ wranglerEnv: undefined }),
+}))
+
+import rollback, { pickPreviousRelease, unavailableDoGuardRefusal } from '../rollback'
 
 describe('pickPreviousRelease (default rollback target)', () => {
   // Regression: the two default-rollback rejections must carry stable machine
@@ -36,5 +48,36 @@ describe('unavailableDoGuardRefusal', () => {
       actionRequired: false,
     })
     expect(refusal.message).toContain('--allow-do-deletion')
+  })
+})
+
+describe('rollback consent gate', () => {
+  // AX S2 (docs/audits/2026-09-01): a bare `deepspace rollback` probe
+  // silently rolled production back, while undeploy demanded consent.
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    process.exitCode = undefined
+  })
+
+  it('refuses confirmation_required under --json without --yes, before any mutation', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const lines: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
+    const releaseId = `rel_${'0'.repeat(26)}`
+    const command = rollback as unknown as {
+      run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+    }
+    await command.run({ args: { release: releaseId, json: true } })
+
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      ok: false,
+      code: 'confirmation_required',
+      appId: 'app_01HZXYABCDEFGHJKMNPQRSTVWX',
+      releaseId,
+    })
+    expect(process.exitCode).toBe(1)
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 })

@@ -19,7 +19,7 @@
 
 import { readFileSync } from 'node:fs'
 import * as p from '@clack/prompts'
-import { ensureToken } from '../auth'
+import { ensureToken, loginAction } from '../auth'
 import { PLATFORM_URLS } from '../env'
 import { ApiError, fetchIntegrationCatalog } from '../lib/api'
 import { cliAction, Refusal, type CommandResult } from '../lib/command'
@@ -416,7 +416,7 @@ export async function runInvoke(args: InvokeArgs): Promise<CommandResult> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     throw new Refusal(msg, 'not_authenticated', {
-      action: cliAction('deepspace', 'auth', 'login'),
+      action: loginAction(),
     })
   }
 
@@ -490,7 +490,7 @@ export async function runInvoke(args: InvokeArgs): Promise<CommandResult> {
   delete rest.message
   delete rest.code
   throw new Refusal(lines.join('\n'), code, {
-    ...(res.status === 401 ? { action: cliAction('deepspace', 'auth', 'login') } : {}),
+    ...(res.status === 401 ? { action: loginAction() } : {}),
     extra: rest,
   })
 }

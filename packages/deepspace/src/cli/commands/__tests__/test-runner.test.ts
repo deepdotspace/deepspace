@@ -11,6 +11,7 @@ import testCommand, {
   PLAYWRIGHT_OUTPUT_DIR,
   playwrightTestArgs,
   runVitest,
+  skippedTestsFromPlaywrightJson,
   specsSkippedByDefaultSuite,
 } from '../test'
 import * as appContext from '../../lib/app-context'
@@ -256,6 +257,7 @@ describe('Playwright artifact routing', () => {
       'tests/playwright.config.ts',
       '--output',
       PLAYWRIGHT_OUTPUT_DIR,
+      '--reporter=list,json',
       'tests/smoke.spec.ts',
     ])
     expect(PLAYWRIGHT_OUTPUT_DIR).toMatch(/^\.deepspace\//)
@@ -275,6 +277,7 @@ describe('Playwright artifact routing', () => {
       'tests/playwright.config.ts',
       '--output',
       PLAYWRIGHT_OUTPUT_DIR,
+      '--reporter=list,json',
       '--grep',
       'presence',
       '--project',
@@ -292,6 +295,7 @@ describe('Playwright artifact routing', () => {
       'tests/playwright.config.ts',
       '--output',
       PLAYWRIGHT_OUTPUT_DIR,
+      '--reporter=list,json',
     ])
   })
 })
@@ -359,5 +363,62 @@ describe('suite runners resolve --env', () => {
 
     const options = spawnSyncMock.mock.calls[0][2] as { env: NodeJS.ProcessEnv }
     expect(options.env.CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH).toBeUndefined()
+  })
+})
+
+describe('skippedTestsFromPlaywrightJson (runtime skips reach the summary)', () => {
+  // AX C3 (docs/audits/2026-09-01): `test run --json` said skippedSpecs: []
+  // while Playwright skipped 3 tests, and the scaffold's authored reason
+  // ("create 2 test accounts …") was swallowed by the list reporter.
+  it('extracts skipped tests and their authored reasons from the json report', () => {
+    const report = JSON.stringify({
+      suites: [
+        {
+          specs: [
+            {
+              file: 'tests/collab.spec.ts',
+              title: 'two users see each other',
+              tests: [
+                {
+                  status: 'skipped',
+                  annotations: [
+                    { type: 'skip', description: 'Needs 2 usable test accounts, found 0.' },
+                  ],
+                },
+              ],
+            },
+            {
+              file: 'tests/smoke.spec.ts',
+              title: 'loads',
+              tests: [{ status: 'expected' }],
+            },
+          ],
+          suites: [
+            {
+              specs: [
+                {
+                  file: 'tests/collab.spec.ts',
+                  title: 'presence updates live',
+                  tests: [{ status: 'skipped' }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    expect(skippedTestsFromPlaywrightJson(report)).toEqual([
+      {
+        spec: 'tests/collab.spec.ts',
+        title: 'two users see each other',
+        reason: 'Needs 2 usable test accounts, found 0.',
+      },
+      { spec: 'tests/collab.spec.ts', title: 'presence updates live', reason: null },
+    ])
+  })
+
+  it('treats a missing or unparseable report as no known skips, never a failure', () => {
+    expect(skippedTestsFromPlaywrightJson('')).toEqual([])
+    expect(skippedTestsFromPlaywrightJson('not json')).toEqual([])
   })
 })

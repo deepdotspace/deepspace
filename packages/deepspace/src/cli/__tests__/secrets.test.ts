@@ -38,6 +38,14 @@ describe('validation', () => {
     expect(() => validateConfigName('bad name')).toThrow()
   })
 
+  it('bounds the secret name length so a stored name can never brick deploys', () => {
+    // Cloudflare rejects long binding names only at deploy time, after the
+    // store already accepted the secret (AX S1, docs/audits/2026-09-01).
+    expect(validateSecretName('A'.repeat(256))).toBe('A'.repeat(256))
+    expect(() => validateSecretName('A'.repeat(257))).toThrow(/257 characters; the limit is 256/)
+    expect(() => validateSecretName('A'.repeat(5000))).toThrow(/limit is 256/)
+  })
+
   it('rejects SDK-managed keys client-side but allows ALLOW_DEBUG_ROUTES', () => {
     // Reserved/SDK-injected keys can't be set as app secrets — fail fast with a
     // clear message instead of a server round-trip that leaks the API path.

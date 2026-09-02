@@ -151,3 +151,4 @@ export class PlatformApiError extends Error {
  */
 export const apiErrorCode = (e: unknown): string | null =>
   e instanceof PlatformApiError ? (e.code ?? null) : null
+

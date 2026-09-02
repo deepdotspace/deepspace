@@ -9,9 +9,9 @@
 
 import { createReadStream } from 'node:fs'
 import { defineCommand } from 'citty'
-import { mintAgentToken } from '../auth'
+import { mintAgentToken, loginAction } from '../auth'
 import { appDomainForEnv, DEEPSPACE_ENV, type DeepSpaceEnvironment } from '../env'
-import { cliAction, defineDeepspaceCommand, Refusal, type CommandResult } from '../lib/command'
+import { defineDeepspaceCommand, Refusal, type CommandResult } from '../lib/command'
 import { APP_NAME_RULES } from '../../server/rooms/app-name'
 import { normalizeAgentTargetOrigin } from '../../server/agent-target'
 import { BodyTooLargeError, readBoundedBodyText } from '../../shared/bounded-body'
@@ -371,7 +371,7 @@ async function callAgent(
     throw new Refusal(
       'Authentication was rejected. Run `deepspace auth login` and try again.',
       'not_authenticated',
-      { action: cliAction('deepspace', 'auth', 'login') },
+      { action: loginAction() },
     )
   }
 }

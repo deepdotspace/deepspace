@@ -14,6 +14,7 @@ import { decodeJwtPayload } from '../shared/jwt'
 import { exchangeAgentSession, exchangeSession } from './session'
 import { registerAuthRefresh } from './lib/api'
 import { cliAction, Refusal } from './lib/command'
+import type { CliAction } from './lib/output'
 import { writeSecretFileSync } from './lib/secure-file'
 
 const AUTH_URL = process.env.DEEPSPACE_AUTH_URL ?? PLATFORM_URLS.auth
@@ -89,6 +90,23 @@ export async function ensureToken(options: EnsureTokenOptions = {}): Promise<str
 }
 
 /**
+ * The `auth login` action every not_authenticated refusal ships — or none.
+ * The bare action only succeeds interactively (browser login) or headless
+ * with $DEEPSPACE_EMAIL + $DEEPSPACE_PASSWORD set; shipping it to a headless
+ * caller without credentials pointed strict agents at a guaranteed
+ * `interactive_required` refusal (AX C5, two lanes; docs/audits/2026-09-01).
+ * Action argv may not carry placeholders, so when only the user can supply
+ * credentials the contract's answer is NO action — the prose names the
+ * headless form. One builder so the eleven refusal sites cannot drift.
+ */
+export function loginAction(): CliAction | undefined {
+  const canRunBare =
+    (Boolean(process.stdin.isTTY) && Boolean(process.stdout.isTTY)) ||
+    (Boolean(process.env.DEEPSPACE_EMAIL) && Boolean(process.env.DEEPSPACE_PASSWORD))
+  return canRunBare ? cliAction('deepspace', 'auth', 'login') : undefined
+}
+
+/**
  * The ONE `not_authenticated` refusal. Credentials are per auth plane, so
  * "not logged in" is only half the truth whenever the selected plane is not
  * the one a stored session belongs to: `DEEPSPACE_ENV=staging` (or a
@@ -130,7 +148,7 @@ function notAuthenticated(state: string): Refusal {
     `${state} on ${selected}.${other} Run \`deepspace auth login\` (headless: ` +
       '`deepspace auth login --email you@example.com --password-stdin`, or set DEEPSPACE_EMAIL and DEEPSPACE_PASSWORD).',
     'not_authenticated',
-    { action: cliAction('deepspace', 'auth', 'login') },
+    { action: loginAction() },
   )
 }
 

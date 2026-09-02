@@ -1,5 +1,47 @@
 # deepspace
 
+## 0.30.0
+
+### Minor Changes
+
+- Remove `deepspace secrets pull`. It was a manual trigger for a mechanism that
+  already runs automatically at every point `.dev.vars` matters: `dev start`,
+  `test`, and `deploy` each refresh the cache themselves, and the hint after
+  `secrets set` already says to restart the dev server. Bulk export remains
+  `secrets download`; single values remain `secrets get --plain`.
+- `deepspace rollback` now runs through the same consent gate as `undeploy`: it
+  prompts with the exact release about to ship (the auto-picked previous release
+  included), `--yes`/`-y` skips the prompt, and `--json`/non-interactive runs
+  without `--yes` refuse with `confirmation_required` instead of silently
+  rolling production back. Scripts that relied on an unconfirmed `rollback`
+  must add `--yes`.
+
+### Patch Changes
+
+- An interrupted deploy no longer strands the next one: `deploy` reclaims a
+  deploy lock whose holder process is provably dead or whose lock file has
+  outlived the ten-minute deploy ceiling, instead of refusing with advice to
+  wait; and a SIGINT/SIGTERM during a locked deploy now releases the lock, says
+  so on stderr, and still emits the `--json` crash envelope.
+- Deploy and undeploy now verify what they claim: `app undeploy` waits (bounded)
+  until independent fresh connections agree the host answers 404 and reports
+  `released` in its envelope, and `deploy` follows its edge confirmation with a
+  data-plane probe of the app's room namespace, reported as a separate
+  `dataPlane` field with a warning when Durable Object bindings are still
+  propagating after a redeploy.
+- Secret and binding names are bounded at 256 characters at write time — a
+  longer name used to be accepted and then fail every later deploy at
+  Cloudflare's binding-name limit. When Cloudflare deterministically rejects a
+  worker upload, the deploy error now leads with Cloudflare's own sentence
+  under `worker_upload_rejected` instead of misdiagnosing it as a Cloudflare
+  incident and prescribing retry.
+- `test run` now reports runner-level skips: a new `skippedTests` field carries
+  each skipped test with its authored `test.skip(cond, reason)` sentence, and a
+  summary line prints the distinct reasons. The `not_authenticated` refusal
+  ships its `auth login` action only where the bare command can succeed (an
+  interactive terminal, or headless with `$DEEPSPACE_EMAIL`/`$DEEPSPACE_PASSWORD`
+  set); otherwise the action is omitted and the message names the headless form.
+
 ## 0.29.1
 
 ### Patch Changes

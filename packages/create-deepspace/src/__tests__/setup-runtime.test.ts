@@ -86,6 +86,8 @@ describe('agentSkillInstallerCommand', () => {
         'add',
         'deepdotspace/deepspace-skill',
         '-y',
+        '--agent',
+        'codex',
       ],
     })
   })
@@ -102,6 +104,8 @@ describe('agentSkillInstallerCommand', () => {
         'add',
         'deepdotspace/deepspace-skill',
         '-y',
+        '--agent',
+        'codex',
       ],
     })
   })

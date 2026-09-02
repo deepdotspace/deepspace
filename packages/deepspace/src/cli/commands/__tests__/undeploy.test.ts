@@ -8,6 +8,11 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../../auth', () => ({ ensureToken: mocks.ensureToken }))
+// The takedown wait probes real sockets (see edge-propagation.test.ts for the
+// wait's own coverage); here it must not reach for my-shop.app.space.
+vi.mock('../../lib/edge-propagation', () => ({
+  waitForHostReleased: vi.fn(async () => 'confirmed' as const),
+}))
 vi.mock('../../lib/app-target', () => ({
   resolveAppSelector: mocks.resolveAppSelector,
   listApps: mocks.listApps,
@@ -120,6 +125,7 @@ describe('undeploy idempotence', () => {
       appId,
       releasedHosts: ['my-shop.app.space'],
       alreadyUndeployed: false,
+      released: 'confirmed',
     })
     expect(process.exitCode).toBe(0)
   })
@@ -132,6 +138,7 @@ describe('undeploy idempotence', () => {
       appId,
       releasedHosts: [],
       alreadyUndeployed: true,
+      released: null,
     })
     expect(process.exitCode).toBe(0)
   })

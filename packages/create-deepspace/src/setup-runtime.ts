@@ -37,6 +37,14 @@ export function agentSkillInstallerCommand(
     'add',
     SKILL_REPOSITORY,
     '-y',
+    // Pin the canonical universal target (.agents/skills). On a host with no
+    // detected agents, `-y` alone installs to EVERY agent the installer
+    // knows, including eve's `agent/skills` variant that rewrites the
+    // frontmatter — leaving a second, divergent skill copy in the scaffold
+    // (AX C4, docs/audits/2026-09-01). Claude reads the canonical copy
+    // through the `.claude` symlink made below.
+    '--agent',
+    'codex',
   ]
   const npmExecPath = environment.npm_execpath
   return npmExecPath && /(?:^|[/\\])npm-cli\.(?:c?js|mjs)$/i.test(npmExecPath)

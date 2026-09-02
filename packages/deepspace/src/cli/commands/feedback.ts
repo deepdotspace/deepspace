@@ -29,10 +29,10 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { release } from 'node:os'
-import { ensureToken } from '../auth'
+import { ensureToken, loginAction } from '../auth'
 import { PLATFORM_URLS, DASHBOARD_URL } from '../env'
 import { apiFetch } from '../lib/api'
-import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
+import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import { hasWranglerConfig, readWranglerConfig } from '../lib/wrangler-env'
 
 const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
@@ -301,7 +301,7 @@ export default defineDeepspaceCommand({
       throw new Refusal(
         (err as Error).message ?? 'Not signed in. Run `deepspace auth login`.',
         'not_authenticated',
-        { action: cliAction('deepspace', 'auth', 'login') },
+        { action: loginAction() },
       )
     }
 

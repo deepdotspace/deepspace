@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   exists: vi.fn<(path: string) => boolean>(),
@@ -23,7 +23,7 @@ vi.mock('../session', () => ({
 }))
 vi.mock('../lib/api', () => ({ registerAuthRefresh: vi.fn() }))
 
-import { ensureToken, mintAgentToken, SESSION_PATH, TOKEN_PATH } from '../auth'
+import { ensureToken, loginAction, mintAgentToken, SESSION_PATH, TOKEN_PATH } from '../auth'
 
 beforeEach(() => {
   mocks.exists.mockReset()
@@ -32,6 +32,14 @@ beforeEach(() => {
   mocks.exchangeAgent.mockClear()
   mocks.write.mockClear()
   mocks.chmod.mockClear()
+  // Deterministic loginAction() inputs: the vitest worker is headless, and a
+  // developer's real DEEPSPACE_EMAIL/PASSWORD must not leak into the pins.
+  vi.stubEnv('DEEPSPACE_EMAIL', '')
+  vi.stubEnv('DEEPSPACE_PASSWORD', '')
+})
+
+afterEach(() => {
+  vi.unstubAllEnvs()
 })
 
 describe('mintAgentToken', () => {
@@ -50,12 +58,13 @@ describe('mintAgentToken', () => {
   })
 })
 
+// Headless without stored credentials (this vitest worker): the bare `auth
+// login` action would only reach `interactive_required`, so the contract's
+// answer is NO action — recovery needs input only the user can supply (AX C5,
+// docs/audits/2026-09-01). The prose still names the headless form.
 const loginRefusal = {
   code: 'not_authenticated',
-  action: {
-    cwd: process.cwd(),
-    argv: ['deepspace', 'auth', 'login'],
-  },
+  action: undefined,
 }
 
 function jwtExpiringIn(milliseconds: number): string {
@@ -65,14 +74,54 @@ function jwtExpiringIn(milliseconds: number): string {
   return `header.${payload}.signature`
 }
 
+describe('loginAction (the one login-recovery action builder)', () => {
+  // isTTY is a plain data property (absent entirely in a vitest worker), so
+  // it is set and restored by descriptor, not spied.
+  let restoreTTY: Array<() => void> = []
+  const stubTTY = (stdin: boolean, stdout: boolean): void => {
+    restoreTTY = [
+      [process.stdin, stdin] as const,
+      [process.stdout, stdout] as const,
+    ].map(([stream, value]) => {
+      const original = Object.getOwnPropertyDescriptor(stream, 'isTTY')
+      Object.defineProperty(stream, 'isTTY', { value, configurable: true })
+      return () => {
+        if (original) Object.defineProperty(stream, 'isTTY', original)
+        else delete (stream as { isTTY?: boolean }).isTTY
+      }
+    })
+  }
+  afterEach(() => {
+    for (const restore of restoreTTY) restore()
+    restoreTTY = []
+  })
+
+  it('omits the action headless without credentials — the bare login cannot succeed there', () => {
+    stubTTY(false, false)
+    expect(loginAction()).toBeUndefined()
+  })
+
+  it('ships the bare action when $DEEPSPACE_EMAIL/$DEEPSPACE_PASSWORD make it runnable headless', () => {
+    stubTTY(false, false)
+    vi.stubEnv('DEEPSPACE_EMAIL', 'agent@example.com')
+    vi.stubEnv('DEEPSPACE_PASSWORD', 'secret-enough')
+    expect(loginAction()).toMatchObject({ argv: ['deepspace', 'auth', 'login'] })
+  })
+
+  it('ships the bare action on an interactive terminal (browser login works there)', () => {
+    stubTTY(true, true)
+    expect(loginAction()).toMatchObject({ argv: ['deepspace', 'auth', 'login'] })
+  })
+})
+
 describe('ensureToken recovery action', () => {
-  it('carries an exact login action when no session exists', async () => {
+  it('omits the login action headless when no session exists', async () => {
     mocks.exists.mockReturnValue(false)
 
     await expect(ensureToken()).rejects.toMatchObject(loginRefusal)
   })
 
-  it('carries the same action when session refresh fails', async () => {
+  it('behaves the same when session refresh fails', async () => {
     mocks.exists.mockImplementation((path) => path === SESSION_PATH && path !== TOKEN_PATH)
 
     await expect(ensureToken()).rejects.toMatchObject(loginRefusal)

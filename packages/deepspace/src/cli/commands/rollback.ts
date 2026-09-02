@@ -21,6 +21,7 @@ import { mintIdempotencyKey, repoApi } from '../lib/repo-api'
 import { createSpinner } from '../lib/spinner'
 import { waitForLiveRelease, type ReleaseWait } from '../lib/edge-propagation'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
+import { requireConsent } from '../lib/consent'
 
 const REL_ID_RE = /^rel_[0-9A-HJKMNP-TV-Z]{26}$/
 
@@ -92,6 +93,12 @@ export default defineDeepspaceCommand({
         'the current one — THEIR STORED DATA IS DELETED.',
       default: false,
     },
+    yes: {
+      type: 'boolean',
+      alias: 'y',
+      description: 'Skip the confirmation (required for --json / non-interactive)',
+      default: false,
+    },
   },
   async run({ args }) {
     const appArg = args.app as string | undefined
@@ -129,7 +136,20 @@ export default defineDeepspaceCommand({
       releaseId = picked.releaseId
     }
 
-    spinner?.message(`Rolling back to ${releaseId}…`)
+    // Rollback mutates the live release and must never run on Enter alone —
+    // a bare `deepspace rollback` probe silently rolled production back (AX
+    // S2, docs/audits/2026-09-01), while the less destructive undeploy
+    // already demanded consent. Gated AFTER the target resolves so the
+    // prompt names the release actually about to ship, auto-picked or not.
+    spinner?.stop(`Rollback target: ${releaseId}`)
+    await requireConsent({
+      yes: Boolean(args.yes),
+      json: Boolean(args.json),
+      message: `This re-deploys release ${releaseId} as the live release of ${appId} (live secrets are kept, not the release's).`,
+      prompt: `Roll ${appId} back to ${releaseId}?`,
+      extra: { appId, releaseId },
+    })
+    spinner?.start(`Rolling back to ${releaseId}…`)
     let result: {
       success: boolean
       url?: string

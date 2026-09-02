@@ -91,7 +91,7 @@ export async function fetchAppIdentityToken(
         // wrangler env, and a bare `app init` under --env would target the
         // TOP-LEVEL [vars] slot. dev/test/deploy attach the env-aware
         // remedy as a structured action; surfaces without an action channel
-        // (secrets pull among them) fall back to the
+        // fall back to the
         // app_not_found hint (check the id / `deepspace app list`).
         `App ${appId} is not registered on this platform — DEEPSPACE_APP_ID may belong to a ` +
           'different environment (a staging id does not exist on prod, and vice versa), or the ' +

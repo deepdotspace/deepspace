@@ -24,7 +24,7 @@
  *      (`interactive_required`) instead.
  */
 
-import { credentialPaths } from '../auth'
+import { credentialPaths, loginAction } from '../auth'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomBytes, createHash } from 'node:crypto'
@@ -35,7 +35,7 @@ import { DASHBOARD_URL, PLATFORM_URLS } from '../env'
 import { exchangeSession, SESSION_COOKIE } from '../session'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { openBrowser } from '../lib/open-browser'
-import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
+import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import { writeSecretFileSync } from '../lib/secure-file'
 import { MAX_STDIN_BYTES, readStreamText } from '../lib/stdio'
 import { fetchWithTransientRetry } from '../lib/fetch-retry'
@@ -143,7 +143,7 @@ export default defineDeepspaceCommand({
         'Login timed out. Run `deepspace auth login` to try again.',
         'login_timeout',
         {
-          action: cliAction('deepspace', 'auth', 'login'),
+          action: loginAction(),
         },
       )
     }
@@ -260,14 +260,14 @@ export async function createCliLoginSession(
     throw new Refusal(
       `Could not reach the auth service to create a login session: ${error instanceof Error ? error.message : String(error)}`,
       'login_session_unreachable',
-      { action: cliAction('deepspace', 'auth', 'login') },
+      { action: loginAction() },
     )
   }
   if (!sessionRes.ok) {
     throw new Refusal(
       `Could not create login session (${sessionRes.status})`,
       'login_session_failed',
-      { action: cliAction('deepspace', 'auth', 'login') },
+      { action: loginAction() },
     )
   }
   const sessionData = (await sessionRes.json().catch(() => ({}))) as {
@@ -278,7 +278,7 @@ export async function createCliLoginSession(
     throw new Refusal(
       'Could not create login session — the auth server returned no session id or login url.',
       'login_session_failed',
-      { action: cliAction('deepspace', 'auth', 'login') },
+      { action: loginAction() },
     )
   }
   return { sessionId: sessionData.sessionId, loginUrl: sessionData.loginUrl }

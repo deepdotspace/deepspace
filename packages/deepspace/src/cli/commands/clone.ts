@@ -8,7 +8,7 @@
  * so plain `git push space` / `git fetch space` work from here on. The
  * clone is deploy-ready because identity travels in the repo itself
  * (wrangler.toml carries DEEPSPACE_APP_ID); secrets come separately via
- * `deepspace secrets pull`.
+ * `deepspace dev start` (which refreshes `.dev.vars` itself).
  *
  * Defined with the command runtime (lib/command.ts): `--json`, the envelope,
  * the slug, and the exit codes come from there, not from this file.
@@ -180,7 +180,7 @@ export default defineDeepspaceCommand({
       },
       // One runnable follow-up instead of the old five-line "Next steps" block:
       // nothing else in the clone works until the deps are installed. Secrets
-      // (`deepspace secrets pull`) and `dev` follow from there.
+      // and `dev` (which refreshes `.dev.vars` itself) follow from there.
       action: { cwd: dir, argv: [detectPackageManager(dir), 'install'] },
     }
   },

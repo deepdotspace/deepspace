@@ -12,7 +12,12 @@ import { ensureInstallReady } from '../lib/install-status'
 import type { CliAction } from '../lib/output'
 import { preflightNodeVersion } from '../lib/preflight'
 import { createSpinner, setPlainProgress } from '../lib/spinner'
-import { wakeWorker, waitForLiveRelease, type ReleaseWait } from '../lib/edge-propagation'
+import {
+  wakeWorker,
+  waitForDataPlane,
+  waitForLiveRelease,
+  type ReleaseWait,
+} from '../lib/edge-propagation'
 import { MAX_DEPLOY_ASSET_FILE_BYTES, formatBytes } from '../../shared/app-files'
 import {
   hasWranglerConfig,
@@ -394,11 +399,26 @@ async function runLockedDeploy(
   }
 
   let serving: ReleaseWait = 'unverifiable'
+  // The stamp probe proves only the static edge; the data plane (Durable
+  // Object bindings) can lag behind on script-version rollout, answering 500
+  // after "confirmed" (AX S3). Reported as its own field, never folded into
+  // `serving`, whose meaning is pinned.
+  let dataPlane: Exclude<ReleaseWait, 'unverifiable'> = 'unconfirmed'
   const edgeWaitStarted = Date.now()
   if (body.url) {
     spinner.message('Waiting for the edge to serve this release...')
     serving = await waitForLiveRelease(body.url, body.releaseStamp, 90_000)
-    if (serving === 'confirmed') await wakeWorker(body.url)
+    if (serving === 'confirmed') {
+      dataPlane = await waitForDataPlane(body.url, appId, 30_000)
+      await wakeWorker(body.url)
+      if (dataPlane === 'unconfirmed') {
+        p.log.warn(
+          'The edge serves the new release, but its worker still answered 5xx on the data ' +
+            'plane — Durable Object bindings can lag a redeploy briefly. First requests may ' +
+            'fail; retry before asserting against the app.',
+        )
+      }
+    }
     if (serving !== 'confirmed') {
       spinner.stop(
         serving === 'unconfirmed'
@@ -423,6 +443,7 @@ async function runLockedDeploy(
           releaseId: body.releaseId ?? null,
           bundleRetained: body.bundleRetained ?? null,
           serving,
+          dataPlane,
           recoverable: repository.recoverable,
           ...worktree,
           ...renameFields,
@@ -435,7 +456,7 @@ async function runLockedDeploy(
   }
 
   spinner.stop(
-    `Deployed! (edge confirmed in ${Math.round((Date.now() - edgeWaitStarted) / 1000)}s)`,
+    `Deployed! (edge${dataPlane === 'confirmed' ? ' + data plane' : ''} confirmed in ${Math.round((Date.now() - edgeWaitStarted) / 1000)}s)`,
   )
   // Verified from HERE: ten independent connections agreed. Other regions
   // may still be rolling over — see lib/edge-propagation.ts.
@@ -450,6 +471,7 @@ async function runLockedDeploy(
       // Always present, so a caller branches on one field instead of
       // inferring success from an absent one.
       serving,
+      dataPlane,
       releaseId: body.releaseId ?? null,
       bundleRetained: body.bundleRetained ?? null,
       recoverable: repository.recoverable,

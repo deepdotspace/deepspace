@@ -41,63 +41,114 @@ export async function waitForLiveRelease(
   timeoutMs: number,
 ): Promise<ReleaseWait> {
   if (!releaseStamp) return 'unverifiable'
+  // Unique per probe: the stamp is a static asset, and a cached copy would
+  // report the release it was cached under.
+  return agreeingProbes(timeoutMs, async (attempt) =>
+    servesRelease(bustedUrl(RELEASE_STAMP_PATH, url, attempt), releaseStamp),
+  )
+}
 
+/**
+ * The undeploy counterpart of {@link waitForLiveRelease}. Undeploy used to
+ * return while the old URL kept serving 200 through route-table propagation
+ * and edge caches, so "confirm the URL 404s" verified nothing in either
+ * direction (AX C2, docs/audits/2026-09-01). Confirms once independent fresh
+ * connections agree the host answers 404.
+ */
+export async function waitForHostReleased(
+  url: string,
+  timeoutMs: number,
+): Promise<Exclude<ReleaseWait, 'unverifiable'>> {
+  return agreeingProbes(timeoutMs, async (attempt) => {
+    const result = await getOnFreshConnection(bustedUrl('/', url, attempt))
+    return result !== null && result.statusCode === 404
+  })
+}
+
+/**
+ * Post-deploy data-plane probe (AX S3, docs/audits/2026-09-01). The release
+ * stamp is a static asset that never enters the worker, so `serving:
+ * "confirmed"` said nothing about whether the worker's Durable Object
+ * bindings resolve — after an undeploy → redeploy, edge machines briefly on
+ * the previous script version answer 500 "Durable Object Namespace was
+ * deleted" for /api/actions/* and /ws/*. `GET /ws/app:<appId>` without an
+ * Upgrade header reaches the room namespace unauthenticated and a healthy
+ * room answers 404 (constructing — and so warming — the DO); only a 5xx
+ * means not ready. An app that removed the scaffold's realtime routes 404s
+ * at its router instead, indistinguishable from healthy: the probe can only
+ * fail safe.
+ */
+export async function waitForDataPlane(
+  url: string,
+  appId: string,
+  timeoutMs: number,
+): Promise<Exclude<ReleaseWait, 'unverifiable'>> {
+  return agreeingProbes(timeoutMs, async (attempt) => {
+    const result = await getOnFreshConnection(bustedUrl(`/ws/app:${appId}`, url, attempt))
+    return result !== null && result.statusCode < 500
+  })
+}
+
+/** The shared wait: several probes on independent connections must agree. */
+async function agreeingProbes(
+  timeoutMs: number,
+  probe: (attempt: number) => Promise<boolean>,
+): Promise<Exclude<ReleaseWait, 'unverifiable'>> {
   const deadline = Date.now() + timeoutMs
   let attempt = 0
   let streak = 0
-
   while (Date.now() < deadline) {
     attempt++
-    // Unique per probe: the stamp is a static asset, and a cached copy would
-    // report the release it was cached under.
-    const probe = new URL(RELEASE_STAMP_PATH, url)
-    probe.searchParams.set('probe', `${Date.now()}-${attempt}`)
-
-    if (await servesRelease(probe, releaseStamp)) {
+    if (await probe(attempt)) {
       streak++
       if (streak >= CONSECUTIVE_MATCHES) return 'confirmed'
       await sleep(MATCH_INTERVAL_MS)
       continue
     }
-
-    // Old stamp, transitional page, connection error: all "not yet".
+    // Old answer, transitional page, connection error: all "not yet".
     streak = 0
     await sleep(Math.min(4_000, 500 * 2 ** Math.min(attempt - 1, 3)))
   }
   return 'unconfirmed'
 }
 
+function bustedUrl(path: string, base: string, attempt: number): URL {
+  const probe = new URL(path, base)
+  probe.searchParams.set('probe', `${Date.now()}-${attempt}`)
+  return probe
+}
+
 /** One probe, on a connection of its own. */
 async function servesRelease(probe: URL, releaseStamp: string): Promise<boolean> {
-  const body = await getOnFreshConnection(probe)
-  if (body === null) return false
+  const result = await getOnFreshConnection(probe)
+  if (result === null || result.statusCode !== 200) return false
   try {
-    return (JSON.parse(body) as { release?: unknown }).release === releaseStamp
+    return (JSON.parse(result.body) as { release?: unknown }).release === releaseStamp
   } catch {
     return false
   }
 }
 
-/** GET with pooling defeated: `agent: false` opens a socket of its own. */
-function getOnFreshConnection(url: URL, timeoutMs = 5_000): Promise<string | null> {
+/** GET with pooling defeated: `agent: false` opens a socket of its own.
+ *  `null` means no HTTP answer at all (refused, timed out, torn down). */
+function getOnFreshConnection(
+  url: URL,
+  timeoutMs = 5_000,
+): Promise<{ statusCode: number; body: string } | null> {
   const send = url.protocol === 'http:' ? httpRequest : httpsRequest
   return new Promise((resolve) => {
     const request = send(
       url,
       { method: 'GET', agent: false, timeout: timeoutMs, headers: { 'cache-control': 'no-cache' } },
       (response) => {
-        if (response.statusCode !== 200) {
-          response.resume()
-          resolve(null)
-          return
-        }
+        const statusCode = response.statusCode ?? 0
         let body = ''
         response.setEncoding('utf8')
-        // A few dozen bytes; anything larger is not the stamp.
+        // A few dozen bytes; anything larger is not a probe answer.
         response.on('data', (chunk: string) => {
           if (body.length < 4096) body += chunk
         })
-        response.on('end', () => resolve(body))
+        response.on('end', () => resolve({ statusCode, body }))
         response.on('error', () => resolve(null))
       },
     )

@@ -35,10 +35,10 @@
  */
 
 import { registerForLocalRun } from '../lib/app-registration'
-import { existsSync, readdirSync, type Dirent } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, rmSync, type Dirent } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
 import { sync as spawnSync } from 'cross-spawn'
-import { ensureToken } from '../auth'
+import { ensureToken, loginAction } from '../auth'
 import { findAppDir } from '../lib/app-context'
 import { resolveWorktreePort } from '../lib/launch-config'
 import { PLATFORM_URLS } from '../env'
@@ -54,7 +54,7 @@ import {
   wranglerViteEnv,
   type PreparedWranglerEnvConfig,
 } from '../lib/wrangler-env'
-import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
+import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import { syncTestAccountStore } from '../lib/test-account-service'
 // Same refusal text `dev` uses — one source so the two can't drift.
 import { noAppDirRefusal } from './dev'
@@ -118,11 +118,66 @@ export function playwrightTestArgs(
     'tests/playwright.config.ts',
     '--output',
     PLAYWRIGHT_OUTPUT_DIR,
+    // The default list reporter stays for the live stream; the json reporter
+    // is what lets the CLI surface runtime skips and their authored reasons,
+    // which the list reporter swallows (AX C3, docs/audits/2026-09-01).
+    '--reporter=list,json',
     ...(flags.grep ? ['--grep', flags.grep] : []),
     ...(flags.project ? ['--project', flags.project] : []),
     ...(flags.headed ? ['--headed'] : []),
     ...testFiles,
   ]
+}
+
+/** A test the runner skipped at runtime, with the reason its author gave. */
+export interface SkippedTest {
+  spec: string
+  title: string
+  reason: string | null
+}
+
+/**
+ * Runtime skips from Playwright's json-reporter output. `test.skip(cond,
+ * reason)` records the reason as a static `skip` annotation; the list
+ * reporter never prints annotations, so this is the only place the authored
+ * reason (e.g. "create 2 test accounts") reaches the person running tests.
+ * Pure + exported for its unit test.
+ */
+export function skippedTestsFromPlaywrightJson(raw: string): SkippedTest[] {
+  interface JsonTest {
+    status?: unknown
+    annotations?: Array<{ type?: unknown; description?: unknown }>
+  }
+  interface JsonSpec {
+    file?: unknown
+    title?: unknown
+    tests?: JsonTest[]
+  }
+  interface JsonSuite {
+    suites?: JsonSuite[]
+    specs?: JsonSpec[]
+  }
+  const skipped: SkippedTest[] = []
+  const walk = (suite: JsonSuite): void => {
+    for (const spec of suite.specs ?? []) {
+      for (const test of spec.tests ?? []) {
+        if (test.status !== 'skipped') continue
+        const note = test.annotations?.find((entry) => entry.type === 'skip')?.description
+        skipped.push({
+          spec: typeof spec.file === 'string' ? spec.file : '',
+          title: typeof spec.title === 'string' ? spec.title : '',
+          reason: typeof note === 'string' && note ? note : null,
+        })
+      }
+    }
+    for (const child of suite.suites ?? []) walk(child)
+  }
+  try {
+    walk(JSON.parse(raw) as JsonSuite)
+  } catch {
+    return [] // a missing or unparseable report must not fail the run
+  }
+  return skipped
 }
 
 export default defineDeepspaceCommand({
@@ -230,7 +285,7 @@ export default defineDeepspaceCommand({
       throw new Refusal(
         err instanceof Error ? err.message : 'Not logged in. Run `deepspace auth login` first.',
         'not_authenticated',
-        { action: cliAction('deepspace', 'auth', 'login') },
+        { action: loginAction() },
       )
     }
 
@@ -281,16 +336,24 @@ export default defineDeepspaceCommand({
     // specs out without being asked to (`smoke`/`api`/`<file>` were named by
     // the caller; `e2e`/`all` run everything), so this stays empty elsewhere.
     let skippedSpecs: string[] = []
+    // Tests the runner itself skipped inside executed files — the fact
+    // `skippedSpecs` deliberately does not cover (cli-contract.md).
+    let skippedTests: SkippedTest[] = []
+    const playwright = (testFiles: string[]): number => {
+      const result = runPlaywright(appDir, testFiles, port, wranglerEnv, forwarded)
+      skippedTests = result.skippedTests
+      return result.exitCode
+    }
 
     switch (suite) {
       case 'smoke':
-        exitCode = runPlaywright(appDir, ['tests/smoke.spec.ts'], port, wranglerEnv, forwarded)
+        exitCode = playwright(['tests/smoke.spec.ts'])
         break
       case 'api':
-        exitCode = runPlaywright(appDir, ['tests/api.spec.ts'], port, wranglerEnv, forwarded)
+        exitCode = playwright(['tests/api.spec.ts'])
         break
       case 'e2e':
-        exitCode = runPlaywright(appDir, [], port, wranglerEnv, forwarded)
+        exitCode = playwright([])
         break
       case 'unit':
         if (forwarded.grep || forwarded.project || forwarded.headed) {
@@ -311,12 +374,12 @@ export default defineDeepspaceCommand({
           // bounded wait for a dying listener to release the port, an
           // immediate port_in_use refusal for one that still answers.
           await ensurePortFree(port, '0.0.0.0')
-          exitCode = runPlaywright(appDir, [], port, wranglerEnv, forwarded)
+          exitCode = playwright([])
         }
         break
       case 'default':
         skippedSpecs = specsSkippedByDefaultSuite(appDir)
-        exitCode = runPlaywright(appDir, [...DEFAULT_SUITE_SPECS], port, wranglerEnv, forwarded)
+        exitCode = playwright([...DEFAULT_SUITE_SPECS])
         // After the run, next to the runner's own summary — that summary is
         // what claimed "everything passed", so the correction belongs beside
         // it rather than scrolled off the top by the Playwright output.
@@ -342,7 +405,7 @@ export default defineDeepspaceCommand({
               'spec_not_found',
             )
           }
-          exitCode = runPlaywright(appDir, [suite], port, wranglerEnv, forwarded)
+          exitCode = playwright([suite])
         } else {
           // Whoever typed a name that is not a suite usually wanted one part
           // of one, so the refusal names both narrowing tools it has: a spec
@@ -357,15 +420,28 @@ export default defineDeepspaceCommand({
         }
     }
 
+    // Runtime skips get one line beside the runner's own summary — a green
+    // run that silently skipped tests reads as complete (AX C3). The
+    // authored reasons are the actionable part ("create 2 test accounts…").
+    if (skippedTests.length > 0) {
+      const reasons = [...new Set(skippedTests.map((test) => test.reason).filter(Boolean))]
+      say(
+        `${skippedTests.length} test(s) were skipped at runtime` +
+          (reasons.length > 0 ? ` — ${reasons.join(' | ')}` : ''),
+      )
+    }
+
     // The runner already printed every failure in detail; the refusal adds the
     // slug and the non-zero exit. Playwright's own code collapses to 1 — the
     // contract reserves 0/1/2 and every non-zero code here means "tests failed".
     if (exitCode !== 0) {
       throw new Refusal(`Test suite '${suite}' failed (exit ${exitCode}).`, 'tests_failed', {
-        extra: { suite, port, exitCode, skippedSpecs },
+        extra: { suite, port, exitCode, skippedSpecs, skippedTests },
       })
     }
-    return { data: { suite, port, appDir, wranglerEnv: wranglerEnv ?? null, skippedSpecs } }
+    return {
+      data: { suite, port, appDir, wranglerEnv: wranglerEnv ?? null, skippedSpecs, skippedTests },
+    }
   },
 })
 
@@ -412,11 +488,21 @@ function runPlaywright(
   port: number,
   wranglerEnv?: string,
   flags: PlaywrightForwardedFlags = {},
-): number {
-  return runSuite(appDir, playwrightTestArgs(testFiles, flags), wranglerEnv, {
+): { exitCode: number; skippedTests: SkippedTest[] } {
+  const resultsPath = join(appDir, '.deepspace', 'playwright-results.json')
+  rmSync(resultsPath, { force: true })
+  const exitCode = runSuite(appDir, playwrightTestArgs(testFiles, flags), wranglerEnv, {
     DEEPSPACE_PORT: String(port),
     PLAYWRIGHT_HTML_OUTPUT_DIR: '.deepspace/playwright-report',
+    PLAYWRIGHT_JSON_OUTPUT_FILE: resultsPath,
   })
+  let raw = ''
+  try {
+    raw = readFileSync(resultsPath, 'utf-8')
+  } catch {
+    // No report (older runner, crashed run): skips stay unknown, not fatal.
+  }
+  return { exitCode, skippedTests: skippedTestsFromPlaywrightJson(raw) }
 }
 
 /** Exported for its regression test: this runner used to spawn with no

@@ -100,6 +100,19 @@ export type BindingJsonValue =
 /** Cloudflare's maximum UTF-8 payload for one environment variable. */
 export const MAX_ENV_VAR_BYTES = 5 * 1024
 
+/**
+ * Bound on names that become Cloudflare binding names verbatim (declared
+ * bindings and app secrets). Cloudflare itself caps a binding name at 2712
+ * bytes but only rejects at deploy time — after a too-long secret name was
+ * already accepted into the store, which bricks every later deploy. Refuse at
+ * write time instead, with a bound no sane name exceeds.
+ */
+export const MAX_BINDING_NAME_LENGTH = 256
+
+/** One rule for user secret names, shared by the CLI's fail-fast validation
+ * and the deploy-worker's authoritative store so the layers cannot drift. */
+export const SECRET_NAME_RE = new RegExp(`^[A-Za-z_][A-Za-z0-9_]{0,${MAX_BINDING_NAME_LENGTH - 1}}$`)
+
 /** Sentinel string in an ID field that requests platform-side provisioning. */
 export const AUTO_PROVISION_SENTINEL = 'auto'
 
@@ -228,6 +241,12 @@ export function validateBindingManifest(
     }
     if (typeof name !== 'string' || !name) {
       errors.push({ reason: `Binding of type "${type}" missing 'name' (string)` })
+      continue
+    }
+    if (name.length > MAX_BINDING_NAME_LENGTH) {
+      errors.push({
+        reason: `Binding name "${name.slice(0, 64)}…" is ${name.length} characters; the limit is ${MAX_BINDING_NAME_LENGTH}`,
+      })
       continue
     }
     if (RESERVED_BINDING_NAMES.has(name)) {

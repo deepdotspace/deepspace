@@ -775,7 +775,11 @@ export function formatDeployWorkerError(
   if (
     code === 'cli_outdated' ||
     code === 'secrets_read_failed' ||
-    code === 'release_reconciliation_pending'
+    code === 'release_reconciliation_pending' ||
+    // Cloudflare deterministically rejected this upload; the sentence already
+    // names the input to fix, and incident boilerplate would prescribe an
+    // infinite wait-and-retry loop (AX S1, docs/audits/2026-09-01).
+    code === 'worker_upload_rejected'
   ) {
     return detail
   }

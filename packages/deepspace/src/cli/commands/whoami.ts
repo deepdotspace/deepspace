@@ -13,10 +13,10 @@
  * the slug, and the exit codes come from there, not from this file.
  */
 
-import { ensureToken } from '../auth'
+import { ensureToken, loginAction } from '../auth'
 import { DASHBOARD_URL } from '../env'
 import { decodeJwtPayload } from '../../shared/jwt'
-import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
+import { defineDeepspaceCommand, Refusal } from '../lib/command'
 
 interface JwtPayload {
   sub?: string
@@ -52,7 +52,7 @@ export default defineDeepspaceCommand({
       throw isNetworkError(err)
         ? new Refusal(msg, 'network_error')
         : new Refusal(msg, 'not_authenticated', {
-            action: cliAction('deepspace', 'auth', 'login'),
+            action: loginAction(),
           })
     }
 
@@ -61,7 +61,7 @@ export default defineDeepspaceCommand({
       payload = decodeJwtPayload<JwtPayload>(jwt)
     } catch {
       throw new Refusal('Malformed session token. Run `deepspace auth login` again.', 'not_authenticated', {
-        action: cliAction('deepspace', 'auth', 'login'),
+        action: loginAction(),
       })
     }
 

@@ -10,7 +10,12 @@
 
 import { afterEach, describe, expect, it } from 'vitest'
 import { createServer, type Server } from 'node:http'
-import { RELEASE_STAMP_PATH, waitForLiveRelease } from '../edge-propagation'
+import {
+  RELEASE_STAMP_PATH,
+  waitForDataPlane,
+  waitForHostReleased,
+  waitForLiveRelease,
+} from '../edge-propagation'
 
 let server: Server | null = null
 
@@ -89,5 +94,44 @@ describe('waitForLiveRelease', () => {
     await expect(waitForLiveRelease('http://127.0.0.1:1', 'new', 1_500)).resolves.toBe(
       'unconfirmed',
     )
+  })
+})
+
+/** Per-connection status cycle, mirroring startEdge for the status-code waits. */
+async function startStatusEdge(statuses: number[]): Promise<{ url: string }> {
+  const state = { requests: 0 }
+  server = createServer((_req, res) => {
+    res.writeHead(statuses[state.requests % statuses.length]!).end()
+    state.requests++
+  })
+  await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve))
+  const port = (server!.address() as { port: number }).port
+  return { url: `http://127.0.0.1:${port}` }
+}
+
+describe('waitForHostReleased (the undeploy counterpart)', () => {
+  it('confirms once independent connections agree the host answers 404', async () => {
+    const edge = await startStatusEdge([404])
+    await expect(waitForHostReleased(edge.url, 30_000)).resolves.toBe('confirmed')
+  })
+
+  it('does NOT confirm while some edge machines still serve the app', async () => {
+    // The AX C2 failure mode: undeploy "succeeded" while the URL served 200.
+    const edge = await startStatusEdge([200, 404])
+    await expect(waitForHostReleased(edge.url, 3_000)).resolves.toBe('unconfirmed')
+  })
+})
+
+describe('waitForDataPlane (post-deploy DO probe)', () => {
+  it('confirms on the healthy 404 a room answers a non-upgrade GET with', async () => {
+    const edge = await startStatusEdge([404])
+    await expect(waitForDataPlane(edge.url, 'app_x', 30_000)).resolves.toBe('confirmed')
+  })
+
+  it('does NOT confirm while edges on the old script version answer 5xx', async () => {
+    // The AX S3 failure mode: "Durable Object Namespace was deleted" 500s
+    // after serving was already confirmed.
+    const edge = await startStatusEdge([500, 404])
+    await expect(waitForDataPlane(edge.url, 'app_x', 3_000)).resolves.toBe('unconfirmed')
   })
 })
