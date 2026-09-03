@@ -1,5 +1,11 @@
 # create-deepspace
 
+## 0.30.2
+
+### Patch Changes
+
+- Surface integration provider errors consistently from browser calls and server actions.
+
 ## 0.30.1
 
 ## 0.30.0

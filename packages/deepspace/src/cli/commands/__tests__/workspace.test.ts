@@ -39,7 +39,6 @@ import {
 } from '../workspace/land'
 import { cleanFailedFreshAttachDir, finishedWorkspaceMessage } from '../workspace/attach'
 import { overlapsWith, workspaceSyncRelation } from '../workspace/analysis'
-import { withWorkspaceOverlaps } from '../workspace/list'
 import {
   dropRemoteTolerant,
   isWorkspaceTipPublished,
@@ -58,7 +57,6 @@ import * as vcPushModule from '../../lib/vc-push'
 // and blows the default 5s wall under parallel vitest workers — the drifting
 // 18-24 failures in docs/audits/2026-08-06-e2e-0.13.0. Headroom, not a
 // license to hang.
-
 
 const git = (cwd: string, args: string[]): string =>
   execFileSync('git', args, { cwd, encoding: 'utf-8' })
@@ -134,24 +132,6 @@ function remoteWorkspaceView(id: string): RemoteWorkspaceView {
     behindTrunk: { count: 0, capped: false },
   }
 }
-
-describe('withWorkspaceOverlaps', () => {
-  it('attaches the same overlap facts to machine-readable workspace output', () => {
-    repo = mkdtempSync(join(tmpdir(), 'ds-ws-list-'))
-    const views = [remoteWorkspaceView('ws_one'), remoteWorkspaceView('ws_two')]
-    const overlap = {
-      workspaceId: 'ws_two',
-      task: 'Task ws_two',
-      paths: ['src/shared.ts'],
-      morePaths: 0,
-    }
-
-    expect(withWorkspaceOverlaps(views, new Map([['ws_one', [overlap]]]))).toEqual([
-      { ...views[0], overlaps: [overlap] },
-      { ...views[1], overlaps: [] },
-    ])
-  })
-})
 
 describe('cleanFailedFreshAttachDir', () => {
   it('removes the new target when only attach-created Git metadata remains', () => {
@@ -497,7 +477,13 @@ describe('cleanupWorkspaceLocal (workspace land/drop default cleanup)', () => {
     // checkout's install — cleanup deletes the workspace entry this process
     // is running from.
     const action = staleTrunkPullAction(main, 'main')
-    expect(action.argv).toEqual([process.execPath, realpathSync(primaryEntry), 'pull', '-b', 'main'])
+    expect(action.argv).toEqual([
+      process.execPath,
+      realpathSync(primaryEntry),
+      'pull',
+      '-b',
+      'main',
+    ])
 
     const cleanup = cleanupWorkspaceLocal(main, ID, 'main')
     expect(cleanup.error).toBeUndefined()
@@ -1073,6 +1059,40 @@ describe('workspace sync — a finished workspace routes to drop', () => {
   })
 })
 
+describe('workspace list — one API call, no local git work', () => {
+  const APP_ID = 'app_01ABCDEFGHJKMNPQRSTVWXYZ00'
+
+  it('emits { workspaces, truncated } without overlaps and touches neither the remote nor local git', async () => {
+    // The point of dropping the overlap report: list answers from the repo
+    // API alone. A regression re-introducing git work here trips the spies.
+    vi.spyOn(authModule, 'ensureToken').mockResolvedValue('token')
+    vi.spyOn(appTargetModule, 'resolveAppTarget').mockResolvedValue(APP_ID)
+    const ensureSpaceRemote = vi
+      .spyOn(vcRemoteModule, 'ensureSpaceRemote')
+      .mockReturnValue('https://example.invalid/repo')
+    const runGitRemote = vi.spyOn(vcRemoteModule, 'runGitRemote').mockReturnValue({
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      status: 0,
+    })
+    const listWorkspaces = vi
+      .fn()
+      .mockResolvedValue({ views: [remoteWorkspaceView('ws_01ABCDEFGHJKMNPQRSTVWXYZ00')] })
+    vi.spyOn(repoApiModule, 'repoApi').mockReturnValue({ listWorkspaces } as never)
+
+    const { output, exits } = await runWorkspaceJson('list', { app: APP_ID })
+
+    expect(output).toMatchObject({ ok: true, truncated: false })
+    const workspaces = output.workspaces as Array<Record<string, unknown>>
+    expect(workspaces).toHaveLength(1)
+    expect(workspaces[0]).not.toHaveProperty('overlaps')
+    expect(listWorkspaces).toHaveBeenCalledTimes(1)
+    expect(ensureSpaceRemote).not.toHaveBeenCalled()
+    expect(runGitRemote).not.toHaveBeenCalled()
+    expect(exits).toEqual([0])
+  })
+})
+
 describe('workspace status — fetches a published tip it does not hold', () => {
   const ID = 'ws_01ABCDEFGHJKMNPQRSTVWXYZ00'
   const BRANCH = `ws/${ID.slice(3).toLowerCase()}`
@@ -1114,7 +1134,9 @@ describe('workspace status — fetches a published tip it does not hold', () => 
     await runWorkspaceJson('status', { workspace: ID, app: APP_ID })
 
     const fetches = runGitRemote.mock.calls.map(([, , args]) => args)
-    const probe = fetches.find((args) => args.includes('--refmap=') && args.includes(view.workspace.ref))
+    const probe = fetches.find(
+      (args) => args.includes('--refmap=') && args.includes(view.workspace.ref),
+    )
     expect(probe).toBeDefined()
     // The whole point of `--refmap=`: a diagnostic read must not advance any
     // tracking ref behind the user's back.

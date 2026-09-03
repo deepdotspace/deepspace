@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -21,6 +21,8 @@ import { decodeRoomIdentityHeader } from '../../../shared/room-identity-headers'
 
 interface TestEnv {
   ASSETS?: Fetcher
+  API_WORKER?: Fetcher
+  APP_OWNER_JWT?: string
   APP_NAME?: string
   AUTH_JWT_ISSUER?: string
   AUTH_JWT_PUBLIC_KEY?: string
@@ -35,12 +37,22 @@ interface TestEnv {
 
 type TestContext = { Bindings: TestEnv }
 type RegisterRoutes = (app: Hono<TestContext>) => void
+interface TestVerifyResult {
+  userId: string
+  claims: Record<string, unknown>
+}
 type RegisterAuthenticatedRoutes = (
   app: Hono<TestContext>,
-  resolveAuth: () => Promise<null>,
+  resolveAuth: () => Promise<TestVerifyResult | null>,
 ) => void
 
 let registerActionRoutes: RegisterAuthenticatedRoutes
+let templateActions: Record<
+  string,
+  (context: {
+    tools: { integration(endpoint: string, data?: unknown): Promise<unknown> }
+  }) => Promise<unknown>
+>
 let registerAgent: (
   app: Hono<TestContext>,
   options: {
@@ -66,6 +78,9 @@ beforeAll(async () => {
   // TypeScript rootDir while Vitest still executes the real modules.
   const serverDirectory = join(TEMPLATES_DIR, 'base', 'src', 'server')
   const actionRoutes = await import(pathToFileURL(join(serverDirectory, 'action-routes.ts')).href)
+  const actionDefinitions = await import(
+    pathToFileURL(join(TEMPLATES_DIR, 'base', 'src', 'actions', 'index.ts')).href
+  )
   // Keep the assembled copy under this package so its `deepspace/*` imports
   // resolve through the package's self-reference during Vitest execution.
   agentTemplateDir = mkdtempSync(join(process.cwd(), '.tmp-ds-agent-routes-'))
@@ -82,6 +97,7 @@ beforeAll(async () => {
   )
 
   registerActionRoutes = actionRoutes.registerActionRoutes as RegisterAuthenticatedRoutes
+  templateActions = actionDefinitions.actions as typeof templateActions
   registerAgent = agentRoutes.registerAgent as typeof registerAgent
   buildGeneratedTools = generatedTools.buildTools as typeof buildGeneratedTools
   registerAuthAndIntegrationRoutes = httpRoutes.registerAuthAndIntegrationRoutes as RegisterRoutes
@@ -812,10 +828,10 @@ describe('generated worker route owners', () => {
     // the raw JWT (user-billed integrations forward it), and reading it
     // unguarded used to throw a TypeError and answer 500.
     const actions = new Hono<TestContext>()
-    const cookieSession = (async () => ({
+    const cookieSession = async () => ({
       userId: 'cookie-user',
       claims: { sub: 'cookie-user' },
-    })) as unknown as () => Promise<null>
+    })
     registerActionRoutes(actions, cookieSession)
 
     const action = await actions.request(
@@ -826,6 +842,73 @@ describe('generated worker route owners', () => {
 
     expect(action.status).toBe(401)
     expect(await action.json()).toEqual({ error: 'Unauthorized' })
+  })
+
+  it('returns the provider message, machine code, and metadata from tools.integration', async () => {
+    const actionName = '__integration_error_test__'
+    templateActions[actionName] = async ({ tools }) =>
+      tools.integration('shotstack/render', { timeline: {}, output: {} })
+
+    const apiFetch = vi.fn(async () =>
+      Response.json(
+        {
+          success: false,
+          error: 'upstream_provider_error',
+          message: 'Shotstack API error 400: Bad Request',
+          integration: 'shotstack',
+          endpoint: 'render',
+          billing: 'released',
+        },
+        { status: 502 },
+      ),
+    )
+    const recordRooms = {
+      idFromName: (name: string) => name,
+      get: () => ({ fetch: vi.fn() }),
+    } as unknown as DurableObjectNamespace
+    const actions = new Hono<TestContext>()
+    const signedIn = async () => ({
+      userId: 'verified-user',
+      claims: { sub: 'verified-user' },
+    })
+    registerActionRoutes(actions, signedIn)
+
+    try {
+      const response = await actions.request(
+        `https://app.test/api/actions/${actionName}`,
+        {
+          method: 'POST',
+          headers: { Authorization: 'Bearer caller-jwt', 'Content-Type': 'application/json' },
+          body: '{}',
+        },
+        env({
+          API_WORKER: { fetch: apiFetch } as unknown as Fetcher,
+          APP_OWNER_JWT: 'owner-jwt',
+          DEEPSPACE_APP_ID: 'app_test',
+          RECORD_ROOMS: recordRooms,
+        }),
+      )
+
+      expect(await response.json()).toEqual({
+        success: false,
+        error: 'Shotstack API error 400: Bad Request',
+        code: 'upstream_provider_error',
+        status: 502,
+        details: {
+          integration: 'shotstack',
+          endpoint: 'render',
+          billing: 'released',
+        },
+      })
+      expect(apiFetch).toHaveBeenCalledWith(
+        'https://api-worker/api/integrations/shotstack/render',
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: 'Bearer owner-jwt' }),
+        }),
+      )
+    } finally {
+      delete templateActions[actionName]
+    }
   })
 
   it('rejects unlisted browser proxies and registers the SPA fallback last', async () => {

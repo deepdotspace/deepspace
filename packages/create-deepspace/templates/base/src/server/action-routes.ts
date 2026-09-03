@@ -28,7 +28,7 @@
  */
 
 import type { Hono } from 'hono'
-import { apiWorkerFetch } from 'deepspace/worker'
+import { apiWorkerFetch, normalizeApiError } from 'deepspace/worker'
 import type { ActionResult, ActionTools, VerifyResult } from 'deepspace/worker'
 import { actions } from '../actions/index.js'
 import { integrations } from '../integrations.js'
@@ -101,7 +101,11 @@ function createActionTools(env: Env, userId: string, callerJwt: string): ActionT
       },
       body: JSON.stringify(data ?? {}),
     })
-    return res.json() as Promise<ActionResult<T>>
+    const payload = (await res.json()) as Record<string, unknown>
+    if (!res.ok || payload.success === false) {
+      return { success: false, ...normalizeApiError(res.status, payload) }
+    }
+    return payload as ActionResult<T>
   }
 
   return {

@@ -7,6 +7,7 @@
  */
 
 import type { RecordResult } from '../../shared/types'
+import type { ApiErrorIssue } from '../../shared/api-error'
 
 /**
  * Discriminated result wrapper. Narrowing on `.success` lets TS know
@@ -19,7 +20,20 @@ import type { RecordResult } from '../../shared/types'
  */
 export type ActionResult<TData = unknown> =
   | { success: true; data: TData; error?: never }
-  | { success: false; data?: never; error: string }
+  | {
+      success: false
+      data?: never
+      /** Human-readable error, safe to render directly. */
+      error: string
+      /** Machine slug for branching, when the failing tool supplied one. */
+      code?: string
+      /** HTTP status from an upstream platform request, when applicable. */
+      status?: number
+      /** Structured fields supplied with the error response. */
+      details?: Record<string, unknown>
+      /** Validation issues supplied with a `validation_failed` response. */
+      issues?: ApiErrorIssue[]
+    }
 
 /** Shape of the data field for `tools.query`. */
 export interface QueryActionData<T = Record<string, unknown>> {
@@ -89,7 +103,9 @@ export interface ActionTools {
    * api-worker. On success, `result.data` is the integration's response
    * body directly — there is no `.response` wrapper. So an OpenAI call
    * yields `result.data.choices`, a Freepik image call yields
-   * `result.data.images`, etc.
+   * `result.data.images`, etc. On failure, `result.error` is human-readable;
+   * branch on `result.code` and inspect `status`, `details`, or `issues` when
+   * present.
    */
   integration<T = unknown>(
     endpoint: string,

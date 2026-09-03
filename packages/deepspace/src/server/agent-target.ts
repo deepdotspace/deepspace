@@ -1,16 +1,12 @@
 import { validateAppName } from './rooms/app-name'
 
-/**
- * First-party non-app origins allowed as agent targets on the production app
- * domain. The token minter and the CLI must agree on this policy, so both the
- * set AND the "is production" predicate (appDomain === PRODUCTION_APP_DOMAIN)
- * live here — callers never re-derive either.
- */
+/** First-party non-app origins retained for callers using the legacy policy shape. */
 export const PRODUCTION_OFFICIAL_AGENT_ORIGINS: readonly string[] = ['https://admin.deep.space']
 const PRODUCTION_APP_DOMAIN = 'app.space'
 
 export interface AgentTargetPolicy {
   appDomain: string
+  platformDomain?: string
   allowLoopback?: boolean
 }
 
@@ -37,14 +33,18 @@ export function normalizeAgentTargetOrigin(
   }
   if (url.protocol !== 'https:' || url.port) return null
 
-  if (
-    policy.appDomain.toLowerCase() === PRODUCTION_APP_DOMAIN &&
-    PRODUCTION_OFFICIAL_AGENT_ORIGINS.includes(url.origin)
-  ) {
+  const appDomain = policy.appDomain.toLowerCase()
+  const platformDomain = policy.platformDomain?.toLowerCase()
+  const officialAdminOrigin = platformDomain
+    ? `https://admin.${platformDomain}`
+    : appDomain === PRODUCTION_APP_DOMAIN
+      ? PRODUCTION_OFFICIAL_AGENT_ORIGINS[0]
+      : null
+  if (url.origin === officialAdminOrigin) {
     return url.origin
   }
 
-  const suffix = `.${policy.appDomain.toLowerCase()}`
+  const suffix = `.${appDomain}`
   if (!hostname.endsWith(suffix)) return null
   const label = hostname.slice(0, -suffix.length)
   return !label.includes('.') && validateAppName(label).valid ? url.origin : null

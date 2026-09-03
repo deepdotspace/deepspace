@@ -2,20 +2,9 @@ import * as p from '@clack/prompts'
 import { parseLimitArg } from '../../lib/citty-args'
 import { actorLabels } from '../../lib/actor-labels'
 import { defineDeepspaceCommand, Refusal } from '../../lib/command'
-import type { RemoteWorkspaceView } from '../../lib/repo-api'
 import { createSpinner } from '../../lib/spinner'
-import { formatCount, listOverlaps, type WorkspaceOverlap } from './analysis'
+import { formatCount } from './analysis'
 import { APP_ARG, resolveApiOnly } from './runtime'
-
-export function withWorkspaceOverlaps(
-  views: RemoteWorkspaceView[],
-  overlapsById: Map<string, WorkspaceOverlap[]>,
-) {
-  return views.map((view) => ({
-    ...view,
-    overlaps: overlapsById.get(view.workspace.id) ?? [],
-  }))
-}
 
 export const listWorkspacesCommand = defineDeepspaceCommand({
   meta: { name: 'list', description: 'List workspaces on the cloud repo' },
@@ -49,38 +38,22 @@ export const listWorkspacesCommand = defineDeepspaceCommand({
       return { data: { workspaces: views, truncated: truncated === true } }
     }
 
-    spinner?.message('Checking workspace overlaps…')
-    const overlapsPromise = listOverlaps(appId, token, api, views)
+    // No overlap report here: computing it cost two extra `git fetch`es plus
+    // a refs call per in-clone invocation, on the most frequently run
+    // workspace verb (outside the app's clone it was silently skipped).
+    // `workspace status` and `workspace sync` carry the advisory overlap
+    // report at the moments it can change a decision.
     if (args.json) {
-      return {
-        data: {
-          workspaces: withWorkspaceOverlaps(views, await overlapsPromise),
-          truncated: truncated === true,
-        },
-      }
+      return { data: { workspaces: views, truncated: truncated === true } }
     }
-    const [actors, overlapsById] = await Promise.all([actorLabels(token, appId), overlapsPromise])
-    const workspaces = withWorkspaceOverlaps(views, overlapsById)
+    const actors = await actorLabels(token, appId)
     spinner?.stop(`Loaded ${views.length} ${views.length === 1 ? 'workspace' : 'workspaces'}.`)
-    for (const view of workspaces) {
+    for (const view of views) {
       const workspace = view.workspace
-      const overlaps = view.overlaps
-      const marker =
-        workspace.status === 'active'
-          ? overlaps.length > 0
-            ? '⚠'
-            : ' '
-          : workspace.status === 'landed'
-            ? '✓'
-            : '✗'
+      const marker = workspace.status === 'active' ? ' ' : workspace.status === 'landed' ? '✓' : '✗'
       console.log(
         `${marker} ${workspace.id}  ${workspace.status}  ↑${formatCount(view.aheadOfBase)} ↓${formatCount(view.behindTrunk)}  ${actors.get(workspace.createdBy) ?? workspace.createdBy}  ${workspace.updatedAt}  ${workspace.task}`,
       )
-      for (const overlap of overlaps) {
-        console.log(
-          `    overlaps ${overlap.workspaceId}: ${overlap.paths.slice(0, 3).join(', ')}${overlap.paths.length + overlap.morePaths > 3 ? ` (+${overlap.paths.length + overlap.morePaths - 3} more)` : ''}`,
-        )
-      }
     }
     if (truncated) {
       // "Not here" is a conclusion agents draw from this list — say so when
@@ -91,6 +64,6 @@ export const listWorkspacesCommand = defineDeepspaceCommand({
       )
     }
     p.log.info('↑ commits ahead of base · ↓ trunk commits since base (staleness)')
-    return { data: { workspaces, truncated: truncated === true } }
+    return { data: { workspaces: views, truncated: truncated === true } }
   },
 })

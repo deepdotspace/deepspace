@@ -43,6 +43,11 @@ export function appDomainForEnv(env: DeepSpaceEnvironment): string | null {
   return env === 'production' ? 'app.space' : env === 'staging' ? 'spacestest.com' : null
 }
 
+/** Canonical platform-service domain for a plane. */
+export function platformDomainForEnv(env: DeepSpaceEnvironment): string | null {
+  return env === 'production' ? 'deep.space' : env === 'staging' ? 'deepspacesites.com' : null
+}
+
 export const PLATFORM_URLS =
   DEEPSPACE_ENV === 'production'
     ? PROD_URLS

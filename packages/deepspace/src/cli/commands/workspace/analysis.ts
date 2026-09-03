@@ -1,21 +1,7 @@
 import * as p from '@clack/prompts'
-import { findAppDir } from '../../lib/app-context'
-import { readAppId } from '../../lib/app-identity'
-import {
-  assertSyncableRepo,
-  diffNameOnly,
-  isAncestor,
-  mergeBase,
-  resolveCommit,
-} from '../../lib/git/repository'
+import { diffNameOnly, isAncestor, mergeBase, resolveCommit } from '../../lib/git/repository'
 import type { RemoteRefsResult, RemoteWorkspaceView, RepoApi } from '../../lib/repo-api'
-import {
-  ensureSpaceRemote,
-  runGitRemote,
-  SPACE_REMOTE,
-  spacePrivateRef,
-  spaceTrackingRef,
-} from '../../lib/vc-remote'
+import { runGitRemote, SPACE_REMOTE, spacePrivateRef, spaceTrackingRef } from '../../lib/vc-remote'
 
 const MAX_OVERLAP_PATHS = 20
 const PEER_REF_PREFIX = `${spacePrivateRef('peers')}/`
@@ -173,31 +159,6 @@ export async function loadWorkspaceLines(
     const { views } = await api.listWorkspaces()
     fetchPeerWorkspaceRefs(appDir, token)
     return changedPathsByWorkspace(appDir, views, trunkOid)
-  } catch {
-    return new Map()
-  }
-}
-
-export async function listOverlaps(
-  appId: string,
-  token: string,
-  api: RepoApi,
-  views: RemoteWorkspaceView[],
-): Promise<Map<string, WorkspaceOverlap[]>> {
-  const appDir = findAppDir()
-  if (!appDir || readAppId(appDir) !== appId) return new Map()
-  try {
-    assertSyncableRepo(appDir)
-    ensureSpaceRemote(appDir, appId)
-    const refs = await api.getRefs().catch(() => null)
-    try {
-      fetchTrunk(appDir, token, refs?.head ?? null)
-    } catch {
-      // localTrunkOid tolerates a stale tracking ref.
-    }
-    fetchPeerWorkspaceRefs(appDir, token)
-    const lines = changedPathsByWorkspace(appDir, views, localTrunkOid(appDir, refs))
-    return new Map([...lines].map(([id, line]) => [id, overlapsWith(line.paths, lines, id)]))
   } catch {
     return new Map()
   }

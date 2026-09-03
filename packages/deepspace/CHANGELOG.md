@@ -1,5 +1,13 @@
 # deepspace
 
+## 0.30.2
+
+### Patch Changes
+
+- Surface integration provider errors consistently from browser calls and server actions.
+- Allow the agent CLI and token minter to target the exact Admin origin for the selected deployment plane.
+- `deepspace workspace list` no longer computes the advisory overlap report: the listing was paying a trunk fetch plus an all-peer-objects fetch plus a refs API call (4–6 extra HTTP round-trips) on every non-empty listing run from inside the app's clone — silently skipped elsewhere — for a marker nothing acts on. The `⚠` glyph, the indented `overlaps ws_…:` lines, and the undocumented `overlaps` field in `workspace list --json` are gone; `list` itself is now one repo-API call (the listing; the human-readable path adds an api-worker roster lookup for actor names, and `-a <name>` still resolves the app first) and does no local git work. The page-truncation signal is unrelated and stays: `--json` output still carries `truncated`, and the human listing still warns when the page is partial. The overlap report itself is unchanged where it can affect a decision — `workspace status` and `workspace sync` still fetch live peer tips and print/emit it exactly as documented.
+
 ## 0.30.1
 
 ### Patch Changes

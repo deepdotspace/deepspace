@@ -10,7 +10,12 @@
 import { createReadStream } from 'node:fs'
 import { defineCommand } from 'citty'
 import { mintAgentToken, loginAction } from '../auth'
-import { appDomainForEnv, DEEPSPACE_ENV, type DeepSpaceEnvironment } from '../env'
+import {
+  appDomainForEnv,
+  DEEPSPACE_ENV,
+  platformDomainForEnv,
+  type DeepSpaceEnvironment,
+} from '../env'
 import { defineDeepspaceCommand, Refusal, type CommandResult } from '../lib/command'
 import { APP_NAME_RULES } from '../../server/rooms/app-name'
 import { normalizeAgentTargetOrigin } from '../../server/agent-target'
@@ -73,7 +78,8 @@ export function resolveAgentTarget(
   if (typeof app !== 'string' || !app)
     badApp('App must be a canonical app name or canonical app URL.')
   const appDomain = appDomainForEnv(plane)
-  if (!appDomain) badApp('The selected DeepSpace environment is invalid.')
+  const platformDomain = platformDomainForEnv(plane)
+  if (!appDomain || !platformDomain) badApp('The selected DeepSpace environment is invalid.')
 
   // 'localhost' is a valid app label, so a bare `localhost` would silently
   // resolve to the PUBLIC origin localhost.<appDomain> and receive a minted
@@ -88,6 +94,7 @@ export function resolveAgentTarget(
 
   const url = normalizeAgentTargetOrigin(app, {
     appDomain,
+    platformDomain,
     allowLoopback: true,
   })
   if (!url) {

@@ -8,7 +8,8 @@
  * send the bare slug with no `message` at all, e.g. 409
  * `{ error: 'owner_connect_not_ready' }`). Consumers must never show the slug
  * to a person or make an agent parse the sentence — this module separates the
- * two once, for the integration client, the billing hooks, and the CLI.
+ * two once, for the integration client, server actions, billing hooks, and the
+ * CLI.
  */
 
 /** One structured validation issue (Zod shape) from a `validation_failed` response. */
@@ -151,4 +152,3 @@ export class PlatformApiError extends Error {
  */
 export const apiErrorCode = (e: unknown): string | null =>
   e instanceof PlatformApiError ? (e.code ?? null) : null
-

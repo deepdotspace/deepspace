@@ -36,6 +36,11 @@ export {
   type AgentTargetPolicy,
 } from './server/agent-target'
 export { SESSION_COOKIE } from './shared/auth-session'
+// Shared platform-error contract used by scaffolded server integrations.
+// Keep server actions on the same human `error` / machine `code` shape as
+// the browser integration client instead of maintaining a second decoder.
+export { normalizeApiError } from './shared/api-error'
+export type { ApiErrorIssue, NormalizedApiError } from './shared/api-error'
 // `deepspace logs` wire DTO — the single source of truth shared with the CLI,
 // the dashboard, and the platform telemetry reader (deploy-worker).
 export * from './shared/log-events'

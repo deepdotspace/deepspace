@@ -53,6 +53,9 @@ describe('agent command surface and target allowlist', () => {
     expect(resolveAgentTarget('https://admin.deep.space', 'production')).toEqual({
       url: 'https://admin.deep.space',
     })
+    expect(resolveAgentTarget('https://admin.deepspacesites.com', 'staging')).toEqual({
+      url: 'https://admin.deepspacesites.com',
+    })
   })
 
   it.each([
@@ -77,8 +80,14 @@ describe('agent command surface and target allowlist', () => {
     expect(() => resolveAgentTarget('Localhost', 'staging')).toThrow(/loopback URL/)
   })
 
-  it('does not cross the staging plane to reach the production admin origin', () => {
+  it('does not cross planes between the production and staging admin origins', () => {
     expect(() => resolveAgentTarget('https://admin.deep.space', 'staging')).toThrow(
+      /canonical|root|exactly/i,
+    )
+    expect(() => resolveAgentTarget('https://admin.deepspacesites.com', 'production')).toThrow(
+      /canonical|root|exactly/i,
+    )
+    expect(() => resolveAgentTarget('https://dashboard.deepspacesites.com', 'staging')).toThrow(
       /canonical|root|exactly/i,
     )
   })
