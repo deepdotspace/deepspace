@@ -1,5 +1,11 @@
 # create-deepspace
 
+## 0.31.2
+
+### Patch Changes
+
+- Clarify generated agent guidance for safe authentication recovery in headless shells.
+
 ## 0.31.1
 
 ## 0.31.0

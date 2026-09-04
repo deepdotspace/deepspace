@@ -56,5 +56,8 @@ the app's tools to a local assistant, add
 `npx deepspace agent tools <app> --json` discovers the tools and their input
 schemas, and `npx deepspace agent invoke <app> <tool> --input-file input.json
 --json` runs one — always run `agent tools` first and follow the returned
-schema rather than guessing arguments. Both reuse the current CLI login; if
-they report `not_authenticated`, run `npx deepspace auth login`.
+schema rather than guessing arguments. Both reuse the current CLI login. If
+they report `not_authenticated`, run the refusal's action when present. In a
+headless shell without an action, run `npx deepspace auth login --help` and use
+the operator-supplied credential path it names; never invent credentials or put
+a password on the command line.

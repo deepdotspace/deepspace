@@ -42,7 +42,10 @@ npx deepspace add <feature>
 For local app tools, always run `agent tools` first and follow the returned
 description and input schema rather than guessing arguments. `agent invoke`
 reuses the current CLI login and requires no separate connection. If it reports
-`not_authenticated`, run `npx deepspace auth login`.
+`not_authenticated`, run the refusal's action when present. In a headless shell
+without an action, run `npx deepspace auth login --help` and use the
+operator-supplied credential path it names; never invent credentials or put a
+password on the command line.
 
 Use the DeepSpace cloud repo as the default version control; no external Git
 host is required. Start parallel work with
