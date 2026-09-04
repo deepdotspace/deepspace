@@ -31,7 +31,7 @@ import { randomBytes, createHash } from 'node:crypto'
 import * as p from '@clack/prompts'
 
 import { createSpinner } from '../lib/spinner'
-import { DASHBOARD_URL, PLATFORM_URLS } from '../env'
+import { API_URL, AUTH_URL, DASHBOARD_URL } from '../env'
 import { exchangeSession, SESSION_COOKIE } from '../session'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { openBrowser } from '../lib/open-browser'
@@ -39,9 +39,6 @@ import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import { writeSecretFileSync } from '../lib/secure-file'
 import { MAX_STDIN_BYTES, readStreamText } from '../lib/stdio'
 import { fetchWithTransientRetry } from '../lib/fetch-retry'
-
-const AUTH_URL = process.env.DEEPSPACE_AUTH_URL ?? PLATFORM_URLS.auth
-const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
 
 export default defineDeepspaceCommand({
   meta: {

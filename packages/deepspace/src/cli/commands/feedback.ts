@@ -29,13 +29,11 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { release } from 'node:os'
-import { ensureToken, loginAction } from '../auth'
-import { PLATFORM_URLS, DASHBOARD_URL } from '../env'
+import { ensureToken } from '../auth'
+import { API_URL, DASHBOARD_URL } from '../env'
 import { apiFetch } from '../lib/api'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import { hasWranglerConfig, readWranglerConfig } from '../lib/wrangler-env'
-
-const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
 
 const TYPES = ['bug', 'feature', 'other'] as const
 type FeedbackType = (typeof TYPES)[number]
@@ -294,16 +292,10 @@ export default defineDeepspaceCommand({
       }
     }
 
-    let token: string
-    try {
-      token = await ensureToken()
-    } catch (err) {
-      throw new Refusal(
-        (err as Error).message ?? 'Not signed in. Run `deepspace auth login`.',
-        'not_authenticated',
-        { action: loginAction() },
-      )
-    }
+    // Uncaught on purpose, same as the POST below: ensureToken's refusal
+    // already carries the code and login action, and re-tagging would
+    // mislabel a coded `network_error` transport failure as a logout.
+    const token = await ensureToken()
 
     // The POST is left uncaught on purpose: apiFetch throws a typed ApiError
     // whose `code` the runtime already lifts into the envelope, so wrapping it

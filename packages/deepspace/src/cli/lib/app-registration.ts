@@ -10,7 +10,7 @@
 
 import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { DEEPSPACE_ENV, PLATFORM_URLS } from '../env'
+import { DEEPSPACE_ENV, DEPLOY_URL } from '../env'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { apiFetch } from './api'
 import { APP_ID_PLACEHOLDER, readAppId, writeAppId } from './app-identity'
@@ -24,7 +24,6 @@ import {
   type WranglerConfig,
 } from './wrangler-env'
 
-const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
 /**
  * Mint a fresh server-registered app id and stamp it into wrangler.toml —

@@ -14,7 +14,7 @@
  */
 
 import { ensureToken } from '../auth'
-import { DEEPSPACE_ENV, PLATFORM_URLS } from '../env'
+import { DEEPSPACE_ENV, DEPLOY_URL } from '../env'
 import { ApiError } from '../lib/api'
 import { findAppDir } from '../lib/app-context'
 import { getAppSource } from '../lib/source-api'
@@ -28,8 +28,6 @@ import {
 import { errorCode } from '../lib/cli-errors'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 import { readAppIdVar, readWranglerConfig } from '../lib/wrangler-env'
-
-const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
 // The registration mechanics live in lib/app-registration — the same
 // chokepoint `resolveAppTarget` heals through on first use. Re-exported here

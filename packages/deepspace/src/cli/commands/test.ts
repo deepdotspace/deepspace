@@ -41,7 +41,7 @@ import { sync as spawnSync } from 'cross-spawn'
 import { ensureToken, loginAction } from '../auth'
 import { findAppDir } from '../lib/app-context'
 import { resolveWorktreePort } from '../lib/launch-config'
-import { PLATFORM_URLS } from '../env'
+import { DEPLOY_URL } from '../env'
 import { writeDevVars } from '../lib/dev-vars'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { ensureInstallReady } from '../lib/install-status'
@@ -59,7 +59,6 @@ import { syncTestAccountStore } from '../lib/test-account-service'
 // Same refusal text `dev` uses — one source so the two can't drift.
 import { noAppDirRefusal } from './dev'
 
-const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 export const PLAYWRIGHT_OUTPUT_DIR = '.deepspace/test-results'
 
 /** Flags forwarded verbatim to `playwright test`. Declared as real options
@@ -273,17 +272,18 @@ export default defineDeepspaceCommand({
 
     // Always write .dev.vars pointing to dev workers. A logged-in user is
     // required so writeDevVars can mint APP_OWNER_JWT via the auth-worker.
-    let token: string
+    // ensureToken itself is uncaught on purpose (ONB-5): its refusal already
+    // carries the canonical message, code, and login action — re-tagging here
+    // would mislabel a coded `network_error` transport failure as a logout.
+    // Only the DECODE keeps a guard (same as dev/whoami): a malformed minted
+    // token must still refuse coded, not escape as a bare Error.
+    const token = await ensureToken()
     let ownerId: string
     try {
-      token = await ensureToken()
-      const payload = decodeJwtPayload<{ sub: string }>(token)
-      ownerId = payload.sub
-    } catch (err) {
-      // Surface ensureToken's canonical message ("Not logged in. Run `deepspace
-      // login` first." / "Session expired…") instead of a bespoke one (ONB-5).
+      ownerId = decodeJwtPayload<{ sub: string }>(token).sub
+    } catch {
       throw new Refusal(
-        err instanceof Error ? err.message : 'Not logged in. Run `deepspace auth login` first.',
+        'Malformed session token. Run `deepspace auth login` again.',
         'not_authenticated',
         { action: loginAction() },
       )

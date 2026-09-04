@@ -30,7 +30,7 @@ import { defineCommand } from 'citty'
 import { basename, resolve } from 'node:path'
 import { existsSync, statSync } from 'node:fs'
 import { ensureToken } from '../auth'
-import { PLATFORM_URLS } from '../env'
+import { DEPLOY_URL, PLATFORM_URL } from '../env'
 import { resolveAppTarget } from '../lib/app-target'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import { createSpinner } from '../lib/spinner'
@@ -43,9 +43,6 @@ import {
   MAX_APP_FILE_BYTES,
   uploadAppFile,
 } from '../lib/app-files-api'
-
-const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
-const PLATFORM_URL = process.env.DEEPSPACE_PLATFORM_URL ?? PLATFORM_URLS.platform
 
 /**
  * Two services, deliberately. The app registry that turns a name into an id

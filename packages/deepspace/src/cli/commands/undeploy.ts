@@ -11,15 +11,13 @@
 import { readAppId } from '../lib/app-identity'
 import * as p from '@clack/prompts'
 import { createSpinner } from '../lib/spinner'
-import { ensureToken, loginAction } from '../auth'
-import { PLATFORM_URLS } from '../env'
+import { ensureToken } from '../auth'
+import { DEPLOY_URL } from '../env'
 import { listApps, resolveAppSelector } from '../lib/app-target'
 import { hasWranglerConfig, readWranglerConfig } from '../lib/wrangler-env'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 import { requireConsent } from '../lib/consent'
 import { waitForHostReleased } from '../lib/edge-propagation'
-
-const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
 export default defineDeepspaceCommand({
   meta: {
@@ -51,14 +49,7 @@ export default defineDeepspaceCommand({
     const envName = typeof args.env === 'string' && args.env.trim() ? args.env.trim() : undefined
 
     // Token first — resolving a subdomain name to its id needs the registry.
-    let token: string
-    try {
-      token = await ensureToken()
-    } catch (err: unknown) {
-      throw new Refusal(err instanceof Error ? err.message : String(err), 'not_authenticated', {
-        action: loginAction(),
-      })
-    }
+    const token = await ensureToken()
 
     // Target: an explicit positional — app id OR live subdomain name, resolved
     // via the registry (DEP-5) — else DEEPSPACE_APP_ID from wrangler.toml.

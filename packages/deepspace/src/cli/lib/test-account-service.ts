@@ -5,7 +5,7 @@ import {
   type RemoteTestAccount,
 } from '../../testing/accounts'
 import { SESSION_PATH } from '../auth'
-import { PLATFORM_URLS } from '../env'
+import { AUTH_URL } from '../env'
 import { SESSION_COOKIE } from '../../shared/auth-session'
 
 /** A platform refusal that carried a machine `code` (newer auth-workers put
@@ -27,7 +27,6 @@ function serviceError(
   return new TestAccountServiceError(data.error ?? fallback, data.code)
 }
 
-const AUTH_URL = process.env.DEEPSPACE_AUTH_URL ?? PLATFORM_URLS.auth
 
 export interface CreateRemoteTestAccountInput {
   email: string

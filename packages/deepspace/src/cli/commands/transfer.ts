@@ -19,14 +19,11 @@
 import { defineCommand } from 'citty'
 import * as p from '@clack/prompts'
 import { ensureToken } from '../auth'
-import { PLATFORM_URLS } from '../env'
+import { API_URL, DEPLOY_URL } from '../env'
 import { requireAppIdArg, resolveAppTarget } from '../lib/app-target'
 import { apiFetch as api } from '../lib/api'
 import { InputError } from '../lib/cli-errors'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
-
-const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
-const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
 const offer = defineDeepspaceCommand({
   meta: { name: 'offer', description: 'Offer this app to another DeepSpace user' },

@@ -18,11 +18,9 @@
  */
 
 import { ensureToken } from '../auth'
-import { PLATFORM_URLS } from '../env'
+import { DEPLOY_URL } from '../env'
 import { defineDeepspaceCommand } from '../lib/command'
 import { listAppsPage, liveAppUrl, type AppListEntry } from '../lib/app-target'
-
-const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
 export default defineDeepspaceCommand({
   meta: {

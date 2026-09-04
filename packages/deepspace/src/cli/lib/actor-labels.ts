@@ -8,11 +8,9 @@
  * never to a failed command.
  */
 
-import { PLATFORM_URLS } from '../env'
+import { API_URL } from '../env'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { apiFetch } from './api'
-
-const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
 
 export async function actorLabels(token: string, appId: string): Promise<Map<string, string>> {
   const labels = new Map<string, string>()

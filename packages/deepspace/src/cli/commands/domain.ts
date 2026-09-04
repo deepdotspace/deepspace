@@ -26,15 +26,12 @@
 
 import { defineCommand } from 'citty'
 import { ensureToken } from '../auth'
-import { PLATFORM_URLS } from '../env'
+import { API_URL, DEPLOY_URL } from '../env'
 import { apiFetch } from '../lib/api'
 import { openBrowser } from '../lib/open-browser'
 import { resolveAppTarget } from '../lib/app-target'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
 import { requireConsent } from '../lib/consent'
-
-const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
-const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
 interface SearchResult {
   name: string

@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.31.1
+
+### Patch Changes
+
+- CLI failures now preserve their actual recovery path: auth-service outages retain their transport or service code, and local credential-store failures report `credential_unreadable` or `credential_unwritable` instead of suggesting another login. Deploy's post-upload refusals now use the standard envelope and exit tiers, while platform URL resolution, integrations routing, and deploy failure handling each have one shared implementation.
+
 ## 0.31.0
 
 ### Minor Changes

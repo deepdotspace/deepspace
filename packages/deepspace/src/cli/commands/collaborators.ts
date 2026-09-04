@@ -13,14 +13,11 @@
 
 import { defineCommand } from 'citty'
 import { ensureToken } from '../auth'
-import { PLATFORM_URLS } from '../env'
+import { API_URL, DEPLOY_URL } from '../env'
 import { resolveAppTarget } from '../lib/app-target'
 import { apiFetch } from '../lib/api'
 import { isTestAccountEmail } from '../../server/auth/testAccounts'
 import { cliAction, defineDeepspaceCommand, Refusal } from '../lib/command'
-
-const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
-const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
 /**
  * Everything the grant actually confers. The `--help` line, the human success

@@ -11,7 +11,7 @@
 
 import * as p from '@clack/prompts'
 import { ensureToken } from '../auth'
-import { PLATFORM_URLS } from '../env'
+import { DEPLOY_URL } from '../env'
 import { resolveAppTarget, assertAppTargetResolvable, parseWranglerEnvArg } from '../lib/app-target'
 import { releaseSourceLabel, repoApi } from '../lib/repo-api'
 import { displayText } from '../lib/cli-format'
@@ -19,8 +19,6 @@ import { actorLabels } from '../lib/actor-labels'
 import { parseLimitArg } from '../lib/citty-args'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import { createSpinner } from '../lib/spinner'
-
-const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
 export default defineDeepspaceCommand({
   meta: {

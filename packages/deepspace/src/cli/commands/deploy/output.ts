@@ -13,11 +13,7 @@ export interface DeployOutput {
   readonly nonInteractive: boolean
   emitJson(value: unknown): void
   showIntro(): void
-  die(
-    message: string,
-    code: string,
-    opts?: DeployFailureOptions,
-  ): never
+  die(message: string, code: string, opts?: DeployFailureOptions): never
 }
 
 /** Deploy's JSON refusal, with the same reserved-field boundary as every

@@ -23,6 +23,7 @@ vi.mock('@clack/prompts', async (importOriginal) => {
 })
 
 import undeploy from '../undeploy'
+import { ApiError } from '../../lib/api'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -37,6 +38,30 @@ afterEach(() => {
 })
 
 describe('undeploy partial failure', () => {
+  it('preserves an auth-service outage instead of relabeling it not_authenticated', async () => {
+    mocks.ensureToken.mockRejectedValueOnce(
+      new ApiError('The auth service is unavailable.', 503, 'auth_service_unavailable'),
+    )
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const lines: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line?: unknown) => lines.push(String(line)))
+
+    const command = undeploy as unknown as {
+      run: (ctx: { args: Record<string, unknown> }) => Promise<unknown>
+    }
+    await command.run({
+      args: { name: 'app_01HZXYABCDEFGHJKMNPQRSTVWX', json: true, yes: true },
+    })
+
+    expect(process.exitCode).toBe(1)
+    expect(JSON.parse(lines[0])).toMatchObject({
+      ok: false,
+      code: 'auth_service_unavailable',
+    })
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
   it('returns the exact retry action when registry takedown remains', async () => {
     const appId = 'app_01HZXYABCDEFGHJKMNPQRSTVWX'
     vi.stubGlobal(
@@ -132,7 +157,10 @@ describe('undeploy idempotence', () => {
 
   it('reports alreadyUndeployed:true when the registry released no route (second undeploy)', async () => {
     const appId = 'app_01HZXYABCDEFGHJKMNPQRSTVWX'
-    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ success: true, releasedHosts: [] })))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ success: true, releasedHosts: [] })),
+    )
     expect(await run({ name: appId, json: true, yes: true })).toEqual({
       ok: true,
       appId,

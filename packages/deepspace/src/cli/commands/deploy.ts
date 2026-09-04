@@ -4,7 +4,7 @@ import * as p from '@clack/prompts'
 import { defineCommand } from 'citty'
 import { join, resolve } from 'node:path'
 import { ensureToken, refreshTokenFromSession } from '../auth'
-import { PLATFORM_URLS } from '../env'
+import { DEPLOY_URL } from '../env'
 import { commitScaffoldIfUnborn, ensureAppRegistered, healRefusal } from '../lib/app-registration'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { readAppId } from '../lib/app-identity'
@@ -44,7 +44,6 @@ import { getAppSource } from '../lib/source-api'
 import { loadDeploySecrets } from './deploy/secrets'
 import { acquireDeployLock } from './deploy/lock'
 
-const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 /** Leave enough bearer lifetime for source sync + asset upload before the
  * final commit's exact 401 recovery takes over. Fresh CLI JWTs last 15m. */
 const DEPLOY_TOKEN_MIN_VALIDITY_MS = 10 * 60 * 1000

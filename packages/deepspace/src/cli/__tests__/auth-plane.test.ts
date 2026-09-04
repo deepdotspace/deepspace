@@ -8,11 +8,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   exists: vi.fn<(path: string) => boolean>(),
+  read: vi.fn<(path: string) => string>(),
 }))
 
 vi.mock('node:fs', () => ({
   existsSync: mocks.exists,
-  readFileSync: vi.fn(() => 'session'),
+  readFileSync: mocks.read,
   writeFileSync: vi.fn(),
   chmodSync: vi.fn(),
   mkdirSync: vi.fn(),
@@ -27,6 +28,11 @@ beforeEach(() => {
   vi.resetModules()
   vi.unstubAllEnvs()
   mocks.exists.mockReset()
+  mocks.read.mockReset()
+  mocks.read.mockImplementation((path) => {
+    if (mocks.exists(path)) return 'session'
+    throw Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT', path })
+  })
 })
 
 describe('not_authenticated on a non-default plane', () => {

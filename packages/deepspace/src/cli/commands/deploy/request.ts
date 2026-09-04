@@ -1,9 +1,8 @@
 import * as p from '@clack/prompts'
 import { readFileSync } from 'node:fs'
 import { ApiError } from '../../lib/api'
-import { CliExit } from '../../lib/cli-errors'
 import { fetchWithTransientRetry } from '../../lib/fetch-retry'
-import { executableAction, printAction, withSlug, type CliAction } from '../../lib/output'
+import { type CliAction } from '../../lib/output'
 import type { Spinner } from '../../lib/spinner'
 import type { DeployAsset, DeployBundle } from './build'
 import type { DeployOutput } from './output'
@@ -225,30 +224,15 @@ export async function deployBuiltBundle(options: {
   const bail = async (
     message: string,
     stopLabel: string | null = 'Deploy failed',
-    code?: string,
+    code: string,
     actionRequired = false,
     rawAction?: CliAction,
   ): Promise<never> => {
-    // Deploy's post-upload exit door pins like die() does — a bare
-    // `deepspace` argv must never leave here.
-    const action = rawAction ? executableAction(rawAction) : undefined
+    // Deploy's post-upload exit door: stop the spinner with its verdict
+    // label, then leave through die() — ONE envelope shape, one argv-pinning
+    // rule, one CliExit — instead of a hand-rolled copy of all three.
     if (stopLabel !== null) spinner.stop(stopLabel)
-    p.cancel(code ? withSlug(message, code) : message)
-    if (action) printAction(action)
-    if (output.json) {
-      output.emitJson({
-        ok: false,
-        ...(actionRequired ? { actionRequired: true } : {}),
-        error: message,
-        ...(code ? { code } : {}),
-        ...(action ? { action } : {}),
-      })
-    }
-    // Throw, never process.exit(): the deploy POST/uploads above leave undici
-    // connections that make an exit() abort on Windows (see lib/command.ts).
-    // The sentinel unwinds to wrapCommandErrors → renderCliError, which
-    // records the exit code without re-rendering.
-    throw new CliExit(actionRequired ? 2 : 1)
+    return output.die(message, code, { actionRequired, action: rawAction })
   }
 
   const makeForm = (): FormData => {
@@ -354,7 +338,7 @@ export async function deployBuiltBundle(options: {
         ? errorMessage(error)
         : `Deploy request failed: ${errorMessage(error)}`,
       'Deploy failed',
-      error instanceof ApiError ? error.code : 'deploy_request_failed',
+      (error instanceof ApiError ? error.code : undefined) ?? 'deploy_request_failed',
     )
     throw error
   }
@@ -369,7 +353,8 @@ export async function deployBuiltBundle(options: {
       await bail(renameRefusalMessage(rename), null, 'rename_required')
     }
     const confirmed = await p.confirm({ message: renamePromptMessage(rename) })
-    if (p.isCancel(confirmed) || !confirmed) await bail('Deploy cancelled.', null)
+    if (p.isCancel(confirmed) || !confirmed)
+      await bail('Deploy cancelled.', null, 'rename_declined')
 
     confirmRename = true
     renamedFrom = rename.fromHost

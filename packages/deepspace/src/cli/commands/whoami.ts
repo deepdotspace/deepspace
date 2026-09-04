@@ -28,33 +28,14 @@ interface JwtPayload {
   exp?: number
 }
 
-/**
- * A network failure reaching the auth server (Node fetch throws
- * `TypeError: fetch failed`, or a DNS/socket errno) is NOT proof of being
- * logged out — code it apart so a retry isn't mistaken for a re-login.
- */
-const isNetworkError = (err: unknown): boolean =>
-  err instanceof TypeError ||
-  (err instanceof Error &&
-    /fetch failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|getaddrinfo|network/i.test(err.message))
-
 export default defineDeepspaceCommand({
   meta: { name: 'whoami', description: 'Show the currently logged-in user' },
   async run({ args }) {
-    let jwt: string
-    try {
-      jwt = await ensureToken()
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Not logged in. Run `deepspace auth login` first.'
-      // The code distinguishes a genuine logged-out state (log in) from an
-      // unreachable auth server (retry): both would otherwise read as
-      // "not logged in", and an agent would re-login instead of reconnecting.
-      throw isNetworkError(err)
-        ? new Refusal(msg, 'network_error')
-        : new Refusal(msg, 'not_authenticated', {
-            action: loginAction(),
-          })
-    }
+    // Uncaught on purpose: ensureToken throws the plane-aware
+    // `not_authenticated` refusal with the login action, and the session
+    // exchange codes an unreachable auth server as `network_error` — so a
+    // retry is never mistaken for a re-login, with no local classifier.
+    const jwt = await ensureToken()
 
     let payload: JwtPayload
     try {

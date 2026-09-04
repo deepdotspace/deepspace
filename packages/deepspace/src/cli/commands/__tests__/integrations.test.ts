@@ -4,15 +4,14 @@
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import { Readable } from 'node:stream'
 import type { CommandDef } from 'citty'
-import {
+import integrations, {
   billingUnit,
   costGate,
   exampleBody,
   isInteractive,
   priceLabel,
   runInvoke,
-} from '../_invoke-impl'
-import integrations from '../integrations'
+} from '../integrations'
 
 describe('integrations command surface', () => {
   it('exposes list, info, and invoke as distinct canonical commands', () => {

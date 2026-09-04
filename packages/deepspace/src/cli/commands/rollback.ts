@@ -14,7 +14,7 @@
 
 import * as p from '@clack/prompts'
 import { ensureToken } from '../auth'
-import { PLATFORM_URLS } from '../env'
+import { DEPLOY_URL } from '../env'
 import { resolveAppTarget, assertAppTargetResolvable, parseWranglerEnvArg } from '../lib/app-target'
 import { apiFetch, ApiError } from '../lib/api'
 import { mintIdempotencyKey, repoApi } from '../lib/repo-api'
@@ -36,8 +36,6 @@ export function unavailableDoGuardRefusal(message: string, detail?: unknown): Re
     'do_guard_unavailable',
   )
 }
-
-const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
 /**
  * Pick the default rollback target (the release before the current one) from

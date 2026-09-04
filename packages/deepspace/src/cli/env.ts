@@ -69,7 +69,9 @@ export const PLANE_AUTH_URLS: Record<Exclude<DeepSpaceEnvironment, 'invalid'>, s
   staging: PLANE_URLS.staging.auth,
 }
 
-/** Report per-service process overrides without changing the stable presets. */
+/** Resolve per-service process overrides against the stable presets. The
+ *  lazy readers (lib/vc-remote, lib/dev-vars, commands/status) call this per
+ *  invocation — tests pin that; the constants below snapshot it at import. */
 export function effectivePlatformUrls(env: NodeJS.ProcessEnv = process.env) {
   return {
     auth: env.DEEPSPACE_AUTH_URL ?? PLATFORM_URLS.auth,
@@ -78,6 +80,18 @@ export function effectivePlatformUrls(env: NodeJS.ProcessEnv = process.env) {
     deploy: env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy,
   }
 }
+
+/** The resolved service URLs (per-service env override, else the plane
+ *  preset), snapshotted at import like `DEEPSPACE_ENV` itself — the one copy
+ *  of the `process.env.X ?? PLATFORM_URLS.y` fallback every command used to
+ *  hand-roll at module level. (The three lazy call sites above are the
+ *  deliberate exceptions — converting them breaks their env-mutation tests.) */
+export const {
+  auth: AUTH_URL,
+  api: API_URL,
+  platform: PLATFORM_URL,
+  deploy: DEPLOY_URL,
+} = effectivePlatformUrls()
 
 export const DASHBOARD_URL =
   DEEPSPACE_ENV === 'production'

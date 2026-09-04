@@ -9,7 +9,7 @@ import { readFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
-import { DEEPSPACE_ENV, PLANE_AUTH_URLS, PLATFORM_URLS } from './env'
+import { AUTH_URL, DEEPSPACE_ENV, PLANE_AUTH_URLS } from './env'
 import { decodeJwtPayload } from '../shared/jwt'
 import { exchangeAgentSession, exchangeSession } from './session'
 import { registerAuthRefresh } from './lib/api'
@@ -17,7 +17,6 @@ import { cliAction, Refusal } from './lib/command'
 import type { CliAction } from './lib/output'
 import { writeSecretFileSync } from './lib/secure-file'
 
-const AUTH_URL = process.env.DEEPSPACE_AUTH_URL ?? PLATFORM_URLS.auth
 /** The plane whose credentials keep the historical un-suffixed filenames. */
 const PROD_AUTH_URL = PLANE_AUTH_URLS.production
 
@@ -66,6 +65,44 @@ export interface EnsureTokenOptions {
   minimumValidityMs?: number
 }
 
+function errnoCode(error: unknown): string | undefined {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return typeof code === 'string' && code.length > 0 ? code : undefined
+}
+
+/**
+ * Read one local credential without confusing a missing login with a broken
+ * credential store. `existsSync` cannot make that distinction reliably: a
+ * permissions failure can look absent, and a file can disappear between the
+ * existence check and the read.
+ */
+function readCredential(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf-8').trim()
+  } catch (error) {
+    const code = errnoCode(error)
+    if (code === 'ENOENT') return null
+    throw new Refusal(
+      `Could not read the DeepSpace CLI credential at ${path}${code ? ` (${code})` : ''}. Fix the file or directory permissions, then retry.`,
+      'credential_unreadable',
+    )
+  }
+}
+
+/** Persist a refreshed bearer, preserving local storage failures as such. */
+function writeCachedToken(token: string): void {
+  try {
+    mkdirSync(DIR, { recursive: true, mode: 0o700 })
+    writeSecretFileSync(TOKEN_PATH, token)
+  } catch (error) {
+    const code = errnoCode(error)
+    throw new Refusal(
+      `Could not save the refreshed DeepSpace CLI token at ${TOKEN_PATH}${code ? ` (${code})` : ''}. Make ${DIR} writable and check available disk space, then retry.`,
+      'credential_unwritable',
+    )
+  }
+}
+
 /**
  * Ensure a sufficiently long-lived JWT exists. Refreshes from the session
  * token when the cached bearer cannot cover the caller's expected work.
@@ -74,18 +111,15 @@ export interface EnsureTokenOptions {
 export async function ensureToken(options: EnsureTokenOptions = {}): Promise<string> {
   const minimumValidityMs = options.minimumValidityMs ?? 30_000
   // Try existing token first — if it's still valid, skip the refresh
-  if (existsSync(TOKEN_PATH)) {
-    const existing = readFileSync(TOKEN_PATH, 'utf-8').trim()
-    if (isTokenValid(existing, minimumValidityMs)) {
-      return existing
-    }
+  const existing = readCredential(TOKEN_PATH)
+  if (existing !== null && isTokenValid(existing, minimumValidityMs)) {
+    return existing
   }
 
-  if (!existsSync(SESSION_PATH)) throw notAuthenticated('Not logged in')
-
-  const token = await exchangeStoredSession()
-  if (!token)
-    throw notAuthenticated('The stored session is no longer valid (expired or unreadable)')
+  const sessionToken = readCredential(SESSION_PATH)
+  if (sessionToken === null) throw notAuthenticated('Not logged in')
+  const token = await exchangeAndCacheSession(sessionToken)
+  if (!token) throw notAuthenticated('The stored session is invalid')
   return token
 }
 
@@ -176,21 +210,23 @@ export async function refreshTokenFromSession(): Promise<string | null> {
  * replacing the CLI's ordinary platform-token cache.
  */
 export async function mintAgentToken(target: string): Promise<string> {
-  if (!existsSync(SESSION_PATH)) throw notAuthenticated('Not logged in')
-  const sessionToken = readFileSync(SESSION_PATH, 'utf-8').trim()
+  const sessionToken = readCredential(SESSION_PATH)
+  if (sessionToken === null) throw notAuthenticated('Not logged in')
   const token = await exchangeAgentSession(AUTH_URL, sessionToken, target)
-  if (!token)
-    throw notAuthenticated('The stored session is no longer valid (expired or unreadable)')
+  if (!token) throw notAuthenticated('The stored session is invalid')
   return token
 }
 
 async function exchangeStoredSession(): Promise<string | null> {
-  if (!existsSync(SESSION_PATH)) return null
-  const sessionToken = readFileSync(SESSION_PATH, 'utf-8').trim()
+  const sessionToken = readCredential(SESSION_PATH)
+  if (sessionToken === null) return null
+  return await exchangeAndCacheSession(sessionToken)
+}
+
+async function exchangeAndCacheSession(sessionToken: string): Promise<string | null> {
   const token = await exchangeSession(AUTH_URL, sessionToken)
   if (!token) return null
-  mkdirSync(DIR, { recursive: true, mode: 0o700 })
-  writeSecretFileSync(TOKEN_PATH, token)
+  writeCachedToken(token)
   return token
 }
 

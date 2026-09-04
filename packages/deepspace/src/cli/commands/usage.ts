@@ -22,11 +22,9 @@
  */
 
 import { ensureToken } from '../auth'
-import { PLATFORM_URLS, DASHBOARD_URL } from '../env'
+import { API_URL, DASHBOARD_URL } from '../env'
 import { apiFetch } from '../lib/api'
 import { defineDeepspaceCommand } from '../lib/command'
-
-const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
 
 interface CreditBucket {
   allocation: number

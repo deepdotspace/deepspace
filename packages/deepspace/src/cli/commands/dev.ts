@@ -38,7 +38,7 @@ import {
   upsertWorktreeLaunchConfig,
   writeLaunchConfigIfMissing,
 } from '../lib/launch-config'
-import { PLATFORM_URLS } from '../env'
+import { DEPLOY_URL } from '../env'
 import { writeDevVars } from '../lib/dev-vars'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { ensureInstallReady } from '../lib/install-status'
@@ -59,8 +59,6 @@ import {
   type PreparedWranglerEnvConfig,
 } from '../lib/wrangler-env'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
-
-const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
 /**
  * The "no wrangler.toml here" refusal, shared verbatim by `dev` and `test` —
@@ -193,23 +191,18 @@ export default defineDeepspaceCommand({
     // before dev can run regardless of how auth turns out.
     ensureInstallReady(appDir)
 
-    let token: string
-    try {
-      token = await ensureToken()
-    } catch (err: unknown) {
-      // Keep ensureToken's canonical wording ("Not logged in…" / "Session
-      // expired…") and add the slug + the command that fixes it.
-      throw new Refusal(err instanceof Error ? err.message : String(err), 'not_authenticated', {
-        action: loginAction(),
-      })
-    }
+    // Uncaught on purpose: ensureToken's refusal already carries the
+    // canonical wording, code, and login action — and re-tagging here would
+    // mislabel a coded `network_error` transport failure as a logout. The
+    // decode below keeps its own guard.
+    const token = await ensureToken()
 
     let payload: { sub: string; name?: string; email?: string }
     try {
       payload = decodeJwtPayload<{ sub: string; name?: string; email?: string }>(token)
     } catch {
       throw new Refusal(
-        'Malformed session token. Run `npx deepspace auth login`.',
+        'Malformed session token. Run `deepspace auth login` again.',
         'not_authenticated',
         { action: loginAction() },
       )

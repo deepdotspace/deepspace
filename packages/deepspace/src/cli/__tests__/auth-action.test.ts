@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   exchangeAgent: vi.fn(async () => null as string | null),
   write: vi.fn(),
   chmod: vi.fn(),
+  mkdir: vi.fn(),
 }))
 
 vi.mock('node:fs', () => ({
@@ -14,7 +15,7 @@ vi.mock('node:fs', () => ({
   readFileSync: mocks.read,
   writeFileSync: mocks.write,
   chmodSync: mocks.chmod,
-  mkdirSync: vi.fn(),
+  mkdirSync: mocks.mkdir,
 }))
 vi.mock('node:os', () => ({ homedir: () => '/tmp/deepspace-auth-action-test' }))
 vi.mock('../session', () => ({
@@ -27,11 +28,16 @@ import { ensureToken, loginAction, mintAgentToken, SESSION_PATH, TOKEN_PATH } fr
 
 beforeEach(() => {
   mocks.exists.mockReset()
-  mocks.read.mockClear()
+  mocks.read.mockReset()
+  mocks.read.mockImplementation((path) => {
+    if (mocks.exists(path)) return 'session'
+    throw Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT', path })
+  })
   mocks.exchange.mockClear()
   mocks.exchangeAgent.mockClear()
   mocks.write.mockClear()
   mocks.chmod.mockClear()
+  mocks.mkdir.mockClear()
   // Deterministic loginAction() inputs: the vitest worker is headless, and a
   // developer's real DEEPSPACE_EMAIL/PASSWORD must not leak into the pins.
   vi.stubEnv('DEEPSPACE_EMAIL', '')
@@ -79,17 +85,16 @@ describe('loginAction (the one login-recovery action builder)', () => {
   // it is set and restored by descriptor, not spied.
   let restoreTTY: Array<() => void> = []
   const stubTTY = (stdin: boolean, stdout: boolean): void => {
-    restoreTTY = [
-      [process.stdin, stdin] as const,
-      [process.stdout, stdout] as const,
-    ].map(([stream, value]) => {
-      const original = Object.getOwnPropertyDescriptor(stream, 'isTTY')
-      Object.defineProperty(stream, 'isTTY', { value, configurable: true })
-      return () => {
-        if (original) Object.defineProperty(stream, 'isTTY', original)
-        else delete (stream as { isTTY?: boolean }).isTTY
-      }
-    })
+    restoreTTY = [[process.stdin, stdin] as const, [process.stdout, stdout] as const].map(
+      ([stream, value]) => {
+        const original = Object.getOwnPropertyDescriptor(stream, 'isTTY')
+        Object.defineProperty(stream, 'isTTY', { value, configurable: true })
+        return () => {
+          if (original) Object.defineProperty(stream, 'isTTY', original)
+          else delete (stream as { isTTY?: boolean }).isTTY
+        }
+      },
+    )
   }
   afterEach(() => {
     for (const restore of restoreTTY) restore()
@@ -164,6 +169,48 @@ describe('ensureToken recovery action', () => {
 
     await expect(ensureToken({ minimumValidityMs: 10 * 60 * 1000 })).rejects.toBe(serviceError)
   })
+
+  it('classifies an unreadable cached token as a local credential-store failure', async () => {
+    mocks.read.mockImplementation((path) => {
+      if (path === TOKEN_PATH) {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES', path })
+      }
+      return 'session'
+    })
+
+    const err = await ensureToken().catch((error: Error) => error)
+    expect(err).toMatchObject({ code: 'credential_unreadable' })
+    expect((err as Error).message).toContain(TOKEN_PATH)
+    expect((err as Error).message).toContain('EACCES')
+    expect(mocks.exchange).not.toHaveBeenCalled()
+  })
+
+  it('classifies an unreadable session as a local credential-store failure', async () => {
+    mocks.read.mockImplementation((path) => {
+      if (path === TOKEN_PATH) {
+        throw Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT', path })
+      }
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES', path })
+    })
+
+    const err = await ensureToken().catch((error: Error) => error)
+    expect(err).toMatchObject({ code: 'credential_unreadable' })
+    expect((err as Error).message).toContain(SESSION_PATH)
+    expect((err as Error).message).toContain('EACCES')
+  })
+
+  it('classifies a failed refreshed-token write as a local credential-store failure', async () => {
+    mocks.exists.mockImplementation((path) => path === SESSION_PATH)
+    mocks.exchange.mockResolvedValueOnce('fresh-token')
+    mocks.write.mockImplementationOnce((path) => {
+      throw Object.assign(new Error('disk full'), { code: 'ENOSPC', path })
+    })
+
+    const err = await ensureToken().catch((error: Error) => error)
+    expect(err).toMatchObject({ code: 'credential_unwritable' })
+    expect((err as Error).message).toContain(TOKEN_PATH)
+    expect((err as Error).message).toContain('ENOSPC')
+  })
 })
 
 describe('ensureToken not_authenticated sentence', () => {
@@ -189,11 +236,9 @@ describe('ensureToken not_authenticated sentence', () => {
     expect(err).toMatchObject(loginRefusal)
   })
 
-  it('says the session is invalid — not merely "expired" — when the refresh is refused', async () => {
+  it('says the session is invalid when the refresh is refused', async () => {
     mocks.exists.mockImplementation((path) => path === SESSION_PATH)
     const err = await ensureToken().catch((e: Error) => e)
-    expect((err as Error).message).toMatch(
-      /no longer valid \(expired or unreadable\) on production/,
-    )
+    expect((err as Error).message).toMatch(/stored session is invalid on production/)
   })
 })

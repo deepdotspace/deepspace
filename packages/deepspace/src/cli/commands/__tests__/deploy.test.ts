@@ -53,6 +53,7 @@ import {
   workspaceDeployLineage,
 } from '../deploy/repository'
 import { createDeployOutput, deployFailureEnvelope, type DeployOutput } from '../deploy/output'
+import { CliExit } from '../../lib/cli-errors'
 import type { PushRefResult } from '../../lib/vc-push'
 import { ApiError } from '../../lib/api'
 import { GitError } from '../../lib/git/process'
@@ -497,8 +498,11 @@ describe('on-behalf deploy attribution', () => {
           nonInteractive: true,
           emitJson,
           showIntro: vi.fn(),
-          die(message, code): never {
-            throw new Error(`${code}: ${message}`)
+          die(message, code, opts = {}): never {
+            // Model the real exit door (deploy/output.ts): envelope out,
+            // CliExit up — bail() now delegates here instead of hand-rolling.
+            this.emitJson(deployFailureEnvelope(message, code, opts))
+            throw new CliExit(opts.actionRequired ? 2 : 1)
           },
         },
         spinner: SILENT_SPINNER,
@@ -650,8 +654,11 @@ describe('on-behalf deploy attribution', () => {
           nonInteractive: true,
           emitJson,
           showIntro: vi.fn(),
-          die(message, code): never {
-            throw new Error(`${code}: ${message}`)
+          die(message, code, opts = {}): never {
+            // Model the real exit door (deploy/output.ts): envelope out,
+            // CliExit up — bail() now delegates here instead of hand-rolling.
+            this.emitJson(deployFailureEnvelope(message, code, opts))
+            throw new CliExit(opts.actionRequired ? 2 : 1)
           },
         },
         spinner: SILENT_SPINNER,

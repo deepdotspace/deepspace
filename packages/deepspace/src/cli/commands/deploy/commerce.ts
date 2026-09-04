@@ -3,10 +3,8 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { normalizeApiError } from '../../../shared/api-error'
-import { PLATFORM_URLS } from '../../env'
+import { API_URL } from '../../env'
 import { createSpinner } from '../../lib/spinner'
-
-const API_URL = process.env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api
 
 interface PlanChange {
   slug: string

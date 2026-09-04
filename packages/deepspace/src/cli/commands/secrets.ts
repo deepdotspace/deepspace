@@ -20,7 +20,7 @@
 import { defineCommand } from 'citty'
 import { readFileSync } from 'node:fs'
 import { ensureToken } from '../auth'
-import { PLATFORM_URLS } from '../env'
+import { DEPLOY_URL } from '../env'
 import { assertAppTargetResolvable, parseWranglerEnvArg, resolveAppTarget } from '../lib/app-target'
 import { ApiError } from '../lib/api'
 import { InputError } from '../lib/cli-errors'
@@ -46,8 +46,6 @@ import {
   validateSecretValue,
   type SecretsDownloadFormat,
 } from '../lib/secrets'
-
-const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
 const COMMON_ARGS = {
   app: {

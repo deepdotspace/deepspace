@@ -23,7 +23,7 @@ import { displayLines } from '../lib/cli-format'
 import { defineCommand } from 'citty'
 import { setTimeout as delay } from 'node:timers/promises'
 import { ensureToken } from '../auth'
-import { PLATFORM_URLS } from '../env'
+import { DEPLOY_URL } from '../env'
 import { apiFetch, apiFetchReadWithRetry, ApiError } from '../lib/api'
 import { InputError } from '../lib/cli-errors'
 import { resolveAppTarget, assertAppTargetResolvable, listApps } from '../lib/app-target'
@@ -37,8 +37,6 @@ import {
   type AppLogEvent,
   type AppLogsResponse,
 } from '../../shared/log-events'
-
-const DEPLOY_URL = process.env.DEEPSPACE_DEPLOY_URL ?? PLATFORM_URLS.deploy
 
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const DEFAULT_WINDOW_MS = 15 * 60 * 1000

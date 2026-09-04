@@ -13,12 +13,10 @@
 
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 
-import { PLATFORM_URLS } from '../env'
+import { AUTH_URL } from '../env'
 import { SESSION_COOKIE } from '../session'
 import { credentialPaths } from '../auth'
 import { defineDeepspaceCommand } from '../lib/command'
-
-const AUTH_URL = process.env.DEEPSPACE_AUTH_URL ?? PLATFORM_URLS.auth
 
 // Per-plane paths from the shared helper — logging out of staging must not
 // delete the production session (and vice versa).
