@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.31.0
+
+### Minor Changes
+
+- Private (`scope=self`) file URLs now render in `<img>`, `<audio>`, and `<video>` for the signed-in user — no tokens in URLs and no signed-URL scheme to build: the files proxy identifies a same-origin GET/HEAD by the app-origin session cookie via the new `resolveSessionReadAuth` helper (bearer still wins; uploads and deletes stay bearer-only; sibling `*.app.space` apps are refused by the `Sec-Fetch-Site` gate). The files API also gains bodiless `HEAD` responses and GET byte ranges (`206`/`416`, with a stale or concurrently replaced `If-Range` representation falling back to a whole `200`) so media elements can seek. Existing apps adopt it via the `2026-09-files-session-cookie-reads` migration.
+
 ## 0.30.2
 
 ### Patch Changes

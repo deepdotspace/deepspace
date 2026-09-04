@@ -14,7 +14,7 @@
  * `platform/platform-worker/src/__tests__/multipart-files.test.ts`.
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createScopedR2Handler } from '../scoped-r2-files'
 
 const PREFIX = 'apps/app-a/'
@@ -334,5 +334,210 @@ describe('stored-file responses', () => {
       key: `${PREFIX}showcase/report.csv`,
       relativeKey: 'showcase/report.csv',
     })
+  })
+})
+
+describe('download responses', () => {
+  const body = new TextEncoder().encode('0123456789abcdefghij') // 20 bytes
+  const key = `${PREFIX}media/clip.mp3`
+
+  /**
+   * The handler parses `Range` itself and hands R2 an explicit
+   * `{ offset, length }`; this bucket only serves what it is asked for, so the
+   * `get` spy is the assertion about what was asked.
+   */
+  function storedBucket(contentType: string, replacement?: { body: typeof body; etag: string }) {
+    let current = { body, etag: 'etag-1' }
+    const object = () => ({
+      size: current.body.length,
+      etag: current.etag,
+      httpEtag: `"${current.etag}"`,
+      httpMetadata: { contentType },
+      customMetadata: { originalName: 'clip.mp3' },
+    })
+    const head = vi.fn(async () => {
+      const result = object()
+      if (replacement) current = replacement
+      return result
+    })
+    const get = vi.fn(async (_key: string, options?: R2GetOptions) => {
+      const onlyIf = options?.onlyIf as R2Conditional | undefined
+      if (onlyIf?.etagMatches && onlyIf.etagMatches !== current.etag) return object()
+      const range = options?.range as { offset: number; length: number } | undefined
+      const served = range
+        ? current.body.slice(range.offset, range.offset + range.length)
+        : current.body
+      return { ...object(), body: new Blob([served]).stream() }
+    })
+    return { bucket: { head, get } as unknown as R2Bucket, head, get }
+  }
+
+  async function download(
+    method: 'GET' | 'HEAD',
+    headers: Record<string, string> = {},
+    contentType = 'audio/mpeg',
+    scope: 'self' | 'app' = 'self',
+  ) {
+    const url = new URL(`https://app.example/api/files/${key}?scope=${scope}`)
+    const { bucket, head, get } = storedBucket(contentType)
+    const res = await handler(new Request(url, { method, headers }), url, bucket, {
+      userId: 'user-1',
+    })
+    return { res, head, get }
+  }
+
+  it('answers a plain GET whole, with no extra head call, and advertises byte ranges', async () => {
+    const { res, head, get } = await download('GET')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('Accept-Ranges')).toBe('bytes')
+    expect(res.headers.get('Content-Length')).toBe('20')
+    expect(res.headers.get('Content-Range')).toBeNull()
+    expect(res.headers.get('Content-Type')).toBe('audio/mpeg')
+    expect(res.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(await res.text()).toBe('0123456789abcdefghij')
+    expect(head).not.toHaveBeenCalled()
+    expect(get).toHaveBeenCalledWith(key)
+  })
+
+  it.each([
+    ['bytes=0-9', 'bytes 0-9/20', { offset: 0, length: 10 }, '0123456789'],
+    ['bytes=15-', 'bytes 15-19/20', { offset: 15, length: 5 }, 'fghij'],
+    ['bytes=15-100', 'bytes 15-19/20', { offset: 15, length: 5 }, 'fghij'],
+    ['bytes=-5', 'bytes 15-19/20', { offset: 15, length: 5 }, 'fghij'],
+    ['bytes=-50', 'bytes 0-19/20', { offset: 0, length: 20 }, '0123456789abcdefghij'],
+  ])('serves %s as 206 with an explicit R2 range', async (range, contentRange, r2Range, text) => {
+    const { res, get } = await download('GET', { range })
+    expect(res.status).toBe(206)
+    expect(res.headers.get('Content-Range')).toBe(contentRange)
+    expect(res.headers.get('Content-Length')).toBe(String(r2Range.length))
+    expect(res.headers.get('Accept-Ranges')).toBe('bytes')
+    expect(await res.text()).toBe(text)
+    expect(get).toHaveBeenCalledWith(key, {
+      range: r2Range,
+      onlyIf: { etagMatches: 'etag-1' },
+    })
+  })
+
+  it.each(['bytes=100-200', 'bytes=20-', 'bytes=-0'])(
+    'refuses unsatisfiable %s with 416 and the size, without fetching the object',
+    async (range) => {
+      const { res, get } = await download('GET', { range })
+      expect(res.status).toBe(416)
+      expect(res.headers.get('Content-Range')).toBe('bytes */20')
+      expect(await res.text()).toBe('')
+      expect(get).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(['bytes=abc', 'bytes=0-1,5-9', 'bytes=9-5', 'bytes=-', 'chars=0-1'])(
+    'ignores %s (malformed or multi-range) and serves the whole object',
+    async (range) => {
+      const { res, get } = await download('GET', { range })
+      expect(res.status).toBe(200)
+      expect(res.headers.get('Content-Range')).toBeNull()
+      expect(res.headers.get('Content-Length')).toBe('20')
+      expect(await res.text()).toBe('0123456789abcdefghij')
+      expect(get).toHaveBeenCalledWith(key)
+    },
+  )
+
+  it('serves the seek under a matching If-Range and the whole object under a stale one', async () => {
+    const { res: fresh } = await download('GET', { range: 'bytes=5-9', 'if-range': '"etag-1"' })
+    expect(fresh.status).toBe(206)
+    expect(fresh.headers.get('Content-Range')).toBe('bytes 5-9/20')
+
+    // The key was replaced mid-playback: the browser's validator is stale.
+    for (const range of ['bytes=5-9', 'bytes=100-200']) {
+      const { res, get } = await download('GET', { range, 'if-range': '"etag-0"' })
+      expect(res.status, range).toBe(200)
+      expect(res.headers.get('Content-Range')).toBeNull()
+      expect(await res.text()).toBe('0123456789abcdefghij')
+      expect(get).toHaveBeenCalledWith(key)
+    }
+  })
+
+  it('falls back to the whole new object when an upsert races the ranged read', async () => {
+    const replacementBody = new TextEncoder().encode('replacement-media-contents')
+    const url = new URL(`https://app.example/api/files/${key}?scope=self`)
+    const { bucket, get } = storedBucket('audio/mpeg', {
+      body: replacementBody,
+      etag: 'etag-2',
+    })
+    const res = await handler(
+      new Request(url, { headers: { range: 'bytes=5-9', 'if-range': '"etag-1"' } }),
+      url,
+      bucket,
+      { userId: 'user-1' },
+    )
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get('ETag')).toBe('"etag-2"')
+    expect(res.headers.get('Content-Range')).toBeNull()
+    expect(res.headers.get('Content-Length')).toBe(String(replacementBody.length))
+    expect(await res.text()).toBe('replacement-media-contents')
+    expect(get).toHaveBeenNthCalledWith(1, key, {
+      range: { offset: 5, length: 5 },
+      onlyIf: { etagMatches: 'etag-1' },
+    })
+    expect(get).toHaveBeenNthCalledWith(2, key)
+  })
+
+  it('answers HEAD with the GET headers and no body', async () => {
+    const [{ res: head }, { res: get }] = await Promise.all([download('HEAD'), download('GET')])
+    expect(head.status).toBe(200)
+    expect(await head.text()).toBe('')
+    for (const name of [
+      'Content-Type',
+      'Content-Length',
+      'Accept-Ranges',
+      'ETag',
+      'Cache-Control',
+    ]) {
+      expect(head.headers.get(name), name).toBe(get.headers.get(name))
+    }
+    const {
+      res: ranged,
+      head: rangedHead,
+      get: rangedGet,
+    } = await download('HEAD', {
+      range: 'bytes=5-9',
+    })
+    expect(ranged.status).toBe(200)
+    expect(ranged.headers.get('Content-Range')).toBeNull()
+    expect(ranged.headers.get('Content-Length')).toBe('20')
+    expect(await ranged.text()).toBe('')
+    expect(rangedHead).toHaveBeenCalledWith(key)
+    expect(rangedGet).not.toHaveBeenCalled()
+  })
+
+  it('keeps forcing active content to a sandboxed attachment on HEAD and 206', async () => {
+    for (const { res } of [
+      await download('HEAD', {}, 'text/html'),
+      await download('GET', { range: 'bytes=0-1' }, 'text/html'),
+    ]) {
+      expect(res.headers.get('Content-Type')).toBe('application/octet-stream')
+      expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff')
+      expect(res.headers.get('Content-Disposition')).toMatch(/^attachment;/)
+      expect(res.headers.get('Content-Security-Policy')).toBe("sandbox; default-src 'none'")
+    }
+  })
+
+  it('still revalidates app-scope downloads by ETag', async () => {
+    const { res } = await download('GET', { 'if-none-match': '"etag-1"' }, 'audio/mpeg', 'app')
+    expect(res.status).toBe(304)
+    expect(res.headers.get('Cache-Control')).toBe('public, max-age=0, must-revalidate')
+    expect(await res.text()).toBe('')
+  })
+
+  it('evaluates If-None-Match before an unsatisfiable Range', async () => {
+    const { res, get } = await download(
+      'GET',
+      { range: 'bytes=100-200', 'if-none-match': '"etag-1"' },
+      'audio/mpeg',
+      'app',
+    )
+    expect(res.status).toBe(304)
+    expect(res.headers.get('Content-Range')).toBeNull()
+    expect(get).not.toHaveBeenCalled()
   })
 })

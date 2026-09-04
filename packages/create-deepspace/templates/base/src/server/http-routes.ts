@@ -15,6 +15,7 @@ import {
   isPlatformReservedPath,
   platformWorkerFetch,
   resolveAppRole,
+  resolveSessionReadAuth,
   SESSION_COOKIE,
   verifyAgentToken,
   verifyJwt,
@@ -253,7 +254,11 @@ export function registerPlatformProxyRoutes(app: Hono<AppContext>): void {
   // Scoped R2 files → platform-worker. The app has no local R2 binding; the
   // platform bucket scopes keys to the verified app and, by default, user.
   app.all('/api/files/*', async (c) => {
-    const auth = await resolveAuth(c.req.raw, c.env)
+    // A same-origin GET/HEAD with no bearer is identified by the app-origin
+    // session cookie, so a private file URL renders in <img>/<audio>/<video>.
+    // The fallback lives here, not in resolveAuth, which also gates writes.
+    const auth =
+      (await resolveAuth(c.req.raw, c.env)) ?? (await resolveSessionReadAuth(c.req.raw, c.env))
     const userId = auth?.userId ?? null
 
     const url = new URL(c.req.url)
@@ -276,9 +281,10 @@ export function registerPlatformProxyRoutes(app: Hono<AppContext>): void {
       }),
     )
 
-    // Rewrite platform URLs in JSON responses to use the app's origin.
+    // Rewrite platform URLs in JSON responses to use the app's origin (a HEAD
+    // answer has the content-type but no body).
     const contentType = resp.headers.get('content-type') ?? ''
-    if (contentType.includes('application/json')) {
+    if (contentType.includes('application/json') && c.req.method !== 'HEAD') {
       const body = (await resp.json()) as Record<string, unknown>
       const rewriteUrl = (value: string) => value.replace(/^https?:\/\/[^/]+/, url.origin)
       if (typeof body.url === 'string') body.url = rewriteUrl(body.url)

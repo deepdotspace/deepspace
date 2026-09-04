@@ -21,6 +21,11 @@ export const BUILD_INJECTED_APP_ID_MIGRATION_ID = '2026-08-build-injected-app-id
  *  file states the trust model actions run under. */
 export const ACTION_ROUTES_BEARER_GUARD_MIGRATION_ID = '2026-08-action-routes-bearer-guard'
 
+/** The files proxy identifies a header-less same-origin read (an `<img>`,
+ *  `<audio>`, or `<video>` load) by the app-origin session cookie, so private
+ *  file URLs render for the signed-in user without tokens or signed URLs. */
+export const FILES_SESSION_COOKIE_READS_MIGRATION_ID = '2026-09-files-session-cookie-reads'
+
 export type AppMigrationIdsValidation =
   | { valid: true; ids: string[] }
   | { valid: false; reason: string }

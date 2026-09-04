@@ -10,9 +10,12 @@
  * request-size accident. Callers do nothing differently either way.
  *
  * Two scopes are supported via the `scope` option:
- *   - `'self'` (default): per-user storage. Reads require auth.
+ *   - `'self'` (default): per-user storage. Reads are private to the owner:
+ *     the URL works in `<img>`/`<audio>`/`<video>` for the signed-in user of
+ *     this origin (the session cookie identifies the load), and for nobody
+ *     else.
  *   - `'app'`: app-wide storage. Reads are public — the upload URL works
- *     directly as an `<img src>`. Use for avatars, logos, etc.
+ *     for anyone, embedded anywhere. Use for logos, shared assets, etc.
  *
  * @example
  * ```tsx
@@ -217,9 +220,12 @@ export interface UseR2FilesReturn {
   /**
    * Build a plain URL for a file. Accepts an R2FileInfo or a raw key string.
    *
-   * **Note**: This URL has no auth token attached. It works for `'app'`-scope
-   * files (which are publicly readable) but not for `'self'`-scope files —
-   * those require an Authorization header, so use `readFile` / `downloadFile`.
+   * No token travels in the URL. An `'app'`-scope URL is readable by anyone.
+   * A `'self'`-scope URL renders in `<img>`/`<audio>`/`<video>` for the
+   * signed-in user on this origin only (see {@link R2Scope}); showing one
+   * user's private file to another user is app-level authorization, not
+   * something this URL can grant. Use `readFile` / `downloadFile` for the
+   * bytes in code.
    */
   getUrl: (fileOrKey: R2FileInfo | string) => string
   /** Whether an upload is currently in progress. */
@@ -230,12 +236,15 @@ export interface UseR2FilesReturn {
  * Scope controls where files live and who can read them:
  *
  *  - `'self'` (default) — `apps/<app>/users/<userId>/…`. Per-user storage.
- *    Reads require the caller's auth token; not usable from a plain `<img>`
- *    or unauthenticated browser request.
+ *    Reads need the caller's bearer token, or — for a plain `<img>`,
+ *    `<audio>`, or `<video>` load from this origin — the signed-in user's
+ *    session cookie. Nobody else can read the URL, and it cannot be
+ *    embedded from another origin; browsers that send no `Sec-Fetch-Site`
+ *    (Safari before 16.4) and cross-site links receive 401 by design.
  *  - `'app'` — `apps/<app>/…`. Shared by everyone in the app. Reads are
- *    public (no auth header needed), so the upload URL works directly as
- *    an `<img src>`. Use this for avatars, logos, attachments, and other
- *    assets meant to be embedded in pages.
+ *    public (no auth at all), so the upload URL works as an `<img src>`
+ *    anywhere. Use this for logos, attachments, and other assets meant to
+ *    be embedded in pages for everyone.
  *
  * Uploads under `'app'` still require a signed-in user.
  */
@@ -551,7 +560,10 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
         const response = await fetch(getUrl(key), { headers })
 
         if (!response.ok) {
-          return { success: false, error: describeFilesFailure(response.status, await response.text()) }
+          return {
+            success: false,
+            error: describeFilesFailure(response.status, await response.text()),
+          }
         }
 
         // Derive a display name: explicit arg > R2FileInfo.originalName > Content-Disposition > last key segment

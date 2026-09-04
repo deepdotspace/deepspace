@@ -16,7 +16,8 @@
  *   POST   /api/files/multipart/complete  → assemble the parts
  *   DELETE /api/files/multipart           → abandon a chunked upload
  *   GET    /api/files                     → list   (prefix + optional user prefix)
- *   GET    /api/files/:key                → download (validated against prefix)
+ *   GET    /api/files/:key                → download (validated against prefix; Range-aware)
+ *   HEAD   /api/files/:key                → the download's headers, no body
  *   DELETE /api/files/:key                → delete   (validated against prefix)
  *
  * ## One transport discipline
@@ -461,8 +462,8 @@ export function createScopedR2Handler(config: ScopedR2Config): ScopedR2Handler {
       return handleList(bucket, prefix, excludedPrefixes, url, scope, auth)
     }
 
-    // ── Download ────────────────────────────────────────────────────────
-    if (subpath && request.method === 'GET') {
+    // ── Download (HEAD answers with the GET's headers and no body) ──────
+    if (subpath && (request.method === 'GET' || request.method === 'HEAD')) {
       if (!isKeyWithinScope(subpath, prefix, excludedPrefixes)) {
         return Response.json(
           { error: 'Access denied: key outside scope' },
@@ -1388,16 +1389,97 @@ async function handleList(
   )
 }
 
+type ByteRange = { offset: number; length: number }
+
+/**
+ * The single-range forms of RFC 9110 (`bytes=a-b`, `bytes=a-`, `bytes=-n`),
+ * clamped to `size`. Anything else — malformed, multi-range, `a > b` — is
+ * ignored (`undefined`), which the RFC spells as a plain 200.
+ */
+function parseByteRange(header: string, size: number): ByteRange | 'unsatisfiable' | undefined {
+  const [, first, last] = /^bytes=(\d*)-(\d*)$/.exec(header.trim()) ?? []
+  if (first === undefined || (first === '' && last === '')) return undefined
+  const offset = first === '' ? Math.max(0, size - Number(last)) : Number(first)
+  if (offset >= size) return 'unsatisfiable'
+  const end = first === '' || last === '' ? size - 1 : Math.min(Number(last), size - 1)
+  return end < offset ? undefined : { offset, length: end - offset + 1 }
+}
+
 async function handleDownload(
   request: Request,
   bucket: R2Bucket,
   key: string,
   scope: 'self' | 'app',
 ): Promise<Response> {
-  const object = await bucket.get(key)
-  if (!object) {
+  // HEAD has no Range semantics (RFC 9110 §14.2) and should not open an R2
+  // body only to discard it. Its metadata is also enough to evaluate the
+  // app-scope revalidation precondition before returning the GET headers.
+  if (request.method === 'HEAD') {
+    const object = await bucket.head(key)
+    if (!object) {
+      return Response.json({ error: 'File not found' }, { status: 404, headers: CORS_HEADERS })
+    }
+    const headers = downloadHeaders(object, key, scope)
+    if (scope === 'app' && request.headers.get('if-none-match') === object.httpEtag) {
+      return new Response(null, { status: 304, headers })
+    }
+    headers.set('Content-Length', String(object.size))
+    return new Response(null, { status: 200, headers })
+  }
+
+  const rangeHeader = request.headers.get('range')
+  if (rangeHeader === null) {
+    return wholeDownload(request, await bucket.get(key), key, scope)
+  }
+
+  // Parsed here rather than by R2: Miniflare answers an unsatisfiable Range
+  // with the whole object, so `object.range` cannot carry the 416 decision.
+  const head = await bucket.head(key)
+  if (!head) {
     return Response.json({ error: 'File not found' }, { status: 404, headers: CORS_HEADERS })
   }
+  // Preconditions are evaluated before Range. In particular, a matching
+  // If-None-Match is 304 even when the supplied byte range is unsatisfiable.
+  if (scope === 'app' && request.headers.get('if-none-match') === head.httpEtag) {
+    return new Response(null, { status: 304, headers: downloadHeaders(head, key, scope) })
+  }
+
+  // RFC 9110 §13.1.5: a seek carries `If-Range: <etag>`; when it no longer
+  // matches, ignore Range and transfer the whole current representation.
+  const ifRange = request.headers.get('if-range')
+  if (ifRange !== null && ifRange !== head.httpEtag) {
+    return wholeDownload(request, await bucket.get(key), key, scope)
+  }
+
+  const range = parseByteRange(rangeHeader, head.size)
+  if (range === 'unsatisfiable') {
+    const headers = { ...CORS_HEADERS, 'Content-Range': `bytes */${head.size}` }
+    return new Response(null, { status: 416, headers })
+  }
+  if (!range) {
+    return wholeDownload(request, await bucket.get(key), key, scope)
+  }
+
+  // Pin the ranged read to the representation whose size and validator were
+  // inspected above. If an upsert wins between head() and get(), R2 returns a
+  // metadata-only conditional miss; serve the whole new object instead of
+  // splicing its bytes into a response validated against the old object.
+  const conditional = await bucket.get(key, {
+    range,
+    onlyIf: { etagMatches: head.etag },
+  })
+  if (!conditional || !('body' in conditional)) {
+    return wholeDownload(request, await bucket.get(key), key, scope)
+  }
+
+  const headers = downloadHeaders(conditional, key, scope)
+  const end = range.offset + range.length - 1
+  headers.set('Content-Range', `bytes ${range.offset}-${end}/${conditional.size}`)
+  headers.set('Content-Length', String(range.length))
+  return new Response(conditional.body, { status: 206, headers })
+}
+
+function downloadHeaders(object: R2Object, key: string, scope: 'self' | 'app'): Headers {
   const headers = new Headers()
   const storedType = resolveMimeType(object.httpMetadata?.contentType ?? '')
   const mustDownload = DANGEROUS_MIME_TYPES.has(storedType)
@@ -1415,8 +1497,23 @@ async function handleDownload(
     contentDisposition(originalName, mustDownload ? 'attachment' : 'inline'),
   )
   if (mustDownload) headers.set('Content-Security-Policy', "sandbox; default-src 'none'")
+  headers.set('Accept-Ranges', 'bytes')
+  return headers
+}
+
+function wholeDownload(
+  request: Request,
+  object: R2ObjectBody | null,
+  key: string,
+  scope: 'self' | 'app',
+): Response {
+  if (!object) {
+    return Response.json({ error: 'File not found' }, { status: 404, headers: CORS_HEADERS })
+  }
+  const headers = downloadHeaders(object, key, scope)
   if (scope === 'app' && request.headers.get('if-none-match') === object.httpEtag) {
     return new Response(null, { status: 304, headers })
   }
-  return new Response(object.body, { headers })
+  headers.set('Content-Length', String(object.size))
+  return new Response(object.body, { status: 200, headers })
 }
