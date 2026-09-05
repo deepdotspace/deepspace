@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.32.0
+
+### Minor Changes
+
+- Add viewer-relative release and activity attribution, remove misleading Cloudflare upload ETags from public JSON, preserve app ids in source-authority refusals, and bind the first completed release to its winning source revision without mutating routes on a lost source race.
+
 ## 0.31.2
 
 ## 0.31.1

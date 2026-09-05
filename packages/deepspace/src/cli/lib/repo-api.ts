@@ -40,10 +40,10 @@ export interface RemoteRelease {
   id: string
   seq: number
   commitOid: string | null
-  cfVersionId: string | null
   rollbackAvailable: boolean
   config: unknown
   actor: string
+  byYou: boolean
   url: string | null
   kind: 'deploy' | 'rollback'
   createdAt: string
@@ -117,6 +117,7 @@ export interface RemoteActivityEvent {
   subjectId: string | null
   summary: unknown
   actor: string
+  byYou: boolean
   createdAt: string
 }
 
@@ -155,7 +156,18 @@ export function repoApi(deployUrl: string, token: string, appId: string) {
   const call = async <T>(path: string, init?: RequestInit): Promise<T> => {
     // The bare-404 "wrong/old service" case (→ unrecognized_service) is handled
     // uniformly in apiFetch now, for every caller incl. rollback's direct endpoint.
-    return await apiFetch<T>(deployUrl, token, `${base}${path}`, init)
+    try {
+      return await apiFetch<T>(deployUrl, token, `${base}${path}`, init)
+    } catch (err) {
+      // Every repo JSON endpoint is gated by the same source-authority read.
+      // Translate that refusal here so `workspace list` and future commands
+      // cannot lose the app id while `refs` happens to retain it.
+      if (err instanceof ApiError && err.code === 'source_managed_by_github') {
+        const repository = err.details?.repository
+        if (typeof repository === 'string') throw githubSourceRefusal(appId, repository)
+      }
+      throw err
+    }
   }
   const post = <T>(path: string, body: unknown) =>
     call<T>(path, { method: 'POST', body: JSON.stringify(body) })
@@ -240,13 +252,6 @@ export function repoApi(deployUrl: string, token: string, appId: string) {
         return await getShape<RemoteRefsResult>('/refs', { refs: 'array', head: 'present' })
       } catch (err) {
         if (err instanceof ApiError && err.code === 'app_not_found') return null
-        // The cloud-repo read every source verb starts with, so this is where
-        // `pull`/`clone`/`workspace` all meet a GitHub-source app — translate
-        // once, into the same refusal `push` raises from its own /source read.
-        if (err instanceof ApiError && err.code === 'source_managed_by_github') {
-          const repository = err.details?.repository
-          if (typeof repository === 'string') throw githubSourceRefusal(appId, repository)
-        }
         throw err
       }
     },

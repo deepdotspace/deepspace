@@ -157,9 +157,10 @@ describe('blankSelectorRefusal (pre-auth blank deploy selector)', () => {
  * multi-hundred-KiB upload. They are answered by the pre-build `/source`
  * response, so the CLI settles them before `buildDeployBundle` runs.
  */
-describe('external git source is inferred, never registered', () => {
+describe('external git source is selected from first-release evidence', () => {
   // The `source_unclaimed` fork-in-the-road is gone: an unclaimed app whose
-  // checkout points at GitHub deploys as GitHub — no claim step, no git gates.
+  // checkout points at GitHub deploys as GitHub without a manual declaration
+  // or git gates; the successful first release latches that evidence.
   it('skips every git gate for an unclaimed app with a GitHub remote, even dirty', () => {
     const repo = mkdtempSync(join(tmpdir(), 'ds-deploy-inferred-'))
     try {
@@ -2233,8 +2234,8 @@ describe('shippedSourceEvidence — the deploy envelope names what authority shi
     expect(
       shippedSourceEvidence({ source: { provider: 'deepspace' }, observedRepository: null }),
     ).toEqual({ provider: 'deepspace' })
-    // Unclaimed with observed evidence: same shape, marked inferred so a
-    // consumer can tell a claim from a per-release observation.
+    // Unclaimed with observed evidence: same request shape, marked inferred
+    // because the server has not committed the first-release latch yet.
     expect(shippedSourceEvidence({ source: null, observedRepository: 'acme/y' })).toEqual({
       provider: 'github',
       repository: 'acme/y',

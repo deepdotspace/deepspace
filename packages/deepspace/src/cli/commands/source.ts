@@ -1,11 +1,10 @@
 /**
  * `deepspace app source` — report the app's source authority.
  *
- * Read-only: source is never registered or declared. An unclaimed app whose
- * checkout has a GitHub remote deploys as GitHub (the release ledger records
- * the observed repository per release); an app becomes DeepSpace-source by
- * publishing to it — the first `deepspace push` claims it — and that claim is
- * permanent. There is nothing to set here, so this command only answers.
+ * Read-only: source is never declared manually. The first source-producing
+ * action latches it permanently: a deploy from a checkout with a GitHub remote
+ * picks GitHub, while the first push or a deploy without one picks DeepSpace.
+ * There is nothing to set here, so this command only answers.
  */
 
 import { ensureToken } from '../auth'
@@ -19,12 +18,12 @@ import { deployBaseUrl } from '../lib/vc-remote'
 export default defineDeepspaceCommand({
   meta: {
     name: 'source',
-    description: 'Show the app’s source authority (inferred from use, never declared)',
+    description: 'Show the app’s permanent source authority (latched on first source use)',
   },
   args: {
     provider: {
       type: 'positional',
-      description: 'No longer accepted — source is inferred, not declared',
+      description: 'No longer accepted — source latches on first use, not by declaration',
       required: false,
     },
     app: {
@@ -40,7 +39,7 @@ export default defineDeepspaceCommand({
       // there is no declaration left to make, and the two ways an app gets a
       // source are both ordinary commands.
       throw new Refusal(
-        "Source is no longer declared — it latches at the app's first release, permanently: " +
+        "Source is no longer declared — it latches at the app's first source use, permanently: " +
           'a first deploy from a checkout with a GitHub remote fixes GitHub source, and a ' +
           'first `deepspace push` (or a first deploy without one) fixes DeepSpace source. ' +
           'This command only reports.',
@@ -57,7 +56,9 @@ export default defineDeepspaceCommand({
       if (appDir && !readAppId(appDir)) {
         if (!args.json) {
           console.log('App: not registered yet — it registers on first use (deploy, secrets, dev…)')
-          console.log('Source: unclaimed — a checkout with a GitHub remote deploys as GitHub; the first `deepspace push` claims DeepSpace source permanently.')
+          console.log(
+            'Source: unclaimed — first source use latches permanently: a deploy with a GitHub remote claims GitHub; a first push or deploy without one claims DeepSpace.',
+          )
         }
         return { data: { appId: null, source: null, revision: 0, registered: false } }
       }
@@ -87,7 +88,7 @@ function reportSource(appId: string, state: AppSourceState, json: boolean): void
     console.log('Source: DeepSpace')
   } else {
     console.log(
-      'Source: unclaimed — a checkout with a GitHub remote deploys as GitHub; the first `deepspace push` claims DeepSpace source permanently.',
+      'Source: unclaimed — first source use latches permanently: a deploy with a GitHub remote claims GitHub; a first push or deploy without one claims DeepSpace.',
     )
   }
   console.log(`Revision: ${state.revision}`)

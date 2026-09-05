@@ -104,6 +104,34 @@ describe('listWorkspaces reports a capped page', () => {
   })
 })
 
+describe('source-authority refusals', () => {
+  it('preserves the app id on workspace list just like every other repo read', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: 'Source is managed by GitHub',
+              code: 'source_managed_by_github',
+              repository: 'deepdotspace/example',
+            }),
+            { status: 409, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    )
+
+    const err = await api()
+      .listWorkspaces()
+      .then(() => null)
+      .catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Refusal)
+    expect(err).toEqual(
+      githubSourceRefusal('app_01ARZ3NDEKTSV4RRFFQ69G5FAV', 'deepdotspace/example'),
+    )
+  })
+})
+
 describe('repo-api shape guard', () => {
   const badShapes: Record<string, string> = {
     'empty object': '{}',
@@ -378,7 +406,10 @@ describe('the GitHub-source refusal is one refusal', () => {
       vi.fn(
         async () =>
           new Response(
-            JSON.stringify({ error: 'This app uses GitHub source.', code: 'source_managed_by_github' }),
+            JSON.stringify({
+              error: 'This app uses GitHub source.',
+              code: 'source_managed_by_github',
+            }),
             { status: 422, headers: { 'content-type': 'application/json' } },
           ),
       ),

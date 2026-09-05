@@ -151,7 +151,6 @@ export default defineDeepspaceCommand({
     let result: {
       success: boolean
       url?: string
-      versionId?: string
       rolledBackTo?: string
       releaseId?: string
       bundleRetained?: boolean
@@ -240,7 +239,6 @@ export default defineDeepspaceCommand({
         newReleaseId: result.releaseId ?? null,
         bundleRetained: result.bundleRetained ?? null,
         url: result.url ?? null,
-        versionId: result.versionId ?? null,
         wranglerEnv: wranglerEnv ?? null,
         // Always present, matching `deploy`: one field to branch on.
         serving,

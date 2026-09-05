@@ -12,6 +12,7 @@ const ev = (partial: Partial<RemoteActivityEvent>): RemoteActivityEvent => ({
   subjectId: null,
   summary: null,
   actor: 'u',
+  byYou: false,
   createdAt: '2026-07-24T00:00:00.000Z',
   ...partial,
 })
