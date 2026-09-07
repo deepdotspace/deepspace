@@ -1,5 +1,19 @@
 # create-deepspace
 
+## 0.32.1
+
+### Patch Changes
+
+- Require npm 11.6+ and check the selected npm before creating project files, avoiding older npm's peer-resolution crash. Keep dependency installation on the same npm executable that launched the scaffold, declare the npm requirement in generated apps, and keep install-failure advice on the app's selected package manager.
+
+  Fix creator typechecking for tests that import browser template code and run the creator's typecheck in CI.
+
+  Update sanitize-html to 2.17.7 to include the upstream SVG SMIL URI-list sanitization fix.
+
+- Fix Yarn 4 scaffolding by unpacking the creator's templates and configuring generated apps to use node_modules for build and CLI compatibility.
+
+  Declare the documents feature's Tiptap collaboration peer dependencies explicitly so Yarn installs can build the editor.
+
 ## 0.32.0
 
 ## 0.31.2

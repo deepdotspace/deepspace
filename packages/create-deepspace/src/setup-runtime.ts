@@ -11,7 +11,7 @@ import {
 import { join } from 'node:path'
 import * as p from '@clack/prompts'
 import spawn from 'cross-spawn'
-import { detectBun, resolveInstall } from './install-cmd'
+import { npmCommand, type InstallCommand } from './install-cmd'
 import type { PreparedProject, Progress } from './project-template'
 
 // This focused upstream installer intentionally floats: pinning it would make
@@ -46,10 +46,7 @@ export function agentSkillInstallerCommand(
     '--agent',
     'codex',
   ]
-  const npmExecPath = environment.npm_execpath
-  return npmExecPath && /(?:^|[/\\])npm-cli\.(?:c?js|mjs)$/i.test(npmExecPath)
-    ? { command: process.execPath, args: [npmExecPath, ...args] }
-    : { command: 'npm', args }
+  return npmCommand(args, environment)
 }
 
 export function createProgress(): Progress {
@@ -69,9 +66,10 @@ export function createProgress(): Progress {
 export async function completeProjectSetup(
   project: PreparedProject,
   progress: Progress,
+  install: InstallCommand,
 ): Promise<void> {
   await installAgentSkill(project.appDir, progress)
-  await installDependencies(project.appDir)
+  await installDependencies(project.appDir, install)
   // A scaffold comes out IDENTITY-LESS, always. `wrangler.toml` keeps the
   // `__APP_ID__` placeholder and the repo keeps its unborn HEAD; the first
   // verb that needs an id (deploy, dev, secrets…) mints one under the login
@@ -183,7 +181,7 @@ function lstatExists(path: string): boolean {
   }
 }
 
-async function installDependencies(appDir: string): Promise<void> {
+async function installDependencies(appDir: string, install: InstallCommand): Promise<void> {
   const sentinelDirectory = join(appDir, '.deepspace')
   mkdirSync(sentinelDirectory, { recursive: true })
   // A fresh attempt clears the previous failure sentinel — the same protocol
@@ -193,8 +191,8 @@ async function installDependencies(appDir: string): Promise<void> {
   const startedPath = join(sentinelDirectory, 'install.started')
   writeFileSync(startedPath, new Date().toISOString() + '\n')
 
-  const { cmd, args } = resolveInstall(detectBun(), process.env.npm_config_user_agent)
-  p.log.step(`Installing dependencies (${cmd} ${args.join(' ')})…`)
+  const { cmd, args, display } = install
+  p.log.step(`Installing dependencies (${display})…`)
   // The CLI reads install.started's AGE as the liveness signal (younger
   // than 6 minutes = a live install; there is no pid protocol). This
   // install has no hard timeout — a cold cache on a slow link can
@@ -229,11 +227,11 @@ async function installDependencies(appDir: string): Promise<void> {
   }
   if (result.error || result.status !== 0) {
     const message = result.error
-      ? `${cmd} ${args.join(' ')} failed to start: ${result.error.message}`
-      : `${cmd} ${args.join(' ')} exited with code ${result.status}`
+      ? `${display} failed to start: ${result.error.message}`
+      : `${display} exited with code ${result.status}`
     writeFileSync(join(sentinelDirectory, 'install.err'), message + '\n')
     p.log.error(
-      'Dependency install failed — run `npm install` (or `bun install`) in the app dir, then retry.',
+      `Dependency install failed — run \`${display}\` in the app dir, then retry.`,
     )
     throw new Error(message)
   } else {
@@ -268,9 +266,7 @@ export function installedSdkVersion(appDir: string): string | null {
  * out loud is WHOSE app it becomes — registration follows the login that
  * shell holds at the moment of first use, not the one that ran `npm create`.
  */
-export function nextStepsLines(
-  project: Pick<PreparedProject, 'appName' | 'isInPlace'>,
-): string[] {
+export function nextStepsLines(project: Pick<PreparedProject, 'appName' | 'isInPlace'>): string[] {
   return [
     ...(project.isInPlace ? [] : [`cd ${project.appName}`]),
     '# The first command that needs an app id registers this app to whichever',

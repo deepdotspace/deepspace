@@ -41,6 +41,7 @@ export { SESSION_COOKIE } from './shared/auth-session'
 // the browser integration client instead of maintaining a second decoder.
 export { normalizeApiError } from './shared/api-error'
 export type { ApiErrorIssue, NormalizedApiError } from './shared/api-error'
+export { BodyTooLargeError, readBoundedBodyText } from './shared/bounded-body'
 // `deepspace logs` wire DTO — the single source of truth shared with the CLI,
 // the dashboard, and the platform telemetry reader (deploy-worker).
 export * from './shared/log-events'

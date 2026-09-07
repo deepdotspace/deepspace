@@ -11,28 +11,32 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readCliInput } from './cli-input'
+import { checkedInstallCommand } from './install-cmd'
 import { DEFAULT_TEMPLATE, listTemplates, prepareProject } from './project-template'
 import { completeProjectSetup, createProgress } from './setup-runtime'
 
 const SOURCE_DIR = dirname(fileURLToPath(import.meta.url))
 
-function readCreatorVersion(): string {
-  const creatorPackage = JSON.parse(
-    readFileSync(join(SOURCE_DIR, '..', 'package.json'), 'utf-8'),
-  ) as { version: string }
-  return creatorPackage.version
+function readCreatorPackage(): { version: string; engines: { npm: string } } {
+  return JSON.parse(readFileSync(join(SOURCE_DIR, '..', 'package.json'), 'utf-8'))
 }
 
 async function main(): Promise<void> {
+  const creator = readCreatorPackage()
   const input = await readCliInput(
     process.argv,
-    readCreatorVersion,
+    () => creator.version,
     listTemplates,
     DEFAULT_TEMPLATE,
   )
+  const install = checkedInstallCommand(creator.engines.npm)
+  if (!install.ok) {
+    console.error(install.error)
+    process.exit(1)
+  }
   const progress = createProgress()
-  const project = prepareProject(input, readCreatorVersion(), progress)
-  await completeProjectSetup(project, progress)
+  const project = prepareProject(input, creator.version, progress)
+  await completeProjectSetup(project, progress, install.install)
 }
 
 main().catch((error) => {

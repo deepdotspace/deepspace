@@ -195,6 +195,11 @@ USAGE
   npm create deepspace@latest <app-name>
   npx create-deepspace <app-name> [options]
 
+REQUIREMENTS
+  Node 22.15+, 24, or 26. When using npm, version 11.6+ is required.
+  Older npm versions can crash while resolving the template's peer dependencies.
+  pnpm, yarn, and bun keep their own dependency installers.
+
 ARGUMENTS
   <app-name>          Lowercase name (a–z, 0–9, single dashes; 2–63 chars).
                       Use "." to scaffold into the current directory.

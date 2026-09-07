@@ -1,11 +1,13 @@
 {
   "name": "create-deepspace",
-  "version": "0.32.0",
+  "version": "0.32.1",
   "engines": {
-    "node": ">=22.15.0 <23 || >=24 <25 || >=26 <27"
+    "node": ">=22.15.0 <23 || >=24 <25 || >=26 <27",
+    "npm": ">=11.6.0"
   },
   "description": "Create a new DeepSpace app",
   "type": "module",
+  "preferUnplugged": true,
   "bin": {
     "create-deepspace": "dist/index.js"
   },
@@ -16,16 +18,19 @@
   ],
   "scripts": {
     "build": "tsup",
+    "type-check": "tsc --noEmit",
     "test": "vitest run",
     "test:in-place": "pnpm build && bash scripts/test-in-place.sh",
     "prepublishOnly": "pnpm build"
   },
   "dependencies": {
     "@clack/prompts": "^1.2.0",
-    "cross-spawn": "^7.0.6"
+    "cross-spawn": "^7.0.6",
+    "semver": "^7.7.4"
   },
   "devDependencies": {
     "@types/cross-spawn": "^6.0.6",
+    "@types/semver": "^7.8.0",
     "tsup": "^8.3.0",
     "typescript": "^5.7.0",
     "vitest": "^4.1.0"
