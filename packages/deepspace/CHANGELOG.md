@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.33.0
+
+### Minor Changes
+
+- Connect domains registered elsewhere with `app domain attach --external` and `app domain verify`, including caller-bound DNS ownership checks, delegated certificate renewal, and registrar-aware status and detach commands.
+
 ## 0.32.1
 
 ### Patch Changes

@@ -14,7 +14,8 @@
  *   buy <domain>              — buy a domain via Stripe Checkout (browser)
  *   list                      — list domains you own
  *   status <domain>           — detail view for one domain
- *   attach <domain>           — re-point a domain at a different app
+ *   attach <domain>           — attach a domain (--external when bought elsewhere)
+ *   verify <domain>           — verify external DNS and activate hosting
  *   detach <domain>           — stop routing the domain (keeps registration)
  *   renew <domain> --auto X   — toggle auto-renew on/off at the registrar
  *
@@ -57,6 +58,8 @@ interface DomainPurchase {
   chargedCents: number
   autoRenew: boolean
   registrar: string
+  renewalManagedExternally?: boolean
+  dnsRecords?: Array<{ type: string; name: string; value: string; purpose: string }>
 }
 
 const api = <T>(token: string, path: string, init?: RequestInit): Promise<T> =>
@@ -290,7 +293,7 @@ const list = defineDeepspaceCommand({
       )
       for (const d of result.domains) {
         console.log(
-          `${d.domain.padEnd(35)} ${d.appId.padEnd(20)} ${d.status.padEnd(20)} ${fmtDate(d.expiresAt).padEnd(12)} ${d.autoRenew ? 'on' : 'off'}`,
+          `${d.domain.padEnd(35)} ${d.appId.padEnd(20)} ${d.status.padEnd(20)} ${fmtDate(d.expiresAt).padEnd(12)} ${d.registrar === 'external' ? 'external' : d.autoRenew ? 'on' : 'off'}`,
         )
       }
     }
@@ -329,10 +332,15 @@ const status = defineDeepspaceCommand({
       )
       console.log(`Attached app:  ${found.appId}`)
       console.log(`Registrar:     ${found.registrar}`)
-      console.log(`Registered:    ${fmtDate(found.registeredAt)}`)
-      console.log(`Expires:       ${fmtDate(found.expiresAt)}`)
-      console.log(`Auto-renew:    ${found.autoRenew ? 'on' : 'off'}`)
-      console.log(`Charged:       ${fmtCents(found.chargedCents)}/yr`)
+      if (found.registrar === 'external') {
+        console.log('Renewal:       Managed at your registrar')
+        printExternalDomain(found)
+      } else {
+        console.log(`Registered:    ${fmtDate(found.registeredAt)}`)
+        console.log(`Expires:       ${fmtDate(found.expiresAt)}`)
+        console.log(`Auto-renew:    ${found.autoRenew ? 'on' : 'off'}`)
+        console.log(`Charged:       ${fmtCents(found.chargedCents)}/yr`)
+      }
     }
     return { data: scrubInternal({ ...found }) }
   },
@@ -342,21 +350,115 @@ const status = defineDeepspaceCommand({
 // attach
 // ============================================================================
 
-const attach = defineDeepspaceCommand({
-  meta: { name: 'attach', description: 'Re-point a domain at a different app' },
+function printExternalDomain(domain: DomainPurchase) {
+  console.log(`${domain.domain}: ${domain.status}`)
+  for (const record of domain.dnsRecords ?? []) {
+    console.log(`${record.type.padEnd(5)} ${record.name} → ${record.value} (${record.purpose})`)
+  }
+  if (domain.status !== 'active')
+    console.log(
+      'Add these DNS records at your registrar, then run the verification command below. Keep certificate CNAME records for automatic renewal.',
+    )
+}
+
+const verify = defineDeepspaceCommand({
+  meta: {
+    name: 'verify',
+    description: 'Verify DNS ownership and activate an externally registered domain',
+  },
   args: {
-    domain: { type: 'positional', description: 'Domain to re-point', required: true },
-    app: { type: 'string', description: 'Target app id or live name (defaults to ./wrangler.toml)' },
+    domain: { type: 'positional', description: 'External domain', required: true },
+    app: {
+      type: 'string',
+      description: 'Target app id or live name (defaults to ./wrangler.toml)',
+    },
+  },
+  async run({ args }) {
+    const token = await ensureToken()
+    const appId = await resolveAppTarget(DEPLOY_URL, token, args.app as string | undefined)
+    const { domain } = await api<{ domain: DomainPurchase }>(
+      token,
+      '/api/domains/external/verify',
+      {
+        method: 'POST',
+        body: JSON.stringify({ domain: String(args.domain), appId }),
+      },
+    )
+    if (!args.json) printExternalDomain(domain)
+    return {
+      data: { ...domain },
+      action:
+        domain.status === 'active'
+          ? undefined
+          : cliAction('deepspace', 'app', 'domain', 'verify', domain.domain, '--app', appId),
+    }
+  },
+})
+
+const attach = defineDeepspaceCommand({
+  meta: {
+    name: 'attach',
+    description: 'Attach a domain; use --external for a domain bought elsewhere',
+  },
+  args: {
+    domain: { type: 'positional', description: 'Domain to attach', required: true },
+    external: {
+      type: 'boolean',
+      description: 'Connect a domain registered elsewhere without buying or transferring it',
+    },
+    app: {
+      type: 'string',
+      description: 'Target app id or live name (defaults to ./wrangler.toml)',
+    },
   },
   async run({ args }) {
     const domain = String(args.domain)
     const token = await ensureToken()
-    const targetAppId = await resolveAppTarget(
-      DEPLOY_URL,
-      token,
-      args.app as string | undefined,
-    )
+    const targetAppId = await resolveAppTarget(DEPLOY_URL, token, args.app as string | undefined)
+    if (args.external) {
+      const result = await api<{ domain: DomainPurchase }>(token, '/api/domains/external', {
+        method: 'POST',
+        body: JSON.stringify({ domain, appId: targetAppId }),
+      })
+      if (!args.json) printExternalDomain(result.domain)
+      return {
+        data: { ...result.domain },
+        action: cliAction(
+          'deepspace',
+          'app',
+          'domain',
+          'verify',
+          result.domain.domain,
+          '--app',
+          targetAppId,
+        ),
+      }
+    }
     const found = await requireDomain(token, domain)
+    if (found.registrar === 'external') {
+      if (found.appId !== targetAppId)
+        throw new Refusal(
+          'Detach the external domain before connecting it to another app',
+          'external_domain_attached',
+        )
+      const { domain: result } = await api<{ domain: DomainPurchase }>(
+        token,
+        '/api/domains/external/verify',
+        {
+          method: 'POST',
+          body: JSON.stringify({ domain, appId: targetAppId }),
+        },
+      )
+      if (!args.json) printExternalDomain(result)
+      return {
+        data: { ...result },
+        action:
+          result.status === 'active'
+            ? undefined
+            : cliAction('deepspace', 'app', 'domain', 'verify', domain, '--app', targetAppId),
+      }
+    }
+
     const result = await api<{ success: boolean; appId: string }>(
       token,
       `/api/domains/${found.id}/reattach`,
@@ -398,7 +500,9 @@ const detach = defineDeepspaceCommand({
     await api(token, `/api/domains/${found.id}`, { method: 'DELETE' })
     if (!args.json) {
       console.log(
-        `✓ ${domain} detached. Use \`deepspace app domain attach\` to re-route, or \`renew --auto off\` to stop auto-renewal.`,
+        found.registrar === 'external'
+          ? `✓ ${domain} detached. Remove its DeepSpace DNS records at your registrar; registration and renewal are unchanged.`
+          : `✓ ${domain} detached. Use \`deepspace app domain attach\` to re-route, or \`renew --auto off\` to stop auto-renewal.`,
       )
     }
     return { data: { domain, detached: true } }
@@ -422,6 +526,11 @@ const renew = defineDeepspaceCommand({
     }
     const token = await ensureToken()
     const found = await requireDomain(token, domain)
+    if (found.registrar === 'external')
+      throw new Refusal(
+        'Manage renewal at the registrar where you bought this domain',
+        'external_renewal',
+      )
     const enabled = args.auto === 'on'
     await api(token, `/api/domains/${found.id}/auto-renew`, {
       method: 'POST',
@@ -442,5 +551,5 @@ const renew = defineDeepspaceCommand({
 //
 export default defineCommand({
   meta: { name: 'domain', description: 'Buy and manage custom domains' },
-  subCommands: { search, buy, list, status, attach, detach, renew },
+  subCommands: { search, buy, list, status, attach, verify, detach, renew },
 })
