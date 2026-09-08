@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.33.1
+
+### Patch Changes
+
+- Use automatic HTTP certificate validation for newly attached external domains to avoid conflicts with existing Cloudflare certificates, and recover duplicate custom hostname creation using the documented provider error code.
+
 ## 0.33.0
 
 ### Minor Changes
