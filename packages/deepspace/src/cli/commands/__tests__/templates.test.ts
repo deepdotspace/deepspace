@@ -94,6 +94,12 @@ describe('assembled templates', () => {
           'package.json',
           'worker.ts',
           'src/main.tsx',
+          'src/seo.ts',
+          'src/components/Seo.tsx',
+          'src/prerender-entry.tsx',
+          'src/prerender-entry.test.tsx',
+          'prerender.ts',
+          'public/robots.txt',
           'src/server/action-routes.ts',
           'src/server/http-routes.ts',
           'src/server/realtime-routes.ts',
@@ -134,6 +140,15 @@ describe('assembled templates', () => {
         )
         expect(httpRoutes).toContain("headers.delete('x-user-id')")
         expect(httpRoutes).toContain("headers.delete('x-app-identity-token')")
+      })
+
+      it('renders <Seo> first on the public landing, fed from src/seo.ts', () => {
+        const app = makeAssembled(overlay)
+        const landing = readFileSync(join(app, 'src/pages/index.tsx'), 'utf-8')
+        expect(landing).toContain("import { Seo } from '../components/Seo'")
+        expect(landing).toContain("import { seo } from '../seo'")
+        expect(landing.indexOf('<Seo {...seo} path="/" />')).toBeGreaterThan(-1)
+        expect(landing.indexOf('<Seo ')).toBeLessThan(landing.indexOf('data-testid="static-landing"'))
       })
 
       it('has no dangling relative or @/ imports', () => {

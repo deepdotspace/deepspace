@@ -1,4 +1,5 @@
 import type { Context, Hono } from 'hono'
+import { createUIMessageStreamResponse, toUIMessageStream } from 'ai'
 import { resolveDeepSpaceAgentModel } from '../../shared/ai-models'
 import type { DeepSpaceAIEnv } from '../../server/utils/ai'
 import { deepSpaceAgentErrorSummary, streamDeepSpaceAgent } from '../../server/utils/agent'
@@ -139,7 +140,7 @@ export function registerDocumentationAssistantRoutes<Env extends DocumentationAs
         profile: 'documentation',
         modelId: selectedModel.modelId,
         ...(authToken ? { authToken } : {}),
-        system: buildDocumentationAssistantPrompt(manifest.name || c.env.APP_NAME, route),
+        instructions: buildDocumentationAssistantPrompt(manifest.name || c.env.APP_NAME, route),
         messages: [...history, { role: 'user' as const, content: question }],
         tools: buildDocumentationAssistantTools(corpus, publicBasePath),
         abortSignal: c.req.raw.signal,
@@ -156,14 +157,17 @@ export function registerDocumentationAssistantRoutes<Env extends DocumentationAs
       return c.json({ error: 'Documentation assistant is not configured' }, 503)
     }
 
-    return result.toUIMessageStreamResponse({
-      sendReasoning: false,
-      onError: (error) => {
-        console.error(
-          `[documentation-assistant] response error: ${deepSpaceAgentErrorSummary(error, diagnosticContext)}`,
-        )
-        return 'The documentation assistant could not complete this response.'
-      },
+    return createUIMessageStreamResponse({
+      stream: toUIMessageStream({
+        stream: result.stream,
+        sendReasoning: false,
+        onError: (error) => {
+          console.error(
+            `[documentation-assistant] response error: ${deepSpaceAgentErrorSummary(error, diagnosticContext)}`,
+          )
+          return 'The documentation assistant could not complete this response.'
+        },
+      }),
     })
   })
 }

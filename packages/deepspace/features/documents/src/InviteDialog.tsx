@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { RecordData } from 'deepspace'
-import { useMutations, useQuery, useUser } from 'deepspace'
+import { useMutations, useUser, useUserLookup } from 'deepspace'
 import { Mail, ShieldCheck, UserMinus, Users } from 'lucide-react'
 import { Modal, useToast } from '@/components/ui'
 import {
@@ -8,10 +8,15 @@ import {
   type DocumentsDocumentFields,
   type InviteAclDiff,
 } from './documents-library-types'
+import { findDocumentsInvitee } from './documents-invitee-lookup'
+import type { DocumentsInviteeLookup } from '@/actions/documents-find-invitee'
 
-interface UserFields {
+/** One row of "People with access", drawn from the roster every member receives. */
+interface PersonRow {
+  id: string
+  name: string
+  /** Only admins receive emails in the roster. */
   email?: string
-  name?: string
   imageUrl?: string
 }
 
@@ -46,14 +51,18 @@ function initialsFor(name: string): string {
 
 export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: InviteDialogProps) {
   const { user } = useUser()
-  const { records: users, status: usersStatus } = useQuery<UserFields>('users')
+  // The roster names everyone who has signed in to the app, projected to
+  // public identity for members. A plain `useQuery('users')` is self-only
+  // under the scaffold's `member: { read: 'own' }` policy, so it cannot name
+  // a collaborator — or resolve an email — for an ordinary owner.
+  const { getUser } = useUserLookup()
   const { putConfirmed, ready: documentsMutationsReady } =
     useMutations<DocumentsDocumentFields>('documents')
   const toast = useToast()
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<InviteRole>('editor')
   const [saving, setSaving] = useState(false)
-  const ready = usersStatus === 'ready' && documentsMutationsReady
+  const ready = documentsMutationsReady
 
   const collaborators = useMemo(
     () => parseDocumentsIdList(doc.data.collaborators),
@@ -61,17 +70,22 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
   )
   const editors = useMemo(() => parseDocumentsIdList(doc.data.editors), [doc.data.editors])
 
-  const ownerRecord = useMemo(
-    () => users.find((u) => u.recordId === doc.data.ownerId),
-    [doc.data.ownerId, users],
-  )
+  const ownerRecord = useMemo(() => getUser(doc.data.ownerId), [doc.data.ownerId, getUser])
 
-  const collaboratorRecords = useMemo(
+  // Every collaborator id stays listed even before the roster names it, so
+  // access can always be changed or removed.
+  const collaboratorRecords = useMemo<PersonRow[]>(
     () =>
-      collaborators
-        .map((id) => users.find((u) => u.recordId === id))
-        .filter((u): u is RecordData<UserFields> => Boolean(u)),
-    [collaborators, users],
+      collaborators.map((id) => {
+        const u = getUser(id)
+        return {
+          id,
+          name: u?.name?.trim() || 'Collaborator',
+          email: u?.email,
+          imageUrl: u?.imageUrl,
+        }
+      }),
+    [collaborators, getUser],
   )
 
   if (!isOwner) return null
@@ -122,30 +136,41 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
 
   const addInvite = async () => {
     const normalized = email.trim().toLowerCase()
-    if (!normalized) return
+    if (!normalized || !ready) return
 
-    const target = users.find((u) => u.data.email?.trim().toLowerCase() === normalized)
-    if (!target) {
+    // The email resolves server-side (owner-only action): members cannot read
+    // other users' rows, and the roster carries no emails for them.
+    let target: DocumentsInviteeLookup
+    setSaving(true)
+    try {
+      target = await findDocumentsInvitee(doc.recordId, normalized)
+    } catch (err) {
+      toast.error('Could not look up that email', err instanceof Error ? err.message : undefined)
+      return
+    } finally {
+      setSaving(false)
+    }
+    if (!target.found) {
       toast.error(
         'User not found',
         'Ask them to sign in to this app once, then invite the same email again.',
       )
       return
     }
-    if (target.recordId === doc.data.ownerId || target.recordId === user?.id) {
+    if (target.userId === doc.data.ownerId || target.userId === user?.id) {
       toast.info('Already has access', 'That user is the document owner.')
       return
     }
-    if (collaborators.includes(target.recordId)) {
-      toast.info('Already invited', `${target.data.email ?? normalized} already has access.`)
+    if (collaborators.includes(target.userId)) {
+      toast.info('Already invited', `${normalized} already has access.`)
       return
     }
 
-    const nextCollaborators = [...collaborators, target.recordId]
-    const nextEditors = role === 'editor' ? [...editors, target.recordId] : editors
+    const nextCollaborators = [...collaborators, target.userId]
+    const nextEditors = role === 'editor' ? [...editors, target.userId] : editors
     if (!(await saveAccess(nextCollaborators, nextEditors))) return
     setEmail('')
-    toast.success('Invite added', `${target.data.email ?? normalized} now has ${role} access.`)
+    toast.success('Invite added', `${normalized} now has ${role} access.`)
   }
 
   const setCollaboratorRole = async (userId: string, nextRole: InviteRole) => {
@@ -163,12 +188,7 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
     )
   }
 
-  const ownerName =
-    ownerRecord?.data.name?.trim() ||
-    ownerRecord?.data.email?.trim() ||
-    user?.name ||
-    user?.email ||
-    'Owner'
+  const ownerName = ownerRecord?.name?.trim() || user?.name || user?.email || 'Owner'
 
   return (
     <Modal
@@ -216,6 +236,10 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
             <select
               value={role}
               onChange={(e) => setRole(e.target.value as InviteRole)}
+              // addInvite grants the role captured when Add was pressed; lock
+              // the select while the lookup and save run so the UI cannot show
+              // one role and grant another.
+              disabled={!ready || saving}
               className="h-10 rounded-lg border bg-transparent px-3 text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
               style={{ borderColor: 'var(--documents-el-line)', color: 'var(--documents-el-text)' }}
             >
@@ -251,7 +275,7 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm font-medium">{ownerName}</div>
                 <div className="truncate text-xs" style={{ color: 'var(--documents-el-muted)' }}>
-                  {ownerRecord?.data.email ?? user?.email ?? 'Owner'}
+                  {ownerRecord?.email ?? user?.email ?? 'Owner'}
                 </div>
               </div>
               <span className="inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium">
@@ -261,39 +285,36 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
             </div>
 
             {collaboratorRecords.map((u) => {
-              const name = u.data.name?.trim() || u.data.email?.trim() || 'Collaborator'
-              const userRole: InviteRole = editors.includes(u.recordId) ? 'editor' : 'viewer'
+              const userRole: InviteRole = editors.includes(u.id) ? 'editor' : 'viewer'
               return (
                 <div
-                  key={u.recordId}
+                  key={u.id}
                   className="flex items-center gap-3 rounded-xl border p-3"
                   style={{ borderColor: 'var(--documents-el-line)' }}
                 >
-                  {u.data.imageUrl ? (
+                  {u.imageUrl ? (
                     <img
-                      src={u.data.imageUrl}
+                      src={u.imageUrl}
                       alt=""
                       className="h-9 w-9 shrink-0 rounded-full object-cover"
                     />
                   ) : (
                     <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-black/5 text-xs font-bold dark:bg-white/10">
-                      {initialsFor(name)}
+                      {initialsFor(u.name)}
                     </div>
                   )}
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium">{name}</div>
+                    <div className="truncate text-sm font-medium">{u.name}</div>
                     <div
                       className="truncate text-xs"
                       style={{ color: 'var(--documents-el-muted)' }}
                     >
-                      {u.data.email ?? 'No email'}
+                      {u.email ?? (userRole === 'editor' ? 'Can edit' : 'Can view')}
                     </div>
                   </div>
                   <select
                     value={userRole}
-                    onChange={(e) =>
-                      void setCollaboratorRole(u.recordId, e.target.value as InviteRole)
-                    }
+                    onChange={(e) => void setCollaboratorRole(u.id, e.target.value as InviteRole)}
                     disabled={!ready || saving}
                     className="h-8 rounded-lg border bg-transparent px-2 text-xs font-medium outline-none"
                     style={{
@@ -306,7 +327,7 @@ export function InviteDialog({ open, onOpenChange, doc, isOwner, onAclChange }: 
                   </select>
                   <button
                     type="button"
-                    onClick={() => void removeCollaborator(u.recordId)}
+                    onClick={() => void removeCollaborator(u.id)}
                     disabled={!ready || saving}
                     className="rounded-lg p-1.5 text-red-600 transition-colors hover:bg-red-500/10 disabled:opacity-50"
                     title="Remove access"

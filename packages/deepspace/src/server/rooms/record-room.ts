@@ -271,12 +271,14 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
         this.schemaRegistry,
       )
       const regMs = Date.now() - regStart
-      // A first registration (or a changed name/avatar/role) changes what
-      // every other tab's roster should show — push it, or peers who joined
-      // after a tab connected render as "Unknown" there until it reconnects.
+      // A first registration (or a changed name/avatar/role — or email, which
+      // admin roster rows carry) changes what every other tab's roster should
+      // show — push it, or peers who joined after a tab connected render as
+      // "Unknown" there until it reconnects.
       if (
         !before ||
         before.name !== registeredUser.name ||
+        before.email !== registeredUser.email ||
         before.imageUrl !== registeredUser.imageUrl ||
         before.role !== registeredUser.role
       ) {
@@ -436,12 +438,8 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
         break
 
       case MSG.USER_UPDATE:
-        handleUserUpdate(
-          recordCtx,
-          ws,
-          attachment,
-          payload as { name?: string; email?: string; imageUrl?: string },
-        )
+        // The heartbeat carries no fields the server may take (see handleUserUpdate).
+        handleUserUpdate(recordCtx, ws, attachment)
         break
 
       case MSG.SET_ROLE:

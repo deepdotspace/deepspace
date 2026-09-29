@@ -155,7 +155,7 @@ export function ChatDock() {
       {/* Mobile: right-side sheet over a backdrop. Like the desktop dock, the
           sheet stays MOUNTED while closed (invisible, inert) — unmounting on
           close would abort an in-flight assistant turn and, since the server
-          persists only in onFinish, permanently lose the pending message.
+          persists a turn only once a step completes, lose the pending message.
           (Crossing the md breakpoint still swaps containers and remounts —
           rare enough that we accept it rather than merge the two layouts.) */}
       {!isDesktop && (

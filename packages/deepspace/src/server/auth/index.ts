@@ -10,4 +10,9 @@ export {
   isTestAccountClaims,
   isTestAccountTier,
 } from './testAccounts'
-export { createDeepSpaceAuth, type DeepSpaceAuth, type DeepSpaceAuthConfig } from './betterAuth'
+export {
+  createDeepSpaceAuth,
+  type DeepSpaceAuth,
+  type DeepSpaceAuthConfig,
+  type DeepSpaceUserCreateContext,
+} from './betterAuth'

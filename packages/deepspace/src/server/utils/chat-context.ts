@@ -559,7 +559,7 @@ export function makeDefaultSummarizer(
       // 2500 gives the model room to finish a sentence after hitting the
       // "under 2000 tokens" soft limit in the prompt.
       maxOutputTokens: 2500,
-      system: SUMMARIZER_SYSTEM_PROMPT,
+      instructions: SUMMARIZER_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: formatTranscript(messages) }],
     })
     return text

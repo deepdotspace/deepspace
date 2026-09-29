@@ -4,6 +4,7 @@ import { APP_ID_ADOPTION_EDITS, APP_ID_ADOPTION_TOGETHER } from '../../../build/
 import {
   ACTION_ROUTES_BEARER_GUARD_MIGRATION_ID,
   ACTION_TOOLS_DELETE_WHERE_MIGRATION_ID,
+  AI_SDK_7_MIGRATION_ID,
   BUILD_INJECTED_APP_ID_MIGRATION_ID,
   FILES_SESSION_COOKIE_READS_MIGRATION_ID,
   SECURE_ROOM_BOUNDARIES_MIGRATION_ID,
@@ -67,6 +68,13 @@ export const APP_MIGRATION_GUIDANCE: readonly AppMigrationGuidance[] = [
     files: ['the app-owned HTTP route file that proxies /api/files/*'],
     guidance:
       "In the /api/files/* proxy only, replace `const auth = await resolveAuth(c.req.raw, c.env)` with `const auth = (await resolveAuth(c.req.raw, c.env)) ?? (await resolveSessionReadAuth(c.req.raw, c.env))`, importing resolveSessionReadAuth from 'deepspace/worker'. It identifies same-origin GET/HEAD by the app-origin session cookie and returns null for everything else. Do not add it to resolveAuth, which also gates writes. In the same route, skip the JSON URL rewrite for HEAD: change `if (contentType.includes('application/json'))` to `if (contentType.includes('application/json') && c.req.method !== 'HEAD')`, because a HEAD answer carries the content-type but no body and parsing it would turn every failed media probe into a 500.",
+  },
+  {
+    id: AI_SDK_7_MIGRATION_ID,
+    description: "Move the app's own AI code to AI SDK 7",
+    files: ['src/ai/chat-routes.ts', 'every other file importing from "ai"'],
+    guidance:
+      "Run `npx @ai-sdk/codemod v7 src` and review its diff: it renames `system` to `instructions` in ANY object, including non-AI-SDK request bodies, so revert those. Then by hand: in the chat route's `onEnd` (formerly `onFinish`), persist `responseMessages` — `response.messages` now holds only the final step, which drops earlier tool calls — and since `onEnd` no longer runs after an abort, also persist in `onAbort({ steps })` from the completed steps' `response.messages`. Replace `result.toUIMessageStreamResponse(options)` with `createUIMessageStreamResponse({ headers, stream: toUIMessageStream({ stream: result.stream, ...options }) })` imported from 'ai'. A tool's `execute` options now include `context`. `role: 'system'` messages inside `messages` are rejected unless the call sets `allowSystemInMessages: true`.",
   },
 ]
 

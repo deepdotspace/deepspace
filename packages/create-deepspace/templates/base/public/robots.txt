@@ -1,0 +1,40 @@
+# robots.txt — crawler policy for this app.
+#
+# Search engines and AI answer-engine crawlers are welcome on the public pages
+# (the top level of src/pages/). The build appends
+#   Sitemap: https://<your-origin>/sitemap.xml
+# because the origin is only known at build time; do not add that line here.
+# To keep the whole app out of search results and AI crawlers, set
+# `noindex: true` in src/seo.ts — the build then publishes "Disallow: /".
+
+User-agent: *
+Allow: /
+
+# Search engines
+User-agent: Googlebot
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+
+# AI answer engines / LLM crawlers
+User-agent: GPTBot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: CCBot
+Allow: /

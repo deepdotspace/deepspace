@@ -23,7 +23,7 @@ import { RecordProvider, RecordScope } from 'deepspace'
 import { AppSidebar, SidebarMobileHeader } from '../../components/sidebar/AppSidebar'
 import { ChatDock } from '../../components/shell/ChatDock'
 import { useToast } from '@/components/ui'
-import { SCOPE_ID } from '../../constants'
+import { APP_NAME, SCOPE_ID } from '../../constants'
 import { schemas } from '../../schemas'
 
 export default function AppLayout() {
@@ -32,6 +32,9 @@ export default function AppLayout() {
 
   return (
     <DeepSpaceAuthProvider>
+      {/* The prerendered landing owns the document <title> and React drops it
+          when <Seo> unmounts, so every route without <Seo> sets its own. */}
+      <title>{APP_NAME}</title>
       <AuthBoot>
         <div className="flex h-screen overflow-hidden bg-shell">
           <AppSidebar mobileOpen={mobileNavOpen} onMobileClose={closeMobileNav} />

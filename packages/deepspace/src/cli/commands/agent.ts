@@ -321,15 +321,43 @@ async function requestJson(
   }
 }
 
+/** Human-line rendering of an app's refusal `detail`. The `error` slug and the
+ *  prose fields read bare; every other field as `key: json` so a bare value
+ *  like `unknown` keeps its meaning. Bounded like `message` is, with the cut
+ *  marked so a truncated recovery instruction never reads as complete. */
+const MAX_DETAIL_TEXT = 2_000
+const DETAIL_PROSE_KEYS = new Set(['error', 'detail', 'guidance', 'message'])
+function describeDetail(detail: Record<string, unknown>): string {
+  const parts: string[] = []
+  for (const [key, value] of Object.entries(detail)) {
+    if (value === undefined || value === null || value === '') continue
+    const prose = typeof value === 'string' && DETAIL_PROSE_KEYS.has(key)
+    parts.push(prose ? value : `${key}: ${JSON.stringify(value)}`)
+  }
+  const text = parts.join(' ')
+  return text.length > MAX_DETAIL_TEXT ? `${text.slice(0, MAX_DETAIL_TEXT)}…` : text
+}
+
 function httpRefusal(response: { status: number; body: unknown }, tokens: string[]): Refusal {
   const server = isRecord(response.body) ? response.body : undefined
   const code = safeServerCode(server?.code)
-  const message =
+  const baseMessage =
     typeof server?.error === 'string' ? redact(server.error, tokens).slice(0, 500) : ''
+  // An app's structured refusal reason (the admin console attaches one to any
+  // refused call — which of two 409s this is, or a 503's retry guidance)
+  // travels with the refusal, redacted like any app-controlled value. It goes
+  // into the human line as well as the `--json` envelope: agents read text,
+  // and every fact the envelope carries must appear in the sentence too
+  // (docs/platform/cli-contract.md).
+  const redactedDetail = isRecord(server?.detail) ? redactValue(server.detail, tokens) : undefined
+  const detail = isRecord(redactedDetail) ? { extra: { detail: redactedDetail } } : {}
+  const detailText = isRecord(redactedDetail) ? describeDetail(redactedDetail) : ''
+  const message = detailText ? `${baseMessage} ${detailText}`.trim() : baseMessage
   if (response.status === 403) {
     return new Refusal(
       message || 'You are not allowed to use this app agent.',
       code ?? 'agent_forbidden',
+      detail,
     )
   }
   if (response.status === 404 && !server) {
@@ -348,6 +376,7 @@ function httpRefusal(response: { status: number; body: unknown }, tokens: string
   return new Refusal(
     message || `App agent request failed (${response.status}).`,
     code ?? (response.status === 404 ? 'agent_endpoint_not_found' : 'agent_request_failed'),
+    detail,
   )
 }
 

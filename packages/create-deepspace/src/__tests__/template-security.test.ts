@@ -143,6 +143,38 @@ describe('base scaffold route loading', () => {
     expect(entry).not.toContain("from '@generouted/react-router'")
   })
 
+  it('hydrates a prerendered page instead of repainting it', () => {
+    const entry = readFileSync(
+      fileURLToPath(new URL('../../templates/base/src/main.tsx', import.meta.url)),
+      'utf8',
+    )
+
+    // The scaffold's prerender.ts marks the route it wrote on #root; the mount code
+    // hydrates only that URL and renders every other route from scratch, and
+    // waits for the router's lazy module first so hydration sees the real page.
+    expect(entry).toContain('hydrateRoot(')
+    // A hydration mismatch repaints silently otherwise; the entry names it.
+    expect(entry).toContain('onRecoverableError(')
+    expect(entry).toContain('root.dataset.prerendered === window.location.pathname')
+    expect(entry).toContain('state.initialized')
+    // No SDK import here: the entry chunk stays free of the client library.
+    expect(entry).not.toContain("from 'deepspace'")
+  })
+
+  it('serves client routes the plain SPA shell before falling back to /', () => {
+    const routes = readFileSync(
+      fileURLToPath(new URL('../../templates/base/src/server/http-routes.ts', import.meta.url)),
+      'utf8',
+    )
+    // Once `/` is prerendered it is the landing page, not a shell. The
+    // fallback asks for the build's `_spa` shell first and only then for `/`,
+    // so a build without the plugin behaves exactly as before.
+    const shell = routes.indexOf('url.pathname = SPA_SHELL_PATH')
+    const root = routes.indexOf("url.pathname = '/'")
+    expect(shell).toBeGreaterThan(-1)
+    expect(root).toBeGreaterThan(shell)
+  })
+
   it('reloads only once when the initial lazy route fails twice', () => {
     const values = new Map<string, string>()
     const storage = {

@@ -140,7 +140,11 @@ export async function buildDeployBundle(options: {
         ...wranglerViteEnv(process.env, preparedWranglerConfig),
         // The Vite plugin's one documentation compile stamps release URLs.
         DEEPSPACE_DOCUMENTATION_BASE_URL: `https://${appName}.${appDomain}/docs`,
-      },
+        // The scaffold's build-time prerender (prerender.ts) builds canonical
+        // URLs and the sitemap on this, so a staging deploy resolves to
+        // spacestest.com instead of the wrangler name on app.space.
+        DEEPSPACE_SITE_ORIGIN: `https://${appName}.${appDomain}`,
+      } as unknown as NodeJS.ProcessEnv,
     })
   } catch (error: unknown) {
     spinner.stop('Build failed')

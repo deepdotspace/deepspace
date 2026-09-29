@@ -22,12 +22,17 @@ function makeAuth(
     user: { id: string; email: string; name: string },
     ctx: { request?: Request } | null,
   ) => Promise<void>,
+  options: Pick<
+    Parameters<typeof createDeepSpaceAuth>[0],
+    'beforeUserCreate' | 'userAdditionalFields'
+  > = {},
 ) {
   return createDeepSpaceAuth({
     database: fakeD1,
     baseURL: 'https://auth.test.deep.space',
     secret: 'test-secret-at-least-32-characters-long',
     ...(onUserCreated ? { onUserCreated } : {}),
+    ...options,
   })
 }
 
@@ -36,6 +41,11 @@ type AfterHook = (
   ctx: { request?: Request } | null,
 ) => Promise<void>
 
+type BeforeHook = (
+  user: { id: string; email: string; name: string },
+  ctx: { request?: Request } | null,
+) => Promise<unknown>
+
 function afterHookOf(auth: ReturnType<typeof makeAuth>): AfterHook | undefined {
   const options = auth.options as {
     databaseHooks?: { user?: { create?: { after?: AfterHook } } }
@@ -43,9 +53,60 @@ function afterHookOf(auth: ReturnType<typeof makeAuth>): AfterHook | undefined {
   return options.databaseHooks?.user?.create?.after
 }
 
+function beforeHookOf(auth: ReturnType<typeof makeAuth>): BeforeHook | undefined {
+  const options = auth.options as {
+    databaseHooks?: { user?: { create?: { before?: BeforeHook } } }
+  }
+  return options.databaseHooks?.user?.create?.before
+}
+
 describe('createDeepSpaceAuth onUserCreated', () => {
   it('wires no databaseHooks when onUserCreated is absent', () => {
     expect(afterHookOf(makeAuth())).toBeUndefined()
+  })
+
+  it('declares optional server-owned fields and wires a before-create callback', async () => {
+    const beforeUserCreate = vi.fn().mockResolvedValue({
+      data: { signupReferral: '{"v":1}' },
+    })
+    const auth = makeAuth(undefined, {
+      userAdditionalFields: {
+        signupReferral: {
+          type: 'string',
+          required: false,
+          input: false,
+          returned: false,
+          fieldName: 'signup_referral',
+        },
+      },
+      beforeUserCreate,
+    })
+
+    expect(auth.options.user?.additionalFields?.signupReferral).toMatchObject({
+      input: false,
+      returned: false,
+      fieldName: 'signup_referral',
+    })
+    const before = beforeHookOf(auth)
+    const user = { id: 'user_ref', email: 'ref@example.com', name: 'Ref' }
+    // A direct unit invocation has no Better Auth request-local state. The
+    // auth-worker integration suite exercises this wrapper inside the real
+    // OAuth callback and verifies the decrypted state reaches the callback.
+    await expect(before!(user, null)).resolves.toEqual({
+      data: { signupReferral: '{"v":1}' },
+    })
+    expect(beforeUserCreate).toHaveBeenCalledWith(user, null)
+  })
+
+  it('keeps before-create failures fatal while the after observer remains isolated', async () => {
+    const beforeUserCreate = vi.fn().mockRejectedValue(new Error('invalid referral context'))
+    const onUserCreated = vi.fn().mockResolvedValue(undefined)
+    const auth = makeAuth(onUserCreated, { beforeUserCreate })
+
+    await expect(
+      beforeHookOf(auth)!({ id: 'user_bad', email: 'bad@example.com', name: 'Bad' }, null),
+    ).rejects.toThrow('invalid referral context')
+    expect(afterHookOf(auth)).toBeTypeOf('function')
   })
 
   it('invokes the callback with the created user and endpoint context', async () => {

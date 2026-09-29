@@ -1,5 +1,19 @@
 # create-deepspace
 
+## 0.34.0
+
+### Minor Changes
+
+- Give Claude Anthropic's hosted code-execution sandbox through the DeepSpace proxy, so an agent can read, edit and create real files (Word, Excel, PowerPoint, PDF, charts). New `deepspace/worker` helpers: `codeExecutionTool()`, `callableFromSandbox(tool)` (sandbox code may call the app's own tool), `sandboxUpload(file)`, `reuseSandbox(containerId)`, `forwardSandboxContainer`, `sandboxOutputs(steps)`, and `sandboxFiles(env)` for upload/download/list/delete. Files and containers are private to the calling user by default, or shared across the app with `createDeepSpaceAI(env, 'anthropic', { sandboxScope: 'app' })`; another app can never reach them. `createDeepSpaceAI` now sends the app's identity with every call.
+
+  **Breaking:** the SDK moves to AI SDK 7 (`ai` 7.0.107, `@ai-sdk/anthropic` 4, `@ai-sdk/openai` 4, `@ai-sdk/openai-compatible` 3). Apps must bump their own `ai` to the same version and migrate their AI code; `deepspace app update` lists the steps (migration `2026-09-ai-sdk-7`).
+
+- SEO-ready scaffolds. New apps prerender their public pages to static HTML at `vite build` — the same build-time approach deep.space uses, now shipped as app code: `prerender.ts` at the app root and an explicit page list in `src/prerender-entry.tsx`. The build stamps each page's title, description, canonical, and Open Graph tags from `src/seo.ts`, writes `sitemap.xml` and a plain `_spa.html` shell for client routes, and appends the `Sitemap:` line to `public/robots.txt` (or publishes `Disallow: /` when `noindex` is set), so crawlers that do not execute JavaScript (Bing, link unfurlers, AI answer engines) read real content. `src/main.tsx` hydrates a prerendered page instead of repainting it, and the worker's client-route fallback serves the shell before `/`. The `<Seo>` head component ships in the app as well (`src/components/Seo.tsx`), keeping the SDK client chunk out of the landing bundle. `deepspace deploy` passes `DEEPSPACE_SITE_ORIGIN` to the build so staging resolves canonical URLs to `spacestest.com`. Existing apps are unchanged: the prerender is scaffold code, copied into new apps only, and the SDK build path is untouched.
+
+### Patch Changes
+
+- Raise two dependency floors for the September 2026 security advisories. hono moves to ^4.13.7 in the SDK's dependencies and the scaffold template: 4.13.5 is the first release fixing query parsing past the URL fragment, `toSSG()` path containment, and unbounded dot-notation nesting in `parseBody()`, and 4.13.7 adds the `hono/jsx` escaping fix. smol-toml moves to ^1.7.1 in the SDK's dependencies, the first release fixing the `parse()` infinite loop on a trailing comment inside an array or inline table (GHSA-7w5x-hrqm-74c2); the CLI parses `wrangler.toml` with it.
+
 ## 0.33.1
 
 ## 0.33.0

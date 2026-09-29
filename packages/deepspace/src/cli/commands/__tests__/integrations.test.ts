@@ -45,6 +45,10 @@ describe('billingUnit (INT-1)', () => {
 })
 
 describe('priceLabel', () => {
+  it('discloses platform markup for metered calls', () => {
+    expect(priceLabel({ model: 'per_actual_cost', baseCost: null, currency: 'USD' }))
+      .toBe("metered at the provider's actual cost plus platform markup")
+  })
   it('calls an input-dependent figure a base rate, not a floor', () => {
     expect(
       priceLabel({
@@ -53,7 +57,26 @@ describe('priceLabel', () => {
         currency: 'USD',
         variesWithInput: true,
       }),
-    ).toBe('base $0.000052 per token (some inputs cost less or more)')
+    ).toBe('base $52 per 1M tokens (some inputs cost less or more)')
+  })
+  it('keeps tiny per-token prices readable', () => {
+    expect(priceLabel({
+      model: 'per_token', baseCost: 0.00000005733, currency: 'USD',
+    })).toBe('$0.05733 per 1M tokens')
+  })
+  it('shows both tier prices when the free tier costs more', () => {
+    expect(priceLabel({
+      model: 'per_actual_cost', baseCost: null, currency: 'USD',
+      freeTierPriceDiffers: true,
+    })).toBe("metered at the provider's actual cost plus platform markup; free-tier pricing differs")
+    expect(priceLabel({
+      model: 'per_request', baseCost: 0.4, paidBaseCost: 0.13, currency: 'USD',
+      freeTierPriceDiffers: true,
+    })).toBe('paid tier: $0.13 per request; free tier: $0.4 per request')
+    expect(priceLabel({
+      model: 'per_request', baseCost: 0.4, paidBaseCost: 0.13, currency: 'USD',
+      freeTierPriceDiffers: true, variesWithInput: true,
+    })).toBe('paid tier: base $0.13 per request (some inputs cost less or more); free tier: base $0.4 per request (some inputs cost less or more)')
   })
 })
 

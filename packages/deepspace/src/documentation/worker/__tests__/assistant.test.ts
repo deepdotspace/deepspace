@@ -86,7 +86,7 @@ describe('documentation assistant corpus', () => {
     const search = tools.documentation_search
     if (!search?.execute) throw new Error('documentation_search is not executable')
     const result = await search.execute({ query: 'deploy' }, {
-      messages: [], toolCallId: 'test', abortSignal: new AbortController().signal,
+      messages: [], toolCallId: 'test', abortSignal: new AbortController().signal, context: undefined,
     }) as { results: Array<{ url: string }> }
     expect(result.results[0]?.url).toBe('/docs/guide')
   })

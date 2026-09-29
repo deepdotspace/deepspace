@@ -134,7 +134,7 @@ describe('documentation assistant public limits', () => {
     agentMocks.streamDeepSpaceAgent.mockImplementation(() => {
       return {
         result: {
-          toUIMessageStreamResponse: () => new Response('stream'),
+          stream: new ReadableStream({ start: (controller) => controller.close() }),
         },
       }
     })

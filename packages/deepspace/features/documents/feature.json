@@ -56,6 +56,14 @@
     {
       "src": "src/editor/DocumentsTiptapToolbar.tsx",
       "dest": "src/pages/documents/editor/DocumentsTiptapToolbar.tsx"
+    },
+    {
+      "src": "src/documents-invitee-lookup.ts",
+      "dest": "src/pages/documents/documents-invitee-lookup.ts"
+    },
+    {
+      "src": "src/documents-find-invitee-action.ts",
+      "dest": "src/actions/documents-find-invitee.ts"
     }
   ],
   "schema": {
@@ -63,6 +71,13 @@
     "importPath": "./schemas/documents-schema",
     "spreadOperator": true
   },
+  "actions": [
+    {
+      "exportName": "documentsFindInviteeAction",
+      "registerAs": "documents-find-invitee",
+      "importPath": "./documents-find-invitee"
+    }
+  ],
   "route": {
     "path": "/documents",
     "protected": true

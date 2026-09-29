@@ -19,6 +19,21 @@ export { type CronContext, buildCronContext } from './cron'
 export { resolveAppMembership, resolveAppRole, type AppMembership } from './app-role'
 export { createDeepSpaceAI, type DeepSpaceAIEnv, type DeepSpaceAIOptions } from './ai'
 export * from './agent'
+export {
+  callableFromSandbox,
+  codeExecutionTool,
+  forwardSandboxContainer,
+  reuseSandbox,
+  sandboxFiles,
+  sandboxOutputs,
+  sandboxUpload,
+  SandboxFileError,
+  type SandboxFile,
+  type SandboxFileList,
+  type SandboxFilesClient,
+  type SandboxFilesOptions,
+  type SandboxUploadOptions,
+} from './sandbox'
 export { composioTools, type ComposioToolsOptions } from './composio-tools'
 export {
   apiWorkerFetch,

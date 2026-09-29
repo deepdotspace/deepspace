@@ -11,6 +11,7 @@ export * from './shared/protocol'
 export * from './shared/ai-models'
 export * from './shared/app-routing'
 export * from './shared/platform-proxy'
+export * from './shared/sandbox'
 export { authenticatedRoomRequest } from './shared/room-identity-headers'
 export * from './server/utils'
 export {
@@ -36,6 +37,15 @@ export {
   type AgentTargetPolicy,
 } from './server/agent-target'
 export { SESSION_COOKIE } from './shared/auth-session'
+export {
+  nativeAuthStart,
+  nativeAuthCallback,
+  nativeAuthExchange,
+  nativeAuthToken,
+  nativeAuthMe,
+  nativeAuthSignOut,
+} from './server/expo-auth'
+export type { ExpoAuthBridgeOptions, ExpoAuthWorkerEnv } from './server/expo-auth'
 // Shared platform-error contract used by scaffolded server integrations.
 // Keep server actions on the same human `error` / machine `code` shape as
 // the browser integration client instead of maintaining a second decoder.

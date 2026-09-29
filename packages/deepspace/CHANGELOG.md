@@ -1,5 +1,40 @@
 # deepspace
 
+## 0.34.0
+
+### Minor Changes
+
+- Give Claude Anthropic's hosted code-execution sandbox through the DeepSpace proxy, so an agent can read, edit and create real files (Word, Excel, PowerPoint, PDF, charts). New `deepspace/worker` helpers: `codeExecutionTool()`, `callableFromSandbox(tool)` (sandbox code may call the app's own tool), `sandboxUpload(file)`, `reuseSandbox(containerId)`, `forwardSandboxContainer`, `sandboxOutputs(steps)`, and `sandboxFiles(env)` for upload/download/list/delete. Files and containers are private to the calling user by default, or shared across the app with `createDeepSpaceAI(env, 'anthropic', { sandboxScope: 'app' })`; another app can never reach them. `createDeepSpaceAI` now sends the app's identity with every call.
+
+  **Breaking:** the SDK moves to AI SDK 7 (`ai` 7.0.107, `@ai-sdk/anthropic` 4, `@ai-sdk/openai` 4, `@ai-sdk/openai-compatible` 3). Apps must bump their own `ai` to the same version and migrate their AI code; `deepspace app update` lists the steps (migration `2026-09-ai-sdk-7`).
+
+- Add the `deepspace/expo` client entry for Expo 57 with PKCE-protected OAuth,
+  SecureStore-backed sessions, JWT refresh, authenticated app requests, and
+  scaffolded native auth routes.
+- Refresh the model lineup: Claude Opus 5.5 (now the default for agents and direct generation), Claude Fable 5.1, GPT-6 Sol and GPT-6 Luna join Claude Sonnet 5 and Haiku 4.5 in the model picker; GPT-6 Astra and Cerebras Qwen 3.8 27B are available for direct generation. Claude Opus 5, Claude Fable 5 and GPT-5.6 Sol/Terra/Luna leave the picker but still resolve by id on the server, so apps that pass them keep working; a chat panel whose saved choice was one of them falls back to the default. The new default costs more per token than Sonnet 5 ($4/$20 vs $2/$10 per million); pass a model id to keep Sonnet 5. The platform's `anthropic/chat-completion` and `openai/chat-completion` integrations now default to Claude Opus 5.5 and GPT-6 Sol and bill each token class at its own rate instead of the output rate.
+
+### Patch Changes
+
+- `deepspace agent invoke` now carries the structured `detail` an app attaches to any refused call (for example which of two 409s a conflict is, or a 503's retry guidance) in both the human line and the `--json` failure envelope, redacted, so an agent can act on the app's stated reason.
+- Display token-priced integrations as readable per-million-token rates in the CLI.
+- Raise two dependency floors for the September 2026 security advisories. hono moves to ^4.13.7 in the SDK's dependencies and the scaffold template: 4.13.5 is the first release fixing query parsing past the URL fragment, `toSSG()` path containment, and unbounded dot-notation nesting in `parseBody()`, and 4.13.7 adds the `hono/jsx` escaping fix. smol-toml moves to ^1.7.1 in the SDK's dependencies, the first release fixing the `parse()` infinite loop on a trailing comment inside an array or inline table (GHSA-7w5x-hrqm-74c2); the CLI parses `wrangler.toml` with it.
+- Documents feature: an ordinary member who owns a document can now share it by email — the invite dialog resolves the address through a new owner-only server action (`documents-find-invitee`, installed with the feature) instead of a client-side read that only ever worked for the app owner, and its "People with access" list is drawn from the roster so member owners can manage collaborators. Bulleted and numbered lists in the editor render their markers again, and a refused "New document" write is reported instead of being an unhandled rejection.
+
+  Runtime (every app on this release): the record room's `user.update` frame is now only the presence heartbeat it always was on the SDK client — it no longer takes an `email`, `name`, or `imageUrl`; those are the identity the auth plane verified at connect (`email` is the key invites resolve on, `name`/`imageUrl` are what a share dialog shows about a collaborator), so a member can no longer be resolved in, or pose as, another user — and `registerUser` / the `users.register` tool store the email trimmed and lowercased so exact-match lookups agree with what the auth plane writes.
+
+  Reach: new installs, and re-installs of the feature. `deepspace add documents` on an app that already has it adds the action and the lookup module and registers the action, but keeps every feature file that already exists — delete the copied documents files you have not customized before re-running it — at least `src/pages/documents/InviteDialog.tsx` (member sharing), `src/pages/documents/documents-ui.css` (list markers) and `src/pages/documents/index.tsx` (refused-create toast), which are the three files these fixes change.
+
+- Show free-tier and paid-tier integration prices in the CLI cost prompt.
+- Allow selected JobRoom job types to run beyond the 15-minute alarm limit using `backgroundJobTypes`.
+- `createDeepSpaceAI` fixes for the AI SDK 7 providers. GPT-6 Sol and Luna agents work again: `@ai-sdk/openai` 4 drops `reasoningEffort: 'none'` for GPT-6, and OpenAI refuses function tools on Chat Completions without it, so the SDK restores it for GPT-5.6/GPT-6 Sol, Terra and Luna tool calls that carry no effort.
+
+  Anthropic calls with no `maxOutputTokens` now default to 64K output tokens instead of the model's ceiling (128K for Claude 5), reducing upfront credit holds. Billing still uses actual usage. Explicit `maxOutputTokens` values override the SDK default.
+
+  Adaptive thinking shares this limit with the response. With `thinking.type: 'enabled'`, the provider adds `budgetTokens` to the output allowance, capped at the model's ceiling.
+
+- SEO-ready scaffolds. New apps prerender their public pages to static HTML at `vite build` — the same build-time approach deep.space uses, now shipped as app code: `prerender.ts` at the app root and an explicit page list in `src/prerender-entry.tsx`. The build stamps each page's title, description, canonical, and Open Graph tags from `src/seo.ts`, writes `sitemap.xml` and a plain `_spa.html` shell for client routes, and appends the `Sitemap:` line to `public/robots.txt` (or publishes `Disallow: /` when `noindex` is set), so crawlers that do not execute JavaScript (Bing, link unfurlers, AI answer engines) read real content. `src/main.tsx` hydrates a prerendered page instead of repainting it, and the worker's client-route fallback serves the shell before `/`. The `<Seo>` head component ships in the app as well (`src/components/Seo.tsx`), keeping the SDK client chunk out of the landing bundle. `deepspace deploy` passes `DEEPSPACE_SITE_ORIGIN` to the build so staging resolves canonical URLs to `spacestest.com`. Existing apps are unchanged: the prerender is scaffold code, copied into new apps only, and the SDK build path is untouched.
+- Allow auth workers to declare server-owned user fields and populate them in a before-create hook.
+
 ## 0.33.1
 
 ### Patch Changes

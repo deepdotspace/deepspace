@@ -5,6 +5,7 @@ import generouted from '@generouted/react-router/plugin'
 import { cloudflare } from '@cloudflare/vite-plugin'
 import checker from 'vite-plugin-checker'
 import { deepspaceBuild } from 'deepspace/build'
+import { prerender } from './prerender.ts'
 
 const appDir = fileURLToPath(new URL('.', import.meta.url))
 
@@ -20,6 +21,12 @@ export default defineConfig({
     // `deepspace deploy --env` generates); src/constants.ts is the only
     // consumer.
     deepspaceBuild({ appDir }),
+    // Prerenders the public pages listed in src/prerender-entry.tsx into static
+    // HTML at `vite build`, stamps their <Seo> head, and writes sitemap.xml plus
+    // the robots.txt Sitemap line from src/seo.ts — so crawlers that do not run
+    // JavaScript read real content. See prerender.ts; delete this line for a
+    // plain SPA.
+    prerender(),
     // Runs the Rules of Hooks lint (see eslint.config.js) automatically, so
     // there's no separate step to remember: a violation surfaces as an overlay
     // during `deepspace dev start` and fails the build during `deepspace deploy`.

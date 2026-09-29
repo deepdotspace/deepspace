@@ -189,7 +189,7 @@ describe('app files transport', () => {
       // intact under the `file` field.
       const parsed = await new Response(new Uint8Array(captured!.body), {
         headers: { 'content-type': captured!.contentType! },
-      }).formData()
+      }).formData() as unknown as FormData & { get(name: string): FormDataEntryValue | null }
       const part = parsed.get('file') as File
       expect(part.name).toBe('hero.png')
       expect(part.type).toBe('image/png')
@@ -228,7 +228,7 @@ describe('app files transport', () => {
       await uploadAppFile(baseUrl, 'tok', APP, local, name)
       const parsed = await new Response(new Uint8Array(captured!.body), {
         headers: { 'content-type': captured!.contentType! },
-      }).formData()
+      }).formData() as unknown as FormData & { get(name: string): FormDataEntryValue | null }
       expect((parsed.get('file') as File).type).toBe(mime)
     })
 

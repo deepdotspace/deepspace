@@ -10,6 +10,7 @@ import agent, {
   runAgentTools,
 } from '../agent'
 import * as auth from '../../auth'
+import { failureEnvelope } from '../../lib/cli-errors'
 import { AGENT_TOOL_REQUEST_BODY_CAP } from '../../../shared/agent-tool-protocol'
 
 afterEach(() => {
@@ -253,6 +254,82 @@ describe('agent requests and output', () => {
       expect(error).toMatchObject({ code: 'app_denied' })
       expect((error as Error).message).not.toContain('jwt-secret')
     }
+  })
+
+  it('forwards the structured detail of a refused call, redacted, into the failure envelope', async () => {
+    // An app can attach a `detail` object to any refusal — the
+    // admin console does, to tell `idempotency_key_mismatch` from
+    // `idempotency_key_owned_by_another_admin` on a 409, where the right next
+    // step is the opposite. Dropping it leaves an agent with only the generic
+    // conflict sentence.
+    mockToken('jwt-secret')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            ok: false,
+            code: 'operation_conflict',
+            error: 'The operation conflicts with the recorded state.',
+            detail: {
+              error: 'idempotency_key_mismatch',
+              detail: 'Re-send the original parameters (not Bearer jwt-secret).',
+            },
+          }),
+          { status: 409 },
+        ),
+      ),
+    )
+    const error = await runAgentInvoke({ app: 'example', tool: 'promo_mint', json: true }).catch(
+      (e: unknown) => e,
+    )
+    expect(error).toMatchObject({ code: 'operation_conflict' })
+    // The human line is the primary surface (docs/platform/cli-contract.md):
+    // every fact `--json` carries has to appear in the sentence too.
+    expect((error as Error).message).toContain('idempotency_key_mismatch')
+    expect((error as Error).message).toContain('Re-send the original parameters')
+    expect((error as Error).message).not.toContain('jwt-secret')
+    const envelope = failureEnvelope(error)
+    expect(envelope).toMatchObject({
+      ok: false,
+      code: 'operation_conflict',
+      detail: { error: 'idempotency_key_mismatch' },
+    })
+    expect(JSON.stringify(envelope)).not.toContain('jwt-secret')
+  })
+
+  it("carries a 503 refusal's retry guidance in both the human line and the envelope", async () => {
+    // `operation_unavailable` is the case where the detail matters most: the
+    // effect is unknown and the guidance says whether a retry can double-issue.
+    mockToken('jwt-secret')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            ok: false,
+            code: 'operation_unavailable',
+            error: 'The operation could not be completed. Try again.',
+            detail: {
+              effect: 'unknown',
+              retriable: true,
+              guidance: 'Retry with the SAME idempotencyKey. Never retry under a new key.',
+            },
+          }),
+          { status: 503 },
+        ),
+      ),
+    )
+    const error = await runAgentInvoke({ app: 'example', tool: 'promo_mint', json: true }).catch(
+      (e: unknown) => e,
+    )
+    expect(error).toMatchObject({ code: 'operation_unavailable' })
+    expect((error as Error).message).toContain('Never retry under a new key')
+    expect((error as Error).message).toContain('effect: "unknown"')
+    expect(failureEnvelope(error)).toMatchObject({
+      code: 'operation_unavailable',
+      detail: { effect: 'unknown', retriable: true },
+    })
   })
 
   it('redacts a bearer token echoed anywhere in a successful app result', async () => {

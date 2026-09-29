@@ -28,7 +28,7 @@ npm install deepspace
 
 ## Entry points
 
-The package has seven supported import paths:
+The package has ten supported import paths:
 
 - **`deepspace`** — the React client SDK (hooks, providers, auth, storage,
   messaging, theme). Runs in the browser.
@@ -38,6 +38,10 @@ The package has seven supported import paths:
 - **`deepspace/server`** — app-server helpers for actions, billing, and room
   handlers.
 - **`deepspace/testing`** — Playwright fixtures for multi-user tests.
+- **`deepspace/testing/mcp`** — dependency-free MCP wire client.
+- **`deepspace/build`** — Node-only app build helpers.
+- **`deepspace/expo`** — Expo 57 native auth client with PKCE,
+  SecureStore-backed sessions, JWT refresh, and authenticated requests.
 - **`deepspace/documentation`** — documentation compiler and runtime helpers.
 - **`deepspace/documentation/react`** — documentation React components.
 

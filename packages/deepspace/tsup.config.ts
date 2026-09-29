@@ -17,6 +17,10 @@ export default defineConfig([
       'better-auth',
       'better-auth/react',
       'better-auth/client/plugins',
+      'expo-crypto',
+      'expo-linking',
+      'expo-secure-store',
+      'expo-web-browser',
       'jose',
       'yjs',
       'hono',
@@ -30,6 +34,13 @@ export default defineConfig([
       options.jsx = 'automatic'
       options.alias = alias
     },
+  },
+  {
+    entry: { expo: 'src/expo.ts' },
+    format: ['esm'],
+    dts: true,
+    sourcemap: true,
+    external: ['expo-crypto', 'expo-linking', 'expo-secure-store', 'expo-web-browser'],
   },
   {
     entry: { schema: 'src/schema.ts' },

@@ -26,6 +26,17 @@ test.describe('Smoke tests', () => {
     expect(errors).toEqual([])
   })
 
+  test('landing carries one title, one description, one canonical', async ({ page }) => {
+    // <Seo> (src/pages/index.tsx, values from src/seo.ts) hoists these into
+    // <head>. Exactly one of each: index.html ships no static description or
+    // canonical, because React 19 would not dedupe against them on mount.
+    await page.goto('/')
+    await expect(page.getByTestId('static-landing')).toBeVisible()
+    await expect(page).toHaveTitle(/\S/)
+    expect(await page.locator('head meta[name="description"]').count()).toBe(1)
+    expect(await page.locator('head link[rel="canonical"]').count()).toBe(1)
+  })
+
   test('static contract: landing fires no auth request, opens no websocket', async ({ page }) => {
     const offenders: string[] = []
     page.on('request', (req) => {

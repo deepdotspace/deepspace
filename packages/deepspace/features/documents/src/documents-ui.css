@@ -178,10 +178,20 @@
   color: var(--documents-editor-paper-muted);
 }
 
+/* Tailwind's preflight resets `ul, ol { list-style: none }`; the editor's
+   lists need their markers back. The task-list rule below opts back out. */
 .documents-paged-editor .ProseMirror ul,
 .documents-paged-editor .ProseMirror ol {
   padding-left: 1.4em;
   margin: 0 0 0.45em;
+}
+
+.documents-paged-editor .ProseMirror ul {
+  list-style-type: disc;
+}
+
+.documents-paged-editor .ProseMirror ol {
+  list-style-type: decimal;
 }
 
 .documents-paged-editor .ProseMirror ul[data-type='taskList'] {

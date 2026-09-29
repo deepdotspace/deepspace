@@ -25,7 +25,7 @@
  *   // Server-side autonomous — no auth config needed
  *   import { createDeepSpaceAI } from 'deepspace/worker'
  *   const cerebras = createDeepSpaceAI(env, 'cerebras')
- *   const result = await generateText({ model: cerebras('llama-3.3-70b'), ... })
+ *   const result = await generateText({ model: cerebras('gpt-oss-120b'), ... })
  *
  *   // User-initiated (inside a request handler)
  *   const jwt = c.req.header('Authorization')!.slice(7)
@@ -36,8 +36,10 @@ import { createAnthropic } from '@ai-sdk/anthropic'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import type { DeepSpaceAIProvider } from '../../shared/ai-models'
+import { SANDBOX_SCOPE_HEADER, type SandboxScope } from '../../shared/sandbox'
+import { appendAppIdentity } from './app-identity'
 import { resolveApiTransport, type ApiWorkerEnv } from './proxies'
-import type { LanguageModel } from 'ai'
+import { defaultSettingsMiddleware, wrapLanguageModel, type LanguageModel } from 'ai'
 
 /**
  * Model factory: `(modelId) => LanguageModel`. The explicit return type
@@ -53,6 +55,13 @@ export interface DeepSpaceAIEnv extends ApiWorkerEnv {
    * Bills the app owner.
    */
   APP_OWNER_JWT?: string
+  /**
+   * The app's id and deploy-time identity token. Sent with every proxied call
+   * so the proxy can tie Anthropic sandbox files and containers to this app;
+   * code execution and files are refused without them.
+   */
+  DEEPSPACE_APP_ID?: string
+  APP_IDENTITY_TOKEN?: string
 }
 
 export interface DeepSpaceAIOptions {
@@ -66,26 +75,71 @@ export interface DeepSpaceAIOptions {
    * client-supplied billing override.
    */
   authToken?: string
+  /**
+   * Who may reuse the sandbox files and containers this call creates.
+   * Default `'user'`: only the auth token's user. `'app'`: every caller of
+   * this app. Another app can never reach either.
+   */
+  sandboxScope?: SandboxScope
 }
 
-const ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS = 4096
+/** The proxy auth token: explicit, else the app owner's. */
+export function resolveProxyAuthToken(env: DeepSpaceAIEnv, options: DeepSpaceAIOptions): string {
+  const authToken = options.authToken ?? env.APP_OWNER_JWT
+  if (!authToken) {
+    throw new Error(
+      'DeepSpace AI proxy: no auth token available. Either pass `options.authToken` ' +
+        'explicitly (for user-initiated calls), or ensure `env.APP_OWNER_JWT` is set ' +
+        '(injected at deploy time or by `deepspace dev start`).',
+    )
+  }
+  return authToken
+}
 
-function withDefaultAnthropicMaxTokens(body: RequestInit['body']): RequestInit['body'] {
+/** Auth, app identity and sandbox scope — the headers every proxied call carries. */
+export function setProxyHeaders(
+  headers: Headers,
+  env: DeepSpaceAIEnv,
+  authToken: string,
+  scope: SandboxScope = 'user',
+): void {
+  headers.set('X-Auth-Token', authToken)
+  // Always called, so caller-supplied identity headers are stripped even
+  // before the first deploy mints a token.
+  appendAppIdentity(headers, {
+    DEEPSPACE_APP_ID: env.DEEPSPACE_APP_ID ?? '',
+    APP_IDENTITY_TOKEN: env.APP_IDENTITY_TOKEN,
+  })
+  headers.set(SANDBOX_SCOPE_HEADER, scope)
+}
+
+/**
+ * Output tokens an Anthropic call may produce when the caller sets no
+ * `maxOutputTokens`. Without it @ai-sdk/anthropic sends the model's ceiling
+ * (128K for Claude 5), and the proxy holds that worst case in credits before
+ * every call. Settlement bills the tokens actually produced.
+ */
+const ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS = 64_000
+
+/**
+ * OpenAI takes function tools on Chat Completions for these models only with
+ * `reasoning_effort: 'none'` (GPT-6 Astra takes neither; its tools need the
+ * Responses API). @ai-sdk/openai 4 drops `'none'` for GPT-6, so it is
+ * restored here when a request carries tools and no effort.
+ */
+const OPENAI_TOOLS_NEED_NO_REASONING = /^gpt-(5\.6|6)-(sol|terra|luna)(-|$)/
+
+function withOpenAIToolReasoningEffort(body: RequestInit['body']): RequestInit['body'] {
   if (typeof body !== 'string') return body
-
   try {
     const parsed = JSON.parse(body) as Record<string, unknown>
-    const hasExplicitLimit =
-      typeof parsed.max_tokens === 'number' ||
-      typeof parsed.max_completion_tokens === 'number' ||
-      typeof parsed.max_output_tokens === 'number'
-
-    if (hasExplicitLimit) return body
-
-    return JSON.stringify({
-      ...parsed,
-      max_tokens: ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
-    })
+    const needsEffort =
+      typeof parsed.model === 'string' &&
+      OPENAI_TOOLS_NEED_NO_REASONING.test(parsed.model) &&
+      Array.isArray(parsed.tools) &&
+      parsed.tools.length > 0 &&
+      parsed.reasoning_effort === undefined
+    return needsEffort ? JSON.stringify({ ...parsed, reasoning_effort: 'none' }) : body
   } catch {
     return body
   }
@@ -104,14 +158,7 @@ export function createDeepSpaceAI(
   options: DeepSpaceAIOptions = {},
 ): DeepSpaceModelFactory {
   const transport = resolveApiTransport(env)
-  const authToken = options.authToken ?? env.APP_OWNER_JWT
-  if (!authToken) {
-    throw new Error(
-      'createDeepSpaceAI: no auth token available. Either pass `options.authToken` ' +
-        'explicitly (for user-initiated calls), or ensure `env.APP_OWNER_JWT` is set ' +
-        '(injected at deploy time or by `deepspace dev start`).',
-    )
-  }
+  const authToken = resolveProxyAuthToken(env, options)
 
   const proxyFetch: typeof globalThis.fetch = (input, init) => {
     const url =
@@ -128,9 +175,9 @@ export function createDeepSpaceAI(
     // JWT auth below and fail verifyJwt.
     headers.delete('authorization')
     headers.delete('x-api-key')
-    headers.set('X-Auth-Token', authToken)
+    setProxyHeaders(headers, env, authToken, options.sandboxScope)
 
-    const body = provider === 'anthropic' ? withDefaultAnthropicMaxTokens(init?.body) : init?.body
+    const body = provider === 'openai' ? withOpenAIToolReasoningEffort(init?.body) : init?.body
     if (body !== init?.body) {
       // The request body length changed, so the runtime must recompute it.
       headers.delete('content-length')
@@ -153,10 +200,15 @@ export function createDeepSpaceAI(
   const baseURL = `https://api-worker.internal/api/proxy/${provider}/v1`
 
   switch (provider) {
-    case 'anthropic':
+    case 'anthropic': {
       // Anthropic always returns usage in both streaming and non-streaming
       // responses, so no extra config is needed.
-      return createAnthropic({ baseURL, apiKey: 'platform-managed', fetch: proxyFetch })
+      const anthropic = createAnthropic({ baseURL, apiKey: 'platform-managed', fetch: proxyFetch })
+      const defaults = defaultSettingsMiddleware({
+        settings: { maxOutputTokens: ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS },
+      })
+      return (modelId) => wrapLanguageModel({ model: anthropic(modelId), middleware: defaults })
+    }
 
     case 'openai': {
       // Pin to `.chat` — v5's default `openai(modelId)` returns a Responses

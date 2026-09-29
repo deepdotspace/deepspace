@@ -10,6 +10,7 @@ import { useUser } from 'deepspace'
 import { useQuery } from 'deepspace'
 import { useMutations } from 'deepspace'
 import { ROLES, type Role } from 'deepspace'
+import { useToast } from '@/components/ui'
 import {
   FileText,
   Plus,
@@ -81,6 +82,7 @@ function formatDate(iso: string): string {
 export default function DocumentsListPage() {
   const { user } = useUser()
   const navigate = useNavigate()
+  const toast = useToast()
   const userRole = (user?.role ?? ROLES.VIEWER) as Role
   const roleCanCreate = userRole === ROLES.MEMBER || userRole === ROLES.ADMIN
 
@@ -233,15 +235,27 @@ export default function DocumentsListPage() {
 
   const handleNewDocument = useCallback(async () => {
     if (!user || !canCreate) return
-    const id = await createConfirmed({
-      title: UNTITLED,
-      ownerId: user.id,
-      collaborators: '[]',
-      editors: '[]',
-      folderId: folderIdForNew,
-    })
+    // A confirmed write answers with an ack the provider-level onWriteError
+    // never sees, so a refusal or timeout has to be reported here — otherwise
+    // the click does nothing and the rejection is unhandled.
+    let id: string
+    try {
+      id = await createConfirmed({
+        title: UNTITLED,
+        ownerId: user.id,
+        collaborators: '[]',
+        editors: '[]',
+        folderId: folderIdForNew,
+      })
+    } catch (err) {
+      toast.error(
+        'Document not created',
+        err instanceof Error ? err.message : 'DeepSpace did not confirm the write.',
+      )
+      return
+    }
     navigate(`/documents/${id}`)
-  }, [canCreate, createConfirmed, folderIdForNew, navigate, user])
+  }, [canCreate, createConfirmed, folderIdForNew, navigate, toast, user])
 
   const handleDelete = useCallback(
     async (docId: string) => {

@@ -470,6 +470,150 @@ describe('JobRoom — cancellation', () => {
   })
 })
 
+describe('JobRoom — background execution', () => {
+  afterEach(() => vi.useRealTimers())
+
+  function deferredResult() {
+    let resolve!: (value: string) => void
+    const promise = new Promise<string>((done) => {
+      resolve = done
+    })
+    return { promise, resolve }
+  }
+
+  it('returns from alarms, keeps a long attempt live, and serializes the next job', async () => {
+    vi.useFakeTimers()
+    const db = new Database(':memory:')
+    const { state, alarms, settled } = makeState(db)
+    const room = new TestJobRoom(state, {}, { backgroundJobTypes: ['sandbox'] })
+    const release = deferredResult()
+    const started: string[] = []
+    room.handler = (job) => {
+      started.push(job.type)
+      return job.type === 'sandbox' ? release.promise : 'second result'
+    }
+    const first = room.enqueue('sandbox', {})
+    const second = room.enqueue('ordinary', {})
+
+    await room.runAlarm()
+    expect(started).toEqual(['sandbox'])
+    expect(db.prepare('SELECT status FROM jobs WHERE id = ?').get(first.id)).toEqual({
+      status: 'running',
+    })
+
+    // No model response yet, even after the former 16-minute stale boundary.
+    vi.setSystemTime(Date.now() + 20 * 60_000)
+    await room.runAlarm()
+    await room.runAlarm()
+    expect(started).toEqual(['sandbox'])
+    expect(db.prepare('SELECT status, attempts FROM jobs WHERE id = ?').get(first.id)).toEqual({
+      status: 'running',
+      attempts: 1,
+    })
+    expect(db.prepare('SELECT status FROM jobs WHERE id = ?').get(second.id)).toEqual({
+      status: 'queued',
+    })
+    expect(alarms.at(-1)).toBe(Date.now() + 30_000)
+
+    release.resolve('document result')
+    await settled()
+    expect(alarms.at(-1)).toBe(Date.now() + 50)
+    await room.runAlarm()
+    expect(started).toEqual(['sandbox', 'ordinary'])
+    expect(db.prepare('SELECT status, result FROM jobs WHERE id = ?').get(first.id)).toEqual({
+      status: 'succeeded',
+      result: JSON.stringify('document result'),
+    })
+    expect(db.prepare('SELECT status FROM jobs WHERE id = ?').get(second.id)).toEqual({
+      status: 'succeeded',
+    })
+    db.close()
+  })
+
+  it('preserves a manual retry while the canceled handler is still unwinding', async () => {
+    const db = new Database(':memory:')
+    const { state, settled } = makeState(db)
+    const room = new TestJobRoom(state, {}, { backgroundJobTypes: ['sandbox'] })
+    const release = deferredResult()
+    let calls = 0
+    let signal: AbortSignal | undefined
+    room.handler = (_, ctx) => {
+      signal = ctx.signal
+      return ++calls === 1 ? release.promise : 'retried result'
+    }
+    const job = room.enqueue('sandbox', {})
+    await room.runAlarm()
+    await room.dispatch({ type: MSG.JOB_CANCEL, payload: { jobId: job.id } })
+    expect(signal?.aborted).toBe(true)
+    await room.dispatch({ type: MSG.JOB_RETRY, payload: { jobId: job.id } })
+    await room.runAlarm()
+    expect(calls).toBe(1)
+
+    release.resolve('discarded result')
+    await settled()
+    expect(db.prepare('SELECT status, result FROM jobs WHERE id = ?').get(job.id)).toEqual({
+      status: 'queued',
+      result: null,
+    })
+    await room.runAlarm()
+    await settled()
+    expect(calls).toBe(2)
+    expect(
+      db.prepare('SELECT status, result, attempts FROM jobs WHERE id = ?').get(job.id),
+    ).toEqual({ status: 'succeeded', result: JSON.stringify('retried result'), attempts: 2 })
+    db.close()
+  })
+
+  it('retries a failed background attempt using the existing retry budget', async () => {
+    const db = new Database(':memory:')
+    const { state, settled } = makeState(db)
+    const room = new TestJobRoom(state, {}, { backgroundJobTypes: ['sandbox'], retryBackoffMs: 0 })
+    room.handler = (job) => {
+      if (job.attempts === 1) throw new Error('temporary failure')
+      return 'done'
+    }
+    const job = room.enqueue('sandbox', {}, { maxAttempts: 2 })
+    await room.runAlarm()
+    await settled()
+    expect(db.prepare('SELECT status FROM jobs WHERE id = ?').get(job.id)).toEqual({
+      status: 'queued',
+    })
+    await room.runAlarm()
+    await settled()
+    expect(db.prepare('SELECT status, attempts FROM jobs WHERE id = ?').get(job.id)).toEqual({
+      status: 'succeeded',
+      attempts: 2,
+    })
+    db.close()
+  })
+
+  it('persists and resumes a checkpoint from a background handler', async () => {
+    const db = new Database(':memory:')
+    const { state, settled } = makeState(db)
+    const room = new TestJobRoom(state, {}, { backgroundJobTypes: ['sandbox'] })
+    const seen: unknown[] = []
+    room.handler = (job, ctx) => {
+      seen.push(job.resumeFrom)
+      if (!job.resumeFrom) ctx.continue({ page: 50 })
+      else return 'remaining pages done'
+    }
+    const job = room.enqueue('sandbox', {})
+    await room.runAlarm()
+    await settled()
+    expect(db.prepare('SELECT status, checkpoint FROM jobs WHERE id = ?').get(job.id)).toEqual({
+      status: 'queued',
+      checkpoint: JSON.stringify({ page: 50 }),
+    })
+    await room.runAlarm()
+    await settled()
+    expect(seen).toEqual([undefined, { page: 50 }])
+    expect(db.prepare('SELECT status FROM jobs WHERE id = ?').get(job.id)).toEqual({
+      status: 'succeeded',
+    })
+    db.close()
+  })
+})
+
 describe('JobRoom — ctx.continue checkpoint', () => {
   it('passes the previous checkpoint as job.resumeFrom on the next tick', async () => {
     const db = new Database(':memory:')

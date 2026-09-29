@@ -26,6 +26,10 @@ export const ACTION_ROUTES_BEARER_GUARD_MIGRATION_ID = '2026-08-action-routes-be
  *  file URLs render for the signed-in user without tokens or signed URLs. */
 export const FILES_SESSION_COOKIE_READS_MIGRATION_ID = '2026-09-files-session-cookie-reads'
 
+/** The SDK moved to AI SDK 7 (`ai` 7, `@ai-sdk/anthropic` 4). Apps pin their
+ *  own `ai`, and their chat route persists and streams through its API. */
+export const AI_SDK_7_MIGRATION_ID = '2026-09-ai-sdk-7'
+
 export type AppMigrationIdsValidation =
   | { valid: true; ids: string[] }
   | { valid: false; reason: string }

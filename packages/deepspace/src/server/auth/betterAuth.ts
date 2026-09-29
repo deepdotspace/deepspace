@@ -5,9 +5,29 @@
  */
 
 import { betterAuth, type BetterAuthOptions } from 'better-auth'
+import { getOAuthState } from 'better-auth/api'
 import { loggableError } from '../../shared/log-events'
 import { organization, twoFactor } from 'better-auth/plugins'
 import { SignJWT, importPKCS8 } from 'jose'
+
+type BetterAuthUserCreateBeforeHook = NonNullable<
+  NonNullable<
+    NonNullable<NonNullable<BetterAuthOptions['databaseHooks']>['user']>['create']
+  >['before']
+>
+
+type UserCreateData = Parameters<BetterAuthUserCreateBeforeHook>[0]
+type UserCreateResult = Awaited<ReturnType<BetterAuthUserCreateBeforeHook>>
+
+export interface DeepSpaceUserCreateContext {
+  request?: Request
+  headers?: Headers
+  path?: string
+  /** OAuth state after Better Auth has decrypted/loaded and verified it. */
+  oauthState: Awaited<ReturnType<typeof getOAuthState>>
+}
+
+type UserAdditionalFields = NonNullable<BetterAuthOptions['user']>['additionalFields']
 
 export interface DeepSpaceAuthConfig {
   /** D1 database binding */
@@ -32,6 +52,22 @@ export interface DeepSpaceAuthConfig {
   emailAndPassword?: boolean
   /** Trusted origins for CORS */
   trustedOrigins?: string[]
+  /**
+   * Server-owned fields to add to Better Auth's user model. Use `input: false`
+   * for values that may only be populated by a database hook, and
+   * `returned: false` for values that must stay out of public auth responses.
+   */
+  userAdditionalFields?: UserAdditionalFields
+  /**
+   * Runs inside Better Auth's `user.create.before` lifecycle and may return
+   * the library's `{ data }` patch. Errors intentionally abort user creation,
+   * which lets callers fail closed when a server-validated signup promise can
+   * no longer be attached to the new account.
+   */
+  beforeUserCreate?: (
+    user: UserCreateData,
+    ctx: DeepSpaceUserCreateContext | null,
+  ) => Promise<UserCreateResult> | UserCreateResult
   /**
    * Called after a new user row is created (any flow: social OAuth callback,
    * email/password, server-side `auth.api.signUpEmail`). When the signup came
@@ -117,6 +153,9 @@ export function createDeepSpaceAuth(config: DeepSpaceAuthConfig) {
     emailAndPassword: {
       enabled: config.emailAndPassword ?? true,
     },
+    ...(config.userAdditionalFields
+      ? { user: { additionalFields: config.userAdditionalFields } }
+      : {}),
     socialProviders: socialProviders as Parameters<typeof betterAuth>[0]['socialProviders'],
     trustedOrigins: config.trustedOrigins ?? [
       'https://deep.space',
@@ -154,7 +193,7 @@ export function createDeepSpaceAuth(config: DeepSpaceAuthConfig) {
     //     keys) — that case is caught by the runtime assertions in
     //     __tests__/betterAuth-hooks.test.ts, which read the wired hook back
     //     off auth.options. Don't rename the key without running them.
-    databaseHooks: buildDatabaseHooks(config.onUserCreated),
+    databaseHooks: buildDatabaseHooks(config.beforeUserCreate, config.onUserCreated),
     plugins: [organization(), twoFactor()],
   })
 }
@@ -166,26 +205,50 @@ export function createDeepSpaceAuth(config: DeepSpaceAuthConfig) {
  * observer is configured (better-auth treats that as "no hooks").
  */
 function buildDatabaseHooks(
+  beforeUserCreate: DeepSpaceAuthConfig['beforeUserCreate'],
   onUserCreated: DeepSpaceAuthConfig['onUserCreated'],
 ): BetterAuthOptions['databaseHooks'] {
-  if (!onUserCreated) return undefined
+  if (!beforeUserCreate && !onUserCreated) return undefined
   return {
     user: {
       create: {
-        after: async (user, ctx) => {
-          try {
-            await onUserCreated(
-              { id: user.id, email: user.email, name: user.name },
-              // Forward BOTH request and standalone headers — some better-auth
-              // entry points populate ctx.headers without a request.
-              ctx ? { request: ctx.request, headers: ctx.headers ?? undefined } : null,
-            )
-          } catch (err) {
-            console.error(
-              `[deepspace] onUserCreated hook failed (signup unaffected): ${loggableError(err)}`,
-            )
-          }
-        },
+        ...(beforeUserCreate
+          ? {
+              before: async (user, ctx) =>
+                beforeUserCreate(
+                  user,
+                  ctx
+                    ? {
+                        request: ctx.request,
+                        headers: ctx.headers ?? undefined,
+                        path: ctx.path,
+                        // Read from this package's Better Auth instance. In a
+                        // pnpm graph the consuming worker can have another
+                        // physical copy whose request-state singleton differs.
+                        oauthState: await getOAuthState(),
+                      }
+                    : null,
+                ),
+            }
+          : {}),
+        ...(onUserCreated
+          ? {
+              after: async (user, ctx) => {
+                try {
+                  await onUserCreated(
+                    { id: user.id, email: user.email, name: user.name },
+                    // Forward BOTH request and standalone headers — some better-auth
+                    // entry points populate ctx.headers without a request.
+                    ctx ? { request: ctx.request, headers: ctx.headers ?? undefined } : null,
+                  )
+                } catch (err) {
+                  console.error(
+                    `[deepspace] onUserCreated hook failed (signup unaffected): ${loggableError(err)}`,
+                  )
+                }
+              },
+            }
+          : {}),
       },
     },
   }

@@ -72,7 +72,7 @@ export const PLANE_AUTH_URLS: Record<Exclude<DeepSpaceEnvironment, 'invalid'>, s
 /** Resolve per-service process overrides against the stable presets. The
  *  lazy readers (lib/vc-remote, lib/dev-vars, commands/status) call this per
  *  invocation — tests pin that; the constants below snapshot it at import. */
-export function effectivePlatformUrls(env: NodeJS.ProcessEnv = process.env) {
+export function effectivePlatformUrls(env: Record<string, string | undefined> = process.env) {
   return {
     auth: env.DEEPSPACE_AUTH_URL ?? PLATFORM_URLS.auth,
     api: env.DEEPSPACE_API_URL ?? PLATFORM_URLS.api,

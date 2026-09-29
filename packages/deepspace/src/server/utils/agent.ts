@@ -1,15 +1,10 @@
-import {
-  stepCountIs,
-  streamText,
-  type PrepareStepFunction,
-  type StreamTextResult,
-  type ToolSet,
-} from 'ai'
+import { isStepCount, streamText, type PrepareStepFunction, type ToolSet } from 'ai'
 import {
   resolveDeepSpaceAgentModel,
   type DeepSpaceAgentProfileId,
   type ResolvedDeepSpaceAgentModel,
 } from '../../shared/ai-models'
+import type { SandboxScope } from '../../shared/sandbox'
 import { createDeepSpaceAI, type DeepSpaceAIEnv } from './ai'
 
 type StreamTextOptions<TOOLS extends ToolSet> = Parameters<typeof streamText<TOOLS>>[0]
@@ -21,11 +16,13 @@ export type DeepSpaceAgentStreamOptions<TOOLS extends ToolSet> = Omit<
   profile: DeepSpaceAgentProfileId
   modelId?: unknown
   authToken?: string
+  /** Scope for sandbox files and containers this turn creates (see `createDeepSpaceAI`). */
+  sandboxScope?: SandboxScope
 }
 
 export interface DeepSpaceAgentStream<TOOLS extends ToolSet> {
   selection: ResolvedDeepSpaceAgentModel
-  result: StreamTextResult<TOOLS, never>
+  result: ReturnType<typeof streamText<TOOLS>>
 }
 
 export class DeepSpaceAgentModelError extends Error {
@@ -54,7 +51,7 @@ export function streamDeepSpaceAgent<TOOLS extends ToolSet>(
   env: DeepSpaceAIEnv,
   options: DeepSpaceAgentStreamOptions<TOOLS>,
 ): DeepSpaceAgentStream<TOOLS> {
-  const { profile, modelId, authToken, ...streamOptions } = options
+  const { profile, modelId, authToken, sandboxScope, ...streamOptions } = options
   const selection = resolveDeepSpaceAgentModel(modelId, profile)
   if (!selection) throw new DeepSpaceAgentModelError(modelId, profile)
   if (selection.profile.allowedTools !== 'application-defined') {
@@ -66,14 +63,17 @@ export function streamDeepSpaceAgent<TOOLS extends ToolSet>(
     }
   }
 
-  const provider = createDeepSpaceAI(env, selection.provider, authToken ? { authToken } : {})
+  const provider = createDeepSpaceAI(env, selection.provider, {
+    ...(authToken ? { authToken } : {}),
+    ...(sandboxScope ? { sandboxScope } : {}),
+  })
   const { prepareStep, tools, ...remainingStreamOptions } = streamOptions
   const boundedTools = limitToolExecutions(tools, selection.profile.maxToolCalls)
   const result = streamText<TOOLS>({
     ...remainingStreamOptions,
     ...(boundedTools ? { tools: boundedTools } : {}),
     model: provider(selection.modelId),
-    stopWhen: stepCountIs(selection.profile.maxSteps),
+    stopWhen: isStepCount(selection.profile.maxSteps),
     prepareStep: enforceToolCallLimit(prepareStep, selection.profile.maxToolCalls),
     ...(selection.provider === 'openai'
       ? { providerOptions: { openai: { reasoningEffort: 'none' as const } } }

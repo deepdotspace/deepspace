@@ -25,6 +25,11 @@ export interface DeepSpaceAIModel {
   transport: 'messages' | 'chat-completions'
   recommendation: 'frontier' | 'balanced' | 'fast' | 'available' | 'limited'
   note?: string
+  /**
+   * Superseded: still resolvable by id, so an app that saved it keeps working,
+   * but left out of pickers and model lists.
+   */
+  legacy?: true
 }
 
 export interface DeepSpaceAgentProfile {
@@ -42,8 +47,8 @@ export interface DeepSpaceAgentProfile {
  * deployed app underneath a commit.
  */
 export const DEEPSPACE_MODEL_CATALOG_PROVENANCE = {
-  version: '2026-08-04',
-  verifiedAt: '2026-08-04',
+  version: '2026-09-24',
+  verifiedAt: '2026-09-24',
   sources: {
     anthropic: 'https://platform.claude.com/docs/en/api/beta/models/list',
     openai: 'https://developers.openai.com/api/docs/models/all',
@@ -53,7 +58,7 @@ export const DEEPSPACE_MODEL_CATALOG_PROVENANCE = {
 
 const MULTI_STEP_AGENT_PROFILES = ['application', 'documentation'] as const
 
-type MultiStepModelInput = Pick<DeepSpaceAIModel, 'id' | 'label' | 'family' | 'recommendation'>
+type MultiStepModelInput = Pick<DeepSpaceAIModel, 'id' | 'label' | 'family' | 'recommendation' | 'legacy'>
 type MultiStepProvider = Pick<DeepSpaceAIModel, 'provider' | 'providerLabel' | 'transport'>
 
 function createMultiStepModelFactory<const Provider extends MultiStepProvider>(provider: Provider) {
@@ -77,16 +82,19 @@ const openAIModel = createMultiStepModelFactory({
   transport: 'chat-completions',
 })
 
+const DIRECT_GENERATION_NOTE =
+  'Available for direct generation; the current proxy adapter has not passed multi-step tool-result continuation.'
+
 export const DEEPSPACE_AI_MODELS = [
   anthropicModel({
-    id: 'claude-fable-5',
-    label: 'Claude Fable 5',
+    id: 'claude-opus-5-5',
+    label: 'Claude Opus 5.5',
     family: 'Claude 5',
     recommendation: 'frontier',
   }),
   anthropicModel({
-    id: 'claude-opus-5',
-    label: 'Claude Opus 5',
+    id: 'claude-fable-5-1',
+    label: 'Claude Fable 5.1',
     family: 'Claude 5',
     recommendation: 'frontier',
   }),
@@ -103,23 +111,29 @@ export const DEEPSPACE_AI_MODELS = [
     recommendation: 'fast',
   }),
   openAIModel({
-    id: 'gpt-5.6-sol',
-    label: 'GPT-5.6 Sol',
-    family: 'GPT-5.6',
-    recommendation: 'frontier',
-  }),
-  openAIModel({
-    id: 'gpt-5.6-terra',
-    label: 'GPT-5.6 Terra',
-    family: 'GPT-5.6',
+    id: 'gpt-6-sol',
+    label: 'GPT-6 Sol',
+    family: 'GPT-6',
     recommendation: 'balanced',
   }),
   openAIModel({
-    id: 'gpt-5.6-luna',
-    label: 'GPT-5.6 Luna',
-    family: 'GPT-5.6',
+    id: 'gpt-6-luna',
+    label: 'GPT-6 Luna',
+    family: 'GPT-6',
     recommendation: 'fast',
   }),
+  {
+    id: 'gpt-6-astra',
+    label: 'GPT-6 Astra',
+    provider: 'openai',
+    providerLabel: 'OpenAI',
+    family: 'GPT-6',
+    agentSupport: 'none',
+    agentProfiles: [],
+    transport: 'chat-completions',
+    recommendation: 'limited',
+    note: 'Available for direct generation; its tool calling requires the Responses API, which the DeepSpace proxy does not serve.',
+  },
   {
     id: 'gpt-oss-120b',
     label: 'GPT-OSS 120B',
@@ -130,13 +144,31 @@ export const DEEPSPACE_AI_MODELS = [
     agentProfiles: [],
     transport: 'chat-completions',
     recommendation: 'limited',
-    note: 'Available for direct generation; the current proxy adapter has not passed multi-step tool-result continuation.',
+    note: DIRECT_GENERATION_NOTE,
   },
+  {
+    id: 'qwen-3.8-27b',
+    label: 'Qwen 3.8 27B',
+    provider: 'cerebras',
+    providerLabel: 'Cerebras',
+    family: 'Qwen 3.8',
+    agentSupport: 'single-step',
+    agentProfiles: [],
+    transport: 'chat-completions',
+    recommendation: 'limited',
+    note: DIRECT_GENERATION_NOTE,
+  },
+  // Superseded models: still resolvable for apps that saved them.
+  anthropicModel({ id: 'claude-opus-5', label: 'Claude Opus 5', family: 'Claude 5', recommendation: 'frontier', legacy: true }),
+  anthropicModel({ id: 'claude-fable-5', label: 'Claude Fable 5', family: 'Claude 5', recommendation: 'frontier', legacy: true }),
+  openAIModel({ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', family: 'GPT-5.6', recommendation: 'frontier', legacy: true }),
+  openAIModel({ id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', family: 'GPT-5.6', recommendation: 'balanced', legacy: true }),
+  openAIModel({ id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', family: 'GPT-5.6', recommendation: 'fast', legacy: true }),
 ] as const satisfies readonly DeepSpaceAIModel[]
 
 export const DEEPSPACE_AI_DEFAULTS = {
-  agent: 'claude-sonnet-5',
-  directGeneration: 'claude-sonnet-5',
+  agent: 'claude-opus-5-5',
+  directGeneration: 'claude-opus-5-5',
   summarization: 'claude-haiku-4-5',
 } as const satisfies Record<string, DeepSpaceAIModelId>
 
@@ -170,8 +202,8 @@ export function listDeepSpaceAgentModels(
   profileId: DeepSpaceAgentProfileId = 'application',
 ): readonly DeepSpaceAIModel[] {
   const defaultModel = DEEPSPACE_AGENT_PROFILES[profileId].defaultModel
-  return DEEPSPACE_AI_MODELS.filter((model) =>
-    (model.agentProfiles as readonly DeepSpaceAgentProfileId[]).includes(profileId),
+  return DEEPSPACE_AI_MODELS.filter((model: DeepSpaceAIModel) =>
+    !model.legacy && (model.agentProfiles as readonly DeepSpaceAgentProfileId[]).includes(profileId),
   ).sort((left, right) => Number(right.id === defaultModel) - Number(left.id === defaultModel))
 }
 

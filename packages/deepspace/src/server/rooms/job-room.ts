@@ -1,20 +1,8 @@
 /**
- * JobRoom — Per-app durable background-job execution Durable Object.
- *
- * Solves the "long job dies when the response goes out" problem on
- * Cloudflare Workers. `ctx.waitUntil` only gets 30s after a response;
- * jobs that need minutes-to-hours live here instead: rows in SQLite,
- * picked up by DO alarms (15-min wall budget per tick), resumable
- * across ticks via `ctx.continue` for the rare longer cases.
- *
- * Lifecycle: queued → running → succeeded | failed | canceled
- *
- * Crash recovery: if an isolate is recycled mid-run, the row stays at
- * `running`. On next init, rows older than ~16 min are either retried
- * (if attempts left) or marked failed.
- *
- * See the abstract `onJob` method below for the subclass contract.
- * Message types: job.*
+ * Persistent job queue with serial execution, progress, cancellation and retries.
+ * Jobs run inside alarms unless listed in `backgroundJobTypes`.
+ * Use `ctx.continue` to save a checkpoint for the next run.
+ * After a restart, running jobs older than 16 minutes are retried or failed.
  */
 
 /// <reference types="@cloudflare/workers-types" />
@@ -72,6 +60,11 @@ export interface JobContext {
 }
 
 export interface JobRoomConfig {
+  /**
+   * Job types that run after the alarm returns. Defaults to none.
+   * Handlers must set a deadline; restarts use existing checkpoint/retry rules.
+   */
+  backgroundJobTypes?: readonly string[]
   /** Default for jobs enqueued without explicit `maxAttempts`. Default 1 (no auto-retry). */
   defaultMaxAttempts?: number
   /** TTL for terminal rows (succeeded/failed/canceled) in ms. Default 24h. */
@@ -94,8 +87,9 @@ interface JobAttachment extends UserAttachment {
 // Constants
 // ============================================================================
 
-/** 1 min past CF's 15-min alarm wall — anything older was killed, not running. */
+/** Recover an old running row only when its handler is absent from this isolate. */
 const RUNNING_STALE_MS = 16 * 60 * 1000
+const BACKGROUND_ALARM_MS = 30_000
 const DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000
 const DEFAULT_SNAPSHOT_LIMIT = 100
 
@@ -113,6 +107,7 @@ export abstract class JobRoom<
   private readonly retentionMs: number
   private readonly snapshotLimit: number
   private readonly retryBackoffMs: number
+  private readonly backgroundJobTypes: ReadonlySet<string>
   private readonly authorizeWrite: (user: UserAttachment) => boolean | Promise<boolean>
   private readonly authorizeRead: (user: UserAttachment) => boolean | Promise<boolean>
   private broadcastQueue: Promise<void> = Promise.resolve()
@@ -129,6 +124,7 @@ export abstract class JobRoom<
     this.retentionMs = Math.max(0, config.retentionMs ?? DEFAULT_RETENTION_MS)
     this.snapshotLimit = Math.max(1, config.snapshotLimit ?? DEFAULT_SNAPSHOT_LIMIT)
     this.retryBackoffMs = Math.max(0, config.retryBackoffMs ?? 1000)
+    this.backgroundJobTypes = new Set(config.backgroundJobTypes ?? [])
     this.authorizeWrite =
       config.authorizeWrite ?? ((user) => user.role === ROLES.MEMBER || user.role === ROLES.ADMIN)
     this.authorizeRead = config.authorizeRead ?? this.authorizeWrite
@@ -454,11 +450,9 @@ export abstract class JobRoom<
   // Alarm / execution
   // ==========================================================================
 
-  /**
-   * Drain due jobs in FIFO order. All due jobs share the alarm's
-   * 15-min wall budget (a CF property, not a per-job allocation).
-   */
   private async drainDueJobs(): Promise<void> {
+    // Wait for the current handler to finish, including after cancellation.
+    if (this.inFlight.size > 0) return
     // Freeze the cutoff at the start: rows whose `next_run_at` is
     // written during this drain (retries, `ctx.continue`) fall out
     // and pick up on the next alarm with a fresh budget. Without
@@ -476,7 +470,18 @@ export abstract class JobRoom<
         )
         .toArray()[0] as unknown as JobRow | undefined
       if (!row) return
-      await this.executeJob(row)
+      const execution = this.executeJob(row)
+      if (this.backgroundJobTypes.has(row.type)) {
+        this.state.waitUntil(
+          execution
+            .catch((error) =>
+              console.error(`[jobs] background execution failed: ${loggableError(error)}`),
+            )
+            .finally(() => this.scheduleNextAlarm()),
+        )
+        return
+      }
+      await execution
     }
   }
 
@@ -522,10 +527,9 @@ export abstract class JobRoom<
       this.inFlight.delete(row.id)
     }
 
-    // Cancellation racing the finish: if a cancel landed while we were
-    // running, the row is now 'canceled' and we should not overwrite it.
+    // Preserve cancellations and retries made while the handler was running.
     const currentStatus = this.readStatus(row.id)
-    if (currentStatus === 'canceled') {
+    if (currentStatus !== 'running') {
       this.continueState = null
       return
     }
@@ -680,6 +684,11 @@ export abstract class JobRoom<
   // ==========================================================================
 
   private scheduleNextAlarm(): void {
+    if (this.inFlight.size > 0) {
+      // Keep the room active while the handler waits on external I/O.
+      this.state.storage.setAlarm(Date.now() + BACKGROUND_ALARM_MS)
+      return
+    }
     const queued = this.sql
       .exec(
         `SELECT next_run_at FROM jobs
@@ -725,6 +734,7 @@ export abstract class JobRoom<
       .toArray() as { id: string; attempts: number; max_attempts: number }[]
 
     for (const r of stuck) {
+      if (this.inFlight.has(r.id)) continue
       if (r.attempts >= r.max_attempts) {
         this.sql.exec(
           `UPDATE jobs

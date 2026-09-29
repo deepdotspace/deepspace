@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Hono } from 'hono'
@@ -19,6 +19,16 @@ import {
 import { BROWSER_PROXY_ROUTES } from '../../../shared/platform-proxy'
 import { decodeRoomIdentityHeader } from '../../../shared/room-identity-headers'
 
+/**
+ * The scaffold's SPA shell path. App code on both ends — `prerender.ts` writes
+ * `_spa.html`, `src/server/http-routes.ts` asks for `/_spa` — so it is read
+ * from the template rather than restated here, and the two files are pinned to
+ * each other below.
+ */
+const templateSource = (path: string) => readFileSync(join(TEMPLATES_DIR, 'base', path), 'utf8')
+const SPA_SHELL_PATH = /const SPA_SHELL_PATH = '([^']+)'/.exec(templateSource('src/server/http-routes.ts'))?.[1] ?? ''
+const SPA_SHELL_FILE = /const SHELL_FILE = '([^']+)'/.exec(templateSource('prerender.ts'))?.[1] ?? ''
+
 interface TestEnv {
   ASSETS?: Fetcher
   API_WORKER?: Fetcher
@@ -27,6 +37,7 @@ interface TestEnv {
   AUTH_JWT_ISSUER?: string
   AUTH_JWT_PUBLIC_KEY?: string
   AUTH_WORKER_URL?: string
+  NATIVE_AUTH_REDIRECT_URIS?: string
   DEEPSPACE_APP_ID?: string
   OWNER_USER_ID?: string
   ALLOW_DEBUG_ROUTES?: string
@@ -543,6 +554,25 @@ describe('generated worker route owners', () => {
     expect(redirect.headers.get('location')).toBe(
       'https://auth.example.test/login/social?provider=google&returnTo=https%3A%2F%2Fexample.app.space',
     )
+
+    const native = await app.request(
+      'https://example.app.space/api/auth/native-start?provider=google&redirect_uri=veriluma%3A%2F%2Fauth%2Fcallback&state=s-1&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&code_challenge_method=S256',
+      undefined,
+      env({
+        AUTH_WORKER_URL: 'https://auth.example.test',
+        NATIVE_AUTH_REDIRECT_URIS: 'veriluma://auth/callback',
+      }),
+    )
+    expect(native.status).toBe(302)
+    expect(new URL(native.headers.get('location')!).pathname).toBe('/login/social')
+
+    const nativeCallback = await app.request(
+      'https://example.app.space/api/auth/oauth-complete?redirect_uri=veriluma%3A%2F%2Fauth%2Fcallback&code=one-time-code&state=s-1&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&code_challenge_method=S256',
+      undefined,
+      env({ NATIVE_AUTH_REDIRECT_URIS: 'veriluma://auth/callback' }),
+    )
+    expect(nativeCallback.status).toBe(302)
+    expect(nativeCallback.headers.get('location')).toBe('veriluma://auth/callback?code=one-time-code&state=s-1')
   })
 
   it('keeps debug and user-billed integration routes closed by default', async () => {
@@ -941,9 +971,37 @@ describe('generated worker route owners', () => {
     expect(fallback.status).toBe(200)
     expect(await fallback.text()).toBe(APP_SHELL)
     // The binding reported a real miss; the WORKER chose the shell for it —
-    // asking for `/`, because `/index.html` would come back as a redirect.
-    expect(assetRequests).toEqual(['/client/route', '/'])
+    // first the prerender's plain shell (absent in this build), then `/`,
+    // because `/index.html` would come back as a redirect.
+    expect(assetRequests).toEqual(['/client/route', SPA_SHELL_PATH, '/'])
     expect(fallback.status).not.toBe(307)
+  })
+
+  /**
+   * After the scaffold's build-time prerender (prerender.ts), `/` is the
+   * landing page with real markup and the landing's canonical. Client routes
+   * must get the untouched shell the build writes beside it, or a refresh on
+   * /home paints the landing for a frame and crawlers read the `/` canonical
+   * on every app route. The path is the template's own literal (it is app
+   * code on both ends); this test pins the two copies to each other.
+   */
+  it('serves the prerendered build’s plain shell for client routes, not the landing', async () => {
+    const shell = '<!doctype html><div id="root"></div>'
+    const landing = '<!doctype html><div id="root" data-prerendered="/"><h1>Landing</h1></div>'
+    const { assets, assetRequests } = spaAssetLayer({
+      '/': [landing, 'text/html'],
+      [SPA_SHELL_PATH]: [shell, 'text/html'],
+    })
+    const staticApp = new Hono<TestContext>()
+    registerStaticRoutes(staticApp)
+
+    const home = await staticApp.request('https://app.test/home', undefined, env({ ASSETS: assets }))
+    expect(home.status).toBe(200)
+    expect(await home.text()).toBe(shell)
+    expect(assetRequests).toEqual(['/home', SPA_SHELL_PATH])
+
+    const root = await staticApp.request('https://app.test/', undefined, env({ ASSETS: assets }))
+    expect(await root.text()).toBe(landing)
   })
 
   /**
@@ -1067,6 +1125,30 @@ describe('generated worker route owners', () => {
     expect(response.status).toBe(200)
     expect(await response.text()).toBe('# My App\n')
   })
+
+  /** robots.txt and sitemap.xml are not platform-reserved: an app's own file
+   *  (public/robots.txt, or the sitemap the prerender writes) is served as-is,
+   *  and when absent the dotted path 404s as JSON rather than as the shell. */
+  it('serves robots.txt and sitemap.xml from the asset layer, or 404s them, never the shell', async () => {
+    const { assets } = spaAssetLayer({
+      '/robots.txt': ['User-agent: *\nAllow: /\n', 'text/plain'],
+      '/sitemap.xml': ['<urlset/>', 'application/xml'],
+    })
+    const staticApp = new Hono<TestContext>()
+    registerStaticRoutes(staticApp)
+
+    const robots = await staticApp.request('https://app.test/robots.txt', undefined, env({ ASSETS: assets }))
+    expect(robots.status).toBe(200)
+    expect(await robots.text()).toBe('User-agent: *\nAllow: /\n')
+    const sitemap = await staticApp.request('https://app.test/sitemap.xml', undefined, env({ ASSETS: assets }))
+    expect(sitemap.status).toBe(200)
+
+    const bare = new Hono<TestContext>()
+    registerStaticRoutes(bare)
+    const missing = await bare.request('https://app.test/sitemap.xml', undefined, env({ ASSETS: spaAssetLayer().assets }))
+    expect(missing.status).toBe(404)
+    expect(await missing.json()).toEqual({ error: 'not_found' })
+  })
 })
 
 /**
@@ -1100,6 +1182,17 @@ describe('the app/platform routing contract', () => {
     for (const route of SDK_RUN_WORKER_FIRST) {
       expect(toml, `wrangler.toml must list ${route} in run_worker_first`).toContain(`"${route}"`)
     }
+  })
+
+  it('leaves the scaffold’s SPA shell path unreserved', () => {
+    // The shell path is extensionless so auto-trailing-slash serves `_spa.html`
+    // at it, and it is neither a file name nor a platform-reserved path, so
+    // the worker's fallback can ask the asset layer for it. Both ends of that
+    // handoff are app code (prerender.ts writes it, http-routes.ts asks for
+    // it); the platform's only obligation is not to claim the path.
+    expect(SPA_SHELL_PATH).toBe('/_spa')
+    expect(SPA_SHELL_FILE).toBe(`${SPA_SHELL_PATH.slice(1)}.html`)
+    expect(isPlatformReservedPath(SPA_SHELL_PATH)).toBe(false)
   })
 
   it('answers reserved platform paths from one predicate, not a per-app copy', () => {

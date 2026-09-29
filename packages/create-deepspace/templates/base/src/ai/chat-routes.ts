@@ -13,7 +13,7 @@
  */
 
 import type { Context, Hono } from 'hono'
-import type { ModelMessage } from 'ai'
+import { createUIMessageStreamResponse, toUIMessageStream, type ModelMessage } from 'ai'
 import {
   deepSpaceAgentErrorSummary,
   prepareMessagesWithCompaction,
@@ -181,7 +181,7 @@ export function registerAiChatRoutes(
       return c.json({ error: 'Chat not found' }, 404)
     }
 
-    // Load history before writing this turn. `onFinish` later writes user then
+    // Load history before writing this turn. `persistTurn` later writes user then
     // assistant as separate DO operations; the ordering is intentional, but
     // it is not atomic.
     const history = await loadMessages(stub, chatId, auth.userId)
@@ -195,7 +195,7 @@ export function registerAiChatRoutes(
     }))
 
     // Append the in-flight user message in memory so the LLM sees it; its DO
-    // write is the first persistence operation in `onFinish`.
+    // write is the first persistence operation in `persistTurn`.
     // Then dedup consecutive user messages — defense-in-depth for legacy
     // chats with orphan user rows AND for the rare case where a prior turn's
     // user-write succeeded but the assistant-write failed both retries.
@@ -259,120 +259,133 @@ export function registerAiChatRoutes(
     // which broke for users whose clock was ahead of the server.
     const asstId = `asst-${Date.now()}-${crypto.randomUUID()}`
 
+    // Save the finished turn: every step's messages (tool calls included), not
+    // just the final step's. Called on normal completion and when the request
+    // is aborted after at least one step completed.
+    const persistTurn = async (text: string, responseMessages: ModelMessage[]): Promise<void> => {
+      const parts = buildUiParts(responseMessages)
+      if (text.trim() === '' && parts.length === 0) {
+        console.warn('[ai-chat] FINISH empty turn, skipping persist')
+        return
+      }
+
+      // Persist user → assistant → metadata as independent writes, not a
+      // transaction. Order matters: user FIRST so chronological reads are
+      // correct, then assistant. If user-write
+      // exhausts retries we ABORT the assistant write — otherwise we'd persist
+      // an assistant row with no preceding user row, breaking the invariant
+      // relied on by the dedup + turnsToCoreMessages loop on the next turn.
+      //
+      // The helpers return `false` (no throw) when the chat no longer exists
+      // — deleted mid-stream — and nothing was written; that is not retried,
+      // and it stops the sequence the same way an exhausted retry does.
+      const writeWithRetry = async (
+        label: string,
+        fn: () => Promise<boolean | void>,
+      ): Promise<boolean> => {
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            if ((await fn()) === false) {
+              console.warn(`[ai-chat] ${label} skipped — chat ${chatId} no longer exists`)
+              return false
+            }
+            return true
+          } catch (err) {
+            console.error(`[ai-chat] ${label} ${attempt === 1 ? 'failed, retrying once' : 'retry failed'}: ${loggableError(err)}`)
+          }
+        }
+        return false
+      }
+
+      const userOk = await writeWithRetry('user message', () =>
+        appendMessage(stub, {
+          id: userMessageId,
+          chatId,
+          userId: auth.userId,
+          role: 'user',
+          content,
+        }),
+      )
+      if (!userOk) {
+        console.error(
+          '[ai-chat] FINISH aborting — user write did not land; skipping assistant + metadata to avoid orphan rows',
+        )
+        return
+      }
+      const assistantOk = await writeWithRetry('assistant message', () =>
+        appendMessage(stub, {
+          id: asstId,
+          chatId,
+          userId: auth.userId,
+          role: 'assistant',
+          content: text,
+          ...(parts.length > 0 ? { parts } : {}),
+        }),
+      )
+      if (!assistantOk) return
+      await writeWithRetry('chat metadata', async () => {
+        // Re-fetch so a mid-stream rename by the user isn't clobbered by a
+        // stale "auto-title" derived from the captured `chat` snapshot. A
+        // chat deleted mid-stream reads back as null; `updateChat` refuses
+        // that case on its own (an unguarded `records.update` would upsert
+        // the row back into existence), so this only decides the title.
+        const fresh = await getChat(stub, chatId, auth.userId)
+        const patch: { title?: string; model?: string } = { model: usedModelId }
+        if (fresh && (!fresh.title || fresh.title === 'New chat')) {
+          patch.title = deriveTitle(content)
+        }
+        return updateChat(stub, chatId, auth.userId, patch)
+      })
+    }
+
     const { result } = streamDeepSpaceAgent(c.env, {
       profile: 'application',
       modelId: usedModelId,
       authToken: jwt,
-      system: systemText,
+      instructions: systemText,
       messages,
       tools,
-      // Cancel provider and tool work with the request. If at least one step
-      // completed, AI SDK still calls `onFinish`; a zero-step abort skips it.
+      // Cancel provider and tool work with the request. `onAbort` then saves
+      // any completed steps; a zero-step abort saves nothing.
       abortSignal: c.req.raw.signal,
       onError: ({ error }) => {
         console.error(
           `[ai-chat] stream error: ${deepSpaceAgentErrorSummary(error, diagnosticContext)}`,
         )
       },
-      onFinish: async ({ text, response }) => {
-        const parts = buildUiParts(response.messages as ModelMessage[])
-        if (text.trim() === '' && parts.length === 0) {
-          console.warn('[ai-chat] FINISH empty turn, skipping persist')
-          return
-        }
-
-        // Persist user → assistant → metadata as independent writes, not a
-        // transaction. `onFinish` runs after normal completion and after an
-        // abort with at least one completed step. Order matters: user FIRST so
-        // chronological reads are correct, then assistant. If user-write
-        // exhausts retries we ABORT the assistant write — otherwise we'd persist
-        // an assistant row with no preceding user row, breaking the invariant
-        // relied on by the dedup + turnsToCoreMessages loop on the next turn.
-        //
-        // The helpers return `false` (no throw) when the chat no longer exists
-        // — deleted mid-stream — and nothing was written; that is not retried,
-        // and it stops the sequence the same way an exhausted retry does.
-        const writeWithRetry = async (
-          label: string,
-          fn: () => Promise<boolean | void>,
-        ): Promise<boolean> => {
-          for (let attempt = 1; attempt <= 2; attempt++) {
-            try {
-              if ((await fn()) === false) {
-                console.warn(`[ai-chat] ${label} skipped — chat ${chatId} no longer exists`)
-                return false
-              }
-              return true
-            } catch (err) {
-              console.error(`[ai-chat] ${label} ${attempt === 1 ? 'failed, retrying once' : 'retry failed'}: ${loggableError(err)}`)
-            }
-          }
-          return false
-        }
-
-        const userOk = await writeWithRetry('user message', () =>
-          appendMessage(stub, {
-            id: userMessageId,
-            chatId,
-            userId: auth.userId,
-            role: 'user',
-            content,
-          }),
-        )
-        if (!userOk) {
-          console.error(
-            '[ai-chat] FINISH aborting — user write did not land; skipping assistant + metadata to avoid orphan rows',
-          )
-          return
-        }
-        const assistantOk = await writeWithRetry('assistant message', () =>
-          appendMessage(stub, {
-            id: asstId,
-            chatId,
-            userId: auth.userId,
-            role: 'assistant',
-            content: text,
-            ...(parts.length > 0 ? { parts } : {}),
-          }),
-        )
-        if (!assistantOk) return
-        await writeWithRetry('chat metadata', async () => {
-          // Re-fetch so a mid-stream rename by the user isn't clobbered by a
-          // stale "auto-title" derived from the captured `chat` snapshot. A
-          // chat deleted mid-stream reads back as null; `updateChat` refuses
-          // that case on its own (an unguarded `records.update` would upsert
-          // the row back into existence), so this only decides the title.
-          const fresh = await getChat(stub, chatId, auth.userId)
-          const patch: { title?: string; model?: string } = { model: usedModelId }
-          if (fresh && (!fresh.title || fresh.title === 'New chat')) {
-            patch.title = deriveTitle(content)
-          }
-          return updateChat(stub, chatId, auth.userId, patch)
-        })
+      onEnd: ({ text, responseMessages }) => persistTurn(text, responseMessages as ModelMessage[]),
+      // AI SDK skips `onEnd` on abort; keep the steps that did complete.
+      onAbort: ({ steps }) => {
+        const last = steps.at(-1)
+        if (!last) return
+        return persistTurn(last.text, steps.flatMap((step) => step.response.messages) as ModelMessage[])
       },
     })
 
-    return result.toUIMessageStreamResponse({
+    return createUIMessageStreamResponse({
       headers: {
         // Lets the client tag its in-flight assistant overlay with the same id
-        // the worker will use when persisting on `onFinish`, so dedup against
+        // the worker will use in `persistTurn`, so dedup against
         // the WebSocket-broadcast row is by id (clock-skew-proof).
         'X-Asst-Id': asstId,
       },
-      // Reasoning models (o-series, Claude with extended thinking) emit
-      // `reasoning-start`/`reasoning-delta`/`reasoning-end` chunks. We
-      // don't render them today — pass them through and the user sees a
-      // stuck spinner during long thinks. Opt out at the boundary until
-      // the UI gains a "thinking" disclosure block.
-      sendReasoning: false,
-      onError: (error: unknown): string => {
-        // The return value becomes the user-visible `errorText` for every
-        // `tool-input-error` / `tool-output-error` chunk and stream-level
-        // error. Surface the real message so RBAC denials and validation
-        // failures are debuggable; log full detail server-side.
-        console.error(`[ai-chat] response error: ${loggableError(error)}`)
-        return error instanceof Error ? error.message : String(error)
-      },
+      stream: toUIMessageStream({
+        stream: result.stream,
+        // Reasoning models (o-series, Claude with extended thinking) emit
+        // `reasoning-start`/`reasoning-delta`/`reasoning-end` chunks. We
+        // don't render them today — pass them through and the user sees a
+        // stuck spinner during long thinks. Opt out at the boundary until
+        // the UI gains a "thinking" disclosure block.
+        sendReasoning: false,
+        onError: (error: unknown): string => {
+          // The return value becomes the user-visible `errorText` for every
+          // `tool-input-error` / `tool-output-error` chunk and stream-level
+          // error. Surface the real message so RBAC denials and validation
+          // failures are debuggable; log full detail server-side.
+          console.error(`[ai-chat] response error: ${loggableError(error)}`)
+          return error instanceof Error ? error.message : String(error)
+        },
+      }),
     })
   })
 }

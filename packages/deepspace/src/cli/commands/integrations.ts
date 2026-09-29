@@ -63,7 +63,14 @@ interface EndpointInfo {
   /** Present (true) only on endpoints that answer with a requiresOAuth
    *  payload until the user connects the provider. */
   requiresOAuth?: boolean
-  billing: { model: string; baseCost: number | null; currency: string; variesWithInput?: true }
+  billing: {
+    model: string
+    baseCost: number | null
+    paidBaseCost?: number
+    currency: string
+    freeTierPriceDiffers?: true
+    variesWithInput?: true
+  }
   inputSchema: Record<string, unknown> | null
   example: Record<string, unknown> | null
   outputSchema?: Record<string, unknown> | null
@@ -208,9 +215,23 @@ function formatCurrency(value: number, currency: string): string {
  * the input names its 1x reference rate without pretending it is a floor.
  */
 export function priceLabel(billing: EndpointInfo['billing']): string {
-  if (billing.baseCost === null) return "metered at the provider's actual cost"
-  const figure = `${formatCurrency(billing.baseCost, billing.currency)} ${billingUnit(billing.model)}`
-  return billing.variesWithInput ? `base ${figure} (some inputs cost less or more)` : figure
+  if (billing.baseCost === null) {
+    const price = "metered at the provider's actual cost plus platform markup"
+    return billing.freeTierPriceDiffers
+      ? `${price}; free-tier pricing differs`
+      : price
+  }
+  const tokenScale = billing.model === 'per_token' ? 1_000_000 : 1
+  const unit = billing.model === 'per_token' ? 'per 1M tokens' : billingUnit(billing.model)
+  const paidCost = (billing.paidBaseCost ?? billing.baseCost) * tokenScale
+  const figure = `${formatCurrency(paidCost, billing.currency)} ${unit}`
+  const price = billing.variesWithInput ? `base ${figure} (some inputs cost less or more)` : figure
+  if (!billing.freeTierPriceDiffers) return price
+  const freeFigure = `${formatCurrency(billing.baseCost * tokenScale, billing.currency)} ${unit}`
+  const freePrice = billing.variesWithInput
+    ? `base ${freeFigure} (some inputs cost less or more)`
+    : freeFigure
+  return `paid tier: ${price}; free tier: ${freePrice}`
 }
 
 /**

@@ -224,6 +224,12 @@ export async function registerUser(
   schemaRegistry?: SchemaRegistry
 ): Promise<User> {
   const now = new Date().toISOString()
+  // One spelling for the one column invites resolve on: the documents
+  // feature's owner-only lookup queries `where: { email }` on the trimmed,
+  // lowercased address, so every writer must store it that way. The auth
+  // plane already lowercases; this keeps app-side `users.register` callers
+  // and legacy claims consistent with it.
+  const normalizedEmail = email.trim().toLowerCase()
 
   // Get existing user record
   const existing = getUserRecord(sql, userId, schemaRegistry)
@@ -245,7 +251,7 @@ export async function registerUser(
     // Update existing user - only update system-managed columns.
     // When connecting with token-only (no profile), name='Anonymous' and email=''.
     // Don't overwrite real values with defaults.
-    const updatedEmail = email || existing.data.email
+    const updatedEmail = normalizedEmail || existing.data.email
     const updatedName = (name && name !== 'Anonymous') ? name : existing.data.name
     const updatedImageUrl = imageUrl ?? existing.data.imageUrl
 
@@ -268,10 +274,10 @@ export async function registerUser(
   // Create new user record
   sql.exec(
     `INSERT INTO c_users (_row_id, _created_by, _created_at, _updated_at, col_email, col_name, col_imageurl, col_role, col_createdat, col_lastseenat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    userId, userId, now, now, email, name, imageUrl ?? null, role, now, now
+    userId, userId, now, now, normalizedEmail, name, imageUrl ?? null, role, now, now
   )
 
-  return { id: userId, email, name, imageUrl, role, createdAt: now, lastSeenAt: now }
+  return { id: userId, email: normalizedEmail, name, imageUrl, role, createdAt: now, lastSeenAt: now }
 }
 
 type UserRow = { recordId: string; data: UserRecord; createdBy: string }
@@ -403,42 +409,38 @@ export function broadcastUserList(
 }
 
 /**
- * Handle user profile update.
+ * Handle the presence heartbeat (`user.update`): refresh `lastSeenAt`.
  *
- * Called when the client's profile loads after the initial WS connection.
- * Updates the user's name/email/imageUrl in c_users and pushes the updated
- * roster to every connected client so names refresh in real time.
+ * Nothing else on the users row can be set from this frame. Its identity
+ * fields — email, name, imageUrl — are what the auth plane verified at
+ * connect (`registerUser` from the JWT claims) and are refreshed only there:
+ * `email` is the key invites resolve on, and `name`/`imageUrl` are what a
+ * share dialog shows an owner about a collaborator, so a client-chosen value
+ * would let any member be resolved in, or pose as, another user. The SDK
+ * client sends the frame empty (the protocol types it as `EmptyPayload`), and
+ * the room's dispatch does not hand the payload down.
  */
-export interface UserUpdatePayload {
-  name?: string
-  email?: string
-  imageUrl?: string
-}
-
 export function handleUserUpdate(
   ctx: RecordContext,
   _ws: WebSocket,
   attachment: ConnectionAttachment,
-  payload: UserUpdatePayload
 ): void {
   const existing = getUserRecord(ctx.sql, attachment.userId, ctx.schemaRegistry)
   if (!existing) return
 
-  const data: Record<string, unknown> = { lastSeenAt: new Date().toISOString() }
-  if (payload.name && payload.name !== 'Anonymous') data.name = payload.name
-  if (payload.email) data.email = payload.email
-  if (payload.imageUrl !== undefined) data.imageUrl = payload.imageUrl || undefined
-
-  // systemUpdate=true bypasses system-managed field stripping so we can
-  // write to name/email/imageUrl. broadcastChange fires automatically,
-  // updating any useQuery('users') subscriptions on connected clients; the
-  // `user.list` roster (`useUsers()`) is a separate request/response and
-  // needs the explicit push.
-  putRecord(ctx, 'users', attachment.userId, data, attachment.userId, 'admin', true, true)
-  const rosterChanged =
-    (data.name !== undefined && data.name !== existing.data.name) ||
-    (data.imageUrl !== undefined && data.imageUrl !== existing.data.imageUrl)
-  if (rosterChanged) broadcastUserList(ctx)
+  // systemUpdate=true: lastSeenAt is a system-managed column. broadcastChange
+  // fires automatically for useQuery('users') subscribers; the roster needs
+  // no push for a timestamp.
+  putRecord(
+    ctx,
+    'users',
+    attachment.userId,
+    { lastSeenAt: new Date().toISOString() },
+    attachment.userId,
+    'admin',
+    true,
+    true,
+  )
 }
 
 /**

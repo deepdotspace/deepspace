@@ -19,8 +19,14 @@ import {
   SESSION_COOKIE,
   verifyAgentToken,
   verifyJwt,
+  nativeAuthCallback,
+  nativeAuthExchange,
+  nativeAuthMe,
+  nativeAuthSignOut,
+  nativeAuthStart,
+  nativeAuthToken,
 } from 'deepspace/worker'
-import type { JwtVerifierConfig, VerifyResult } from 'deepspace/worker'
+import type { ExpoAuthBridgeOptions, JwtVerifierConfig, VerifyResult } from 'deepspace/worker'
 import { integrations } from '../integrations.js'
 import type { AppContext, Env } from '../../worker.js'
 
@@ -58,6 +64,22 @@ function reassertAppIdentity(headers: Headers, env: Env): void {
 
 /** Register auth, debug, and integration routes in their required order. */
 export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
+  const nativeAuthOptions = (env: Env): ExpoAuthBridgeOptions => ({
+    allowedRedirectUris: (env.NATIVE_AUTH_REDIRECT_URIS ?? '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean),
+  })
+
+  // Native routes must precede the Better Auth wildcard below. The exact
+  // browser callback handler branches only when the native bridge's validated
+  // redirect_uri is present, so a generated worker cannot shadow native OAuth.
+  app.get('/api/auth/native-start', (c) => nativeAuthStart(c.req.raw, c.env, nativeAuthOptions(c.env)))
+  app.post('/api/auth/native-exchange', (c) => nativeAuthExchange(c.req.raw, c.env))
+  app.post('/api/auth/native-token', (c) => nativeAuthToken(c.req.raw, c.env))
+  app.get('/api/auth/native-me', (c) => nativeAuthMe(c.req.raw, c.env))
+  app.post('/api/auth/native-signout', (c) => nativeAuthSignOut(c.req.raw, c.env))
+
   // Social OAuth redirect + code exchange.
   app.get('/api/auth/social-redirect', (c) => {
     const provider = c.req.query('provider')
@@ -72,6 +94,9 @@ export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
   })
 
   app.get('/api/auth/oauth-complete', async (c) => {
+    if (c.req.query('redirect_uri')) {
+      return nativeAuthCallback(c.req.raw, c.env, nativeAuthOptions(c.env))
+    }
     const code = c.req.query('code')
     const appOrigin = new URL(c.req.url).origin
     // Land the signed-in user in the app, not on the static landing. `/` is a
@@ -345,6 +370,13 @@ const matches = (pathname: string, prefixes: readonly string[]): boolean =>
 const API_PREFIXES = ['/api']
 
 /**
+ * The plain SPA shell prerender.ts (app root) writes beside the prerendered
+ * pages: the built index.html with #root still empty. Extensionless, so the
+ * asset layer's auto-trailing-slash serves `_spa.html` at it.
+ */
+const SPA_SHELL_PATH = '/_spa'
+
+/**
  * A FILE, not a client route: last segment carries an extension. Wrong in only
  * the cheap direction — a dotted route 404s visibly, where a missing file
  * getting the shell is HTML parsed as JavaScript and a blank page.
@@ -380,6 +412,14 @@ export function registerStaticRoutes(app: Hono<AppContext>): void {
     if (namesAFile(url.pathname) || isPlatformReservedPath(url.pathname)) {
       return c.json({ error: 'not_found' }, 404)
     }
+    // Once the prerender has run, `/` is the landing page, not an empty
+    // shell — serving it for /home would paint the landing for a frame and
+    // hand crawlers the `/` canonical on every app route. Ask for the plain
+    // shell the build writes first; a build without it (plain SPA,
+    // `deepspace dev`) misses and falls through to `/` exactly as before.
+    url.pathname = SPA_SHELL_PATH
+    const shell = await c.env.ASSETS.fetch(new Request(url.toString(), c.req.raw))
+    if (shell.status !== 404) return shell
     // `/`, not `/index.html`: auto-trailing-slash redirects the explicit
     // filename, and the browser would follow it off the URL it asked for.
     url.pathname = '/'

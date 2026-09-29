@@ -385,6 +385,7 @@ export function registerAgentToolRoutes<Env extends AgentToolRouteEnv>(
         toolCallId: crypto.randomUUID(),
         messages: [],
         abortSignal: c.req.raw.signal,
+        context: undefined,
       })
     } catch {
       return errorResponse(500, 'tool_execution_failed')
