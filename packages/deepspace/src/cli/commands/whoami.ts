@@ -65,7 +65,7 @@ export default defineDeepspaceCommand({
       if (payload.exp) {
         console.log(`Expires:    ${new Date(payload.exp * 1000).toISOString()} (renews on use)`)
       }
-      console.log(`Dashboard:  ${DASHBOARD_URL}`)
+      if (DASHBOARD_URL) console.log(`Dashboard:  ${DASHBOARD_URL}`)
       if (isTestAccount) {
         console.log('')
         console.log('Note: this is a test account, not a real OAuth developer.')

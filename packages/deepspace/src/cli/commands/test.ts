@@ -459,7 +459,7 @@ function runSuite(
   appDir: string,
   argv: string[],
   wranglerEnv: string | undefined,
-  extraEnv: Record<string, string | undefined> = {},
+  extraEnv: NodeJS.ProcessEnv = {},
 ): number {
   let wranglerConfig: PreparedWranglerEnvConfig
   try {
@@ -474,7 +474,7 @@ function runSuite(
       // Under --json the child's stdout is routed to our stderr: the live
       // suite output stays visible and stdout stays a single JSON line.
       stdio: childStdio(),
-      env: wranglerViteEnv(process.env, wranglerConfig, extraEnv) as NodeJS.ProcessEnv,
+      env: wranglerViteEnv(process.env, wranglerConfig, extraEnv),
     })
     return result.status ?? 1
   } finally {

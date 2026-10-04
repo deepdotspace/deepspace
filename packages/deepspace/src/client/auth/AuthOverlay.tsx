@@ -11,6 +11,7 @@
 import React, { useState } from 'react'
 import { useAuth } from './hooks'
 import { signIn } from './client'
+import { getEnvironmentConfig } from '../../shared/env'
 
 interface AuthOverlayProps {
   /** Called when the user clicks the close button. If omitted, overlay is not closeable. */
@@ -190,7 +191,7 @@ export function AuthOverlay({
             </a>{' '}
             and{' '}
             <a
-              href="https://deep.space/privacy"
+              href={getEnvironmentConfig().privacyPolicyUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="underline hover:text-foreground"

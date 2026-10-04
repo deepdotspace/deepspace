@@ -13,6 +13,7 @@ export * from './shared/app-routing'
 export * from './shared/platform-proxy'
 export * from './shared/sandbox'
 export { authenticatedRoomRequest } from './shared/room-identity-headers'
+export { isRestrictedPlane, PLANES, type PlaneName, type PlaneUrls } from './shared/planes'
 export * from './server/utils'
 export {
   registerDeepSpaceDocumentation,

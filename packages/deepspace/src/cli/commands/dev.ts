@@ -276,7 +276,7 @@ export default defineDeepspaceCommand({
       {
         cwd: appDir,
         stdio: 'inherit',
-        env: wranglerViteEnv(process.env, wranglerConfig, { DEEPSPACE_PORT: String(port) }) as NodeJS.ProcessEnv,
+        env: wranglerViteEnv(process.env, wranglerConfig, { DEEPSPACE_PORT: String(port) }),
       },
     )
     // The readiness envelope. `--json` used to emit nothing until the server

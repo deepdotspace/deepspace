@@ -5,13 +5,14 @@ const mocks = vi.hoisted(() => {
   const state = {
     store,
     browserUrl: '',
+    browserResult: null as null | { type: string },
     randomValues: ['oauth-state', 'verifier-a', 'verifier-b'],
   }
   return state
 })
 
 vi.mock('expo-linking', () => ({
-  createURL: (path: string) => `veriluma://${path}`,
+  createURL: (path: string) => `myapp://${path}`,
 }))
 
 vi.mock('expo-crypto', () => ({
@@ -29,6 +30,7 @@ vi.mock('expo-secure-store', () => ({
 
 vi.mock('expo-web-browser', () => ({
   openAuthSessionAsync: async (url: string, redirectUri: string) => {
+    if (mocks.browserResult) return mocks.browserResult
     const start = new URL(url)
     return {
       type: 'success',
@@ -40,6 +42,7 @@ vi.mock('expo-web-browser', () => ({
 describe('DeepSpace Expo client', () => {
   beforeEach(() => {
     mocks.store.clear()
+    mocks.browserResult = null
     mocks.randomValues.splice(0, mocks.randomValues.length, 'oauth-state', 'verifier-a', 'verifier-b')
   })
 
@@ -60,7 +63,7 @@ describe('DeepSpace Expo client', () => {
 
     const { createDeepSpaceExpoClient } = await import('../expo')
     const client = createDeepSpaceExpoClient({
-      baseUrl: 'https://veriluma.app.space',
+      baseUrl: 'https://example.app.space',
       fetch: fetcher,
     })
     await expect(client.signInWithGoogle()).resolves.toEqual({
@@ -68,9 +71,26 @@ describe('DeepSpace Expo client', () => {
       claims: { email: 'user@example.com' },
     })
     expect(fetcher).toHaveBeenCalledWith(
-      'https://veriluma.app.space/api/auth/native-exchange',
+      'https://example.app.space/api/auth/native-exchange',
       expect.objectContaining({ method: 'POST' }),
     )
+  })
+
+  it('tells a closed sign-in sheet apart from a failed sign-in', async () => {
+    const { createDeepSpaceExpoClient, DeepSpaceSignInCancelledError } = await import('../expo')
+    const fetcher = vi.fn()
+    const client = createDeepSpaceExpoClient({ baseUrl: 'https://notes.app.space', fetch: fetcher })
+    for (const type of ['cancel', 'dismiss']) {
+      mocks.browserResult = { type }
+      const error = await client.signInWithGoogle().catch((caught: unknown) => caught)
+      expect(error).toBeInstanceOf(DeepSpaceSignInCancelledError)
+      expect(error).toMatchObject({ code: 'sign_in_cancelled' })
+    }
+    mocks.browserResult = { type: 'locked' }
+    const locked = await client.signInWithGoogle().catch((error: unknown) => error)
+    expect(locked).toBeInstanceOf(Error)
+    expect(locked).not.toBeInstanceOf(DeepSpaceSignInCancelledError)
+    expect(fetcher).not.toHaveBeenCalled()
   })
 
   it('namespaces the default secure-store key per app origin', async () => {

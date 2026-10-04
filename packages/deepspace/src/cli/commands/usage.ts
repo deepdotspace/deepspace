@@ -122,8 +122,10 @@ export function renderSummary(summary: UsageSummary): string {
     }
   }
 
-  lines.push('')
-  lines.push(`Dashboard: ${DASHBOARD_URL}`)
+  if (DASHBOARD_URL) {
+    lines.push('')
+    lines.push(`Dashboard: ${DASHBOARD_URL}`)
+  }
   return lines.join('\n')
 }
 

@@ -143,6 +143,21 @@ describe('base scaffold route loading', () => {
     expect(entry).not.toContain("from '@generouted/react-router'")
   })
 
+  it('keeps generouted out of production dependencies', () => {
+    // Its Vite plugin pulls fast-glob -> micromatch -> braces, which has an
+    // unpatched advisory (GHSA-vfj7-8cjw-p6xm). That code runs only in the
+    // build; the lazy runtime Vite bundles imports just React and React Router.
+    // As a production dependency it fails the release's npm audit gate.
+    const template = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL('../../templates/base/package.json', import.meta.url)),
+        'utf8',
+      ),
+    ) as { dependencies: Record<string, string>; devDependencies: Record<string, string> }
+    expect(template.dependencies['@generouted/react-router']).toBeUndefined()
+    expect(template.devDependencies['@generouted/react-router']).toBeDefined()
+  })
+
   it('hydrates a prerendered page instead of repainting it', () => {
     const entry = readFileSync(
       fileURLToPath(new URL('../../templates/base/src/main.tsx', import.meta.url)),

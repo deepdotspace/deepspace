@@ -178,10 +178,10 @@ export function prepareWranglerEnvConfig(
 }
 
 export function wranglerViteEnv(
-  baseEnv: Record<string, string | undefined>,
+  baseEnv: NodeJS.ProcessEnv,
   prepared: PreparedWranglerEnvConfig,
-  extraEnv: Record<string, string | undefined> = {},
-): Record<string, string | undefined> {
+  extraEnv: NodeJS.ProcessEnv = {},
+): NodeJS.ProcessEnv {
   const env = { ...baseEnv, ...extraEnv }
   if (prepared.configPath) {
     delete env.CLOUDFLARE_ENV

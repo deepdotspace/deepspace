@@ -535,7 +535,7 @@ async function handleUpload(
     let rawMimeType: string
 
     if (contentType.includes('multipart/form-data')) {
-      const formData = await request.formData() as unknown as FormData & { get(name: string): FormDataEntryValue | null }
+      const formData = await request.formData()
       const file = formData.get('file') as File | null
       if (!file) return fail(400, 'No file provided', 'bad_request')
       const tooBig = overRequestBound(file.size)

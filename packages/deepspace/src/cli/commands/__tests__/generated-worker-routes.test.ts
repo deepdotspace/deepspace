@@ -556,23 +556,23 @@ describe('generated worker route owners', () => {
     )
 
     const native = await app.request(
-      'https://example.app.space/api/auth/native-start?provider=google&redirect_uri=veriluma%3A%2F%2Fauth%2Fcallback&state=s-1&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&code_challenge_method=S256',
+      'https://example.app.space/api/auth/native-start?provider=google&redirect_uri=myapp%3A%2F%2Fauth%2Fcallback&state=s-1&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&code_challenge_method=S256',
       undefined,
       env({
         AUTH_WORKER_URL: 'https://auth.example.test',
-        NATIVE_AUTH_REDIRECT_URIS: 'veriluma://auth/callback',
+        NATIVE_AUTH_REDIRECT_URIS: 'myapp://auth/callback',
       }),
     )
     expect(native.status).toBe(302)
     expect(new URL(native.headers.get('location')!).pathname).toBe('/login/social')
 
     const nativeCallback = await app.request(
-      'https://example.app.space/api/auth/oauth-complete?redirect_uri=veriluma%3A%2F%2Fauth%2Fcallback&code=one-time-code&state=s-1&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&code_challenge_method=S256',
+      'https://example.app.space/api/auth/oauth-complete?redirect_uri=myapp%3A%2F%2Fauth%2Fcallback&code=one-time-code&state=s-1&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&code_challenge_method=S256',
       undefined,
-      env({ NATIVE_AUTH_REDIRECT_URIS: 'veriluma://auth/callback' }),
+      env({ NATIVE_AUTH_REDIRECT_URIS: 'myapp://auth/callback' }),
     )
     expect(nativeCallback.status).toBe(302)
-    expect(nativeCallback.headers.get('location')).toBe('veriluma://auth/callback?code=one-time-code&state=s-1')
+    expect(nativeCallback.headers.get('location')).toBe('myapp://auth/callback?code=one-time-code&state=s-1')
   })
 
   it('keeps debug and user-billed integration routes closed by default', async () => {

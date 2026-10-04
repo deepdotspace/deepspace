@@ -102,7 +102,7 @@ export interface Env extends DOBindings<typeof __DO_MANIFEST__> {
   AUTH_JWT_PUBLIC_KEY: string
   AUTH_JWT_ISSUER: string
   AUTH_WORKER_URL: string
-  /** Comma-separated exact Expo/native callback URIs (for example, veriluma://auth/callback). */
+  /** Comma-separated exact Expo/native callback URIs (for example, myapp://auth/callback). */
   NATIVE_AUTH_REDIRECT_URIS?: string
   APP_NAME: string
   /** Immutable record-scope and platform identity. */

@@ -1,6 +1,6 @@
 {
   "name": "deepspace",
-  "version": "0.34.0",
+  "version": "0.35.0",
   "engines": {
     "node": ">=22.15.0 <23 || >=24 <25 || >=26 <27"
   },
@@ -61,7 +61,7 @@
   ],
   "scripts": {
     "build": "node ../../scripts/clean-artifacts.mjs dist --tsbuildinfo && tsup",
-    "type-check": "tsc --noEmit",
+    "type-check": "tsc --noEmit && tsc --noEmit -p tsconfig.expo.json",
     "test": "vitest run",
     "test:documentation-browser": "playwright test --config src/documentation/runtime/__browser__/playwright.config.ts",
     "clean": "node ../../scripts/clean-artifacts.mjs dist --tsbuildinfo",

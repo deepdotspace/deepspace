@@ -37,7 +37,7 @@ export interface ExpoAuthStorage {
 }
 
 export interface DeepSpaceExpoClientOptions {
-  /** Deployed app origin, for example `https://veriluma.app.space`. */
+  /** Deployed app origin, for example `https://example.app.space`. */
   baseUrl: string
   /** Defaults to Expo's `createURL('auth/callback')`. */
   redirectUri?: string
@@ -69,6 +69,21 @@ export class DeepSpaceExpoError extends Error {
     this.name = 'DeepSpaceExpoError'
     this.status = status
     this.body = body
+  }
+}
+
+/**
+ * Thrown by `signIn` when the person closes the sign-in sheet. It isn't a
+ * failure, so apps usually return to where they were without showing an error.
+ * Check `code`: `instanceof` fails if the bundler includes two copies of
+ * this package.
+ */
+export class DeepSpaceSignInCancelledError extends Error {
+  readonly code = 'sign_in_cancelled' as const
+
+  constructor() {
+    super('DeepSpace sign-in was cancelled')
+    this.name = 'DeepSpaceSignInCancelledError'
   }
 }
 
@@ -138,7 +153,8 @@ export class DeepSpaceExpoClient {
       codeChallenge,
     )
     const result = await WebBrowser.openAuthSessionAsync(startUrl, this.redirectUri)
-    if (result.type !== 'success' || !result.url) throw new Error('DeepSpace sign-in was cancelled')
+    if (result.type === 'cancel' || result.type === 'dismiss') throw new DeepSpaceSignInCancelledError()
+    if (result.type !== 'success' || !result.url) throw new Error('DeepSpace sign-in did not finish')
     const code = codeFromExpoRedirect(result.url)
     if (!code) throw new Error('DeepSpace sign-in returned no exchange code')
     if (stateFromExpoRedirect(result.url) !== expectedState) {

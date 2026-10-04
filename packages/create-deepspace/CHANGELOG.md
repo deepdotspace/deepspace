@@ -1,5 +1,12 @@
 # create-deepspace
 
+## 0.35.0
+
+### Patch Changes
+
+- Use neutral example values (`myapp://auth/callback`, `example.app.space`) in the Expo client's docs and the app template's native-callback comments.
+- New apps list `@generouted/react-router` under `devDependencies`. Its Vite plugin depends on `braces`, which has an unpatched advisory; that code runs only during the build, so it no longer counts as a production dependency.
+
 ## 0.34.0
 
 ### Minor Changes

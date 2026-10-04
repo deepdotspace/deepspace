@@ -18,6 +18,7 @@ import { join } from 'node:path'
 // too — Playwright fixtures. Reusing it keeps one definition of "write a file
 // holding plaintext secrets" rather than a second hand-rolled copy here.
 import { writeSecretFileSync } from '../cli/lib/secure-file'
+import { PLANES } from '../shared/planes'
 
 export interface TestAccount {
   email: string
@@ -30,9 +31,6 @@ export interface TestAccount {
 }
 
 export const TEST_ACCOUNTS_PATH = join(homedir(), '.deepspace', 'test-accounts.json')
-
-const PRODUCTION_AUTH_ORIGIN = 'https://auth.deep.space'
-const STAGING_AUTH_ORIGIN = 'https://auth.deepspacesites.com'
 
 export interface TestAccountCredentialStore {
   version: 2
@@ -52,9 +50,10 @@ export interface RemoteTestAccount {
  * array if the file doesn't exist yet.
  */
 export function currentTestAccountScope(env: NodeJS.ProcessEnv = process.env): string {
+  const plane: string | undefined = env.DEEPSPACE_ENV
   const selected =
     env.DEEPSPACE_AUTH_URL ??
-    (env.DEEPSPACE_ENV === 'staging' ? STAGING_AUTH_ORIGIN : PRODUCTION_AUTH_ORIGIN)
+    (plane === 'staging' || plane === 'medical' ? PLANES[plane].auth : PLANES.production.auth)
   return normalizeTestAccountScope(selected)
 }
 

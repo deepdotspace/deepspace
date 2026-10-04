@@ -1,5 +1,16 @@
 # deepspace
 
+## 0.35.0
+
+### Minor Changes
+
+- `deepspace/expo`: closing the sign-in sheet now throws `DeepSpaceSignInCancelledError` (`code: 'sign_in_cancelled'`), so apps can tell it apart from a failed sign-in and skip the error message.
+- Add the `medical` plane: `DEEPSPACE_ENV=medical` selects DeepSpace Medical's services on deepspacemedical.com, pages on deepspacemedical.app and deepspacemedical.com resolve to the medical plane instead of production, and the sign-in overlay links to the plane's own privacy policy. Every plane's URLs now come from one table, exported from `deepspace/worker` as `PLANES` along with `isRestrictedPlane`. The CLI omits the dashboard line on a plane without a dashboard.
+
+### Patch Changes
+
+- Use neutral example values (`myapp://auth/callback`, `example.app.space`) in the Expo client's docs and the app template's native-callback comments.
+
 ## 0.34.0
 
 ### Minor Changes

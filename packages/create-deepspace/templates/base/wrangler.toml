@@ -30,7 +30,7 @@ run_worker_first = ["/api/*", "/ws/*", "/internal/*", "/v1/*", "/_deepspace/*", 
 DEEPSPACE_APP_ID = "__APP_ID__"
 APP_NAME = "__APP_NAME__"
 # Exact comma-separated native callback URIs. Set this before deploying an
-# Expo client, for example: "veriluma://auth/callback".
+# Expo client, for example: "myapp://auth/callback".
 NATIVE_AUTH_REDIRECT_URIS = ""
 
 [[migrations]]

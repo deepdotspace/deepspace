@@ -16,9 +16,8 @@ import { InputError } from './cli-errors'
 
 /** Resolve the source remote without allowing staging to re-aim production state. */
 export function spaceRemoteName(environment: DeepSpaceEnvironment = DEEPSPACE_ENV): string {
-  if (environment === 'staging') return 'space-staging'
   if (environment === 'production') return 'space'
-  return 'space-invalid'
+  return `space-${environment}`
 }
 
 /** The source remote for this CLI process. */
@@ -92,7 +91,7 @@ function entryIsTransient(cwd: string): boolean {
 function helperEntryUsable(command: string): boolean {
   // Quoted paths containing a single quote deliberately fall through to false;
   // re-aiming that rare form is simpler and safer than partially parsing shell.
-  const match = /^!(?:DEEPSPACE_ENV=(production|staging) )?'([^']*)' '([^']*)' git-credential$/.exec(command)
+  const match = /^!(?:DEEPSPACE_ENV=(production|staging|medical) )?'([^']*)' '([^']*)' git-credential$/.exec(command)
   const expectedEnvironment = DEEPSPACE_ENV === 'production' ? undefined : DEEPSPACE_ENV
   if (!match || match[1] !== expectedEnvironment) return false
   return existsSync(match[2]) && existsSync(match[3])
@@ -105,7 +104,8 @@ function helperEntryUsable(command: string): boolean {
 export function credentialHelperCommand(environment: DeepSpaceEnvironment = DEEPSPACE_ENV): string {
   const entry = process.argv[1]
   if (!entry) throw new Error('CLI entry path is unavailable')
-  const environmentPrefix = environment === 'staging' ? 'DEEPSPACE_ENV=staging ' : ''
+  const environmentPrefix =
+    environment === 'staging' || environment === 'medical' ? `DEEPSPACE_ENV=${environment} ` : ''
   return `!${environmentPrefix}${shQuote(process.execPath)} ${shQuote(entry)} git-credential`
 }
 
