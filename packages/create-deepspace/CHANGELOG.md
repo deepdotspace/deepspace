@@ -1,5 +1,13 @@
 # create-deepspace
 
+## 0.38.0
+
+### Minor Changes
+
+- Remove the DeepSpace Medical plane and native ID-token sign-in. `DEEPSPACE_ENV` accepts only `production` and `staging` again, the `Environment` type and `detectEnvironment()` no longer include `'medical'`, pages on deepspacemedical.app and deepspacemedical.com fall back to production like any unknown host, and the sign-in overlay links to deep.space/privacy. `deepspace/worker` no longer exports `PLANES`, `PlaneName`, `PlaneUrls`, `isRestrictedPlane` or `nativeAuthIdToken`; `deepspace/expo` drops `signInWithIdToken`, `NativeIdTokenOptions` and `paths.idToken`; `createDeepSpaceAuth` drops `nativeIdTokenAudiences`; and the app template no longer registers `POST /api/auth/native-id-token`. Expo sign-in through the system browser is unchanged.
+
+  `createDeepSpaceAuth` now refuses Better Auth's ID-token sign-in (`idToken` on `/sign-in/social` and `/link-social`) for Google, Microsoft and Apple. No DeepSpace client signs in that way, and a posted ID token could be replayed until it expires; the normal OAuth flow is unaffected.
+
 ## 0.37.0
 
 ### Minor Changes

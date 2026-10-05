@@ -359,7 +359,7 @@ const wantsHelp = rawArgs.some((arg) => arg === '--help' || arg === '-h')
 if (DEEPSPACE_ENV === 'invalid') {
   const error =
     `Invalid DEEPSPACE_ENV=${JSON.stringify(process.env.DEEPSPACE_ENV)}. ` +
-    'Use `production`, `staging`, `medical`, or unset it; refusing to default to production.'
+    'Use `staging`, `production`, or unset it; refusing to default to production.'
   if (rawArgs.includes('--json') && !wantsHelp) {
     console.log(JSON.stringify({ ok: false, code: 'invalid_environment', error }))
   } else {

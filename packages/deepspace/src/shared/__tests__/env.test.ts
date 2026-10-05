@@ -1,7 +1,7 @@
 /**
  * Hostname detection decides which plane a page's sign-in and API calls go
- * to. A medical app's page must call the medical plane's sign-in and API,
- * never production's.
+ * to. A staging page must never call production, and production pages must
+ * stay on production.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -19,25 +19,20 @@ afterEach(() => {
 })
 
 describe('plane detection by hostname', () => {
-  it('sends medical apps and services to the medical plane', () => {
-    expect(onHost('notes.deepspacemedical.app')).toEqual({
-      plane: 'medical',
-      authUrl: 'https://auth.deepspacemedical.com',
-    })
-    expect(onHost('auth.deepspacemedical.com').plane).toBe('medical')
-    expect(onHost('deepspacemedical.com').plane).toBe('medical')
-  })
-
-  it('leaves production and look-alike hosts on production', () => {
-    expect(onHost('notes.app.space')).toEqual({
-      plane: 'prod',
-      authUrl: 'https://auth.deep.space',
-    })
-    expect(onHost('notdeepspacemedical.app').plane).toBe('prod')
+  it('keeps production apps and services on production', () => {
+    expect(onHost('notes.app.space')).toEqual({ plane: 'prod', authUrl: 'https://auth.deep.space' })
     expect(onHost('dashboard.deep.space').plane).toBe('prod')
   })
 
-  it('keeps staging on staging', () => {
-    expect(onHost('app.spacestest.com').plane).toBe('staging')
+  it('sends staging apps and services to staging', () => {
+    expect(onHost('notes.spacestest.com')).toEqual({
+      plane: 'staging',
+      authUrl: 'https://auth.deepspacesites.com',
+    })
+    expect(onHost('auth.deepspacesites.com').plane).toBe('staging')
+  })
+
+  it('does not treat a look-alike host as staging', () => {
+    expect(onHost('notspacestest.com').plane).toBe('prod')
   })
 })

@@ -10,9 +10,7 @@
  * 4. Hostname detection (fallback)
  */
 
-import { PLANES, type PlaneUrls } from '../planes'
-
-export type Environment = 'dev' | 'staging' | 'medical' | 'prod'
+export type Environment = 'dev' | 'staging' | 'prod'
 
 declare const __DEEPSPACE_ENV__: string | undefined
 
@@ -36,8 +34,6 @@ interface EnvironmentConfig {
   mainAppUrl: string
   /** Builder dashboard URL */
   dashboardUrl: string
-  /** Privacy policy that sign-in screens link to */
-  privacyPolicyUrl: string
 }
 
 const DEV_CONFIG: EnvironmentConfig = {
@@ -49,35 +45,33 @@ const DEV_CONFIG: EnvironmentConfig = {
   authSignUpUrl: 'http://localhost:5173/sign-up',
   mainAppUrl: 'http://localhost:5173',
   dashboardUrl: 'http://localhost:5174',
-  privacyPolicyUrl: 'https://deep.space/privacy',
 }
 
-/** A deployed plane's client config, from the shared plane table. */
-function planeConfig(name: Exclude<Environment, 'dev'>, plane: PlaneUrls): EnvironmentConfig {
-  return {
-    name,
-    apiUrl: plane.api,
-    platformWorkerUrl: plane.platform,
-    authUrl: plane.auth,
-    authSignInUrl: `${plane.auth}/login/social`,
-    authSignUpUrl: `${plane.auth}/login/social`,
-    mainAppUrl: plane.home,
-    // DeepSpace Medical has no dashboard; its home page stands in.
-    dashboardUrl: plane.dashboard ?? plane.home,
-    privacyPolicyUrl: plane.privacyPolicy,
-  }
-}
-
-// Services and the dashboard on deepspacesites.com, user apps on
-// spacestest.com. This module once had NO staging tier — a staging app calling
+// Mirrors the CLI's staging preset (cli/env.ts) and the staging wrangler
+// routes: services and the dashboard on deepspacesites.com, user apps on
+// spacestest.com. This module had NO staging tier — a staging app calling
 // getApiUrl() silently targeted production.
-const STAGING_CONFIG = planeConfig('staging', PLANES.staging)
+const STAGING_CONFIG: EnvironmentConfig = {
+  name: 'staging',
+  apiUrl: 'https://api.deepspacesites.com',
+  platformWorkerUrl: 'https://platform.deepspacesites.com',
+  authUrl: 'https://auth.deepspacesites.com',
+  authSignInUrl: 'https://auth.deepspacesites.com/login/social',
+  authSignUpUrl: 'https://auth.deepspacesites.com/login/social',
+  mainAppUrl: 'https://spacestest.com',
+  dashboardUrl: 'https://dashboard.deepspacesites.com',
+}
 
-// DeepSpace Medical, the BAA-covered plane: services on deepspacemedical.com,
-// apps on deepspacemedical.app.
-const MEDICAL_CONFIG = planeConfig('medical', PLANES.medical)
-
-const PROD_CONFIG = planeConfig('prod', PLANES.production)
+const PROD_CONFIG: EnvironmentConfig = {
+  name: 'prod',
+  apiUrl: 'https://api-worker.deep.space',
+  platformWorkerUrl: 'https://platform-worker.deep.space',
+  authUrl: 'https://auth.deep.space',
+  authSignInUrl: 'https://auth.deep.space/login/social',
+  authSignUpUrl: 'https://auth.deep.space/login/social',
+  mainAppUrl: 'https://deep.space',
+  dashboardUrl: 'https://dashboard.deep.space',
+}
 
 // ============================================================================
 // Environment Detection
@@ -90,7 +84,6 @@ function parseEnv(value: string | undefined): Environment | null {
   const v = value.toLowerCase()
   if (v === 'dev' || v === 'development') return 'dev'
   if (v === 'staging') return 'staging'
-  if (v === 'medical') return 'medical'
   if (v === 'prod' || v === 'production') return 'prod'
   return null
 }
@@ -143,20 +136,26 @@ export function detectEnvironment(): Environment {
       return 'dev'
     }
 
-    // A deployed plane's apps and services live on its two zones.
-    const onPlane = (plane: PlaneUrls) =>
-      [plane.appDomain, plane.platformDomain].some(
-        (zone) => hostname === zone || hostname.endsWith(`.${zone}`),
-      )
-    for (const [env, plane] of [
-      ['staging', PLANES.staging],
-      ['medical', PLANES.medical],
-      ['prod', PLANES.production],
-    ] as const) {
-      if (onPlane(plane)) {
-        cachedEnvironment = env
-        return env
-      }
+    // Staging: apps on *.spacestest.com, services on *.deepspacesites.com.
+    if (
+      hostname === 'spacestest.com' ||
+      hostname.endsWith('.spacestest.com') ||
+      hostname === 'deepspacesites.com' ||
+      hostname.endsWith('.deepspacesites.com')
+    ) {
+      cachedEnvironment = 'staging'
+      return 'staging'
+    }
+
+    // Production: app.space, *.app.space, deep.space, *.deep.space
+    if (
+      hostname === 'app.space' ||
+      hostname.endsWith('.app.space') ||
+      hostname === 'deep.space' ||
+      hostname.endsWith('.deep.space')
+    ) {
+      cachedEnvironment = 'prod'
+      return 'prod'
     }
   }
 
@@ -167,16 +166,7 @@ export function detectEnvironment(): Environment {
 
 export function getEnvironmentConfig(): EnvironmentConfig {
   const env = detectEnvironment()
-  switch (env) {
-    case 'dev':
-      return DEV_CONFIG
-    case 'staging':
-      return STAGING_CONFIG
-    case 'medical':
-      return MEDICAL_CONFIG
-    case 'prod':
-      return PROD_CONFIG
-  }
+  return env === 'dev' ? DEV_CONFIG : env === 'staging' ? STAGING_CONFIG : PROD_CONFIG
 }
 
 // ============================================================================
@@ -199,8 +189,6 @@ export function isLocalDev(): boolean {
   return detectEnvironment() === 'dev'
 }
 
-/** True only on production. DeepSpace Medical (`medical`) is its own plane,
- *  so this is false there; check `detectEnvironment()` to tell the planes apart. */
 export function isProduction(): boolean {
   return detectEnvironment() === 'prod'
 }

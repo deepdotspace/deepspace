@@ -48,15 +48,6 @@ export interface DeepSpaceAuthConfig {
    * on demand, so there is no six-month token to rotate by hand.
    */
   apple?: { clientId: string; teamId: string; keyId: string; privateKey: string }
-  /**
-   * Extra OAuth client ids whose ID tokens may sign in through Better Auth's
-   * `POST /sign-in/social` `{ provider, idToken }`: a native app's own Google
-   * iOS/web client ids, or its iOS bundle id for Sign in with Apple. Tokens
-   * are still checked for Google's or Apple's signature, issuer and expiry.
-   * A provider listed here without its web credentials above accepts ID
-   * tokens only; it can't start a browser sign-in.
-   */
-  nativeIdTokenAudiences?: { google?: string[]; apple?: string[] }
   /** Enable email/password authentication */
   emailAndPassword?: boolean
   /** Trusted origins for CORS */
@@ -116,33 +107,32 @@ export interface DeepSpaceAuthConfig {
  * Apple's function form, which better-auth's own types don't model.
  */
 type StaticProviderConfig = {
-  clientId: string | string[]
+  clientId: string
   clientSecret: string
-  /** Apple: accepted ID-token audiences (Better Auth checks these before clientId). */
-  audience?: string[]
+  disableIdTokenSignIn?: boolean
 }
 type SocialProviderConfig = StaticProviderConfig | (() => Promise<StaticProviderConfig>)
+
+/**
+ * Better Auth also accepts a provider's ID token posted straight to
+ * `/sign-in/social` and `/link-social`. No DeepSpace client signs in that way
+ * (they all use the server-side OAuth flow), and an ID token can be replayed
+ * until it expires, so the route is off. The normal OAuth callback never
+ * reads this flag.
+ */
+const NO_ID_TOKEN = { disableIdTokenSignIn: true } as const
 
 export function createDeepSpaceAuth(config: DeepSpaceAuthConfig) {
   const socialProviders: Record<string, SocialProviderConfig> = {}
 
-  const googleAudiences = config.nativeIdTokenAudiences?.google ?? []
-  const appleAudiences = config.nativeIdTokenAudiences?.apple ?? []
-
   if (config.google) {
-    // The web client id stays first: Better Auth starts browser sign-ins with
-    // the first id and accepts ID tokens issued to any of them.
-    socialProviders.google = googleAudiences.length
-      ? { ...config.google, clientId: [config.google.clientId, ...googleAudiences] }
-      : config.google
-  } else if (googleAudiences.length) {
-    socialProviders.google = { clientId: googleAudiences, clientSecret: '' }
+    socialProviders.google = { ...config.google, ...NO_ID_TOKEN }
   }
   if (config.github) {
     socialProviders.github = config.github
   }
   if (config.microsoft) {
-    socialProviders.microsoft = config.microsoft
+    socialProviders.microsoft = { ...config.microsoft, ...NO_ID_TOKEN }
   }
   if (config.apple) {
     const apple = config.apple
@@ -152,28 +142,19 @@ export function createDeepSpaceAuth(config: DeepSpaceAuthConfig) {
     // client-secret JWT (we sign on demand rather than store a rotating token)
     // inside try/catch so a bad Apple key degrades to "Apple unavailable"
     // instead of taking Google/GitHub/Microsoft/password down with it.
-    const audience = appleAudiences.length ? [apple.clientId, ...appleAudiences] : undefined
     socialProviders.apple = async () => {
       try {
         return {
           clientId: apple.clientId,
           clientSecret: await generateAppleClientSecret(apple),
-          ...(audience ? { audience } : {}),
+          ...NO_ID_TOKEN,
         }
       } catch (err) {
         console.error(
           `[deepspace] failed to mint Apple client secret; Apple sign-in disabled: ${loggableError(err)}`,
         )
-        return { clientId: apple.clientId, clientSecret: '', ...(audience ? { audience } : {}) }
+        return { clientId: apple.clientId, clientSecret: '', ...NO_ID_TOKEN }
       }
-    }
-  } else if (appleAudiences.length) {
-    // ID tokens only (native Sign in with Apple): no key material is needed to
-    // verify them, so no client secret is minted.
-    socialProviders.apple = {
-      clientId: appleAudiences[0],
-      clientSecret: '',
-      audience: appleAudiences,
     }
   }
 

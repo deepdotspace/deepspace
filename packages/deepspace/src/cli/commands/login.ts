@@ -91,7 +91,7 @@ export default defineDeepspaceCommand({
       const who = await doEmailLogin(email as string, password as string)
       if (!json) {
         console.log(`Logged in as ${who.email} (${who.userId})`)
-        if (DASHBOARD_URL) console.log(`Dashboard: ${DASHBOARD_URL}`)
+        console.log(`Dashboard: ${DASHBOARD_URL}`)
       }
       return { data: { email: who.email, userId: who.userId } }
     }
@@ -161,12 +161,10 @@ export default defineDeepspaceCommand({
     if (!json) {
       s.stop('Authenticated')
       p.log.success(`Logged in as ${result.name ?? result.email}`)
-      if (DASHBOARD_URL) {
-        p.note(
-          `Manage your account, deployed apps, billing, and subscription\nplans on the web dashboard:\n\n  ${DASHBOARD_URL}`,
-          'Dashboard',
-        )
-      }
+      p.note(
+        `Manage your account, deployed apps, billing, and subscription\nplans on the web dashboard:\n\n  ${DASHBOARD_URL}`,
+        'Dashboard',
+      )
       p.outro('Done')
     }
     return { data: { email: result.email, userId } }

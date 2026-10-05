@@ -7,7 +7,6 @@ import {
   type RemoteTestAccount,
   type TestAccount,
   type TestAccountCredentialStore,
-  currentTestAccountScope,
 } from '../accounts'
 
 const live: RemoteTestAccount = {
@@ -109,15 +108,5 @@ describe('findTestAccountByName failure', () => {
     // The pool is global but passwords are local-only, so "not found here"
     // very often means "created on another machine" — say so.
     expect(message).toContain('deepspace test accounts recover')
-  })
-})
-
-describe('test account scope', () => {
-  it('keeps each plane in its own scope', () => {
-    const scope = (DEEPSPACE_ENV?: string) =>
-      currentTestAccountScope({ NODE_ENV: 'test', ...(DEEPSPACE_ENV ? { DEEPSPACE_ENV } : {}) })
-    expect(scope()).toBe('https://auth.deep.space')
-    expect(scope('staging')).toBe('https://auth.deepspacesites.com')
-    expect(scope('medical')).toBe('https://auth.deepspacemedical.com')
   })
 })

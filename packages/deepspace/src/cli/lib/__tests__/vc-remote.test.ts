@@ -36,12 +36,6 @@ describe('source environment isolation', () => {
     expect(spacePrivateRef('pushed/main', 'staging')).toBe('refs/deepspace/staging/pushed/main')
   })
 
-  it('gives the medical plane its own remote and client-only refs', () => {
-    expect(spaceRemoteName('medical')).toBe('space-medical')
-    expect(spaceTrackingRef('main', spaceRemoteName('medical'))).toBe('refs/remotes/space-medical/main')
-    expect(spacePrivateRef('pushed/main', 'medical')).toBe('refs/deepspace/medical/pushed/main')
-  })
-
   it('binds the process-wide defaults to staging before commands load', async () => {
     const savedEnvironment = process.env.DEEPSPACE_ENV
     process.env.DEEPSPACE_ENV = 'staging'
@@ -73,8 +67,6 @@ describe('credential-helper command safety', () => {
       expect(command).not.toMatch(/!deepspace /)
       expect(command).toContain(process.execPath.split(/[\\/]/).pop() as string)
       expect(credentialHelperCommand('staging')).toContain('!DEEPSPACE_ENV=staging ')
-      expect(credentialHelperCommand('medical')).toContain('!DEEPSPACE_ENV=medical ')
-      expect(credentialHelperCommand('production')).not.toContain('DEEPSPACE_ENV=')
     } finally {
       process.env.PATH = savedPath
     }

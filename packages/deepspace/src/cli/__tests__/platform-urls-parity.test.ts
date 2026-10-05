@@ -1,8 +1,7 @@
 /**
- * The shared plane table (shared/planes.ts, which the CLI presets, the browser
- * client and the test helpers all read) must name the hosts the workers
- * actually deploy to — it and the four platform wrangler.toml files are two
- * sources of truth with nothing else tying them together. The
+ * PLATFORM_URLS (the CLI's per-plane service presets) must name the hosts the
+ * workers actually deploy to — env.ts and the four platform wrangler.toml
+ * files are two sources of truth with nothing else tying them together. The
  * staging service-zone move (spacestest.com → deepspacesites.com) is exactly
  * the kind of change this pins: every preset had to move in lockstep with
  * four route blocks, by hand.
@@ -14,7 +13,6 @@
 import { describe, it, expect } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { PLANES } from '../../shared/planes'
 
 const PLATFORM_DIR = resolve(import.meta.dirname, '../../../../../platform')
 const inRepo = existsSync(PLATFORM_DIR)
@@ -38,10 +36,14 @@ describe.skipIf(!inRepo)('PLATFORM_URLS ↔ wrangler routes', () => {
   } as const
 
   it.each(Object.entries(WORKERS))('%s presets point at hosts %s actually serves', async (key, worker) => {
+    // Import lazily so DEEPSPACE_ENV at module-load time doesn't matter for
+    // the rest of the suite; we only need the two literal preset tables.
+    const envSrc = readFileSync(resolve(import.meta.dirname, '../env.ts'), 'utf-8')
+    const urls = [...envSrc.matchAll(new RegExp(`${key}: 'https://([^']+)'`, 'g'))].map((m) => m[1])
+    expect(urls.length, `env.ts should declare a prod and a staging ${key} URL`).toBe(2)
     const hosts = servedHosts(worker)
-    for (const [plane, urls] of Object.entries(PLANES)) {
-      const host = new URL(urls[key as keyof typeof WORKERS]).host
-      expect(hosts.has(host), `the ${plane} plane names https://${host} but ${worker}/wrangler.toml has no route/custom domain for it`).toBe(true)
+    for (const url of urls) {
+      expect(hosts.has(url), `env.ts names https://${url} but ${worker}/wrangler.toml has no route/custom domain for it`).toBe(true)
     }
   })
 })

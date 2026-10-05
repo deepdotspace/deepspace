@@ -311,7 +311,7 @@ export default defineDeepspaceCommand({
       } else {
         console.log(`Submitted feedback ${result.report.id} (${result.report.type}).`)
       }
-      if (DASHBOARD_URL) console.log(`Track triage status at ${DASHBOARD_URL}.`)
+      console.log(`Track triage status at ${DASHBOARD_URL}.`)
     }
 
     // Terminal operation — nothing to run next, so no `next` (never filler).

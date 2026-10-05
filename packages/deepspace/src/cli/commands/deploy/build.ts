@@ -11,7 +11,7 @@ import { APP_ID_ADOPTION_STEPS } from '../../../build/app-id'
 // header and docs/migrations/build-preview-secrets.md.
 import { removeBuildDevVars } from '../../../build/plugin'
 import { readDocumentationDeployManifest } from '../../../documentation/deploy'
-import { DEEPSPACE_ENV, appDomainForEnv } from '../../env'
+import { DEEPSPACE_ENV } from '../../env'
 import {
   bindingManifestFromOutputConfig,
   validateBindingManifest,
@@ -132,8 +132,7 @@ export async function buildDeployBundle(options: {
   let preparedWranglerConfig: PreparedWranglerEnvConfig | undefined
   try {
     preparedWranglerConfig = prepareWranglerEnvConfig(appDir, envName)
-    // cli.ts refuses an invalid DEEPSPACE_ENV before any command runs.
-    const appDomain = appDomainForEnv(DEEPSPACE_ENV) ?? 'app.space'
+    const appDomain = DEEPSPACE_ENV === 'staging' ? 'spacestest.com' : 'app.space'
     execSync('npx vite build', {
       cwd: appDir,
       stdio: 'pipe',

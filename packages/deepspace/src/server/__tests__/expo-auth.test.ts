@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   nativeAuthCallback,
   nativeAuthExchange,
-  nativeAuthIdToken,
   nativeAuthMe,
   nativeAuthStart,
   nativeAuthToken,
@@ -87,62 +86,6 @@ describe('Expo native auth bridge', () => {
       env,
     )
     expect(response.status).toBe(502)
-  })
-
-  it('signs in with a native ID token through Better Auth and mints the first JWT', async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(new Response(JSON.stringify({ redirect: false, token: 'session-token' }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ token: 'access-token' }), { status: 200 }))
-    const response = await nativeAuthIdToken(
-      new Request('https://example.app.space/api/auth/native-id-token', {
-        method: 'POST',
-        headers: { Cookie: 'stray=1', Origin: 'https://evil.example' },
-        body: JSON.stringify({
-          provider: 'apple',
-          idToken: 'header.payload.signature',
-          nonce: 'n'.repeat(32),
-          user: { name: { firstName: ' Ada ', lastName: null } },
-        }),
-      }),
-      env,
-    )
-    expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ sessionToken: 'session-token', accessToken: 'access-token' })
-    const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('https://auth.deep.space/api/auth/sign-in/social')
-    // Only the token travels: no browser cookies or origin from the app's caller.
-    expect(new Headers(init?.headers).get('cookie')).toBeNull()
-    expect(new Headers(init?.headers).get('origin')).toBeNull()
-    expect(JSON.parse(String(init?.body))).toEqual({
-      provider: 'apple',
-      idToken: { token: 'header.payload.signature', nonce: 'n'.repeat(32), user: { name: { firstName: 'Ada' } } },
-    })
-  })
-
-  it('refuses unsupported providers and reports a rejected token as 401', async () => {
-    const post = (body: unknown) =>
-      new Request('https://example.app.space/api/auth/native-id-token', { method: 'POST', body: JSON.stringify(body) })
-    expect((await nativeAuthIdToken(post({ provider: 'github', idToken: 'x'.repeat(20) }), env)).status).toBe(400)
-    expect((await nativeAuthIdToken(post({ provider: 'google' }), env)).status).toBe(400)
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(JSON.stringify({ code: 'INVALID_TOKEN' }), { status: 401 }),
-    )
-    const rejected = await nativeAuthIdToken(post({ provider: 'google', idToken: 'x'.repeat(20) }), env)
-    expect(rejected.status).toBe(401)
-  })
-
-  it('tells an unaccepted provider and rate limiting apart from a bad token', async () => {
-    const post = () =>
-      new Request('https://example.app.space/api/auth/native-id-token', {
-        method: 'POST',
-        body: JSON.stringify({ provider: 'apple', idToken: 'x'.repeat(20) }),
-      })
-    vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 'PROVIDER_NOT_FOUND' }), { status: 404 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 'TOO_MANY' }), { status: 429 }))
-    expect((await nativeAuthIdToken(post(), env)).status).toBe(503)
-    expect((await nativeAuthIdToken(post(), env)).status).toBe(429)
   })
 
   it('requires JWT configuration for the identity endpoint', async () => {

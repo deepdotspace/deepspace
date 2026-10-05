@@ -76,32 +76,6 @@ describe('DeepSpace Expo client', () => {
     )
   })
 
-  it('signs in with a provider ID token and keeps the session', async () => {
-    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const path = new URL(String(input)).pathname
-      if (path === '/api/auth/native-id-token') {
-        expect(JSON.parse(String(init?.body))).toEqual({
-          provider: 'apple',
-          idToken: 'id-token',
-          nonce: 'raw-nonce',
-          user: { name: { firstName: 'Ada', lastName: 'Lovelace' } },
-        })
-        return new Response(JSON.stringify({ sessionToken: 'session-token', accessToken: 'access-token' }), { status: 200 })
-      }
-      if (path === '/api/auth/native-me') {
-        expect(new Headers(init?.headers).get('authorization')).toBe('Bearer access-token')
-        return new Response(JSON.stringify({ userId: 'user-1', claims: {} }), { status: 200 })
-      }
-      throw new Error(`unexpected ${path}`)
-    })
-    const { createDeepSpaceExpoClient } = await import('../expo')
-    const client = createDeepSpaceExpoClient({ baseUrl: 'https://example.app.space', fetch: fetcher })
-    await expect(
-      client.signInWithIdToken('apple', 'id-token', { nonce: 'raw-nonce', name: { firstName: 'Ada', lastName: 'Lovelace' } }),
-    ).resolves.toEqual({ userId: 'user-1', claims: {} })
-    await expect(client.getSession()).resolves.toEqual({ sessionToken: 'session-token', accessToken: 'access-token' })
-  })
-
   it('tells a closed sign-in sheet apart from a failed sign-in', async () => {
     const { createDeepSpaceExpoClient, DeepSpaceSignInCancelledError } = await import('../expo')
     const fetcher = vi.fn()
