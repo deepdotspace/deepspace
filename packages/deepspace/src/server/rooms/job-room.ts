@@ -2,7 +2,7 @@
  * Persistent job queue with serial execution, progress, cancellation and retries.
  * Jobs run inside alarms unless listed in `backgroundJobTypes`.
  * Use `ctx.continue` to save a checkpoint for the next run.
- * After a restart, running jobs older than 16 minutes are retried or failed.
+ * After a restart, interrupted running jobs are retried or failed.
  */
 
 /// <reference types="@cloudflare/workers-types" />
@@ -87,7 +87,7 @@ interface JobAttachment extends UserAttachment {
 // Constants
 // ============================================================================
 
-/** Recover an old running row only when its handler is absent from this isolate. */
+/** Fallback for a missing handler in an already-initialized room. */
 const RUNNING_STALE_MS = 16 * 60 * 1000
 const BACKGROUND_ALARM_MS = 30_000
 const DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000
@@ -158,7 +158,9 @@ export abstract class JobRoom<
     this.sql.exec(`CREATE INDEX IF NOT EXISTS jobs_status_next_run ON jobs (status, next_run_at)`)
     this.sql.exec(`CREATE INDEX IF NOT EXISTS jobs_completed_at ON jobs (completed_at)`)
 
-    this.recoverStuckRunning()
+    // A new room has no handlers from the previous instance. Do not wait for
+    // their original start times to cross the alarm wall-time boundary.
+    this.recoverStuckRunning(true)
     this.scheduleNextAlarm()
   }
 
@@ -261,10 +263,7 @@ export abstract class JobRoom<
 
   protected async onAlarm(): Promise<void> {
     this.ensureInitialized()
-    // A recycled isolate can leave a recently-started row in `running`.
-    // Initialization arms a recovery alarm for the exact stale boundary;
-    // re-check here so that row becomes runnable even if no request wakes the
-    // room in the meantime.
+    // Keep the stale-time fallback for rows without an in-memory handler.
     this.recoverStuckRunning()
     await this.drainDueJobs()
     this.pruneExpired()
@@ -487,8 +486,7 @@ export abstract class JobRoom<
 
   private async executeJob(row: JobRow): Promise<void> {
     const startedAt = row.started_at ?? new Date().toISOString()
-    const attemptsBefore = row.attempts
-    const attempt = attemptsBefore + 1
+    const attempt = row.attempts + 1
 
     this.sql.exec(
       `UPDATE jobs SET status = 'running', started_at = ?, attempts = ? WHERE id = ?`,
@@ -513,7 +511,7 @@ export abstract class JobRoom<
     let errorMessage: string | undefined
 
     try {
-      const ctx = this.makeContext(row.id, controller.signal)
+      const ctx = this.makeContext(row.id, attempt, controller.signal)
       result = await this.onJob(job as Job<P>, ctx)
       if (this.continueState) outcome = 'continued'
     } catch (e) {
@@ -528,8 +526,8 @@ export abstract class JobRoom<
     }
 
     // Preserve cancellations and retries made while the handler was running.
-    const currentStatus = this.readStatus(row.id)
-    if (currentStatus !== 'running') {
+    const current = this.readRunState(row.id)
+    if (current?.status !== 'running' || current.attempts !== attempt) {
       this.continueState = null
       return
     }
@@ -619,9 +617,11 @@ export abstract class JobRoom<
     if (updated) this.broadcast(serverBuild.jobFailed(updated))
   }
 
-  private makeContext(jobId: string, signal: AbortSignal): JobContext {
+  private makeContext(jobId: string, attempt: number, signal: AbortSignal): JobContext {
     return {
       progress: (value: number, message?: string) => {
+        const current = this.readRunState(jobId)
+        if (current?.status !== 'running' || current.attempts !== attempt) return
         const clamped = Math.max(0, Math.min(1, value))
         this.sql.exec(
           `UPDATE jobs SET progress = ?, progress_message = ? WHERE id = ?`,
@@ -644,11 +644,11 @@ export abstract class JobRoom<
     }
   }
 
-  private readStatus(jobId: string): JobStatus | null {
-    const row = this.sql.exec(`SELECT status FROM jobs WHERE id = ?`, jobId).toArray()[0] as
-      | { status: JobStatus }
-      | undefined
-    return row?.status ?? null
+  private readRunState(jobId: string): { status: JobStatus; attempts: number } | null {
+    const row = this.sql
+      .exec(`SELECT status, attempts FROM jobs WHERE id = ?`, jobId)
+      .toArray()[0] as { status: JobStatus; attempts: number } | undefined
+    return row ?? null
   }
 
   /** Reauthorize every live event so role revocation does not leave a stale reader. */
@@ -723,12 +723,13 @@ export abstract class JobRoom<
     this.state.storage.setAlarm(Math.max(Math.min(...targets), now + 50))
   }
 
-  private recoverStuckRunning(): void {
+  private recoverStuckRunning(onStartup = false): void {
     const cutoff = new Date(Date.now() - RUNNING_STALE_MS).toISOString()
     const stuck = this.sql
       .exec(
         `SELECT id, attempts, max_attempts FROM jobs
-          WHERE status = 'running' AND (started_at IS NULL OR started_at <= ?)`,
+          WHERE status = 'running' AND (? = 1 OR started_at IS NULL OR started_at <= ?)`,
+        onStartup ? 1 : 0,
         cutoff,
       )
       .toArray() as { id: string; attempts: number; max_attempts: number }[]

@@ -13,9 +13,8 @@
  *      AbortSignal and marks the row canceled even if the handler ignores it.
  *   4. ctx.continue: a handler that yields once resumes with the previous
  *      checkpoint as `job.resumeFrom`.
- *   5. Crash recovery: a `running` row older than the alarm wall-time is
- *      either retried or permanently failed, and a recent orphan has a
- *      persisted wake-up that recovers it once it crosses that boundary.
+ *   5. Crash recovery: a new room promptly reclaims interrupted `running`
+ *      rows, while the old handler cannot overwrite a recovered attempt.
  *
  * The handler closures inside each test are the public contract the
  * SDK ships — if any of these break, an app's job handler breaks too.
@@ -645,7 +644,7 @@ describe('JobRoom — ctx.continue checkpoint', () => {
 })
 
 describe('JobRoom — crash recovery', () => {
-  it('runs an earlier queued job, then re-arms the orphan recovery deadline', async () => {
+  it('reclaims a recent orphan before a later queued job', async () => {
     vi.useFakeTimers()
     try {
       const now = new Date('2026-08-02T12:00:00.000Z')
@@ -669,24 +668,25 @@ describe('JobRoom — crash recovery', () => {
       room.handler = (job) => job.type
       room.init()
 
-      expect(alarms.at(-1)).toBe(queuedAt.getTime())
-
-      vi.setSystemTime(queuedAt)
+      expect(db.prepare(`SELECT status FROM jobs WHERE id = 'recent-orphan'`).get()).toEqual({
+        status: 'queued',
+      })
+      expect(alarms.at(-1)).toBe(now.getTime() + 50)
       await room.runAlarm()
 
-      expect(db.prepare(`SELECT status FROM jobs WHERE id = 'queued-first'`).get()).toEqual({
+      expect(db.prepare(`SELECT status FROM jobs WHERE id = 'recent-orphan'`).get()).toEqual({
         status: 'succeeded',
       })
-      expect(db.prepare(`SELECT status FROM jobs WHERE id = 'recent-orphan'`).get()).toEqual({
-        status: 'running',
+      expect(db.prepare(`SELECT status FROM jobs WHERE id = 'queued-first'`).get()).toEqual({
+        status: 'queued',
       })
-      expect(alarms.at(-1)).toBe(startedAt.getTime() + 16 * 60_000)
+      expect(alarms.at(-1)).toBe(queuedAt.getTime())
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('arms a wake-up for a recent orphan and recovers it at the stale boundary', async () => {
+  it('retries a recent orphan as soon as a new room starts', async () => {
     vi.useFakeTimers()
     try {
       const now = new Date('2026-08-02T12:00:00.000Z')
@@ -709,22 +709,78 @@ describe('JobRoom — crash recovery', () => {
       }
       room.init()
 
-      const recoveryAt = startedAt.getTime() + 16 * 60_000
-      expect(alarms.at(-1)).toBe(recoveryAt)
+      expect(alarms.at(-1)).toBe(now.getTime() + 50)
       expect(db.prepare(`SELECT status FROM jobs WHERE id = 'recent-orphan'`).get()).toEqual({
-        status: 'running',
+        status: 'queued',
       })
 
-      vi.setSystemTime(recoveryAt)
       await room.runAlarm()
 
       expect(didRun).toBe(true)
-      expect(db.prepare(`SELECT status FROM jobs WHERE id = 'recent-orphan'`).get()).toEqual({
+      expect(
+        db.prepare(`SELECT status, attempts FROM jobs WHERE id = 'recent-orphan'`).get(),
+      ).toEqual({
         status: 'succeeded',
+        attempts: 2,
       })
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('does not let an old handler overwrite a recovered attempt', async () => {
+    const db = new Database(':memory:')
+    const oldState = makeState(db)
+    const oldRoom = new TestJobRoom(oldState.state, {}, { backgroundJobTypes: ['sandbox'] })
+    let oldContext!: JobContext
+    let finishOld!: (value: string) => void
+    oldRoom.handler = (_job, ctx) => {
+      oldContext = ctx
+      return new Promise<string>((resolve) => {
+        finishOld = resolve
+      })
+    }
+    const job = oldRoom.enqueue('sandbox', {}, { maxAttempts: 2 })
+    await oldRoom.runAlarm()
+
+    const newState = makeState(db)
+    const newRoom = new TestJobRoom(newState.state, {}, { backgroundJobTypes: ['sandbox'] })
+    let finishNew!: (value: string) => void
+    newRoom.handler = (_job, ctx) => {
+      ctx.progress(0.6, 'resumed')
+      return new Promise<string>((resolve) => {
+        finishNew = resolve
+      })
+    }
+    newRoom.init()
+    await newRoom.runAlarm()
+
+    oldContext.progress(0.9, 'stale')
+    finishOld('stale result')
+    await oldState.settled()
+    expect(
+      db
+        .prepare(
+          `SELECT status, result, attempts, progress, progress_message FROM jobs WHERE id = ?`,
+        )
+        .get(job.id),
+    ).toEqual({
+      status: 'running',
+      result: null,
+      attempts: 2,
+      progress: 0.6,
+      progress_message: 'resumed',
+    })
+
+    finishNew('resumed result')
+    await newState.settled()
+    expect(
+      db.prepare(`SELECT status, result, attempts FROM jobs WHERE id = ?`).get(job.id),
+    ).toEqual({
+      status: 'succeeded',
+      result: JSON.stringify('resumed result'),
+      attempts: 2,
+    })
   })
 
   it('retries a stale or undated `running` row that has retry budget left', async () => {

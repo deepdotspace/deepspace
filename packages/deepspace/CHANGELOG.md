@@ -1,5 +1,15 @@
 # deepspace
 
+## 0.36.0
+
+### Minor Changes
+
+- `createDeepSpaceAuth` takes an `errorURL` for OAuth failures that can't be tied back to their flow, so they land on the app's own page instead of Better Auth's error page.
+
+### Patch Changes
+
+- Recover interrupted JobRoom jobs promptly after a room restart.
+
 ## 0.35.0
 
 ### Minor Changes

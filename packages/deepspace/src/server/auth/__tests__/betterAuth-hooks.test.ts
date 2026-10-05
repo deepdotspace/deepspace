@@ -159,3 +159,21 @@ describe('createDeepSpaceAuth onUserCreated', () => {
     }
   })
 })
+
+describe('createDeepSpaceAuth OAuth error page', () => {
+  it('sends unattributable OAuth failures to the configured page', () => {
+    const auth = createDeepSpaceAuth({
+      database: fakeD1,
+      baseURL: 'https://auth.example',
+      secret: 'test-secret-at-least-32-characters-long',
+      errorURL: 'https://auth.example/login/social/error',
+    })
+    expect(auth.options.onAPIError?.errorURL).toBe('https://auth.example/login/social/error')
+    const plain = createDeepSpaceAuth({
+      database: fakeD1,
+      baseURL: 'https://auth.example',
+      secret: 'test-secret-at-least-32-characters-long',
+    })
+    expect(plain.options.onAPIError).toBeUndefined()
+  })
+})

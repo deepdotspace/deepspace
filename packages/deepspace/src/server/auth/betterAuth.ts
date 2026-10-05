@@ -53,6 +53,12 @@ export interface DeepSpaceAuthConfig {
   /** Trusted origins for CORS */
   trustedOrigins?: string[]
   /**
+   * Where a failed OAuth callback lands when the flow can't be tied back to
+   * its own error URL (for example its state expired). Without it Better Auth
+   * shows its own developer-facing error page.
+   */
+  errorURL?: string
+  /**
    * Server-owned fields to add to Better Auth's user model. Use `input: false`
    * for values that may only be populated by a database hook, and
    * `returned: false` for values that must stay out of public auth responses.
@@ -157,6 +163,7 @@ export function createDeepSpaceAuth(config: DeepSpaceAuthConfig) {
       ? { user: { additionalFields: config.userAdditionalFields } }
       : {}),
     socialProviders: socialProviders as Parameters<typeof betterAuth>[0]['socialProviders'],
+    ...(config.errorURL ? { onAPIError: { errorURL: config.errorURL } } : {}),
     trustedOrigins: config.trustedOrigins ?? [
       'https://deep.space',
       'https://*.deep.space',
