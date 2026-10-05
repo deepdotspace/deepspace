@@ -1,5 +1,11 @@
 # create-deepspace
 
+## 0.37.0
+
+### Minor Changes
+
+- Expo apps can sign in with their own Google Sign-In or Sign in with Apple and hand the ID token to DeepSpace (`signInWithIdToken` on the Expo client, `nativeAuthIdToken` on the worker), so consent screens show the app's name. A plane accepts an app's client ids through `GOOGLE_ID_TOKEN_AUDIENCES` and `APPLE_ID_TOKEN_AUDIENCES`.
+
 ## 0.36.0
 
 ## 0.35.0

@@ -42,6 +42,7 @@ export {
   nativeAuthStart,
   nativeAuthCallback,
   nativeAuthExchange,
+  nativeAuthIdToken,
   nativeAuthToken,
   nativeAuthMe,
   nativeAuthSignOut,

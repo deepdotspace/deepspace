@@ -151,14 +151,92 @@ export async function nativeAuthExchange(request: Request, env: ExpoAuthWorkerEn
   if (!exchanged || typeof exchanged.sessionToken !== 'string') {
     return Response.json({ error: 'The auth service did not issue a session.' }, { status: 502 })
   }
+  return nativeSession(env, exchanged.sessionToken)
+}
 
+const ID_TOKEN_PROVIDERS = new Set(['google', 'apple'])
+
+/**
+ * Native sign-in with the platform's own Google or Apple SDK. The app sends
+ * the ID token it received; the auth worker checks the token's signature,
+ * issuer, expiry and audience (one of the plane's configured native client
+ * ids) and accepts each token only once. A nonce, when the app sends one, is
+ * checked against the token too, but it isn't a replay defense: the app
+ * chooses it. Returns the same `{ sessionToken, accessToken }` as
+ * `nativeAuthExchange`. Apple only shares a person's name on their first
+ * sign-in, so the app may pass it along as `user.name`.
+ */
+export async function nativeAuthIdToken(request: Request, env: ExpoAuthWorkerEnv): Promise<Response> {
+  const body = await request.json().catch(() => null) as {
+    provider?: unknown
+    idToken?: unknown
+    nonce?: unknown
+    user?: { name?: { firstName?: unknown; lastName?: unknown } }
+  } | null
+  if (
+    !body ||
+    typeof body.provider !== 'string' ||
+    !ID_TOKEN_PROVIDERS.has(body.provider) ||
+    typeof body.idToken !== 'string' ||
+    body.idToken.length < 16 ||
+    body.idToken.length > 8192 ||
+    (body.nonce !== undefined && (typeof body.nonce !== 'string' || body.nonce.length < 16 || body.nonce.length > 256))
+  ) {
+    return Response.json({ error: 'A Google or Apple ID token is required.' }, { status: 400 })
+  }
+  const name = body.user?.name
+  const text = (value: unknown) => (typeof value === 'string' ? value.trim().slice(0, 100) : undefined)
+  const firstName = text(name?.firstName)
+  const lastName = text(name?.lastName)
+  let signIn: Response
+  try {
+    // No cookies or browser headers: this is the app's own server asking, so
+    // Better Auth's browser CSRF checks don't apply.
+    signIn = await authWorkerFetch(env, '/api/auth/sign-in/social', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: body.provider,
+        idToken: {
+          token: body.idToken,
+          ...(typeof body.nonce === 'string' ? { nonce: body.nonce } : {}),
+          ...(firstName || lastName ? { user: { name: { firstName, lastName } } } : {}),
+        },
+      }),
+    })
+  } catch {
+    return Response.json({ error: 'The authentication service is unavailable.' }, { status: 502 })
+  }
+  if (!signIn.ok) {
+    // 404: the plane doesn't accept this provider's ID tokens for any app.
+    if (signIn.status === 404) {
+      return Response.json({ error: 'Signing in this way is not set up for this app.' }, { status: 503 })
+    }
+    if (signIn.status === 429) {
+      return Response.json({ error: 'Too many sign-in attempts. Try again shortly.' }, { status: 429 })
+    }
+    const rejected = signIn.status >= 400 && signIn.status < 500
+    return Response.json(
+      { error: rejected ? 'That sign-in could not be verified. Please try again.' : 'The authentication service is unavailable.' },
+      { status: rejected ? 401 : 502 },
+    )
+  }
+  const signedIn = await signIn.json().catch(() => null) as { token?: unknown } | null
+  if (!signedIn || typeof signedIn.token !== 'string') {
+    return Response.json({ error: 'The auth service did not issue a session.' }, { status: 502 })
+  }
+  return nativeSession(env, signedIn.token)
+}
+
+/** Mints the first short-lived JWT for a new session and returns both to the app. */
+async function nativeSession(env: ExpoAuthWorkerEnv, sessionToken: string): Promise<Response> {
   let tokenResponse: Response | null = null
   let token: { token?: unknown } | null = null
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       tokenResponse = await authWorkerFetch(env, '/api/auth/token', {
         method: 'POST',
-        headers: { Cookie: `${SESSION_COOKIE}=${encodeURIComponent(exchanged.sessionToken)}` },
+        headers: { Cookie: `${SESSION_COOKIE}=${encodeURIComponent(sessionToken)}` },
       })
     } catch {
       tokenResponse = null
@@ -184,7 +262,7 @@ export async function nativeAuthExchange(request: Request, env: ExpoAuthWorkerEn
     return Response.json({ error: 'The auth service did not issue an access token.' }, { status: 502 })
   }
   return Response.json(
-    { sessionToken: exchanged.sessionToken, accessToken: token.token },
+    { sessionToken, accessToken: token.token },
     { headers: { 'Cache-Control': 'no-store' } },
   )
 }

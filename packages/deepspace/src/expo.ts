@@ -55,9 +55,21 @@ export interface DeepSpaceExpoClientOptions {
 export interface ExpoAuthPaths {
   start: string
   exchange: string
+  idToken: string
   token: string
   me: string
   signOut: string
+}
+
+export interface NativeIdTokenOptions {
+  /**
+   * The raw nonce, if the app gave the provider one (Apple takes its SHA-256
+   * as lowercase hex). DeepSpace checks it against the token. Replay is
+   * stopped separately: each ID token signs in once.
+   */
+  nonce?: string
+  /** Apple shares the person's name only on their first sign-in. */
+  name?: { firstName?: string | null; lastName?: string | null }
 }
 
 export class DeepSpaceExpoError extends Error {
@@ -90,6 +102,7 @@ export class DeepSpaceSignInCancelledError extends Error {
 const DEFAULT_PATHS: ExpoAuthPaths = {
   start: '/api/auth/native-start',
   exchange: '/api/auth/native-exchange',
+  idToken: '/api/auth/native-id-token',
   token: '/api/auth/native-token',
   me: '/api/auth/native-me',
   signOut: '/api/auth/native-signout',
@@ -169,6 +182,30 @@ export class DeepSpaceExpoClient {
   }
 
   signInWithGoogle(state?: string): Promise<DeepSpaceExpoUser> { return this.signIn('google', state) }
+
+  /**
+   * Signs in with an ID token from the platform's own sign-in SDK (Google
+   * Sign-In or Sign in with Apple), so the consent screen shows the app's
+   * name. The worker must route `paths.idToken` to `nativeAuthIdToken`, and
+   * the plane must list the app's client ids (see the Expo guide).
+   */
+  async signInWithIdToken(
+    provider: 'google' | 'apple',
+    idToken: string,
+    options: NativeIdTokenOptions = {},
+  ): Promise<DeepSpaceExpoUser> {
+    const session = await this.json<DeepSpaceExpoSession>(this.paths.idToken, {
+      method: 'POST',
+      body: JSON.stringify({
+        provider,
+        idToken,
+        ...(options.nonce ? { nonce: options.nonce } : {}),
+        ...(options.name ? { user: { name: options.name } } : {}),
+      }),
+    })
+    await this.saveSession(session)
+    return this.me()
+  }
 
   async refresh(): Promise<string | null> {
     const session = await this.getSession()

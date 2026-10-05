@@ -48,6 +48,15 @@ export interface DeepSpaceAuthConfig {
    * on demand, so there is no six-month token to rotate by hand.
    */
   apple?: { clientId: string; teamId: string; keyId: string; privateKey: string }
+  /**
+   * Extra OAuth client ids whose ID tokens may sign in through Better Auth's
+   * `POST /sign-in/social` `{ provider, idToken }`: a native app's own Google
+   * iOS/web client ids, or its iOS bundle id for Sign in with Apple. Tokens
+   * are still checked for Google's or Apple's signature, issuer and expiry.
+   * A provider listed here without its web credentials above accepts ID
+   * tokens only; it can't start a browser sign-in.
+   */
+  nativeIdTokenAudiences?: { google?: string[]; apple?: string[] }
   /** Enable email/password authentication */
   emailAndPassword?: boolean
   /** Trusted origins for CORS */
@@ -106,15 +115,28 @@ export interface DeepSpaceAuthConfig {
  * the static google/github/microsoft assignments type-checked while allowing
  * Apple's function form, which better-auth's own types don't model.
  */
-type SocialProviderConfig =
-  | { clientId: string; clientSecret: string }
-  | (() => Promise<{ clientId: string; clientSecret: string }>)
+type StaticProviderConfig = {
+  clientId: string | string[]
+  clientSecret: string
+  /** Apple: accepted ID-token audiences (Better Auth checks these before clientId). */
+  audience?: string[]
+}
+type SocialProviderConfig = StaticProviderConfig | (() => Promise<StaticProviderConfig>)
 
 export function createDeepSpaceAuth(config: DeepSpaceAuthConfig) {
   const socialProviders: Record<string, SocialProviderConfig> = {}
 
+  const googleAudiences = config.nativeIdTokenAudiences?.google ?? []
+  const appleAudiences = config.nativeIdTokenAudiences?.apple ?? []
+
   if (config.google) {
-    socialProviders.google = config.google
+    // The web client id stays first: Better Auth starts browser sign-ins with
+    // the first id and accepts ID tokens issued to any of them.
+    socialProviders.google = googleAudiences.length
+      ? { ...config.google, clientId: [config.google.clientId, ...googleAudiences] }
+      : config.google
+  } else if (googleAudiences.length) {
+    socialProviders.google = { clientId: googleAudiences, clientSecret: '' }
   }
   if (config.github) {
     socialProviders.github = config.github
@@ -130,15 +152,28 @@ export function createDeepSpaceAuth(config: DeepSpaceAuthConfig) {
     // client-secret JWT (we sign on demand rather than store a rotating token)
     // inside try/catch so a bad Apple key degrades to "Apple unavailable"
     // instead of taking Google/GitHub/Microsoft/password down with it.
+    const audience = appleAudiences.length ? [apple.clientId, ...appleAudiences] : undefined
     socialProviders.apple = async () => {
       try {
-        return { clientId: apple.clientId, clientSecret: await generateAppleClientSecret(apple) }
+        return {
+          clientId: apple.clientId,
+          clientSecret: await generateAppleClientSecret(apple),
+          ...(audience ? { audience } : {}),
+        }
       } catch (err) {
         console.error(
           `[deepspace] failed to mint Apple client secret; Apple sign-in disabled: ${loggableError(err)}`,
         )
-        return { clientId: apple.clientId, clientSecret: '' }
+        return { clientId: apple.clientId, clientSecret: '', ...(audience ? { audience } : {}) }
       }
+    }
+  } else if (appleAudiences.length) {
+    // ID tokens only (native Sign in with Apple): no key material is needed to
+    // verify them, so no client secret is minted.
+    socialProviders.apple = {
+      clientId: appleAudiences[0],
+      clientSecret: '',
+      audience: appleAudiences,
     }
   }
 
