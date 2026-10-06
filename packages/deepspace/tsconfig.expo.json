@@ -1,6 +1,16 @@
 {
-  "//": "deepspace/expo type-checks on its own: its optional peers (expo, react-native) bring React Native's global types, which would otherwise replace the DOM's FormData and NodeJS.ProcessEnv for the whole package.",
+  "//": "deepspace/expo and deepspace/native type-check on their own: their optional peers (expo, react-native) bring React Native's global types, which would otherwise replace the DOM's FormData and NodeJS.ProcessEnv for the whole package. Native platform modules (*.native.ts) also replace browser modules only in this program.",
   "extends": "./tsconfig.json",
-  "include": ["src/expo.ts", "src/__tests__/expo.test.ts", "src/expo-shims.d.ts"],
+  "include": [
+    "src/expo.ts",
+    "src/__tests__/expo.test.ts",
+    "src/expo-shims.d.ts",
+    "src/native.ts",
+    "src/native",
+    "src/**/*.native.ts",
+    "src/**/*.native.tsx",
+    "src/__tests__/native-*.test.ts",
+    "src/__tests__/native-*.test.tsx"
+  ],
   "exclude": []
 }

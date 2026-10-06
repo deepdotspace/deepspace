@@ -19,4 +19,5 @@ declare module 'expo-secure-store' {
 declare module 'expo-web-browser' {
   export type WebBrowserAuthSessionResult = { type: 'success'; url: string } | { type: string; url?: string }
   export function openAuthSessionAsync(url: string, redirectUrl?: string, options?: Record<string, unknown>): Promise<WebBrowserAuthSessionResult>
+  export function openBrowserAsync(url: string, options?: Record<string, unknown>): Promise<{ type: string }>
 }

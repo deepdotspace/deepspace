@@ -11,6 +11,7 @@
  */
 
 import { getAuthToken } from './auth/token'
+import { appOrigin } from './platform/origin'
 import { normalizeApiError, type ApiErrorIssue } from '../shared/api-error'
 
 const ENDPOINT_PREFIX = '/api/integrations'
@@ -44,10 +45,7 @@ function resolveUrl(endpoint: string): string {
     )
   }
   const path = endpoint ? `${ENDPOINT_PREFIX}/${endpoint}` : ENDPOINT_PREFIX
-  if (typeof window !== 'undefined') {
-    return `${window.location.origin}${path}`
-  }
-  return path
+  return `${appOrigin()}${path}`
 }
 
 async function request<T>(

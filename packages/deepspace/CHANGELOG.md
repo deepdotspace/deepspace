@@ -1,5 +1,15 @@
 # deepspace
 
+## 0.39.0
+
+### Minor Changes
+
+- Add `deepspace/native`, React Native bindings for Expo SDK 57 apps: `DeepSpaceNativeProvider`, `useDeepSpace`, `useAuth`, `RecordProvider`, `RecordScope`, `useQuery`, `useMutations`, the user and presence hooks, the messaging hooks, `integration`, and `callAction` for server actions, plus everything in `deepspace/expo`. `RecordScope` reconnects when the app returns to the foreground. `react-native` is a new optional peer. The Expo client's `getAuthToken` now refreshes a bearer that has expired or expires within 30 seconds (previously it returned a stored bearer until a request failed with 401), concurrent refreshes share one request, and the client gains `subscribe(listener)` and `origin`. Browser behavior is unchanged: the record socket and integration client now take the app origin from one platform module, which still answers the page origin.
+
+  `deepspace add mobile` writes an Expo client to `mobile/` that pins the app's `deepspace` version and reads its identity from `wrangler.toml`. `consentUrlOf` and `openIntegrationConsent` handle per-user integration consent (for example `google/*`) from a native app.
+
+  Fix: the Expo client's default SecureStore key contained `%` and `:` from the encoded base URL, which iOS SecureStore rejects, so a client created without `storageKey` could never read or save a session on a device. The default key now escapes those characters. No stored session is lost: the old key could never have been written.
+
 ## 0.38.0
 
 ### Minor Changes

@@ -1,6 +1,6 @@
 {
   "name": "deepspace",
-  "version": "0.38.0",
+  "version": "0.39.0",
   "engines": {
     "node": ">=22.15.0 <23 || >=24 <25 || >=26 <27"
   },
@@ -44,6 +44,10 @@
     "./expo": {
       "types": "./dist/expo.d.ts",
       "import": "./dist/expo.js"
+    },
+    "./native": {
+      "types": "./dist/native.d.ts",
+      "import": "./dist/native.js"
     },
     "./documentation": {
       "types": "./dist/documentation.d.ts",
@@ -104,7 +108,8 @@
     "expo-crypto": "~57.0.0",
     "expo-linking": "~57.0.0",
     "expo-secure-store": "~57.0.0",
-    "expo-web-browser": "~57.0.0"
+    "expo-web-browser": "~57.0.0",
+    "react-native": ">=0.76.0"
   },
   "peerDependenciesMeta": {
     "@playwright/test": {
@@ -135,6 +140,9 @@
       "optional": true
     },
     "expo-web-browser": {
+      "optional": true
+    },
+    "react-native": {
       "optional": true
     }
   },

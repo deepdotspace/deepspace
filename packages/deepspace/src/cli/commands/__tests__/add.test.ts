@@ -953,3 +953,64 @@ describe('feature installer resolution', () => {
     }
   })
 })
+
+describe('mobile feature assembly', () => {
+  it('adds an Expo client pinned to the installing SDK version without touching the web app', () => {
+    const { dir, cleanup } = makeApp()
+    try {
+      const sdkVersion = JSON.parse(readFileSync(join(PKG_ROOT, 'package.json'), 'utf-8')).version
+      const rootPackageBefore = readFileSync(join(dir, 'package.json'), 'utf-8')
+      const workerBefore = readFileSync(join(dir, 'worker.ts'), 'utf-8')
+      const navBefore = readFileSync(join(dir, 'src/nav.ts'), 'utf-8')
+
+      const { status, outcome } = installInto(dir, ['mobile'])
+      expect(status).toBe(0)
+      expect(outcome.ok).toBe(true)
+
+      const mobilePackage = JSON.parse(readFileSync(join(dir, 'mobile/package.json'), 'utf-8'))
+      expect(mobilePackage.dependencies.deepspace).toBe(sdkVersion)
+      expect(JSON.stringify(mobilePackage)).not.toContain('__DEEPSPACE_VERSION__')
+      for (const peer of [
+        'expo-crypto',
+        'expo-linking',
+        'expo-secure-store',
+        'expo-web-browser',
+        'react-native',
+      ]) {
+        expect(mobilePackage.dependencies[peer]).toBeTruthy()
+      }
+      for (const file of [
+        'app.config.ts',
+        'metro.config.js',
+        'tsconfig.json',
+        'index.ts',
+        'App.tsx',
+        '.gitignore',
+        'README.md',
+      ]) {
+        expect(existsSync(join(dir, 'mobile', file))).toBe(true)
+      }
+      expect(readFileSync(join(dir, 'mobile/App.tsx'), 'utf-8')).toContain(
+        "from 'deepspace/native'",
+      )
+      expect(readFileSync(join(dir, 'mobile/app.config.ts'), 'utf-8')).toContain(
+        'NATIVE_AUTH_REDIRECT_URIS',
+      )
+      expect(readFileSync(join(dir, 'mobile/.gitignore'), 'utf-8')).toContain('/ios')
+
+      // The web app's own files are unchanged; only lint learns to skip mobile/.
+      expect(readFileSync(join(dir, 'package.json'), 'utf-8')).toBe(rootPackageBefore)
+      expect(readFileSync(join(dir, 'worker.ts'), 'utf-8')).toBe(workerBefore)
+      expect(readFileSync(join(dir, 'src/nav.ts'), 'utf-8')).toBe(navBefore)
+      expect(readFileSync(join(dir, 'eslint.config.js'), 'utf-8')).toContain(
+        "{ ignores: ['mobile/**'] },",
+      )
+
+      const eslint = readFileSync(join(dir, 'eslint.config.js'), 'utf-8')
+      expect(installInto(dir, ['mobile']).status).toBe(0)
+      expect(readFileSync(join(dir, 'eslint.config.js'), 'utf-8')).toBe(eslint)
+    } finally {
+      cleanup()
+    }
+  })
+})

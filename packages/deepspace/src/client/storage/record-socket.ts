@@ -19,6 +19,7 @@ import { parseServerError } from './serverErrors'
 import type { CollectionSchema, Query } from '../../shared/types'
 import type { RoomUser, RoomConnectionState, RecordData } from './types'
 import { MSG } from '../../shared/protocol/constants'
+import { appOrigin } from '../platform/origin'
 
 // WebSocket readyState per spec — avoids touching the global WebSocket
 // object for constants (tests inject WebSocketImpl; node may lack a global).
@@ -76,7 +77,7 @@ export interface RecordSocketConfig {
    *  work; authed rooms reject). */
   getToken: () => Promise<string | null>
   listeners: RecordSocketListeners
-  /** http(s)/ws(s) base; defaults to window.location. */
+  /** http(s)/ws(s) base; defaults to the app origin (the page origin in a browser). */
   wsUrl?: string
   /** Default '/ws'. */
   wsPathPrefix?: string
@@ -179,11 +180,8 @@ export class RecordSocket {
     // connect() (visibility retry, scheduled reconnect) keeps the last one.
     if (identityTag !== undefined) this.identityTag = identityTag
 
-    const protocol =
-      typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const baseUrl =
-      config.wsUrl?.replace(/^http/, 'ws') ??
-      `${protocol}//${typeof window !== 'undefined' ? window.location.host : ''}`
+    // http(s) → ws(s); an explicit ws(s) base passes through unchanged.
+    const baseUrl = (config.wsUrl ?? appOrigin()).replace(/^http/, 'ws')
     const pathPrefix = config.wsPathPrefix ?? '/ws'
     const url = `${baseUrl}${pathPrefix}/${config.roomId}?${params.toString()}`
 

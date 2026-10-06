@@ -1,0 +1,39 @@
+{
+  "id": "mobile",
+  "name": "Mobile app",
+  "category": "platform",
+  "description": "An Expo (React Native) client for iPhone, iPad and Android in mobile/",
+  "details": "Adds an Expo SDK 57 app in mobile/ built on deepspace/native: Google sign-in through the system browser with PKCE, the app's real-time record room, integrations and server actions. The app id and name come from wrangler.toml, and mobile/ pins the same deepspace version as the app. No Xcode project is checked in; npx expo run:ios or EAS Build generates it.",
+  "files": [
+    { "src": "files/package.json", "dest": "mobile/package.json", "pinSdkVersion": true },
+    { "src": "files/app.config.ts", "dest": "mobile/app.config.ts" },
+    { "src": "files/metro.config.js", "dest": "mobile/metro.config.js" },
+    { "src": "files/tsconfig.json", "dest": "mobile/tsconfig.json" },
+    { "src": "files/index.ts", "dest": "mobile/index.ts" },
+    { "src": "files/App.tsx", "dest": "mobile/App.tsx" },
+    { "src": "files/gitignore", "dest": "mobile/.gitignore" },
+    { "src": "files/README.md", "dest": "mobile/README.md" }
+  ],
+  "code": [
+    {
+      "file": "eslint.config.js",
+      "marker": "export default [",
+      "insert": "  // mobile/ is the Expo client, with its own toolchain.\n  { ignores: ['mobile/**'] },"
+    }
+  ],
+  "instructions": [
+    "Allowlist the native callback in wrangler.toml: NATIVE_AUTH_REDIRECT_URIS = \"<scheme>://auth/callback\", where <scheme> is the app name without dashes (mobile/app.config.ts names it if missing). Deploy the Worker after changing it.",
+    "Set your own iOS bundle identifier and Android package in mobile/app.config.ts before building for a device.",
+    "cd mobile && npm install && npx expo run:ios starts a development build in the iOS Simulator."
+  ],
+  "patterns": [
+    "Import everything native from deepspace/native: the client, DeepSpaceNativeProvider, RecordProvider, RecordScope, useQuery, useMutations, integration and callAction.",
+    "The schemas array passed to RecordScope is the same one the Worker uses; import it from ../src rather than copying it.",
+    "Integration results with data.requiresOAuth carry an authUrl: open it with openIntegrationConsent, then retry the call."
+  ],
+  "agentNotes": [
+    "mobile/ is a separate npm project; run its installs and type-checks from inside mobile/.",
+    "Use a development build to test sign-in. Expo Go cannot receive the custom-scheme callback.",
+    "When the root app's deepspace version changes, update mobile/package.json to the same version."
+  ]
+}

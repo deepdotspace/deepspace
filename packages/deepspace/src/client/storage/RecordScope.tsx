@@ -30,6 +30,7 @@ import { RecordSocket } from './record-socket'
 import { RecordRoomNotReadyError } from './errors'
 import { useScopeRegistry, type ScopeEntry } from './ScopeRegistry'
 import { getAuthToken } from '../auth'
+import { subscribeToForeground } from '../platform/foreground'
 import { wsLog } from './ws-log'
 import type { RoomConnectionState, RoomUser } from './types'
 import { MSG } from '@/shared/protocol/constants'
@@ -180,17 +181,17 @@ function ScopeConnection({
     }
   }, [roomId, wsUrl, wsPathPrefix, userProfileId, userProfileLoading, allowAnonymous])
 
-  // Reconnect on tab focus
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === 'visible' && !socketRef.current?.isOpen) {
-        socketRef.current?.resetBackoff()
-        void socketRef.current?.connect()
-      }
-    }
-    document.addEventListener('visibilitychange', onVisible)
-    return () => document.removeEventListener('visibilitychange', onVisible)
-  }, [])
+  // Reconnect when the tab (or native app) returns to the foreground
+  useEffect(
+    () =>
+      subscribeToForeground(() => {
+        if (!socketRef.current?.isOpen) {
+          socketRef.current?.resetBackoff()
+          void socketRef.current?.connect()
+        }
+      }),
+    [],
+  )
 
   // ── Send helpers (stable delegates to the engine) ────────────────────
 

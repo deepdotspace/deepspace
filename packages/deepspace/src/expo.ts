@@ -17,6 +17,7 @@ import {
   normalizeExpoBaseUrl,
   stateFromExpoRedirect,
 } from './expo-url'
+import { jwtClaims } from './expo-jwt'
 
 export type ExpoAuthProvider = 'google' | (string & {})
 
@@ -60,6 +61,9 @@ export interface ExpoAuthPaths {
   signOut: string
 }
 
+/** Called with the new session after sign-in or refresh, and with `null` after sign-out or expiry. */
+export type DeepSpaceExpoSessionListener = (session: DeepSpaceExpoSession | null) => void
+
 export class DeepSpaceExpoError extends Error {
   readonly status: number
   readonly body: unknown
@@ -101,6 +105,9 @@ const defaultStorage: ExpoAuthStorage = {
   deleteItem: (key) => SecureStore.deleteItemAsync(key),
 }
 
+/** Refresh a stored bearer this long before its `exp`, so a socket never opens with a token about to lapse. */
+const ACCESS_TOKEN_REFRESH_MARGIN_MS = 30_000
+
 export function createDeepSpaceExpoClient(options: DeepSpaceExpoClientOptions): DeepSpaceExpoClient {
   return new DeepSpaceExpoClient(options)
 }
@@ -114,16 +121,31 @@ export class DeepSpaceExpoClient {
   private readonly fetcher: typeof globalThis.fetch
   private readonly timeoutMs: number
   private session: DeepSpaceExpoSession | null | undefined
+  private refreshing: Promise<string | null> | null = null
+  private readonly listeners = new Set<DeepSpaceExpoSessionListener>()
 
   constructor(options: DeepSpaceExpoClientOptions) {
     if (!options.baseUrl) throw new Error('DeepSpace Expo client requires baseUrl')
     this.baseUrl = normalizeExpoBaseUrl(options.baseUrl)
     this.redirectUri = options.redirectUri ?? Linking.createURL('auth/callback')
     this.storage = options.storage ?? defaultStorage
-    this.storageKey = options.storageKey ?? `deepspace.session.${encodeURIComponent(this.baseUrl)}`
+    this.storageKey = options.storageKey ?? defaultStorageKey(this.baseUrl)
     this.paths = { ...DEFAULT_PATHS, ...options.paths }
     this.fetcher = options.fetch ?? globalThis.fetch.bind(globalThis)
     this.timeoutMs = options.timeoutMs ?? 15_000
+  }
+
+  /** The deployed app origin this client talks to, without a trailing slash. */
+  get origin(): string {
+    return this.baseUrl
+  }
+
+  /** Observe session changes. Loading a stored session does not notify. Returns an unsubscribe function. */
+  subscribe(listener: DeepSpaceExpoSessionListener): () => void {
+    this.listeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+    }
   }
 
   async getSession(): Promise<DeepSpaceExpoSession | null> {
@@ -170,7 +192,17 @@ export class DeepSpaceExpoClient {
 
   signInWithGoogle(state?: string): Promise<DeepSpaceExpoUser> { return this.signIn('google', state) }
 
-  async refresh(): Promise<string | null> {
+  /** Mint a fresh bearer from the stored session. Concurrent callers share one request. */
+  refresh(): Promise<string | null> {
+    if (!this.refreshing) {
+      this.refreshing = this.refreshOnce().finally(() => {
+        this.refreshing = null
+      })
+    }
+    return this.refreshing
+  }
+
+  private async refreshOnce(): Promise<string | null> {
     const session = await this.getSession()
     if (!session) return null
     try {
@@ -187,7 +219,15 @@ export class DeepSpaceExpoClient {
 
   async getAuthToken(): Promise<string | null> {
     const session = await this.getSession()
-    return session?.accessToken || (await this.refresh())
+    if (!session) return null
+    if (session.accessToken && !isExpiring(session.accessToken, ACCESS_TOKEN_REFRESH_MARGIN_MS)) {
+      return session.accessToken
+    }
+    const refreshed = await this.refresh()
+    if (refreshed) return refreshed
+    // A transient refresh failure keeps the session; use the old bearer while it is still unexpired.
+    const current = this.session
+    return current?.accessToken && !isExpiring(current.accessToken, 0) ? current.accessToken : null
   }
 
   async me(): Promise<DeepSpaceExpoUser> {
@@ -227,8 +267,27 @@ export class DeepSpaceExpoClient {
     return body
   }
 
-  private async saveSession(session: DeepSpaceExpoSession) { this.session = session; await this.storage.setItem(this.storageKey, JSON.stringify(session)) }
-  private async clearSession() { this.session = null; await this.storage.deleteItem(this.storageKey) }
+  private async saveSession(session: DeepSpaceExpoSession) {
+    this.session = session
+    await this.storage.setItem(this.storageKey, JSON.stringify(session))
+    this.notify(session)
+  }
+
+  private async clearSession() {
+    this.session = null
+    await this.storage.deleteItem(this.storageKey)
+    this.notify(null)
+  }
+
+  private notify(session: DeepSpaceExpoSession | null) {
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(session)
+      } catch (error) {
+        console.error('[deepspace/expo] session listener failed', error)
+      }
+    }
+  }
 
   private async fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
     if (!this.timeoutMs || this.timeoutMs <= 0) return this.fetcher(input, init)
@@ -273,6 +332,29 @@ async function createCodeChallenge(verifier: string): Promise<string> {
 
 function isJsonBody(body: BodyInit): boolean {
   return typeof body === 'string'
+}
+
+/**
+ * SecureStore keys may contain only letters, digits, ".", "-" and "_", so a URL
+ * cannot be used directly. Every other character (and "_" itself) becomes
+ * `_<hex>_`, which keeps the key unique per origin.
+ */
+export function defaultStorageKey(baseUrl: string): string {
+  let encoded = ''
+  for (const char of baseUrl) {
+    encoded += /[A-Za-z0-9.-]/.test(char) ? char : `_${char.codePointAt(0)!.toString(16)}_`
+  }
+  return `deepspace.session.${encoded}`
+}
+
+/**
+ * True when a JWT's `exp` falls within `marginMs` of now. A token without a
+ * readable `exp` is treated as current; the server remains the authority and a
+ * 401 still triggers a refresh in `request`.
+ */
+function isExpiring(token: string, marginMs: number): boolean {
+  const exp = jwtClaims(token)?.exp
+  return typeof exp === 'number' && exp * 1000 - marginMs <= Date.now()
 }
 
 function isReplayableBody(body: BodyInit | null | undefined): boolean {

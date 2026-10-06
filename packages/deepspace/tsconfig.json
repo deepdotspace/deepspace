@@ -19,5 +19,14 @@
     "rootDir": "./src"
   },
   "include": ["src"],
-  "exclude": ["src/expo.ts", "src/__tests__/expo.test.ts"]
+  "exclude": [
+    "src/expo.ts",
+    "src/__tests__/expo.test.ts",
+    "src/native.ts",
+    "src/native",
+    "src/**/*.native.ts",
+    "src/**/*.native.tsx",
+    "src/__tests__/native-*.test.ts",
+    "src/__tests__/native-*.test.tsx"
+  ]
 }

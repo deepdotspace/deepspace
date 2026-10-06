@@ -33,6 +33,12 @@ const NAV_MARKER = '// ── Features add nav items below this line ──'
 interface FeatureFile {
   src: string
   dest: string
+  /**
+   * Replace `__DEEPSPACE_VERSION__` in this file with the installing SDK's
+   * version, so a nested project (the mobile client's package.json) pins the
+   * same SDK as the app it belongs to.
+   */
+  pinSdkVersion?: boolean
 }
 
 interface FeatureSchema {
@@ -276,6 +282,23 @@ function copyFileWithImportShift(src: string, dest: string, levels: number): voi
   writeFileSync(dest, shifted)
 }
 
+export const SDK_VERSION_PLACEHOLDER = '__DEEPSPACE_VERSION__'
+
+function sdkVersion(packageRoot: string): string {
+  const { version } = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf-8')) as {
+    version?: unknown
+  }
+  if (typeof version !== 'string' || !version) {
+    throw new Error(`Cannot read the SDK version from ${join(packageRoot, 'package.json')}`)
+  }
+  return version
+}
+
+function copyFileWithSdkVersion(src: string, dest: string, version: string): void {
+  mkdirSync(dirname(dest), { recursive: true })
+  writeFileSync(dest, readFileSync(src, 'utf-8').replaceAll(SDK_VERSION_PLACEHOLDER, version))
+}
+
 function installFiles(
   packageRoot: string,
   config: FeatureConfig,
@@ -313,7 +336,8 @@ function installFiles(
 
     const wasRedirected = resolvedDest !== file.dest
     const shiftLevels = resolvedDest.split('/').length - file.dest.split('/').length
-    if (wasRedirected) copyFileWithImportShift(srcPath, destPath, shiftLevels)
+    if (file.pinSdkVersion) copyFileWithSdkVersion(srcPath, destPath, sdkVersion(packageRoot))
+    else if (wasRedirected) copyFileWithImportShift(srcPath, destPath, shiftLevels)
     else copyFile(srcPath, destPath)
     emit(`   Copied: ${resolvedDest}`)
     created.push(resolvedDest)

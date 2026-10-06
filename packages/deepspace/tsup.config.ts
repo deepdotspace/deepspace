@@ -1,6 +1,7 @@
 import { defineConfig } from 'tsup'
 import { cpSync } from 'fs'
 import { resolve } from 'path'
+import { preferNativeModules } from './src/native/build-plugin'
 
 const alias = { '@': resolve(__dirname, 'src') }
 
@@ -41,6 +42,30 @@ export default defineConfig([
     dts: true,
     sourcemap: true,
     external: ['expo-crypto', 'expo-linking', 'expo-secure-store', 'expo-web-browser'],
+  },
+  {
+    // React Native bindings. Shares the browser storage engine but resolves a
+    // sibling `*.native.ts` module wherever one exists (auth, app origin,
+    // foreground), so this bundle never loads Better Auth, react-dom or DOM UI.
+    entry: { native: 'src/native.ts' },
+    format: ['esm'],
+    dts: { entry: { native: 'src/native.ts' }, compilerOptions: { types: [] } },
+    tsconfig: 'tsconfig.expo.json',
+    sourcemap: true,
+    external: [
+      'react',
+      'react/jsx-runtime',
+      'react-native',
+      'expo-crypto',
+      'expo-linking',
+      'expo-secure-store',
+      'expo-web-browser',
+    ],
+    esbuildPlugins: [preferNativeModules(resolve(__dirname, 'src'))],
+    esbuildOptions(options) {
+      options.jsx = 'automatic'
+      options.alias = alias
+    },
   },
   {
     entry: { schema: 'src/schema.ts' },
