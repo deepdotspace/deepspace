@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.39.2
+
+### Patch Changes
+
+- Fix: native sign-out still did not revoke the session for an app reached through a custom domain. 0.39.1 sent the app's own origin, which the auth worker trusts for `*.app.space` but not for custom domains, so it refused the sign-out while the app cleared its stored session. `nativeAuthSignOut` now sends the auth worker's own origin, which it always trusts, as `deepspace auth logout` does. Its 502 means the auth worker refused the sign-out. `deepspace auth logout` now reports `revoked` in its JSON output and warns when the auth service did not accept the sign-out, instead of always reporting success.
+
 ## 0.39.1
 
 ### Patch Changes

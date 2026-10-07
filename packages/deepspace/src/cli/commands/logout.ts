@@ -25,7 +25,9 @@ const { sessionPath: SESSION_PATH, tokenPath: TOKEN_PATH } = credentialPaths(AUT
 /**
  * Revoke a session on the auth worker. Better Auth refuses a cookie-bearing
  * POST without a JSON body (415) and a trusted Origin (403), so both are sent.
- * Returns whether the session was revoked; network failures return false.
+ * Returns whether the auth worker accepted the sign-out; a refusal or a
+ * network failure returns false. (Better Auth also accepts a token it cannot
+ * verify, which no longer works anywhere.)
  */
 export async function revokeSession(authUrl: string, sessionToken: string): Promise<boolean> {
   try {
@@ -56,8 +58,9 @@ export default defineDeepspaceCommand({
       : null
 
     // If revocation fails (for example, offline), still wipe local credentials
-    // so the user can re-authenticate; the server-side session expires on its own.
-    if (sessionToken) await revokeSession(AUTH_URL, sessionToken)
+    // so the user can re-authenticate, and say so: the server-side session
+    // then stays valid until it expires.
+    const revoked = sessionToken ? await revokeSession(AUTH_URL, sessionToken) : null
 
     let removed = 0
     for (const path of [SESSION_PATH, TOKEN_PATH]) {
@@ -70,7 +73,13 @@ export default defineDeepspaceCommand({
     // Already-logged-out is a SUCCESS, not a refusal: the requested end state
     // (no cached credentials) holds either way, so an agent retrying logout
     // must not read exit 1.
-    if (!args.json) console.log(removed === 0 ? 'Already logged out.' : 'Logged out.')
-    return { data: { loggedOut: true, removed, alreadyLoggedOut: removed === 0 } }
+    if (!args.json) {
+      console.log(removed === 0 ? 'Already logged out.' : 'Logged out.')
+      if (revoked === false) {
+        console.log('Warning: the auth service did not revoke the session, so it stays valid until it expires.')
+      }
+    }
+    // `revoked` is null when there was no stored session to revoke.
+    return { data: { loggedOut: true, removed, alreadyLoggedOut: removed === 0, revoked } }
   },
 })

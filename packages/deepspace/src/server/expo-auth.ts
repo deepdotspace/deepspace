@@ -241,19 +241,21 @@ export async function nativeAuthSignOut(request: Request, env: ExpoAuthWorkerEnv
   if (!body || typeof body.sessionToken !== 'string' || body.sessionToken.length < 16 || body.sessionToken.length > 4096) {
     return Response.json({ ok: true })
   }
-  // The client clears its secure-store entry whatever this returns; the status
-  // only reports whether the server-side session was revoked.
+  // The client clears its secure-store entry whatever this returns. A 502 means
+  // the auth worker refused the sign-out; a 200 means it accepted the request.
   let response: Response
   try {
-    // Better Auth refuses a cookie-bearing POST without a JSON body and a
-    // trusted Origin. Send the app's own origin, as a browser does through the
-    // app's /api/auth/sign-out proxy.
+    // Better Auth refuses a cookie-bearing POST without a JSON body (415) or a
+    // trusted Origin (403). It always trusts its own origin, but not an app's
+    // custom domain, so send the auth worker's origin. This is a server call
+    // authorized by the session token, not a browser request to guard.
+    const authOrigin = new URL(env.AUTH_WORKER_URL ?? '').origin
     response = await authWorkerFetch(env, '/api/auth/sign-out', {
       method: 'POST',
       headers: {
         Cookie: `${SESSION_COOKIE}=${encodeURIComponent(body.sessionToken)}`,
         'Content-Type': 'application/json',
-        Origin: new URL(request.url).origin,
+        Origin: authOrigin,
       },
       body: '{}',
     })

@@ -97,8 +97,8 @@ describe('Expo native auth bridge', () => {
     expect(response.status).toBe(500)
   })
 
-  const signOutRequest = (body: unknown) =>
-    new Request('https://example.app.space/api/auth/native-signout', { method: 'POST', body: JSON.stringify(body) })
+  const signOutRequest = (body: unknown, origin = 'https://example.app.space') =>
+    new Request(`${origin}/api/auth/native-signout`, { method: 'POST', body: JSON.stringify(body) })
 
   it('revokes the session with the JSON body and trusted Origin Better Auth requires', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"success":true}', { status: 200 }))
@@ -111,11 +111,23 @@ describe('Expo native auth bridge', () => {
     expect(init?.body).toBe('{}')
     const headers = new Headers(init?.headers)
     expect(headers.get('content-type')).toBe('application/json')
-    expect(headers.get('origin')).toBe('https://example.app.space')
+    expect(headers.get('origin')).toBe('https://auth.deep.space')
     expect(headers.get('cookie')).toContain('a-session-token-that-is-long-enough')
   })
 
-  it('reports a session the auth worker did not revoke', async () => {
+  it('sends the auth worker origin for an app on a custom domain', async () => {
+    // Better Auth trusts *.app.space and its own origin, not custom domains,
+    // so forwarding the app's origin would leave the session unrevoked.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"success":true}', { status: 200 }))
+    const response = await nativeAuthSignOut(
+      signOutRequest({ sessionToken: 'a-session-token-that-is-long-enough' }, 'https://tasks.example.com'),
+      env,
+    )
+    expect(response.status).toBe(200)
+    expect(new Headers(fetchSpy.mock.calls[0]![1]?.headers).get('origin')).toBe('https://auth.deep.space')
+  })
+
+  it('reports a sign-out the auth worker refused', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response('{"code":"MISSING_OR_NULL_ORIGIN"}', { status: 403 }),
     )
