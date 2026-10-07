@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.39.3
+
+### Patch Changes
+
+- Fix: Google sign-in from a native app could end on "Sign-in didn't finish" when the iOS sign-in sheet dropped the auth service's cookies between the provider and the callback. A native sign-in (one with a PKCE challenge) no longer uses cookies: the auth worker finds the flow by its OAuth state, keeps the new session on the flow, and sends a one-time code only to the return URL it validated at the start, which only the app holding the PKCE verifier can redeem. Browser sign-ins keep their cookie binding. The fix is in the auth worker, so existing apps need no redeploy. `createDeepSpaceAuth` gains a `skipStateCookieCheck` option for a single callback that is bound another way.
+
 ## 0.39.2
 
 ### Patch Changes

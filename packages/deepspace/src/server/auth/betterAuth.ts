@@ -59,6 +59,14 @@ export interface DeepSpaceAuthConfig {
    */
   errorURL?: string
   /**
+   * Accept an OAuth callback without Better Auth's signed state cookie. The
+   * state must still match its single-use, expiring database record. Set it
+   * only on the instance that handles one callback the caller has already
+   * tied to a flow bound another way, such as a native app's PKCE sign-in,
+   * where the browser sheet that carries the round trip may not keep cookies.
+   */
+  skipStateCookieCheck?: boolean
+  /**
    * Server-owned fields to add to Better Auth's user model. Use `input: false`
    * for values that may only be populated by a database hook, and
    * `returned: false` for values that must stay out of public auth responses.
@@ -180,6 +188,7 @@ export function createDeepSpaceAuth(config: DeepSpaceAuthConfig) {
       : {}),
     socialProviders: socialProviders as Parameters<typeof betterAuth>[0]['socialProviders'],
     ...(config.errorURL ? { onAPIError: { errorURL: config.errorURL } } : {}),
+    ...(config.skipStateCookieCheck ? { account: { skipStateCookieCheck: true } } : {}),
     trustedOrigins: config.trustedOrigins ?? [
       'https://deep.space',
       'https://*.deep.space',

@@ -177,3 +177,18 @@ describe('createDeepSpaceAuth OAuth error page', () => {
     expect(plain.options.onAPIError).toBeUndefined()
   })
 })
+
+describe('createDeepSpaceAuth state cookie check', () => {
+  it('keeps the check unless one instance is told to skip it', () => {
+    const base = {
+      database: fakeD1,
+      baseURL: 'https://auth.example',
+      secret: 'test-secret-at-least-32-characters-long',
+    }
+    expect(createDeepSpaceAuth(base).options.account?.skipStateCookieCheck).toBeUndefined()
+    expect(
+      createDeepSpaceAuth({ ...base, skipStateCookieCheck: true }).options.account
+        ?.skipStateCookieCheck,
+    ).toBe(true)
+  })
+})
