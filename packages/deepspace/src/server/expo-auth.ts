@@ -238,15 +238,30 @@ export async function nativeAuthMe(request: Request, env: ExpoAuthWorkerEnv): Pr
 
 export async function nativeAuthSignOut(request: Request, env: ExpoAuthWorkerEnv): Promise<Response> {
   const body = await request.json().catch(() => null) as { sessionToken?: unknown } | null
-  if (body && typeof body.sessionToken === 'string' && body.sessionToken.length >= 16 && body.sessionToken.length <= 4096) {
-    try {
-      await authWorkerFetch(env, '/api/auth/sign-out', {
-        method: 'POST',
-        headers: { Cookie: `${SESSION_COOKIE}=${encodeURIComponent(body.sessionToken)}` },
-      })
-    } catch {
-      // Sign-out is best effort; the local secure-store entry is still cleared.
-    }
+  if (!body || typeof body.sessionToken !== 'string' || body.sessionToken.length < 16 || body.sessionToken.length > 4096) {
+    return Response.json({ ok: true })
+  }
+  // The client clears its secure-store entry whatever this returns; the status
+  // only reports whether the server-side session was revoked.
+  let response: Response
+  try {
+    // Better Auth refuses a cookie-bearing POST without a JSON body and a
+    // trusted Origin. Send the app's own origin, as a browser does through the
+    // app's /api/auth/sign-out proxy.
+    response = await authWorkerFetch(env, '/api/auth/sign-out', {
+      method: 'POST',
+      headers: {
+        Cookie: `${SESSION_COOKIE}=${encodeURIComponent(body.sessionToken)}`,
+        'Content-Type': 'application/json',
+        Origin: new URL(request.url).origin,
+      },
+      body: '{}',
+    })
+  } catch {
+    return Response.json({ ok: false, error: 'The authentication service is unavailable.' }, { status: 502 })
+  }
+  if (!response.ok) {
+    return Response.json({ ok: false, error: 'The session could not be revoked.' }, { status: 502 })
   }
   return Response.json({ ok: true })
 }

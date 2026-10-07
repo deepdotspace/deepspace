@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.39.1
+
+### Patch Changes
+
+- Fix: signing out of a native app (`nativeAuthSignOut`, behind the Expo and React Native clients' `signOut`) and `deepspace auth logout` did not revoke the session on the auth worker. Better Auth refuses a cookie-bearing sign-out without a JSON body (415) and a trusted `Origin` (403), and both requests omitted the body, the native one also the `Origin`, so the session stayed valid until it expired. Both now send them. The native route sends the app's own origin, as the browser does through the app's `/api/auth/sign-out` proxy, and answers 502 when the auth worker does not revoke the session; the client still clears its stored session either way. Apps get the native fix on their next deploy.
+
 ## 0.39.0
 
 ### Minor Changes

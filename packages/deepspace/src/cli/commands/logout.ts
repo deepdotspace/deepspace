@@ -22,6 +22,28 @@ import { defineDeepspaceCommand } from '../lib/command'
 // delete the production session (and vice versa).
 const { sessionPath: SESSION_PATH, tokenPath: TOKEN_PATH } = credentialPaths(AUTH_URL)
 
+/**
+ * Revoke a session on the auth worker. Better Auth refuses a cookie-bearing
+ * POST without a JSON body (415) and a trusted Origin (403), so both are sent.
+ * Returns whether the session was revoked; network failures return false.
+ */
+export async function revokeSession(authUrl: string, sessionToken: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${authUrl}/api/auth/sign-out`, {
+      method: 'POST',
+      headers: {
+        Cookie: `${SESSION_COOKIE}=${encodeURIComponent(sessionToken)}`,
+        'Content-Type': 'application/json',
+        Origin: authUrl,
+      },
+      body: '{}',
+    })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
 export default defineDeepspaceCommand({
   meta: {
     name: 'logout',
@@ -33,20 +55,9 @@ export default defineDeepspaceCommand({
       ? readFileSync(SESSION_PATH, 'utf-8').trim()
       : null
 
-    if (sessionToken) {
-      try {
-        await fetch(`${AUTH_URL}/api/auth/sign-out`, {
-          method: 'POST',
-          headers: {
-            Cookie: `${SESSION_COOKIE}=${encodeURIComponent(sessionToken)}`,
-            Origin: AUTH_URL,
-          },
-        })
-      } catch {
-        // Network failure — still wipe local credentials so the user can
-        // re-authenticate. Server-side session will expire on its own.
-      }
-    }
+    // If revocation fails (for example, offline), still wipe local credentials
+    // so the user can re-authenticate; the server-side session expires on its own.
+    if (sessionToken) await revokeSession(AUTH_URL, sessionToken)
 
     let removed = 0
     for (const path of [SESSION_PATH, TOKEN_PATH]) {

@@ -3,6 +3,7 @@ import {
   nativeAuthCallback,
   nativeAuthExchange,
   nativeAuthMe,
+  nativeAuthSignOut,
   nativeAuthStart,
   nativeAuthToken,
 } from '../expo-auth'
@@ -94,5 +95,39 @@ describe('Expo native auth bridge', () => {
       { AUTH_WORKER_URL: 'https://auth.deep.space' },
     )
     expect(response.status).toBe(500)
+  })
+
+  const signOutRequest = (body: unknown) =>
+    new Request('https://example.app.space/api/auth/native-signout', { method: 'POST', body: JSON.stringify(body) })
+
+  it('revokes the session with the JSON body and trusted Origin Better Auth requires', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"success":true}', { status: 200 }))
+    const response = await nativeAuthSignOut(signOutRequest({ sessionToken: 'a-session-token-that-is-long-enough' }), env)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ ok: true })
+    const [url, init] = fetchSpy.mock.calls[0]!
+    expect(url).toBe('https://auth.deep.space/api/auth/sign-out')
+    expect(init?.method).toBe('POST')
+    expect(init?.body).toBe('{}')
+    const headers = new Headers(init?.headers)
+    expect(headers.get('content-type')).toBe('application/json')
+    expect(headers.get('origin')).toBe('https://example.app.space')
+    expect(headers.get('cookie')).toContain('a-session-token-that-is-long-enough')
+  })
+
+  it('reports a session the auth worker did not revoke', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{"code":"MISSING_OR_NULL_ORIGIN"}', { status: 403 }),
+    )
+    const response = await nativeAuthSignOut(signOutRequest({ sessionToken: 'a-session-token-that-is-long-enough' }), env)
+    expect(response.status).toBe(502)
+    expect(await response.json()).toMatchObject({ ok: false })
+  })
+
+  it('has nothing to revoke without a session token', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const response = await nativeAuthSignOut(signOutRequest({}), env)
+    expect(response.status).toBe(200)
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 })
