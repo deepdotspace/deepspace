@@ -18,6 +18,7 @@ import { ApiError } from '../../lib/api'
 import {
   MAX_APP_FILE_BYTES,
   UPLOAD_PART_BYTES,
+  appFilePath,
   contentTypeFor,
   downloadAppFile,
   encodeKeyPath,
@@ -25,7 +26,7 @@ import {
   formatBytes,
   uploadAppFile,
 } from '../../lib/app-files-api'
-import { appPrefixOf, relativeKey, requireKey, servedPath } from '../app-files'
+import { appPrefixOf, relativeKey, requireKey } from '../app-files'
 
 const APP = 'app_00000000000000000000000F1A'
 
@@ -92,7 +93,7 @@ describe('key rendering', () => {
   })
 
   it('serves from the app origin at app scope, with each segment encoded', () => {
-    expect(servedPath(`apps/${APP}/a b.png`)).toBe(`/api/files/apps/${APP}/a%20b.png?scope=app`)
+    expect(appFilePath(`apps/${APP}/a b.png`, 'app')).toBe(`/api/files/apps/${APP}/a%20b.png?scope=app`)
   })
 
   it('keeps key hierarchy while encoding reserved characters', () => {
@@ -102,6 +103,19 @@ describe('key rendering', () => {
   it('builds the owner route path', () => {
     expect(filesPath(APP)).toBe(`/api/app-files/${APP}`)
     expect(filesPath(APP, '/logo.png')).toBe(`/api/app-files/${APP}/logo.png`)
+  })
+
+  it('addresses the private folder with scope=self, keeping any query', () => {
+    expect(filesPath(APP, '/shot.png', 'self')).toBe(`/api/app-files/${APP}/shot.png?scope=self`)
+    expect(filesPath(APP, '/upload?key=shot.png', 'self')).toBe(
+      `/api/app-files/${APP}/upload?key=shot.png&scope=self`,
+    )
+    const key = `apps/${APP}/users/user_1/shots/a b.png`
+    expect(appPrefixOf(key, 'self')).toBe(`apps/${APP}/users/user_1/`)
+    expect(relativeKey(key, appPrefixOf(key, 'self'))).toBe('shots/a b.png')
+    expect(appFilePath(key, 'self')).toBe(
+      `/api/files/apps/${APP}/users/user_1/shots/a%20b.png?scope=self`,
+    )
   })
 })
 

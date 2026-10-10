@@ -10,13 +10,19 @@
 
 import type { Hono } from 'hono'
 import { registerAgentToolRoutes, resolveAppMembership } from 'deepspace/worker'
-import type { AgentToolAccessResult, JwtClaims } from 'deepspace/worker'
-import type { buildTools } from './tools.js'
+import type { AgentToolAccessResult, AgentToolRouteOptions, JwtClaims } from 'deepspace/worker'
 import { registerAiChatRoutes } from './chat-routes.js'
 import { resolveAgentAuth, resolveAuth } from '../server/http-routes.js'
 import type { AppContext, Env } from '../../worker.js'
 
-type ToolFactory = typeof buildTools
+/**
+ * `buildTools` from src/ai/tools.ts. Its first argument runs record tools as
+ * the caller and returns whole results; each tool's own result is capped for
+ * the model where the SDK hands it over. Tools that need the Worker's
+ * bindings take the second: the request's `env`, the verified `userId`, and
+ * the `request` (store files with `appFiles(context.env, ...)`).
+ */
+type ToolFactory = AgentToolRouteOptions<Env>['buildTools']
 
 export interface AgentAuthorizationContext {
   userId: string
@@ -37,6 +43,12 @@ export interface RegisterAgentOptions {
    * It only narrows access after verified identity and app membership succeed.
    */
   authorize?: (context: AgentAuthorizationContext) => boolean | Promise<boolean>
+  /**
+   * The record room a verified caller's tools run in and their membership is
+   * read from, for an app that keeps a room per user or team. Decide it from
+   * the verified `userId`, never from input. Defaults to the app's room.
+   */
+  room?: (userId: string, env: Env) => string
 }
 
 function createAccessResolver(options: RegisterAgentOptions, resolveIdentity: typeof resolveAuth) {
@@ -44,12 +56,15 @@ function createAccessResolver(options: RegisterAgentOptions, resolveIdentity: ty
     const auth = await resolveIdentity(request, env)
     if (!auth) return { ok: false, status: 401 }
 
-    // Membership has exactly one definition — the caller's row in this app's
-    // canonical users collection (the owner is always a member). It is the
-    // same primitive that gates the admin and realtime routes. A membership
-    // read that could not complete is 503 (retryable), never 403: a transient
-    // room failure must not present as a permission denial.
-    const membership = await resolveAppMembership(env, auth.userId, request.signal)
+    // Membership has exactly one definition — the caller's row in the users
+    // collection of the room their tools run in (the owner is always a
+    // member); a signed-in app visit creates it. It is the same primitive
+    // that gates the admin and realtime routes. A membership read that could
+    // not complete is 503 (retryable), never 403: a transient room failure
+    // must not present as a permission denial. The grant carries the room, so
+    // the tools run exactly where membership was checked.
+    const room = options.room?.(auth.userId, env)
+    const membership = await resolveAppMembership(env, auth.userId, request.signal, { room })
     if (!membership) return { ok: false, status: 503 }
     if (!membership.member) return { ok: false, status: 403 }
 
@@ -66,7 +81,7 @@ function createAccessResolver(options: RegisterAgentOptions, resolveIdentity: ty
       }
     }
 
-    return { ok: true, auth }
+    return { ok: true, auth, room }
   }
 }
 

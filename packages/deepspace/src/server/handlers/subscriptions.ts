@@ -142,13 +142,23 @@ export interface QueryScanState {
   capped: boolean
 }
 
+/** How {@link executeQuery} reads beyond the query itself. */
+export interface QueryReadOptions {
+  /** Readable records to skip before the first one returned, in query order.
+   *  Set by the `records.query` tool; deliberately not part of `Query`, which
+   *  clients also send for subscriptions. */
+  offset?: number
+  /** Out-param: see {@link QueryScanState}. */
+  scan?: QueryScanState
+}
+
 export function executeQuery(
   ctx: SubscriptionContext,
   query: Query,
   userId: string,
   userRole: string,
   skipUserRbac: boolean = false,
-  scanState?: QueryScanState,
+  options: QueryReadOptions = {},
 ): RecordResult[] {
   const resolved = resolveCollection(ctx, query.collection)
 
@@ -161,7 +171,7 @@ export function executeQuery(
 
   if (!resolved.schema) {
     // System collection without schema — query the c_* table directly
-    return executeSystemQuery(ctx, query)
+    return executeSystemQuery(ctx, query, options.offset ?? 0)
   }
 
   return executeTableQuery(
@@ -172,7 +182,7 @@ export function executeQuery(
     userRole,
     resolved.isSystem,
     skipUserRbac,
-    scanState,
+    options,
   )
 }
 
@@ -182,16 +192,18 @@ export function executeQuery(
 function executeSystemQuery(
   ctx: SubscriptionContext,
   query: Query,
+  offset: number,
 ): RecordResult[] {
   const tbl = collectionTableName(query.collection)
   let sql = `SELECT _row_id, _created_by, _created_at, _updated_at FROM "${tbl}"`
   const params: unknown[] = []
 
-  sql += ` ORDER BY _created_at DESC`
+  sql += ` ORDER BY _created_at DESC, _row_id DESC`
 
-  if (query.limit) {
-    sql += ` LIMIT ?`
-    params.push(query.limit)
+  if (query.limit || offset) {
+    // SQLite reads LIMIT -1 as "no limit", the only way to write OFFSET alone.
+    sql += ` LIMIT ? OFFSET ?`
+    params.push(query.limit || -1, offset)
   }
 
   try {
@@ -226,6 +238,20 @@ function preloadUserTeamIds(ctx: SubscriptionContext, userId: string): string[] 
   return cursor.toArray().map(r => (r as Record<string, unknown>).col_teamid as string)
 }
 
+/**
+ * The SQL column a query's `orderBy` sorts on: `createdAt`, `updatedAt`, or a
+ * schema column by name or id. `undefined` for anything else, which the
+ * `records.query` tool refuses and a subscription reads as the default order.
+ */
+export function orderColumn(schema: CollectionSchema | undefined, orderBy: unknown): string | undefined {
+  if (orderBy === 'createdAt') return '_created_at'
+  if (orderBy === 'updatedAt') return '_updated_at'
+  if (typeof orderBy !== 'string' || !orderBy) return undefined
+  return (schema?.columns ?? [])
+    .map(resolveColumn)
+    .find(c => c.id === columnId(orderBy) || c.name === orderBy)?.id
+}
+
 function executeTableQuery(
   ctx: SubscriptionContext,
   query: Query,
@@ -234,8 +260,9 @@ function executeTableQuery(
   userRole: string,
   isSystem: boolean,
   skipUserRbac: boolean = false,
-  scanState?: QueryScanState,
+  options: QueryReadOptions = {},
 ): RecordResult[] {
+  const offset = options.offset ?? 0
   const columns = (schema.columns ?? []).map(resolveColumn)
   const perms = getRolePermissions(schema, userRole)
 
@@ -307,22 +334,15 @@ function executeTableQuery(
     sql += ` WHERE ${whereClauses.join(' AND ')}`
   }
 
-  if (query.orderBy) {
-    const dir = query.orderDir === 'asc' ? 'ASC' : 'DESC'
-    if (query.orderBy === 'createdAt') {
-      sql += ` ORDER BY _created_at ${dir}`
-    } else if (query.orderBy === 'updatedAt') {
-      sql += ` ORDER BY _updated_at ${dir}`
-    } else {
-      const colId = columnId(query.orderBy)
-      const col = columns.find(c => c.id === colId || c.name === query.orderBy)
-      if (col) {
-        sql += ` ORDER BY "${col.id}" ${dir}`
-      }
-    }
-  } else {
-    sql += ` ORDER BY _created_at DESC`
-  }
+  // The record id breaks ties, so the order is total: equal sort keys would
+  // otherwise come back in any order, and consecutive `offset` pages could
+  // repeat or skip a record. An unknown `orderBy` (refused by the
+  // `records.query` tool) falls back to the default order.
+  const dir = query.orderBy && query.orderDir === 'asc' ? 'ASC' : 'DESC'
+  const orderCol = orderColumn(schema, query.orderBy)
+  sql += orderCol
+    ? ` ORDER BY "${orderCol}" ${dir}, _row_id ${dir}`
+    : ` ORDER BY _created_at DESC, _row_id DESC`
 
   const readPage = (limitClause: string, limitParams: number[]): { records: RecordResult[]; scanned: number } => {
     const cursor = ctx.sql.exec(sql + limitClause, ...params, ...limitParams)
@@ -344,33 +364,46 @@ function executeTableQuery(
     return { records, scanned: rows.length }
   }
 
-  // `limit` counts the records the caller receives. When the SQL predicates
-  // are the whole check it pushes straight into SQL; when a per-row read
-  // filter still applies, a SQL LIMIT would end the result early (a page of
-  // unreadable rows reads as "no more matches"), so scan in bounded batches
-  // until the limit is met, the rows run out, or the scan cap is hit — the
-  // cap keeps `limit` a bound on work, and `scanState.capped` makes hitting
-  // it observable so a caller's drain loop cannot read a capped short page
-  // as exhaustion.
-  if (!query.limit) return readPage('', []).records
+  // `limit` and `offset` count the records the caller receives. When the SQL
+  // predicates are the whole check they push straight into SQL; when a
+  // per-row read filter still applies, SQL would count unreadable rows (a
+  // page of them reads as "no more matches"), so scan in bounded batches,
+  // skipping `offset` readable records, until the limit is met, the rows run
+  // out, or the scan cap is hit. The cap counts from the batch where the page
+  // starts, keeping `limit` a bound on the page's work (reaching a deep start
+  // costs at most the one full scan an unlimited query makes), and
+  // `scan.capped` makes hitting it observable so a caller's drain loop cannot
+  // read a capped short page as exhaustion.
   const rowFiltered = !isSystem && !skipPerRecordCheck
-  if (!rowFiltered) return readPage(' LIMIT ?', [query.limit]).records
+  if (!rowFiltered) {
+    // SQLite reads LIMIT -1 as "no limit", the only way to write OFFSET alone.
+    if (offset) return readPage(' LIMIT ? OFFSET ?', [query.limit || -1, offset]).records
+    return query.limit ? readPage(' LIMIT ?', [query.limit]).records : readPage('', []).records
+  }
+  if (!query.limit) return readPage('', []).records.slice(offset)
 
   const results: RecordResult[] = []
   const batch = Math.max(query.limit, 200)
-  for (let offset = 0; ; offset += batch) {
-    const { records, scanned } = readPage(' LIMIT ? OFFSET ?', [batch, offset])
+  let skipped = 0
+  let pageStart: number | undefined = offset === 0 ? 0 : undefined
+  for (let at = 0; ; at += batch) {
+    const { records, scanned } = readPage(' LIMIT ? OFFSET ?', [batch, at])
     for (const record of records) {
+      if (skipped < offset) {
+        skipped++
+        if (skipped === offset) pageStart = at
+        continue
+      }
       results.push(record)
       if (results.length >= query.limit) return results
     }
     if (scanned < batch) return results
-    if (offset + batch >= MAX_FILTERED_SCAN_ROWS) {
+    if (pageStart !== undefined && at + batch - pageStart >= MAX_FILTERED_SCAN_ROWS) {
       // A full final page leaves "capped" and "exhausted exactly on the
       // boundary" indistinguishable; one single-row probe settles it, so
       // `capped` never fires on a table that simply ended here.
-      if (scanState && readPage(' LIMIT ? OFFSET ?', [1, offset + batch]).scanned > 0) {
-        scanState.capped = true
+      if (options.scan && readPage(' LIMIT ? OFFSET ?', [1, at + batch]).scanned > 0) {
+        options.scan.capped = true
       }
       return results
     }

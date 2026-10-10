@@ -2,7 +2,8 @@
  * deepspace/native — DeepSpace for React Native (Expo SDK 57).
  *
  * One import path for a native app: the Expo auth client, React bindings for
- * auth state, real-time records, messaging, integrations, and server actions.
+ * auth state, real-time records, app files, messaging, integrations, and
+ * server actions.
  * Import everything from here (not also from `deepspace/expo`) so the app
  * holds a single copy of the client classes.
  *
@@ -81,6 +82,10 @@ export type {
   WriteError,
 } from './client/storage/types'
 export type { CollectionSchema } from './shared/types'
+
+// App files
+export { useFileSource } from './native/files'
+export type { FileSource, FileSourceOptions } from './native/files'
 
 // Messaging
 export { useMessages } from './client/messaging/useMessages'

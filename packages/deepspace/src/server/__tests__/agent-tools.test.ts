@@ -6,6 +6,7 @@ import {
   AGENT_TOOL_REQUEST_BODY_CAP,
   AGENT_TOOL_RESPONSE_BODY_CAP,
   registerAgentToolRoutes,
+  type AgentToolContext,
   type AgentToolAccessResult,
   type AgentToolRouteEnv,
 } from '../agent-tools'
@@ -58,6 +59,7 @@ function makeApp(
     resolveAccess?: (request: Request) => Promise<AgentToolAccessResult>
     buildTools?: (
       executor: (name: string, params: Record<string, unknown>) => Promise<unknown>,
+      context: AgentToolContext<AgentToolRouteEnv>,
     ) => ToolSet
   } = {},
 ) {
@@ -333,6 +335,126 @@ describe('agent tool routes', () => {
     expect(requests[0].body).toEqual({ tool: 'records.query', params: { collection: 'notes' } })
     expect(requests[0].headers.get('x-user-id')).toBe('user_123')
     expect(requests[0].headers.has('x-app-action')).toBe(false)
+  })
+
+  it('gives buildTools the request context and whole record results', async () => {
+    // One page well past the model's tool-result budget.
+    const records = Array.from({ length: 400 }, (_, index) => ({
+      recordId: `r${index}`,
+      data: { note: 'x'.repeat(200) },
+    }))
+    const { env, requests } = makeEnv(async () =>
+      Response.json({ success: true, data: { records, count: records.length } }),
+    )
+    let seen: AgentToolContext<AgentToolRouteEnv> | undefined
+    const app = makeApp(env, {
+      buildTools: (executor, context) => {
+        seen = context
+        return {
+          count: tool({
+            inputSchema: z.object({}),
+            execute: async () => {
+              const page = (await executor('records.query', { collection: 'notes' })) as {
+                data: { records: unknown[]; truncated?: boolean }
+              }
+              return { read: page.data.records.length, truncated: page.data.truncated === true }
+            },
+          }),
+        }
+      },
+    })
+
+    const response = await app.request(
+      'https://app.test/_deepspace/agent/tools/count',
+      { method: 'POST', body: JSON.stringify({ input: {} }) },
+      env,
+    )
+
+    expect(response.status).toBe(200)
+    expect(await json(response)).toEqual({ ok: true, result: { read: 400, truncated: false } })
+    expect(seen?.env).toBe(env)
+    expect(seen?.userId).toBe('user_123')
+    expect(seen?.request.url).toBe('https://app.test/_deepspace/agent/tools/count')
+    expect(requests.map((request) => request.headers.get('x-user-id'))).toEqual(['user_123'])
+  })
+
+  it('trims an oversized page for the agent and says where the next page starts', async () => {
+    const records = Array.from({ length: 400 }, (_, index) => ({
+      recordId: `r${index}`,
+      data: { note: 'x'.repeat(200) },
+    }))
+    const { env } = makeEnv(async () =>
+      Response.json({ success: true, data: { records, count: 400, offset: 100, nextOffset: 500 } }),
+    )
+    const app = makeApp(env, {
+      buildTools: (executor) => ({
+        records_query: tool({
+          inputSchema: z.object({ collection: z.string() }),
+          execute: (input) => executor('records.query', input),
+        }),
+      }),
+    })
+
+    const response = await app.request(
+      'https://app.test/_deepspace/agent/tools/records_query',
+      { method: 'POST', body: JSON.stringify({ input: { collection: 'notes' } }) },
+      env,
+    )
+
+    expect(response.status).toBe(200)
+    const text = await response.text()
+    expect(new TextEncoder().encode(text).byteLength).toBeLessThan(DEFAULT_CONTEXT_CONFIG.toolResultCap + 100)
+    const { result } = JSON.parse(text) as {
+      result: { data: { records: unknown[]; count: number; nextOffset: number; truncated: boolean; returned: number; total: number } }
+    }
+    const kept = result.data.records.length
+    expect(kept).toBeGreaterThan(0)
+    expect(kept).toBeLessThan(400)
+    expect(result.data).toMatchObject({ truncated: true, returned: kept, total: 400, count: kept, nextOffset: 100 + kept })
+  })
+
+  it('runs tools in the room the access grant names', async () => {
+    const { env, names } = makeEnv(async () => Response.json({ success: true, data: {} }))
+    const app = makeApp(env, {
+      resolveAccess: async () => ({ ...access, room: 'notes:user_123' }),
+      buildTools: (executor) => ({
+        records: tool({
+          inputSchema: z.object({}),
+          execute: () => executor('user.current', {}),
+        }),
+      }),
+    })
+
+    const response = await app.request(
+      'https://app.test/_deepspace/agent/tools/records',
+      { method: 'POST', body: JSON.stringify({ input: {} }) },
+      env,
+    )
+
+    expect(response.status).toBe(200)
+    expect(names).toEqual(['notes:user_123'])
+  })
+
+  it('names the size and the limit when a result is too large', async () => {
+    const { env } = makeEnv()
+    const app = makeApp(env, {
+      buildTools: () => ({
+        big: tool({
+          inputSchema: z.object({}),
+          execute: async () => ({ data: 'x'.repeat(DEFAULT_CONTEXT_CONFIG.toolResultCap) }),
+        }),
+      }),
+    })
+    const response = await app.request(
+      'https://app.test/_deepspace/agent/tools/big',
+      { method: 'POST', body: JSON.stringify({ input: {} }) },
+      env,
+    )
+    const body = (await json(response)) as { code: string; error: string }
+    expect(response.status).toBe(500)
+    expect(body.code).toBe('tool_result_too_large')
+    expect(body.error).toContain(`It was ${DEFAULT_CONTEXT_CONFIG.toolResultCap + 11} bytes`)
+    expect(body.error).toContain(`at most ${DEFAULT_CONTEXT_CONFIG.toolResultCap}`)
   })
 
   it('forwards the route abort signal into a DO tool request', async () => {

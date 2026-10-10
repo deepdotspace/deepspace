@@ -6,6 +6,7 @@ import {
 } from '../../shared/ai-models'
 import type { SandboxScope } from '../../shared/sandbox'
 import { createDeepSpaceAI, type DeepSpaceAIEnv } from './ai'
+import { DEFAULT_CONTEXT_CONFIG, capToolResultSize } from './chat-context'
 
 type StreamTextOptions<TOOLS extends ToolSet> = Parameters<typeof streamText<TOOLS>>[0]
 
@@ -68,7 +69,7 @@ export function streamDeepSpaceAgent<TOOLS extends ToolSet>(
     ...(sandboxScope ? { sandboxScope } : {}),
   })
   const { prepareStep, tools, ...remainingStreamOptions } = streamOptions
-  const boundedTools = limitToolExecutions(tools, selection.profile.maxToolCalls)
+  const boundedTools = limitToolExecutions(capToolOutputs(tools), selection.profile.maxToolCalls)
   const result = streamText<TOOLS>({
     ...remainingStreamOptions,
     ...(boundedTools ? { tools: boundedTools } : {}),
@@ -81,6 +82,38 @@ export function streamDeepSpaceAgent<TOOLS extends ToolSet>(
   } as StreamTextOptions<TOOLS>)
 
   return { selection, result }
+}
+
+/**
+ * Cap every tool's output where it enters the model's context. This is the
+ * one place the model-facing budget applies, so it covers app-defined tools
+ * as well as record tools, while the code inside a tool (and the executor it
+ * calls) reads whole results. A streaming tool's iterable passes through:
+ * the AI SDK detects streaming from `execute`'s direct return value.
+ */
+function capToolOutputs<TOOLS extends ToolSet>(tools: TOOLS | undefined): TOOLS | undefined {
+  if (!tools) return tools
+  return Object.fromEntries(
+    Object.entries(tools).map(([name, definition]) => {
+      if (typeof definition.execute !== 'function') return [name, definition]
+      const execute = definition.execute
+      return [
+        name,
+        {
+          ...definition,
+          execute: (...args: Parameters<typeof execute>) => {
+            const output: unknown = execute(...args)
+            if (output !== null && typeof output === 'object' && Symbol.asyncIterator in output) {
+              return output
+            }
+            return Promise.resolve(output).then((value) =>
+              capToolResultSize(value, DEFAULT_CONTEXT_CONFIG.toolResultCap),
+            )
+          },
+        },
+      ]
+    }),
+  ) as TOOLS
 }
 
 function enforceToolCallLimit<TOOLS extends ToolSet>(

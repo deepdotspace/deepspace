@@ -27,10 +27,10 @@ export type ToolResult =
 /**
  * Page size the assistant defaults to for `records.query` when it omits
  * `limit`. Keeps a model-issued unbounded scan from blowing the tool-result
- * byte cap and gives the model a usable first page. Raise `limit` to page
- * through more (still subject to the cap; see
- * `DEFAULT_CONTEXT_CONFIG.toolResultCap` / `capToolResultSize`, which truncates
- * oversized pages gracefully rather than dropping them).
+ * byte cap and gives the model a usable first page; the result's `nextOffset`
+ * pages through the rest (each page still subject to the cap; see
+ * `DEFAULT_CONTEXT_CONFIG.toolResultCap` / `capToolResultSize`, which trims
+ * an oversized page and moves `nextOffset` back to match).
  *
  * Applied by the AI tool layer via `applyAiToolDefaults`, never by the shared
  * tools-api dispatch, so internal record readers (chat history, cron, app
@@ -79,16 +79,17 @@ export const BUILT_IN_TOOLS: ToolSchema[] = [
     name: 'records.query',
     description:
       'Query records from a collection with optional filtering, ordering, and pagination. ' +
-      `Returns at most \`limit\` records (default ${DEFAULT_QUERY_LIMIT}). Large result sets are capped at ~30KB: ` +
-      'an oversized page is truncated to the leading records that fit and flagged with ' +
-      '`{ truncated, returned, total }`, so narrow with a `where` filter (or page via `orderBy` + `limit`) ' +
-      'to see the rest.',
+      `Returns at most \`limit\` records (default ${DEFAULT_QUERY_LIMIT}) starting at \`offset\`, ` +
+      'plus `nextOffset` when more match: pass it as `offset` with the same filter and order for the next page. ' +
+      'A page is capped at ~30KB: an oversized page is truncated to the leading records that fit, flagged with ' +
+      '`{ truncated, returned, total }`, and its `nextOffset` continues after the last record returned.',
     params: {
       collection: { type: 'string', description: 'Collection name to query', required: true },
       where: { type: 'object', description: 'Filter object with field=value equality conditions; every key must be recordId, createdBy, or a schema column (an unknown key is refused, not ignored)', required: false },
-      orderBy: { type: 'string', description: 'Field to order by (or "createdAt"/"updatedAt")', required: false },
+      orderBy: { type: 'string', description: 'Field to order by: a schema column, "createdAt", or "updatedAt" (default: createdAt; an unknown field is refused)', required: false },
       orderDir: { type: 'string', description: 'Order direction: "asc" or "desc" (default: "desc")', required: false },
-      limit: { type: 'number', description: `Maximum number of records to return (default: ${DEFAULT_QUERY_LIMIT}). Oversized pages are still capped at ~30KB and truncated with returned/total flags.`, required: false },
+      limit: { type: 'number', description: `Maximum number of records to return, at least 1 (default: ${DEFAULT_QUERY_LIMIT}). Oversized pages are still capped at ~30KB and truncated with returned/total flags.`, required: false },
+      offset: { type: 'number', description: 'Matching records to skip, in this order (default: 0). Use the previous page\'s nextOffset.', required: false },
     }
   },
   {

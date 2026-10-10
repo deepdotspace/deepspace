@@ -4,9 +4,11 @@ import { APP_ID_ADOPTION_EDITS, APP_ID_ADOPTION_TOGETHER } from '../../../build/
 import {
   ACTION_ROUTES_BEARER_GUARD_MIGRATION_ID,
   ACTION_TOOLS_DELETE_WHERE_MIGRATION_ID,
+  AGENT_TOOL_CONTEXT_MIGRATION_ID,
   AI_SDK_7_MIGRATION_ID,
   BUILD_INJECTED_APP_ID_MIGRATION_ID,
   FILES_SESSION_COOKIE_READS_MIGRATION_ID,
+  INTEGRATIONS_SIGN_IN_MIGRATION_ID,
   SECURE_ROOM_BOUNDARIES_MIGRATION_ID,
   WORKER_OWNED_NOT_FOUND_MIGRATION_ID,
   validateAppMigrationIds,
@@ -75,6 +77,20 @@ export const APP_MIGRATION_GUIDANCE: readonly AppMigrationGuidance[] = [
     files: ['src/ai/chat-routes.ts', 'every other file importing from "ai"'],
     guidance:
       "Run `npx @ai-sdk/codemod v7 src` and review its diff: it renames `system` to `instructions` in ANY object, including non-AI-SDK request bodies, so revert those. Then by hand: in the chat route's `onEnd` (formerly `onFinish`), persist `responseMessages` — `response.messages` now holds only the final step, which drops earlier tool calls — and since `onEnd` no longer runs after an abort, also persist in `onAbort({ steps })` from the completed steps' `response.messages`. Replace `result.toUIMessageStreamResponse(options)` with `createUIMessageStreamResponse({ headers, stream: toUIMessageStream({ stream: result.stream, ...options }) })` imported from 'ai'. A tool's `execute` options now include `context`. `role: 'system'` messages inside `messages` are rejected unless the call sets `allowSystemInMessages: true`.",
+  },
+  {
+    id: INTEGRATIONS_SIGN_IN_MIGRATION_ID,
+    description: "Stop signed-out visitors from calling integrations billed to the app owner",
+    files: ['src/server/http-routes.ts', 'src/integrations.ts'],
+    guidance:
+      "In the /api/integrations/:name/:endpoint proxy, read `const config = integrations[integrationName]` and change the sign-in check from `if (!auth && billingMode === 'user')` to `if (!auth && (billingMode === 'user' || !config?.anonymous))`. In src/integrations.ts, add `anonymous?: boolean` to the config type. Every integration then needs sign-in; set `anonymous: true` only on a 'developer' integration that signed-out visitors must reach, knowing the owner pays for their calls.",
+  },
+  {
+    id: AGENT_TOOL_CONTEXT_MIGRATION_ID,
+    description: "Give the app's tools the request's env and caller, and let the app choose each caller's room",
+    files: ['src/ai/agent.ts', 'src/ai/chat-routes.ts'],
+    guidance:
+      "Optional; nothing breaks without it. The executor passed to `buildTools` now returns whole record results, and `streamDeepSpaceAgent` and the local agent route cap each tool's result for the model instead, so existing tools stay bounded. To give tools the request: in both files, replace `type ToolFactory = typeof buildTools` with `type ToolFactory = AgentToolRouteOptions<Env>['buildTools']`, importing `AgentToolRouteOptions` from 'deepspace/worker'. In chat-routes.ts, pass `{ env: c.env, userId: auth.userId, request: c.req.raw }` as the second argument where it calls `buildTools(createUserToolExecutor(...))`; the local agent route already passes it. A tool then declares `buildTools(executor, context)` and uses `context.env` (for example `appFiles(context.env, { scope: 'self', userId: context.userId })`). Only for an app that keeps a record room per user or team: add `room?: (userId: string, env: Env) => string` to RegisterAgentOptions in agent.ts; in createAccessResolver compute `const room = options.room?.(auth.userId, env)`, pass `{ room }` as the fourth argument of `resolveAppMembership`, and return `{ ok: true, auth, room }`. The local agent route then runs tools in that room. In chat-routes.ts, have `requireAccess` return the whole grant (`if (access.ok) return access`), read `const { auth } = access` in each route, and pass `{ room: access.room }` as the fourth argument of `createUserToolExecutor`.",
   },
 ]
 

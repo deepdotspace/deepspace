@@ -36,10 +36,12 @@ import {
   MAX_APP_FILE_BYTES,
   MAX_BASE64_UPLOAD_BYTES,
   UPLOAD_PART_BYTES,
+  appFilePath,
   describeFilesFailure,
   encodeKeyPath,
   oversizeMessage,
   planUploadParts,
+  type AppFileScope,
 } from '../../shared/app-files'
 
 // ============================================================================
@@ -248,7 +250,7 @@ export interface UseR2FilesReturn {
  *
  * Uploads under `'app'` still require a signed-in user.
  */
-export type R2Scope = { scope?: 'self' | 'app' }
+export type R2Scope = { scope?: AppFileScope }
 
 // ============================================================================
 // Helpers
@@ -490,9 +492,9 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
   const getUrl = useCallback(
     (fileOrKey: R2FileInfo | string): string => {
       const { key } = resolveFile(fileOrKey)
-      return `/api/files/${encodeKeyPath(key)}?${scopeParams}`
+      return appFilePath(key, scope)
     },
-    [scopeParams],
+    [scope],
   )
 
   const deleteFile = useCallback(

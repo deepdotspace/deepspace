@@ -412,23 +412,48 @@ describe('executeQuery limit', () => {
     expect(records.map(r => r.recordId).sort()).toEqual(['shared-0', 'shared-1', 'shared-2'])
   })
 
+  it('counts offset in readable records, so consecutive pages neither skip nor repeat', () => {
+    const ctx = makeContext(db, [schema])
+    ensureCollectionTable(ctx.sql, schema)
+    // Readable rows interleaved with hidden ones across two scan batches, all
+    // with one timestamp: only the record-id tiebreak orders them.
+    for (let i = 0; i < 300; i++) {
+      const id = String(i).padStart(3, '0')
+      insert(db, 'c_notes', i % 3 === 0
+        ? { recordId: `shared-${id}`, createdBy: 'bob', cols: { body: 'y', sharedWith: JSON.stringify(['alice']) } }
+        : { recordId: `bob-${id}`, createdBy: 'bob', cols: { body: 'x' } })
+    }
+
+    const seen: string[] = []
+    for (let offset = 0; offset < 100; offset += 30) {
+      const page = executeQuery(ctx, { collection: 'notes', limit: 30 }, 'alice', 'member', false, { offset })
+      seen.push(...page.map(r => r.recordId))
+    }
+    expect(seen).toHaveLength(100)
+    expect(new Set(seen).size).toBe(100)
+    expect(seen.every(id => id.startsWith('shared-'))).toBe(true)
+    // Without a limit, offset still counts readable records.
+    expect(executeQuery(ctx, { collection: 'notes' }, 'alice', 'member', false, { offset: 95 })).toHaveLength(5)
+  })
+
   it('stops at the scan cap and reports it instead of scanning forever', () => {
     const ctx = makeContext(db, [schema])
     ensureCollectionTable(ctx.sql, schema)
     for (let i = 0; i < MAX_FILTERED_SCAN_ROWS + 10; i++) {
       insert(db, 'c_notes', { recordId: `bob-${String(i).padStart(5, '0')}`, createdBy: 'bob', cols: { body: 'x' } })
     }
-    // One readable row sorted past the cap — the scan must stop before it and
-    // say so, rather than either finding it (unbounded work) or silently
-    // reporting "no matches".
+    // One readable row sorted past the cap (equal timestamps order by record
+    // id, descending, so "a" comes after "bob-…") — the scan must stop before
+    // it and say so, rather than either finding it (unbounded work) or
+    // silently reporting "no matches".
     insert(db, 'c_notes', {
-      recordId: 'zz-shared',
+      recordId: 'a-shared',
       createdBy: 'bob',
       cols: { body: 'y', sharedWith: JSON.stringify(['alice']) },
     })
 
     const scan = { capped: false }
-    const records = executeQuery(ctx, { collection: 'notes', limit: 1 }, 'alice', 'member', false, scan)
+    const records = executeQuery(ctx, { collection: 'notes', limit: 1 }, 'alice', 'member', false, { scan })
     expect(records).toEqual([])
     expect(scan.capped).toBe(true)
   })
@@ -443,7 +468,7 @@ describe('executeQuery limit', () => {
     // Exactly MAX rows, all unreadable: exhausted, not capped — a spurious
     // `capped` here would make deleteWhere refuse a table that simply ended.
     const scan = { capped: false }
-    const records = executeQuery(ctx, { collection: 'notes', limit: 1 }, 'alice', 'member', false, scan)
+    const records = executeQuery(ctx, { collection: 'notes', limit: 1 }, 'alice', 'member', false, { scan })
     expect(records).toEqual([])
     expect(scan.capped).toBe(false)
   })

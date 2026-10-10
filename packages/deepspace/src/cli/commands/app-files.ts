@@ -21,6 +21,12 @@
  * the physical prefix and validates every key against it, so a key can never
  * address another app.
  *
+ * `--private` addresses the caller's own private folder in the app instead of
+ * the app's public allocation: what the app's `/api/files?scope=self` serves
+ * to that signed-in user alone. It is how an owner, or an agent working for
+ * them, stores a file the app shows only to them (a screenshot of an
+ * account, a recording); `app` scope is world-readable.
+ *
  * `--app` targets an app id or live name like the other app commands and
  * defaults to the cwd's app. Defined with the command runtime (lib/command.ts),
  * so `--json`, the envelope, and the exit codes come from there.
@@ -35,9 +41,10 @@ import { resolveAppTarget } from '../lib/app-target'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import { createSpinner } from '../lib/spinner'
 import {
+  appFilePath,
+  type AppFileScope,
   deleteAppFile,
   downloadAppFile,
-  encodeKeyPath,
   formatBytes,
   listAppFiles,
   MAX_APP_FILE_BYTES,
@@ -59,10 +66,23 @@ async function target(app: unknown): Promise<{ token: string; appId: string }> {
 /** R2 serves at most 1000 keys per list and there is no cursor here yet. */
 const MAX_LIST_LIMIT = 1000
 
+const privateArg = {
+  type: 'boolean',
+  description:
+    'Your own private folder in the app (read in-app with scope=self), not the public app files',
+} as const
+
+function scopeOf(args: Record<string, unknown>): AppFileScope {
+  return args.private ? 'self' : 'app'
+}
+
 function parseLimit(raw: unknown): number {
   const limit = Number(raw ?? 100)
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIST_LIMIT) {
-    throw new Refusal(`--limit must be a whole number from 1 to ${MAX_LIST_LIMIT}.`, 'invalid_limit')
+    throw new Refusal(
+      `--limit must be a whole number from 1 to ${MAX_LIST_LIMIT}.`,
+      'invalid_limit',
+    )
   }
   return limit
 }
@@ -82,22 +102,19 @@ export function requireKey(raw: string): string {
 
 /**
  * Strip the server's mounted prefix so listings read in the same relative keys
- * every other subcommand takes. The prefix is `apps/<resourceId>/` — always
- * the first two segments — so it is taken by segment count rather than by
- * pattern; a key may legitimately contain any character, newlines included.
+ * every other subcommand takes. The prefix is `apps/<resourceId>/` (the first
+ * two segments) or, for a private folder, `apps/<resourceId>/users/<userId>/`
+ * (the first four), so it is taken by segment count rather than by pattern; a
+ * key may legitimately contain any character, newlines included.
  */
-export function appPrefixOf(key: string): string {
+export function appPrefixOf(key: string, scope: AppFileScope = 'app'): string {
+  const count = scope === 'self' ? 4 : 2
   const segments = key.split('/')
-  return segments.length > 2 ? `${segments[0]}/${segments[1]}/` : ''
+  return segments.length > count ? `${segments.slice(0, count).join('/')}/` : ''
 }
 
 export function relativeKey(key: string, prefix: string): string {
   return prefix && key.startsWith(prefix) ? key.slice(prefix.length) : key
-}
-
-/** Where a file is served from, on the app's own origin. */
-export function servedPath(key: string): string {
-  return `/api/files/${encodeKeyPath(key)}?scope=app`
 }
 
 // ============================================================================
@@ -112,6 +129,7 @@ const put = defineDeepspaceCommand({
   args: {
     file: { type: 'positional', description: 'Local file to upload', required: true },
     key: { type: 'string', description: 'Key to store it under (default: the file name)' },
+    private: privateArg,
     app: { type: 'string', description: 'App id or live name (defaults to ./wrangler.toml)' },
   },
   async run({ args }) {
@@ -120,6 +138,7 @@ const put = defineDeepspaceCommand({
       throw new Refusal(`No such file: ${args.file}`, 'file_not_found')
     }
     const key = requireKey((args.key as string | undefined) ?? basename(localPath))
+    const scope = scopeOf(args)
     const { token, appId } = await target(args.app)
 
     // A chunked upload can run for minutes. Report each part as it lands —
@@ -143,6 +162,7 @@ const put = defineDeepspaceCommand({
           `${key} — part ${part}/${parts} (${formatBytes(sent)} of ${formatBytes(total)})`,
         )
       },
+      scope,
     ).finally(() => {
       if (started) spinner?.stop()
     })
@@ -150,7 +170,14 @@ const put = defineDeepspaceCommand({
     if (!args.json) {
       const how = result.parts > 1 ? ` in ${result.parts} parts` : ''
       console.log(`✓ ${key} (${formatBytes(result.size)})${how}`)
-      console.log(`  Served from your app at ${servedPath(result.key)}`)
+      if (scope === 'self') {
+        // The app records the stored key (useFileSource, getUrl); the path is
+        // only readable by this signed-in user.
+        console.log(`  Stored key: ${result.key}`)
+        console.log(`  Served from your app at ${appFilePath(result.key, scope)} (to you only)`)
+      } else {
+        console.log(`  Served from your app at ${appFilePath(result.key, scope)}`)
+      }
     }
     return {
       data: {
@@ -159,7 +186,8 @@ const put = defineDeepspaceCommand({
         storedKey: result.key,
         size: result.size,
         parts: result.parts,
-        path: servedPath(result.key),
+        scope,
+        path: appFilePath(result.key, scope),
       },
     }
   },
@@ -178,21 +206,23 @@ const list = defineDeepspaceCommand({
       description: `Max entries, 1-${MAX_LIST_LIMIT} (default 100)`,
       default: '100',
     },
+    private: privateArg,
     app: { type: 'string', description: 'App id or live name (defaults to ./wrangler.toml)' },
   },
   async run({ args }) {
     const limit = parseLimit(args.limit)
+    const scope = scopeOf(args)
     const { token, appId } = await target(args.app)
     const query = new URLSearchParams({ limit: String(limit) })
     if (args.prefix) query.set('prefix', String(args.prefix))
-    const result = await listAppFiles(PLATFORM_URL, token, appId, query)
+    const result = await listAppFiles(PLATFORM_URL, token, appId, query, scope)
     // Every key in one response shares the mounted prefix.
-    const prefix = result.files.length ? appPrefixOf(result.files[0].key) : ''
+    const prefix = result.files.length ? appPrefixOf(result.files[0].key, scope) : ''
     const files = result.files.map((file) => ({
       key: relativeKey(file.key, prefix),
       size: file.size,
       uploaded: file.uploaded,
-      path: servedPath(file.key),
+      path: appFilePath(file.key, scope),
     }))
 
     if (!args.json) {
@@ -207,7 +237,8 @@ const list = defineDeepspaceCommand({
           )
         }
         // No cursor: at MAX_LIST_LIMIT the only way to see more is --prefix.
-        const more = limit < MAX_LIST_LIMIT ? 'raise --limit or narrow with --prefix' : 'narrow with --prefix'
+        const more =
+          limit < MAX_LIST_LIMIT ? 'raise --limit or narrow with --prefix' : 'narrow with --prefix'
         if (result.truncated) console.log(`(truncated at ${limit} — ${more})`)
       }
       if (result.storage) {
@@ -232,16 +263,26 @@ const get = defineDeepspaceCommand({
   args: {
     key: { type: 'positional', description: 'Key to download', required: true },
     out: { type: 'string', description: 'Write here (default: the key’s file name)' },
+    private: privateArg,
     app: { type: 'string', description: 'App id or live name (defaults to ./wrangler.toml)' },
   },
   async run({ args }) {
     const key = requireKey(String(args.key))
     const destination = resolve(String(args.out ?? basename(key)))
     const { token, appId } = await target(args.app)
-    const result = await downloadAppFile(PLATFORM_URL, token, appId, key, destination)
+    const result = await downloadAppFile(
+      PLATFORM_URL,
+      token,
+      appId,
+      key,
+      destination,
+      scopeOf(args),
+    )
 
     if (!args.json) console.log(`✓ ${key} → ${destination} (${formatBytes(result.bytes)})`)
-    return { data: { appId, key, out: destination, size: result.bytes, contentType: result.contentType } }
+    return {
+      data: { appId, key, out: destination, size: result.bytes, contentType: result.contentType },
+    }
   },
 })
 
@@ -253,18 +294,20 @@ const rm = defineDeepspaceCommand({
   meta: { name: 'rm', description: 'Delete one file' },
   args: {
     key: { type: 'positional', description: 'Key to delete', required: true },
+    private: privateArg,
     app: { type: 'string', description: 'App id or live name (defaults to ./wrangler.toml)' },
   },
   async run({ args }) {
     const key = requireKey(String(args.key))
+    const scope = scopeOf(args)
     const { token, appId } = await target(args.app)
-    const { existed } = await deleteAppFile(PLATFORM_URL, token, appId, key)
+    const { existed } = await deleteAppFile(PLATFORM_URL, token, appId, key, scope)
     // The API is idempotent on purpose (deployed apps depend on that), but a
     // person typing a key wants to know they hit nothing — a `✓ deleted` for a
     // typo reads as "the file is gone" when it was never there.
     if (!existed) {
       throw new Refusal(
-        `No file at ${key} — nothing was deleted. Check the key with \`deepspace app files list\`.`,
+        `No file at ${key} — nothing was deleted. Check the key with \`deepspace app files list${scope === 'self' ? ' --private' : ''}\`.`,
         'file_not_found',
       )
     }

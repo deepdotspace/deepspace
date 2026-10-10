@@ -1,5 +1,19 @@
 # create-deepspace
 
+## 0.40.0
+
+### Minor Changes
+
+- The model-facing 30 KB tool-result cap now applies where a result reaches a model, not inside the record executor. `streamDeepSpaceAgent` caps every tool's output (app-defined tools included, which the in-app assistant previously passed through uncapped), and the local agent route trims an oversized page the same way, refusing with `tool_result_too_large` (which now states the size and the limit) only a result with nothing to trim. `createUserToolExecutor` therefore returns whole results, so tool code can read a whole collection and return its own answer; existing apps need no change to stay bounded. `records.query` pages: it takes `offset` and returns `offset` plus `nextOffset` when more records match, a page trimmed by the cap moves `nextOffset` back to the first record it dropped, and equal sort keys are ordered by record id so pages never repeat or skip a record. It now refuses an unknown `orderBy`, an `orderDir` other than asc/desc, and a `limit` or `offset` that is not a whole number in range (`limit: 0` used to mean no limit). `buildTools` receives a second argument from both assistant routes, `AgentToolContext` (`env`, the verified `userId`, `request`). An app that keeps a record room per user or team can choose it for the verified caller: `resolveAppMembership(env, userId, signal, { room })` checks membership there, the access grant returns it (`{ ok: true, auth, room }`), and both assistant routes run the caller's tools in the room the grant names (`createUserToolExecutor(env, userId, signal, { room })`); the template's `registerAgent({ room })` does all three. Existing apps can adopt the context and the room through `deepspace app update` (migration `2026-10-agent-tool-context`).
+
+  Private media now has a supported path from every side. `deepspace app files put|list|get|rm --private` address the caller's own private folder in the app, the files the app's `/api/files?scope=self` serves to that signed-in user only, so an owner or an agent signed in as them can store screenshots and recordings the app shows privately; `put` prints the stored key the app should record. Worker code (agent tools, crons, actions) gets `appFiles(env, { scope, userId })` from `deepspace/worker`, which uploads, downloads, lists and deletes through the app's own identity and throws `AppFileError`, instead of hand-building `/internal/files` requests. React Native apps get `useFileSource(key, { scope })` from `deepspace/native`, the `{ uri, headers }` source `<Image>` and expo-video need for a private file. The owner files route refuses an unknown `scope` (`invalid_scope`) rather than reading it as the public app scope.
+
+  `resolveAppMembership` now reports only a missing users row as "not a member"; any other refusal from the room returns null (could not verify), so the assistant routes answer a retryable 503 instead of a 403.
+
+### Patch Changes
+
+- The template's integrations proxy now requires a signed-in caller for every integration. Before, signed-out visitors could call any integration not set to user billing, charged to the app owner. Set `anonymous: true` on a developer-billed integration in `src/integrations.ts` to allow signed-out callers on purpose. Existing apps: `deepspace app update` lists the change (migration `2026-10-integrations-sign-in`).
+
 ## 0.39.3
 
 ## 0.39.2

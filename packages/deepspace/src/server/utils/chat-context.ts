@@ -131,16 +131,26 @@ function getPath(root: unknown, path: string[]): unknown {
   return cur
 }
 
-// Shallow-clone along `path`, set the leaf to `value`, and merge `flags` into
-// the object that directly holds the leaf. Non-mutating — the original result
-// is untouched.
-function setPath(root: unknown, path: string[], value: unknown, flags: ResultObj): unknown {
+// Shallow-clone along `path`, set the leaf to the first `kept` items, and
+// merge the truncation flags into the object that directly holds the leaf.
+// A holder that states its page (`count`, `offset`, as `records.query` does)
+// is corrected to describe what it now returns, including where the next page
+// starts. Non-mutating: the original result is untouched.
+function trimAtPath(root: unknown, path: string[], items: unknown[], kept: number): unknown {
   const obj = root && typeof root === 'object' ? (root as ResultObj) : {}
   const [head, ...tail] = path
   if (tail.length === 0) {
-    return { ...obj, [head]: value, ...flags }
+    return {
+      ...obj,
+      [head]: items.slice(0, kept),
+      ...(typeof obj.count === 'number' ? { count: kept } : {}),
+      ...(typeof obj.offset === 'number' ? { nextOffset: obj.offset + kept } : {}),
+      truncated: true,
+      returned: kept,
+      total: items.length,
+    }
   }
-  return { ...obj, [head]: setPath(obj[head], tail, value, flags) }
+  return { ...obj, [head]: trimAtPath(obj[head], tail, items, kept) }
 }
 
 // Find the first trimmable array in a tool result, so an oversized payload can
@@ -170,17 +180,62 @@ export function utf8ByteLength(text: string): number {
 }
 
 /**
- * Keep an individual tool result under `byteCap`.
+ * Fit one JSON-serializable tool result under `byteCap`, or report that it
+ * cannot fit.
  *
  * If the payload carries a list of items (e.g. a `records.query` result), it is
  * degraded gracefully: as many leading items as fit under the cap are returned,
  * the `success: true` shape is preserved, and `{ truncated, returned, total }`
- * flags are merged in next to the array so callers can still use the partial
- * data and paginate for the rest.
+ * flags are merged in next to the array (with `nextOffset` when the page states
+ * its `offset`) so callers can use the partial data and page for the rest.
  *
- * Only when there is no array to trim (or even an empty list still overflows
- * because of oversized sibling fields) does it fall back to replacing the
- * result with an error + small preview telling the agent to narrow its query.
+ * It cannot fit when there is no array to trim, when even an empty list
+ * overflows because of oversized sibling fields, or when not one item fits.
+ */
+export function boundToolResult(
+  result: unknown,
+  byteCap: number,
+): { fits: true; result: unknown } | { fits: false; bytes: number } {
+  const bytes = utf8ByteLength(JSON.stringify(result) ?? 'null')
+  if (bytes <= byteCap) return { fits: true, result }
+
+  if (result && typeof result === 'object') {
+    const located = locateTrimmableArray(result as ResultObj)
+    if (located) {
+      const { path, items } = located
+      const build = (k: number) => trimAtPath(result, path, items, k)
+      const fits = (k: number): boolean => {
+        try {
+          return utf8ByteLength(JSON.stringify(build(k))) <= byteCap
+        } catch {
+          return false
+        }
+      }
+      // Only degrade if an empty list actually fits — otherwise the bloat is in
+      // sibling fields, not the array, and trimming it can't help.
+      if (fits(0)) {
+        // Binary search for the largest prefix that still fits under the cap.
+        let lo = 0
+        let hi = items.length
+        while (lo < hi) {
+          const mid = Math.ceil((lo + hi) / 2)
+          if (fits(mid)) lo = mid
+          else hi = mid - 1
+        }
+        // A partial page only if at least one item fits. When not even one
+        // record fits, an empty list would read like "no results", so the
+        // caller reports the overflow instead.
+        if (lo > 0) return { fits: true, result: build(lo) }
+      }
+    }
+  }
+  return { fits: false, bytes }
+}
+
+/**
+ * Keep an individual tool result that a model will read under `byteCap`:
+ * {@link boundToolResult}, falling back to an error with a small preview that
+ * tells the model to narrow its query.
  */
 export function capToolResultSize(result: unknown, byteCap: number): unknown {
   let serialized: string | undefined
@@ -194,49 +249,16 @@ export function capToolResultSize(result: unknown, byteCap: number): unknown {
   // to do with non-serializable shapes; this function's job is only to
   // cap oversized payloads.
   if (typeof serialized !== 'string') return result
-  if (utf8ByteLength(serialized) <= byteCap) return result
-
-  if (result && typeof result === 'object') {
-    const located = locateTrimmableArray(result as ResultObj)
-    if (located) {
-      const { path, items } = located
-      const total = items.length
-      const build = (k: number) =>
-        setPath(result, path, items.slice(0, k), { truncated: true, returned: k, total })
-      const fits = (k: number): boolean => {
-        try {
-          return utf8ByteLength(JSON.stringify(build(k))) <= byteCap
-        } catch {
-          return false
-        }
-      }
-      // Only degrade if an empty list actually fits — otherwise the bloat is in
-      // sibling fields, not the array, and trimming it can't help.
-      if (fits(0)) {
-        // Binary search for the largest prefix that still fits under the cap.
-        let lo = 0
-        let hi = total
-        while (lo < hi) {
-          const mid = Math.ceil((lo + hi) / 2)
-          if (fits(mid)) lo = mid
-          else hi = mid - 1
-        }
-        // Return a partial page only if at least one item fits. When not even a
-        // single record fits (one oversized record), fall through to the error
-        // below so the caller gets actionable guidance instead of an empty list
-        // that reads like "no results".
-        if (lo > 0) return build(lo)
-      }
-    }
-  }
+  const bounded = boundToolResult(result, byteCap)
+  if (bounded.fits) return bounded.result
 
   return {
     success: false,
     truncated: true,
     error:
-      `Tool result exceeded ${byteCap} bytes (was ${utf8ByteLength(serialized)}). ` +
-      `Retry with a narrower query (e.g. add a \`where\` filter, reduce \`limit\`, ` +
-      `or call records.get for a single record).`,
+      `Tool result exceeded ${byteCap} bytes (was ${bounded.bytes}). ` +
+      `Retry with a narrower query (e.g. add a \`where\` filter, reduce \`limit\` ` +
+      `and page with \`offset\`, or call records.get for a single record).`,
     preview: serialized.slice(0, 2_000),
   }
 }

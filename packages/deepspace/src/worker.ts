@@ -27,8 +27,10 @@ export {
   AGENT_TOOL_REQUEST_BODY_CAP,
   AGENT_TOOL_RESPONSE_BODY_CAP,
   type AgentToolAccessResult,
+  type AgentToolContext,
   type AgentToolRouteEnv,
   type AgentToolRouteOptions,
+  type UserToolExecutor,
   type UserToolExecutorEnv,
 } from './server/agent-tools'
 export {

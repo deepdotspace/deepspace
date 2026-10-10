@@ -198,6 +198,22 @@ export function encodeKeyPath(key: string): string {
   return key.split('/').map(encodeURIComponent).join('/')
 }
 
+/**
+ * Which files a request addresses. `self`: the signed-in user's private
+ * folder, readable by that user alone. `app`: the app's public allocation,
+ * readable by anyone.
+ */
+export type AppFileScope = 'self' | 'app'
+
+/**
+ * Where the app serves a stored key, relative to its origin: the URL
+ * `useR2Files().getUrl`, native `useFileSource`, Worker `appFiles` and the
+ * CLI all report.
+ */
+export function appFilePath(key: string, scope: AppFileScope): string {
+  return `/api/files/${encodeKeyPath(key)}?scope=${scope}`
+}
+
 /** The one oversize sentence, for whichever caller notices first. */
 export function oversizeMessage(bytes: number, limit = MAX_APP_FILE_BYTES): string {
   return `That file is ${formatBytes(bytes)}; the limit is ${formatBytes(limit)} per file.`

@@ -294,7 +294,7 @@ export default function IntegrationTestPage() {
     <div className="mx-auto max-w-4xl px-6 py-10">
       <h1 className="text-2xl font-bold text-foreground mb-2">Integration Tester</h1>
       <p className="text-sm text-muted-foreground mb-6">
-        {isSignedIn ? 'Signed in — API calls will use your JWT.' : 'Not signed in — developer billing will be used.'}
+        {isSignedIn ? 'Signed in — API calls will use your JWT.' : 'Not signed in — calls need sign-in unless the integration sets anonymous: true.'}
       </p>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">

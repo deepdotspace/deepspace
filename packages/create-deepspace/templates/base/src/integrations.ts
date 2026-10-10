@@ -3,10 +3,14 @@
  *
  * Configure who pays for each integration's API calls.
  *
- * - 'developer': The app owner pays (default). Works for anonymous users.
- * - 'user': The calling user pays. Requires sign-in.
+ * - 'developer': The app owner pays (default).
+ * - 'user': The calling user pays.
  *
- * Integrations not listed here default to 'developer'.
+ * Every integration requires a signed-in caller. Set `anonymous: true` on a
+ * 'developer' integration to let signed-out visitors call it too — the owner
+ * then pays for anyone who can reach the app.
+ *
+ * Integrations not listed here default to 'developer' with sign-in required.
  *
  * IMPORTANT: any integration backed by per-user OAuth tokens (Google,
  * etc.) must be 'user' — the api-worker looks up the row keyed by the
@@ -15,7 +19,10 @@
  * of who's signed in client-side.
  */
 
-export const integrations: Record<string, { billing: 'developer' | 'user' }> = {
+export const integrations: Record<
+  string,
+  { billing: 'developer' | 'user'; anonymous?: boolean }
+> = {
   google: { billing: 'user' },
-  // openai: { billing: 'developer' },
+  // openai: { billing: 'developer', anonymous: true },
 }

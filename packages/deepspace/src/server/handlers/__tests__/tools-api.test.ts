@@ -15,9 +15,12 @@
  *      `{ truncated, returned, total }` flags, not a hard failure that drops
  *      every record.
  *
- * The cap is applied by the chat route that wraps each tool result before the
- * model sees it; these tests call `capToolResultSize` directly to exercise
- * that step against the real `executeQuery` output.
+ * The cap is applied where a result reaches a model (`streamDeepSpaceAgent`
+ * and the local agent route); these tests call `capToolResultSize` directly
+ * to exercise that step against the real `executeQuery` output.
+ *
+ *   3. `offset` and `nextOffset` page through every record exactly once, also
+ *      through pages the cap trimmed.
  *
  * Setup mirrors `subscriptions.test.ts`: an in-memory better-sqlite3 instance
  * fronted by a small `SqlStorage` shim, a registered schema materialised via
@@ -292,6 +295,72 @@ describe('records.query oversized result degrades to a usable page', () => {
     expect(capped.data.returned as number).toBeGreaterThan(0)
     expect(capped.data.returned as number).toBeLessThan(120)
     expect(JSON.stringify(capped).length).toBeLessThanOrEqual(CAP)
+  })
+})
+
+describe('records.query paging', () => {
+  let db: Database.Database
+  let ctx: ToolsApiContext
+
+  beforeEach(() => {
+    db = new Database(':memory:')
+    const sql = makeSql(db)
+    ctx = makeToolsContext(sql, [companies])
+    ensureCollectionTable(sql, companies)
+  })
+
+  it('follows nextOffset through every record once, though every row shares one timestamp', async () => {
+    seed(db, 80, 20)
+    const seen: string[] = []
+    const offsets: number[] = []
+    let offset: number | undefined = 0
+    while (offset !== undefined) {
+      offsets.push(offset)
+      const page = await execTool(ctx, 'records.query', { collection: 'companies', limit: 30, offset })
+      expect(page.success).toBe(true)
+      expect(page.data.offset).toBe(offset)
+      seen.push(...(page.data.records as Array<{ recordId: string }>).map((r) => r.recordId))
+      offset = page.data.nextOffset as number | undefined
+    }
+    expect(offsets).toEqual([0, 30, 60])
+    expect(new Set(seen).size).toBe(80)
+  })
+
+  it('omits nextOffset on a page that ends exactly at the last record', async () => {
+    seed(db, 60, 20)
+    const page = await execTool(ctx, 'records.query', { collection: 'companies', limit: 30, offset: 30 })
+    expect(page.data.records).toHaveLength(30)
+    expect(page.data).not.toHaveProperty('nextOffset')
+  })
+
+  it('continues after a page the model cap trimmed', async () => {
+    seed(db, 120, 700)
+    const seen: string[] = []
+    let offset: number | undefined = 0
+    let trimmedPages = 0
+    while (offset !== undefined) {
+      const raw = await execTool(ctx, 'records.query', { collection: 'companies', limit: 50, offset })
+      const page = capToolResultSize(raw, CAP) as typeof raw
+      if (page.data.truncated) trimmedPages++
+      expect(page.data.count).toBe(page.data.records.length)
+      seen.push(...(page.data.records as Array<{ recordId: string }>).map((r) => r.recordId))
+      offset = page.data.nextOffset as number | undefined
+    }
+    expect(trimmedPages).toBeGreaterThan(0)
+    expect(seen).toHaveLength(120)
+    expect(new Set(seen).size).toBe(120)
+  })
+
+  it.each([
+    [{ orderBy: 'nmae' }, 'Unknown orderBy for "companies": "nmae" — sortable fields: createdAt, updatedAt, name, blob'],
+    [{ orderDir: 'up' }, 'orderDir must be "asc" or "desc", not "up"'],
+    [{ limit: 0 }, 'limit must be a whole number of at least 1, not 0'],
+    [{ limit: 2.5 }, 'limit must be a whole number of at least 1, not 2.5'],
+    [{ offset: -1 }, 'offset must be a whole number of at least 0, not -1'],
+  ])('refuses a page it would misread: %j', async (params, error) => {
+    seed(db, 3, 20)
+    const out = await execTool(ctx, 'records.query', { collection: 'companies', ...params })
+    expect(out).toEqual({ success: false, error })
   })
 })
 

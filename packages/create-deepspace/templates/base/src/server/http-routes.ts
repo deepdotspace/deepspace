@@ -230,10 +230,14 @@ export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
 
   app.all('/api/integrations/:name/:endpoint', async (c) => {
     const integrationName = c.req.param('name')
-    const billingMode = integrations[integrationName]?.billing ?? 'developer'
+    const config = integrations[integrationName]
+    const billingMode = config?.billing ?? 'developer'
 
+    // Sign-in is required unless the app opts this integration into anonymous
+    // use; developer billing would otherwise let any visitor spend the owner's
+    // credits. User billing always needs a caller to bill.
     const auth = await resolveAuth(c.req.raw, c.env)
-    if (!auth && billingMode === 'user') {
+    if (!auth && (billingMode === 'user' || !config?.anonymous)) {
       return c.json({ error: 'Sign in required for this integration' }, 401)
     }
 

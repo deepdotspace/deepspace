@@ -29,6 +29,7 @@ import {
   deleteRecord,
   deleteWhere,
   refuseUnknownWhere,
+  refuseInvalidPage,
   readRecord,
   type RecordContext,
 } from './records'
@@ -195,19 +196,46 @@ async function executeTool(
       }
       // Validated above: a plain object of field=value pairs, or absent.
       const where = params.where as Record<string, unknown> | undefined
+      const pageRefusal = refuseInvalidPage(collection, resolved.schema, params)
+      if (pageRefusal) return pageRefusal
+      const limit = params.limit as number | undefined
+      const offset = (params.offset as number | undefined) ?? 0
       // No default `limit` here: this dispatch is the SDK's general record-read
       // path (chat history, cron, app `actions.query`), which must return every
       // row. The assistant's page-size default is applied upstream in the AI
       // tool layer (`applyAiToolDefaults` in `buildTools`).
+      // One record past the page answers "is there more?", so a full page and
+      // the last page are distinguishable and `nextOffset` is exact.
       const query = {
         collection,
         where,
         orderBy: params.orderBy as string | undefined,
         orderDir: params.orderDir as 'asc' | 'desc' | undefined,
-        limit: params.limit as number | undefined,
+        limit: limit === undefined ? undefined : limit + 1,
       }
-      const records = executeQuery(ctx, query, userId, userRole, skipUserRbac)
-      return { success: true, data: { records, count: records.length } }
+      const scan = { capped: false }
+      const records = executeQuery(ctx, query, userId, userRole, skipUserRbac, { offset, scan })
+      const more = limit !== undefined && records.length > limit
+      if (more) records.length = limit
+      if (scan.capped && records.length === 0) {
+        return {
+          success: false,
+          error:
+            `Scanned the most rows one call may scan in "${collection}" without reaching a record ` +
+            `you can read past offset ${offset}; narrow the query with \`where\``,
+        }
+      }
+      // A capped scan stopped early: the next page continues after what it found.
+      const nextOffset = more || scan.capped ? offset + records.length : undefined
+      return {
+        success: true,
+        data: {
+          records,
+          count: records.length,
+          offset,
+          ...(nextOffset === undefined ? {} : { nextOffset }),
+        },
+      }
     }
 
     case 'records.get': {

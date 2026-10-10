@@ -45,6 +45,17 @@ export {
 } from './proxies'
 export { captureScreenshot, type ScreenshotEnv, type ScreenshotResult } from './screenshot'
 export {
+  appFiles,
+  AppFileError,
+  type AppFile,
+  type AppFileInfo,
+  type AppFileList,
+  type AppFilesClient,
+  type AppFilesEnv,
+  type AppFilesOptions,
+} from './app-files'
+export type { AppFileScope } from '../../shared/app-files'
+export {
   prepareMessagesWithCompaction,
   turnsToCoreMessages,
   buildUiParts,

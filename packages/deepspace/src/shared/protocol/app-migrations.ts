@@ -30,6 +30,15 @@ export const FILES_SESSION_COOKIE_READS_MIGRATION_ID = '2026-09-files-session-co
  *  own `ai`, and their chat route persists and streams through its API. */
 export const AI_SDK_7_MIGRATION_ID = '2026-09-ai-sdk-7'
 
+/** The integrations proxy requires a signed-in caller unless the app opts an
+ *  integration into anonymous use, so visitors cannot spend the owner's credits. */
+export const INTEGRATIONS_SIGN_IN_MIGRATION_ID = '2026-10-integrations-sign-in'
+
+/** The app's tool factory gets a second argument from both assistant routes
+ *  (the request's env and the verified caller), and an app with a record room
+ *  per user or team can choose each caller's room. */
+export const AGENT_TOOL_CONTEXT_MIGRATION_ID = '2026-10-agent-tool-context'
+
 export type AppMigrationIdsValidation =
   | { valid: true; ids: string[] }
   | { valid: false; reason: string }

@@ -6,5 +6,7 @@
   "2026-08-build-injected-app-id",
   "2026-08-action-routes-bearer-guard",
   "2026-09-files-session-cookie-reads",
-  "2026-09-ai-sdk-7"
+  "2026-09-ai-sdk-7",
+  "2026-10-integrations-sign-in",
+  "2026-10-agent-tool-context"
 ]

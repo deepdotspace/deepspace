@@ -14,6 +14,7 @@ vi.mock('../ai', () => ({
 }))
 
 import { streamDeepSpaceAgent } from '../agent'
+import { DEFAULT_CONTEXT_CONFIG } from '../chat-context'
 
 describe('streamDeepSpaceAgent tool-call limit', () => {
   for (const profile of ['application', 'documentation'] as const) {
@@ -58,4 +59,46 @@ describe('streamDeepSpaceAgent tool-call limit', () => {
       })
     })
   }
+})
+
+describe('streamDeepSpaceAgent tool results', () => {
+  const cap = DEFAULT_CONTEXT_CONFIG.toolResultCap
+  const runTool = (execute: (...args: unknown[]) => unknown) => {
+    streamTextMock.mockClear()
+    streamTextMock.mockReturnValue({})
+    streamDeepSpaceAgent({} as DeepSpaceAIEnv, {
+      profile: 'application',
+      prompt: 'Summarize my notes',
+      tools: { notes: { execute } } as unknown as ToolSet,
+    })
+    const options = streamTextMock.mock.calls[0]?.[0] as {
+      tools: Record<string, { execute: (...args: unknown[]) => unknown }>
+    }
+    return options.tools.notes.execute({}, {})
+  }
+
+  it("caps an app-defined tool's output where it reaches the model", async () => {
+    const records = Array.from({ length: 400 }, (_, index) => ({ id: index, note: 'x'.repeat(200) }))
+    const output = (await runTool(async () => ({ records }))) as {
+      records: unknown[]
+      truncated: boolean
+      total: number
+    }
+    expect(JSON.stringify(output).length).toBeLessThanOrEqual(cap)
+    expect(output).toMatchObject({ truncated: true, total: 400 })
+    expect(output.records.length).toBeGreaterThan(0)
+  })
+
+  it('passes a small output through unchanged', async () => {
+    const result = { records: [{ id: 1 }] }
+    expect(await runTool(async () => result)).toBe(result)
+  })
+
+  it("returns a streaming tool's iterable as is, so the AI SDK still streams it", () => {
+    async function* stream() {
+      yield 'partial'
+    }
+    const iterable = stream()
+    expect(runTool(() => iterable)).toBe(iterable)
+  })
 })

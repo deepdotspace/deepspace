@@ -33,16 +33,17 @@ import {
   appendMessage,
   loggableError,
 } from 'deepspace/worker'
-import type { AgentToolAccessResult, ChatTurn, VerifyResult } from 'deepspace/worker'
+import type { AgentToolAccessResult, AgentToolRouteOptions, ChatTurn } from 'deepspace/worker'
 import { schemas } from '../schemas.js'
 import { buildSystemPrompt } from './tools.js'
-import type { buildTools } from './tools.js'
 // Type-only — TypeScript strips these at runtime, so no circular import
 // with worker.ts (which imports `registerAiChatRoutes` from this file).
 import type { Env, AppContext } from '../../worker.js'
 
 type ResolveAccess = (req: Request, env: Env) => Promise<AgentToolAccessResult>
-type ToolFactory = typeof buildTools
+type AccessGrant = Extract<AgentToolAccessResult, { ok: true }>
+/** `buildTools` from src/ai/tools.ts; it may ignore the context argument. */
+type ToolFactory = AgentToolRouteOptions<Env>['buildTools']
 
 function recordRoomStub(env: Env): DurableObjectStub {
   // Rooms are keyed by the immutable app id — the same `app:${DEEPSPACE_APP_ID}`
@@ -73,9 +74,9 @@ export function registerAiChatRoutes(
   buildTools: ToolFactory,
 ): void {
   // One chokepoint for the access-decision → HTTP mapping on every chat route.
-  const requireAccess = async (c: Context<AppContext>): Promise<VerifyResult | Response> => {
+  const requireAccess = async (c: Context<AppContext>): Promise<AccessGrant | Response> => {
     const access = await resolveAccess(c.req.raw, c.env)
-    if (access.ok) return access.auth
+    if (access.ok) return access
     const error =
       access.status === 401
         ? 'Unauthorized'
@@ -87,8 +88,9 @@ export function registerAiChatRoutes(
 
   // Create a new chat row owned by the caller.
   app.post('/api/ai/chats', async (c) => {
-    const auth = await requireAccess(c)
-    if (auth instanceof Response) return auth
+    const access = await requireAccess(c)
+    if (access instanceof Response) return access
+    const { auth } = access
 
     const body = await c.req.json<{ title?: string }>().catch(() => ({}) as { title?: string })
     const stub = recordRoomStub(c.env)
@@ -100,8 +102,9 @@ export function registerAiChatRoutes(
 
   // Rename / patch a chat. Ownership enforced via getChat.
   app.patch('/api/ai/chats/:id', async (c) => {
-    const auth = await requireAccess(c)
-    if (auth instanceof Response) return auth
+    const access = await requireAccess(c)
+    if (access instanceof Response) return access
+    const { auth } = access
 
     const id = c.req.param('id')
     const stub = recordRoomStub(c.env)
@@ -120,8 +123,9 @@ export function registerAiChatRoutes(
 
   // Delete chat + cascade messages.
   app.delete('/api/ai/chats/:id', async (c) => {
-    const auth = await requireAccess(c)
-    if (auth instanceof Response) return auth
+    const access = await requireAccess(c)
+    if (access instanceof Response) return access
+    const { auth } = access
 
     const id = c.req.param('id')
     const stub = recordRoomStub(c.env)
@@ -139,8 +143,9 @@ export function registerAiChatRoutes(
   // out of scope for this PR. Realistic impact: rare (multi-tab same-chat
   // usage); recoverable by user (one tab works correctly going forward).
   app.post('/api/ai/chat', async (c) => {
-    const auth = await requireAccess(c)
-    if (auth instanceof Response) return auth
+    const access = await requireAccess(c)
+    if (access instanceof Response) return access
+    const { auth } = access
 
     const authHeader = c.req.header('Authorization') ?? ''
     const jwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
@@ -246,11 +251,16 @@ export function registerAiChatRoutes(
     const systemText = summary ? `${baseSystem}\n\n${summary.content}` : baseSystem
     const messages = turnsToCoreMessages(summary ? rest : prepared)
 
-    // The SDK executor runs each tool as the verified user and forwards the
-    // route's abort signal, so a tool fetch in flight is cancelled if the
-    // client navigates away mid-stream. The local assistant routes use the
-    // same executor, keeping both surfaces' tool behavior identical.
-    const tools = buildTools(createUserToolExecutor(c.env, auth.userId, c.req.raw.signal))
+    // The SDK executor runs each tool as the verified user, in the room the
+    // access grant admitted them to, and forwards the route's abort signal, so
+    // a tool fetch in flight is cancelled if the client navigates away
+    // mid-stream. The local assistant routes use the same executor and
+    // context, and streamDeepSpaceAgent caps each tool result for the model,
+    // keeping both surfaces' tool behavior identical.
+    const tools = buildTools(
+      createUserToolExecutor(c.env, auth.userId, c.req.raw.signal, { room: access.room }),
+      { env: c.env, userId: auth.userId, request: c.req.raw },
+    )
 
     // Allocate the assistant row id BEFORE streaming starts so we can echo it
     // back via a response header. The client tags its in-flight overlay with

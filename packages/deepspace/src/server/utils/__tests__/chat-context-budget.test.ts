@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applySlidingWindow,
+  boundToolResult,
   capToolResultSize,
   truncateOldToolResults,
   type ChatTurn,
@@ -277,5 +278,18 @@ describe('truncateOldToolResults', () => {
     const out = truncateOldToolResults(msgs, 0)
     expect(readToolInvocation(out[0].parts![0]).result._truncated).toBe(true)
     expect(readToolInvocation(out[1].parts![0]).result._truncated).toBe(true)
+  })
+})
+
+describe('boundToolResult', () => {
+  it('fits a trimmable page and reports the size of what cannot fit', () => {
+    const records = Array.from({ length: 50 }, (_, i) => ({ id: i, blob: 'y'.repeat(200) }))
+    const page = boundToolResult({ records, count: 50, offset: 10 }, 3000)
+    expect(page.fits).toBe(true)
+    const kept = (page as { result: { records: unknown[] } }).result.records.length
+    expect((page as { result: unknown }).result).toMatchObject({ count: kept, nextOffset: 10 + kept, total: 50 })
+
+    const blob = { data: 'x'.repeat(5000) }
+    expect(boundToolResult(blob, 1000)).toEqual({ fits: false, bytes: JSON.stringify(blob).length })
   })
 })

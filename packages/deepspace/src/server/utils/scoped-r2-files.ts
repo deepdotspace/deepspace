@@ -54,6 +54,7 @@ import {
   oversizeRequestMessage,
   storageLimitForTier,
   storageQuotaMessage,
+  type AppFileScope,
 } from '../../shared/app-files'
 import {
   activateMultipartReservation,
@@ -1409,7 +1410,7 @@ async function handleDownload(
   request: Request,
   bucket: R2Bucket,
   key: string,
-  scope: 'self' | 'app',
+  scope: AppFileScope,
 ): Promise<Response> {
   // HEAD has no Range semantics (RFC 9110 §14.2) and should not open an R2
   // body only to discard it. Its metadata is also enough to evaluate the
@@ -1479,7 +1480,7 @@ async function handleDownload(
   return new Response(conditional.body, { status: 206, headers })
 }
 
-function downloadHeaders(object: R2Object, key: string, scope: 'self' | 'app'): Headers {
+function downloadHeaders(object: R2Object, key: string, scope: AppFileScope): Headers {
   const headers = new Headers()
   const storedType = resolveMimeType(object.httpMetadata?.contentType ?? '')
   const mustDownload = DANGEROUS_MIME_TYPES.has(storedType)
@@ -1505,7 +1506,7 @@ function wholeDownload(
   request: Request,
   object: R2ObjectBody | null,
   key: string,
-  scope: 'self' | 'app',
+  scope: AppFileScope,
 ): Response {
   if (!object) {
     return Response.json({ error: 'File not found' }, { status: 404, headers: CORS_HEADERS })

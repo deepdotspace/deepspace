@@ -9,7 +9,7 @@
 import { asSchema, type ToolSet } from 'ai'
 import type { Hono } from 'hono'
 import type { VerifyResult } from './auth/types'
-import { DEFAULT_CONTEXT_CONFIG, capToolResultSize, utf8ByteLength } from './utils/chat-context'
+import { DEFAULT_CONTEXT_CONFIG, boundToolResult, utf8ByteLength } from './utils/chat-context'
 import { BodyTooLargeError, readBoundedBodyText } from '../shared/bounded-body'
 import {
   AGENT_TOOL_REQUEST_BODY_CAP,
@@ -28,17 +28,46 @@ export interface AgentToolRouteEnv {
  * The generated worker distinguishes a missing identity (401), a denied
  * identity (403), and an access check it could not complete (503) — a
  * transient failure must not present as a permanent permission denial.
+ *
+ * A grant names the record `room` the caller was admitted to, for an app that
+ * keeps a room per user or team: the room its membership check read, chosen
+ * from the verified caller and never from tool input. The caller's tools run
+ * there. Omitted, both are the app's room, `app:<app id>`.
  */
 export type AgentToolAccessResult =
-  | { ok: true; auth: VerifyResult }
+  | { ok: true; auth: VerifyResult; room?: string }
   | { ok: false; status: 401 | 403 | 503 }
 
+/** Runs one record tool (`records.query`, `records.create`, …) as a user and
+ *  returns the RecordRoom's whole result. */
+export type UserToolExecutor = (toolName: string, params: Record<string, unknown>) => Promise<unknown>
+
+/**
+ * What an app's `buildTools` gets besides the record executor, so a tool can
+ * do more than relay one record call: reach the Worker's bindings (file
+ * storage through `appFiles`, integrations, another room through
+ * `createUserToolExecutor`) as the verified caller.
+ */
+export interface AgentToolContext<Env = unknown> {
+  /** The Worker bindings of the request being served. */
+  env: Env
+  /** The verified caller. */
+  userId: string
+  /** The incoming request; its signal aborts with the client. */
+  request: Request
+}
+
 export interface AgentToolRouteOptions<Env extends AgentToolRouteEnv> {
-  /** Preserve the generated app's existing tool definitions unchanged. */
-  buildTools: (
-    executor: (toolName: string, params: Record<string, unknown>) => Promise<unknown>,
-  ) => ToolSet
-  /** Performs app-specific authentication and authorization before tool discovery or execution. */
+  /**
+   * Preserve the generated app's existing tool definitions unchanged. A
+   * factory may ignore the second argument, so one-argument factories keep
+   * working.
+   */
+  buildTools: (executor: UserToolExecutor, context: AgentToolContext<Env>) => ToolSet
+  /**
+   * Performs app-specific authentication and authorization before tool
+   * discovery or execution, and names the room a granted caller's tools run in.
+   */
   resolveAccess: (request: Request, env: Env) => Promise<AgentToolAccessResult>
 }
 
@@ -221,17 +250,26 @@ export interface UserToolExecutorEnv {
 }
 
 /**
- * Execute one app tool in the canonical app RecordRoom as the verified user.
- * Every assistant surface (website chat, local agent) must share this path so
- * a tool behaves identically regardless of which surface invoked it.
+ * Execute app tools in a RecordRoom as the verified user, returning each
+ * whole result. Every assistant surface (website chat, local agent) shares
+ * this path so a tool behaves identically whichever surface invoked it.
+ *
+ * Results are not capped here: tool code may read whole collections. The
+ * model-facing budget applies where a result reaches a model
+ * (`streamDeepSpaceAgent`, and the local agent route's response).
+ *
+ * `room` names the RecordRoom, `app:<app id>` by default. An app that keeps a
+ * room per user or team passes the one it chose for this verified caller.
  */
 export function createUserToolExecutor(
   env: UserToolExecutorEnv,
   userId: string,
   signal: AbortSignal,
-): (toolName: string, params: Record<string, unknown>) => Promise<unknown> {
-  const roomId = env.RECORD_ROOMS.idFromName(`app:${env.DEEPSPACE_APP_ID}`)
-  const room = env.RECORD_ROOMS.get(roomId)
+  options: { room?: string } = {},
+): UserToolExecutor {
+  const room = env.RECORD_ROOMS.get(
+    env.RECORD_ROOMS.idFromName(options.room ?? `app:${env.DEEPSPACE_APP_ID}`),
+  )
   return async (toolName: string, params: Record<string, unknown>): Promise<unknown> => {
     const response = await room.fetch(
       new Request('https://internal/api/tools/execute', {
@@ -244,7 +282,7 @@ export function createUserToolExecutor(
         signal,
       }),
     )
-    return capToolResultSize(await response.json(), DEFAULT_CONTEXT_CONFIG.toolResultCap)
+    return response.json()
   }
 }
 
@@ -271,7 +309,11 @@ async function resolveCallerTools<Env extends AgentToolRouteEnv>(
     )
   }
   try {
-    return options.buildTools(createUserToolExecutor(env, access.auth.userId, request.signal))
+    const { userId } = access.auth
+    return options.buildTools(
+      createUserToolExecutor(env, userId, request.signal, { room: access.room }),
+      { env, userId, request },
+    )
   } catch {
     return errorResponse(500, 'tool_configuration_error')
   }
@@ -407,12 +449,23 @@ export function registerAgentToolRoutes<Env extends AgentToolRouteEnv>(
 
     // A side-effect-only tool legitimately returns undefined; its REST result
     // is null. Functions/symbols/cyclic values still refuse below.
-    const serialized = jsonText(output === undefined ? null : output)
-    if (!serialized) return errorResponse(500, 'invalid_tool_result')
-    if (utf8ByteLength(serialized) > DEFAULT_CONTEXT_CONFIG.toolResultCap) {
-      return errorResponse(500, 'tool_result_too_large')
+    const result = output === undefined ? null : output
+    if (!jsonText(result)) return errorResponse(500, 'invalid_tool_result')
+    // A local agent is a model too, and both surfaces must behave alike: the
+    // result gets the in-app assistant's budget and its trimming, so an
+    // oversized page arrives as its leading records with `nextOffset`. Only a
+    // result with nothing to trim is refused, naming both numbers so the
+    // caller can size a smaller request and the author can design one.
+    const bounded = boundToolResult(result, DEFAULT_CONTEXT_CONFIG.toolResultCap)
+    if (!bounded.fits) {
+      return errorResponse(
+        500,
+        'tool_result_too_large',
+        `It was ${bounded.bytes} bytes; a tool result may be at most ${DEFAULT_CONTEXT_CONFIG.toolResultCap}. ` +
+          'Ask for less: a narrower filter, a smaller limit, or one record.',
+      )
     }
-    return rawJsonResponse(`{"ok":true,"result":${serialized}}`)
+    return jsonResponse({ ok: true, result: bounded.result })
   })
 
   // Keep unsupported local-assistant paths inside the app instead of letting

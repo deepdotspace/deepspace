@@ -18,14 +18,17 @@ import { ApiError } from './api'
 import {
   MAX_APP_FILE_BYTES,
   UPLOAD_PART_BYTES,
+  appFilePath,
   describeFilesFailure,
   encodeKeyPath,
   formatBytes,
   oversizeMessage,
   planUploadParts,
+  type AppFileScope,
 } from '../../shared/app-files'
 
-export { MAX_APP_FILE_BYTES, UPLOAD_PART_BYTES, encodeKeyPath, formatBytes }
+export { MAX_APP_FILE_BYTES, UPLOAD_PART_BYTES, appFilePath, encodeKeyPath, formatBytes }
+export type { AppFileScope }
 
 export interface AppFileEntry {
   key: string
@@ -80,8 +83,10 @@ export function contentTypeFor(path: string): string {
   return CONTENT_TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream'
 }
 
-export function filesPath(appId: string, rest = ''): string {
-  return `/api/app-files/${appId}${rest}`
+export function filesPath(appId: string, rest = '', scope: AppFileScope = 'app'): string {
+  const path = `/api/app-files/${appId}${rest}`
+  if (scope === 'app') return path
+  return `${path}${path.includes('?') ? '&' : '?'}scope=self`
 }
 
 /**
@@ -217,15 +222,16 @@ export async function uploadAppFile(
   localPath: string,
   key: string,
   onProgress?: UploadProgress,
+  scope: AppFileScope = 'app',
 ): Promise<UploadResult> {
-  const path = filesPath(appId, `/upload?key=${encodeKeyPath(key)}`)
+  const path = filesPath(appId, `/upload?key=${encodeKeyPath(key)}`, scope)
   const size = statSync(localPath).size
   if (size > MAX_APP_FILE_BYTES) {
     throw new ApiError(oversizeMessage(size), 0, 'too_large', path)
   }
   const declaredType = contentTypeFor(localPath)
   if (size > UPLOAD_PART_BYTES) {
-    return uploadInParts(baseUrl, token, appId, localPath, key, size, onProgress)
+    return uploadInParts(baseUrl, token, appId, localPath, key, size, onProgress, scope)
   }
   const { blob, contentType } = await multipartBody(localPath, basename(localPath), declaredType)
   const res = await request(baseUrl, token, path, {
@@ -270,9 +276,10 @@ async function uploadInParts(
   key: string,
   size: number,
   onProgress?: UploadProgress,
+  scope: AppFileScope = 'app',
 ): Promise<UploadResult> {
   const contentType = contentTypeFor(localPath)
-  const initPath = filesPath(appId, `/multipart?key=${encodeKeyPath(key)}`)
+  const initPath = filesPath(appId, `/multipart?key=${encodeKeyPath(key)}`, scope)
   const requestId = randomUUID()
   const initBody = JSON.stringify({
     requestId,
@@ -316,7 +323,11 @@ async function uploadInParts(
   const uploaded: Array<{ partNumber: number; etag: string }> = []
   try {
     for (const part of plan) {
-      const partPath = filesPath(appId, `/multipart/part?${query}&partNumber=${part.partNumber}`)
+      const partPath = filesPath(
+        appId,
+        `/multipart/part?${query}&partNumber=${part.partNumber}`,
+        scope,
+      )
       // The slice is a file-backed range whose exact size becomes the
       // Content-Length the server requires. It is rebuilt per attempt: a body
       // is consumed once, so a retry needs its own.
@@ -336,7 +347,7 @@ async function uploadInParts(
       onProgress?.(part.end, size, part.partNumber, plan.length)
     }
 
-    const completePath = filesPath(appId, `/multipart/complete?${query}`)
+    const completePath = filesPath(appId, `/multipart/complete?${query}`, scope)
     const body = await readJson<{ key: string; name: string }>(
       await request(baseUrl, token, completePath, {
         method: 'POST',
@@ -349,7 +360,7 @@ async function uploadInParts(
   } catch (err) {
     // Release whatever landed. A failed abort must not replace the real
     // failure — the upload is what the caller asked about.
-    await request(baseUrl, token, filesPath(appId, `/multipart?${query}`), {
+    await request(baseUrl, token, filesPath(appId, `/multipart?${query}`, scope), {
       method: 'DELETE',
     }).catch(() => undefined)
     throw err
@@ -370,8 +381,9 @@ export async function listAppFiles(
   token: string,
   appId: string,
   query: URLSearchParams,
+  scope: AppFileScope = 'app',
 ): Promise<ListResult> {
-  const path = filesPath(appId, `?${query}`)
+  const path = filesPath(appId, `?${query}`, scope)
   return readJson<ListResult>(await request(baseUrl, token, path), path)
 }
 
@@ -382,8 +394,9 @@ export async function deleteAppFile(
   token: string,
   appId: string,
   key: string,
+  scope: AppFileScope = 'app',
 ): Promise<{ existed: boolean }> {
-  const path = filesPath(appId, `/${encodeKeyPath(key)}`)
+  const path = filesPath(appId, `/${encodeKeyPath(key)}`, scope)
   const res = await request(baseUrl, token, path, { method: 'DELETE' })
   const body = await readJson<{ existed: boolean }>(res, path)
   return { existed: body.existed }
@@ -401,8 +414,9 @@ export async function downloadAppFile(
   appId: string,
   key: string,
   destination: string,
+  scope: AppFileScope = 'app',
 ): Promise<DownloadResult> {
-  const path = filesPath(appId, `/${encodeKeyPath(key)}`)
+  const path = filesPath(appId, `/${encodeKeyPath(key)}`, scope)
   const res = await request(baseUrl, token, path)
   if (!res.body) {
     throw new ApiError('The server returned an empty response', 502, 'invalid_response', path)

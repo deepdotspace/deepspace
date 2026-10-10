@@ -79,6 +79,7 @@ let buildGeneratedTools: (
   executor: (toolName: string, params: Record<string, unknown>) => Promise<unknown>,
 ) => ToolSet
 let registerAuthAndIntegrationRoutes: RegisterRoutes
+let templateIntegrations: Record<string, { billing: 'developer' | 'user'; anonymous?: boolean }>
 let registerPlatformProxyRoutes: RegisterRoutes
 let registerRealtimeRoutes: RegisterRoutes
 let registerStaticRoutes: RegisterRoutes
@@ -103,6 +104,9 @@ beforeAll(async () => {
     pathToFileURL(join(agentTemplateDir, 'app', 'src', 'ai', 'tools.ts')).href
   )
   const httpRoutes = await import(pathToFileURL(join(serverDirectory, 'http-routes.ts')).href)
+  const integrationConfig = await import(
+    pathToFileURL(join(TEMPLATES_DIR, 'base', 'src', 'integrations.ts')).href
+  )
   const realtimeRoutes = await import(
     pathToFileURL(join(serverDirectory, 'realtime-routes.ts')).href
   )
@@ -112,6 +116,7 @@ beforeAll(async () => {
   registerAgent = agentRoutes.registerAgent as typeof registerAgent
   buildGeneratedTools = generatedTools.buildTools as typeof buildGeneratedTools
   registerAuthAndIntegrationRoutes = httpRoutes.registerAuthAndIntegrationRoutes as RegisterRoutes
+  templateIntegrations = integrationConfig.integrations as typeof templateIntegrations
   registerPlatformProxyRoutes = httpRoutes.registerPlatformProxyRoutes as RegisterRoutes
   registerStaticRoutes = httpRoutes.registerStaticRoutes as RegisterRoutes
   registerRealtimeRoutes = realtimeRoutes.registerRealtimeRoutes as RegisterRoutes
@@ -406,7 +411,9 @@ describe('generated worker route owners', () => {
           idFromName: (name: string) => name,
           get: () => ({
             fetch: () =>
-              Promise.resolve(Response.json({ success: false, error: 'User not found' })),
+              Promise.resolve(
+                Response.json({ success: false, error: 'Record not found: users/not-a-member' }),
+              ),
           }),
         } as unknown as DurableObjectNamespace,
       }),
@@ -588,6 +595,38 @@ describe('generated worker route owners', () => {
       env(),
     )
     expect(integration.status).toBe(401)
+  })
+
+  it('requires sign-in for owner-billed integrations unless the app opts into anonymous', async () => {
+    const app = new Hono<TestContext>()
+    registerAuthAndIntegrationRoutes(app)
+    const apiFetch = vi.fn(async () => Response.json({ success: true, data: {} }))
+    const routeEnv = env({
+      API_WORKER: { fetch: apiFetch } as unknown as Fetcher,
+      APP_OWNER_JWT: 'owner-jwt',
+    })
+    const call = (name: string) =>
+      app.request(`https://app.test/api/integrations/${name}/list-rooms`, { method: 'POST' }, routeEnv)
+
+    expect((await call('livekit')).status).toBe(401)
+    expect(apiFetch).not.toHaveBeenCalled()
+
+    templateIntegrations.livekit = { billing: 'developer', anonymous: true }
+    templateIntegrations.userbilled = { billing: 'user', anonymous: true }
+    try {
+      expect((await call('livekit')).status).toBe(200)
+      expect(apiFetch).toHaveBeenCalledWith(
+        'https://api-worker/api/integrations/livekit/list-rooms',
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: 'Bearer owner-jwt' }),
+        }),
+      )
+      // A user-billed integration has no one to bill without a caller.
+      expect((await call('userbilled')).status).toBe(401)
+    } finally {
+      delete templateIntegrations.livekit
+      delete templateIntegrations.userbilled
+    }
   })
 
   it('requires owner/admin auth after production debug routes are enabled', async () => {

@@ -33,6 +33,7 @@ import {
 import {
   broadcastChange,
   executeQuery,
+  orderColumn,
   resolveCollection,
   type SubscriptionContext,
 } from './subscriptions'
@@ -592,6 +593,39 @@ export function refuseUnknownWhere(
       success: false,
       error: `where values must be primitives (equality only): ${nonPrimitive.map(([k]) => k).join(', ')}`,
     }
+  }
+  return null
+}
+
+/**
+ * Refuse a `records.query` page it would otherwise misread: an `orderBy`
+ * that names no field (it was dropped, leaving the default order where the
+ * caller expected another, so its pages followed an order it never asked
+ * for), an `orderDir` other than asc/desc, and a `limit` or `offset` that is
+ * not a whole number in range (`limit: 0` read as "no limit"). `null` =
+ * nothing to refuse.
+ */
+export function refuseInvalidPage(
+  collection: string,
+  schema: CollectionSchema | undefined,
+  params: Record<string, unknown>,
+): ToolResult | null {
+  const { orderBy, orderDir, limit, offset } = params
+  if (orderBy !== undefined && !orderColumn(schema, orderBy)) {
+    const sortable = ['createdAt', 'updatedAt', ...(schema?.columns ?? []).map((c) => resolveColumn(c).name)]
+    return {
+      success: false,
+      error: `Unknown orderBy for "${collection}": ${JSON.stringify(orderBy)} — sortable fields: ${sortable.join(', ')}`,
+    }
+  }
+  if (orderDir !== undefined && orderDir !== 'asc' && orderDir !== 'desc') {
+    return { success: false, error: `orderDir must be "asc" or "desc", not ${JSON.stringify(orderDir)}` }
+  }
+  if (limit !== undefined && !(Number.isInteger(limit) && (limit as number) >= 1)) {
+    return { success: false, error: `limit must be a whole number of at least 1, not ${JSON.stringify(limit)}` }
+  }
+  if (offset !== undefined && !(Number.isInteger(offset) && (offset as number) >= 0)) {
+    return { success: false, error: `offset must be a whole number of at least 0, not ${JSON.stringify(offset)}` }
   }
   return null
 }
