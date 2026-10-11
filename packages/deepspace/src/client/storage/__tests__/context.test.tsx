@@ -39,7 +39,9 @@ interface SocketListeners {
   onValidationError?: (title: string, detail: string) => void
 }
 const sockets = vi.hoisted(() => ({ all: [] as Array<{ listeners: SocketListeners }> }))
-vi.mock('../record-socket', () => {
+vi.mock('../record-socket', async () => {
+  const { RecordRoomNotReadyError } = await import('../errors')
+  // Never connects, so like the real socket it refuses confirmed writes.
   class RecordSocket {
     listeners: SocketListeners
     constructor(opts: { listeners: SocketListeners }) {
@@ -51,7 +53,7 @@ vi.mock('../record-socket', () => {
     resetBackoff = () => {}
     sendMessage = () => {}
     sendBinary = () => {}
-    sendConfirmed = async () => ({})
+    sendConfirmed = () => Promise.reject(new RecordRoomNotReadyError())
     get isOpen() {
       return false
     }

@@ -68,6 +68,7 @@ import activity from './commands/activity'
 import gitCredential from './commands/git-credential'
 import source from './commands/source'
 import update from './commands/update'
+import testflight from './commands/testflight'
 
 // A reader that exits first (`deepspace secrets download | head`) closes the
 // pipe under us; Node's default is an unhandled 'error' event and a stack
@@ -225,6 +226,7 @@ const main = defineCommand({
     releases,
     rollback,
     deploy,
+    testflight,
     dev: devGroup,
     test: testGroup,
     add,

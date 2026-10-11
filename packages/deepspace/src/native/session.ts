@@ -76,8 +76,17 @@ export function bindNativeClient(client: DeepSpaceExpoClient): void {
     if (generation === bindGeneration) publish(stateForSession(session))
   })
   client.getSession().then(
-    (session) => {
-      if (generation === bindGeneration) publish(stateForSession(session))
+    async (session) => {
+      if (generation !== bindGeneration) return
+      // A session stored without a bearer (a debug launch-argument seed) has
+      // no user id until one is minted; mint it now, or an app that waits for
+      // the user id never renders anything that would.
+      if (session && subjectOf(session.accessToken) === null) {
+        await client.getAuthToken().catch(() => null)
+        session = await client.getSession()
+        if (generation !== bindGeneration) return
+      }
+      publish(stateForSession(session))
     },
     (error: unknown) => {
       console.error('[deepspace/native] could not read the stored session', error)

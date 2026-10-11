@@ -13,6 +13,7 @@ const EXTERNAL = [
   'react',
   'react/jsx-runtime',
   'react-native',
+  'expo',
   'expo-crypto',
   'expo-linking',
   'expo-secure-store',
@@ -52,6 +53,9 @@ describe('deepspace/native bundle', () => {
       'client/auth/token.native.ts',
       'client/platform/origin.native.ts',
       'client/platform/foreground.native.ts',
+      'client/input/keyboard.native.tsx',
+      'client/input/context-menu.native.tsx',
+      'client/input/platform.native.ts',
     ]) {
       expect(inputs.some((input) => input.endsWith(nativeModule))).toBe(true)
     }
@@ -62,6 +66,10 @@ describe('deepspace/native bundle', () => {
       'client/auth/AuthOverlay.tsx',
       'client/platform/origin.ts',
       'client/platform/foreground.ts',
+      'client/input/keyboard.tsx',
+      'client/input/context-menu.tsx',
+      'client/input/platform.ts',
+      'native/web.tsx',
     ]) {
       expect(inputs.some((input) => input.endsWith(browserModule))).toBe(false)
     }

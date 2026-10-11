@@ -34,8 +34,8 @@
  */
 
 // Auth client (the same implementation as `deepspace/expo`)
+export { createDeepSpaceExpoClient } from './native/client'
 export {
-  createDeepSpaceExpoClient,
   DeepSpaceExpoClient,
   DeepSpaceExpoError,
   DeepSpaceSignInCancelledError,
@@ -70,7 +70,8 @@ export { useUser } from './client/storage/hooks/useUser'
 export { useUsers } from './client/storage/hooks/useUsers'
 export { useUserLookup, type UserInfo } from './client/storage/hooks/useUserLookup'
 export { usePresence } from './client/storage/hooks/usePresence'
-export { RecordRoomNotReadyError } from './client/storage/errors'
+export { RecordRoomNotReadyError, WriteUnconfirmedError } from './client/storage/errors'
+export { accountRoomId } from './shared/account-room'
 export { type ConnectionStatus, toConnectionStatus } from './client/storage/connection-status'
 export type {
   Query,
@@ -107,3 +108,13 @@ export { integration } from './client/integration'
 export { consentUrlOf, openIntegrationConsent } from './native/consent'
 export { callAction } from './native/actions'
 export type { ActionResult } from './native/actions'
+
+// Keyboard, pointer and context-menu input
+export { useKeyboardShortcuts, type KeyboardShortcutOptions } from './client/input/use-keyboard-shortcuts'
+export type { KeyboardShortcut, ShortcutKey, ShortcutModifier } from './client/input/shortcuts'
+export { ContextMenu } from './client/input/context-menu'
+export type { ContextMenuItem, ContextMenuProps } from './client/input/context-menu-types'
+export { isIOSAppOnMac, pointerInput } from './client/input/platform'
+
+// Dialogs
+export { Alert } from './native/alert'

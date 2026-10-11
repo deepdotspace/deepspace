@@ -18,6 +18,7 @@ import {
   stateFromExpoRedirect,
 } from './expo-url'
 import { jwtClaims } from './expo-jwt'
+import { DeepSpaceExpoError, DeepSpaceSignInCancelledError } from './expo-errors'
 
 export type ExpoAuthProvider = 'google' | (string & {})
 
@@ -64,32 +65,7 @@ export interface ExpoAuthPaths {
 /** Called with the new session after sign-in or refresh, and with `null` after sign-out or expiry. */
 export type DeepSpaceExpoSessionListener = (session: DeepSpaceExpoSession | null) => void
 
-export class DeepSpaceExpoError extends Error {
-  readonly status: number
-  readonly body: unknown
-
-  constructor(message: string, status: number, body: unknown) {
-    super(message)
-    this.name = 'DeepSpaceExpoError'
-    this.status = status
-    this.body = body
-  }
-}
-
-/**
- * Thrown by `signIn` when the person closes the sign-in sheet. It isn't a
- * failure, so apps usually return to where they were without showing an error.
- * Check `code`: `instanceof` fails if the bundler includes two copies of
- * this package.
- */
-export class DeepSpaceSignInCancelledError extends Error {
-  readonly code = 'sign_in_cancelled' as const
-
-  constructor() {
-    super('DeepSpace sign-in was cancelled')
-    this.name = 'DeepSpaceSignInCancelledError'
-  }
-}
+export { DeepSpaceExpoError, DeepSpaceSignInCancelledError } from './expo-errors'
 
 const DEFAULT_PATHS: ExpoAuthPaths = {
   start: '/api/auth/native-start',

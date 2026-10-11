@@ -127,6 +127,26 @@ describe('deepspace/native session', () => {
     expect(latest).toMatchObject({ isLoaded: true, isSignedIn: true, userId: 'user-2' })
   })
 
+  it('mints a bearer for a stored session that has none, so the user id is known', async () => {
+    const fake = fakeClient({ sessionToken: 'seeded', accessToken: '' })
+    fake.raw.getAuthToken.mockImplementation(async () => {
+      fake.emit({ sessionToken: 'seeded', accessToken: jwt('user-3') })
+      return jwt('user-3')
+    })
+    fake.finishLoading()
+    await act(async () =>
+      root.render(
+        <DeepSpaceNativeProvider client={fake.client}>
+          <Probe />
+        </DeepSpaceNativeProvider>,
+      ),
+    )
+    await flush()
+    await flush()
+    expect(fake.raw.getAuthToken).toHaveBeenCalled()
+    expect(latest).toMatchObject({ isLoaded: true, isSignedIn: true, userId: 'user-3' })
+  })
+
   it('signs out when the client reports an expired session', async () => {
     const fake = fakeClient({ sessionToken: 'stored', accessToken: jwt('user-1') })
     fake.finishLoading()

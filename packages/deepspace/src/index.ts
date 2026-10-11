@@ -8,6 +8,7 @@
 export type { CollectionSchema } from './shared/types'
 export * from './shared/env'
 export * from './shared/roles'
+export { accountRoomId } from './shared/account-room'
 export * from './shared/ai-models'
 // Re-export the wire protocol layer (the `MSG` constants object, the
 // `ClientMessage` / `ServerMessage` discriminated unions, `clientBuild`,

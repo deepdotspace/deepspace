@@ -1,5 +1,17 @@
 # deepspace
 
+## 0.41.0
+
+### Minor Changes
+
+- Expo apps get what each one used to build for itself.
+  - **Keyboard and pointer in `deepspace/native`:** `useKeyboardShortcuts` works on iPhone, iPad, the iPad app on a Mac and the web. Shortcuts work with nothing focused, so Space or a number key acts at once. `{ modal: true }` lets a dialog take every key. `ContextMenu`, `isIOSAppOnMac` and `pointerInput` are also new. The SDK now ships an Expo module (`DeepSpaceKeyboard`, `DeepSpaceContextMenu`) that autolinks; rebuild the app binary to include it.
+  - **`deepspace/native` on the web:** a browser build lets one Expo app also be the app's web page, using the browser SDK's cookie session. There, `Alert` is an in-page dialog with all of its buttons, `openIntegrationConsent` resolves when the consent window closes, and the client's `getSession` and `subscribe` follow the cookie session. `expoWeb()` in `deepspace/build` exports it at `vite build`. Debug iOS builds also accept a `-DeepSpaceSessionToken` launch argument for simulator tests.
+  - **Confirmed writes survive a dropped connection:** `createConfirmed`, `putConfirmed` and `removeConfirmed` no longer reject with "WebSocket disconnected" or "Mutation confirmation timed out". A write made while reconnecting waits and is sent, in order, once the room is back. The room applies a resent write at most once and answers a repeat with the first outcome, so a create resent into an append-only collection no longer comes back as refused. These writes reject when the server refuses them; with the new `WriteUnconfirmedError` when the room leaves one unanswered on three fresh connections; or with `not_ready` before the room's first connection. Waiting offline never rejects them. RecordRoom gains an internal `_confirmed_writes` table; redeploy the Worker.
+  - **One private store per account:** `accountStores({ prefix })`, `registerAccountStoreRoute` and `accountRoomId` give each account its own RecordRoom, chosen from the verified token, for the WebSocket and the agent tools.
+  - **`deepspace testflight <ipa>`:** uploads a signed iOS build and waits until TestFlight offers it. It finds the app from the IPA's bundle id and reads the API key from the variables `eas build` uses.
+  - **`servePreview` and `testState()`:** browser tests can run against the production build, with their own data and a test account as owner.
+
 ## 0.40.0
 
 ### Minor Changes

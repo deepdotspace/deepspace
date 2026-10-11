@@ -29,7 +29,11 @@
   "patterns": [
     "Import everything native from deepspace/native: the client, DeepSpaceNativeProvider, RecordProvider, RecordScope, useQuery, useMutations, integration and callAction.",
     "The schemas array passed to RecordScope is the same one the Worker uses; import it from ../src rather than copying it.",
-    "Integration results with data.requiresOAuth carry an authUrl: open it with openIntegrationConsent, then retry the call."
+    "Integration results with data.requiresOAuth carry an authUrl: open it with openIntegrationConsent, then retry the call.",
+    "Keyboard shortcuts (iPad, the iPad app on a Mac, and the web build): useKeyboardShortcuts([{ key: 'space', run }]) from deepspace/native while the screen is mounted. Context menus: ContextMenu.",
+    "For data private to each account, use accountStores from deepspace/worker and RecordScope roomId={accountRoomId(userId)} instead of the shared app room.",
+    "To make this Expo app the app's web page too, add expoWeb({ mobileDir }) from deepspace/build to the Worker's vite.config.ts; deepspace/native has a browser build, so no per-platform wrappers are needed.",
+    "Ship iOS builds with npx deepspace testflight <signed.ipa> after eas build --local."
   ],
   "agentNotes": [
     "mobile/ is a separate npm project; run its installs and type-checks from inside mobile/.",

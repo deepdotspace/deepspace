@@ -3,6 +3,7 @@
  */
 import { createContext, useContext, useMemo, type ReactElement, type ReactNode } from 'react'
 import type { DeepSpaceExpoClient, DeepSpaceExpoUser, ExpoAuthProvider } from '../expo'
+import { KeyboardShortcutsRoot } from '../client/input/keyboard'
 import { bindNativeClient, useAuth, type NativeAuthState } from './session'
 
 const NativeClientContext = createContext<DeepSpaceExpoClient | null>(null)
@@ -15,14 +16,19 @@ export interface DeepSpaceNativeProviderProps {
 
 /**
  * Binds the app's DeepSpace client for every hook below it. Render exactly one,
- * at the root, above `RecordProvider`.
+ * at the root, above `RecordProvider`. It also roots `useKeyboardShortcuts`,
+ * so it renders a full-size view (`flex: 1`).
  */
 export function DeepSpaceNativeProvider({
   client,
   children,
 }: DeepSpaceNativeProviderProps): ReactElement {
   bindNativeClient(client)
-  return <NativeClientContext.Provider value={client}>{children}</NativeClientContext.Provider>
+  return (
+    <NativeClientContext.Provider value={client}>
+      <KeyboardShortcutsRoot>{children}</KeyboardShortcutsRoot>
+    </NativeClientContext.Provider>
+  )
 }
 
 export function useNativeClient(): DeepSpaceExpoClient {

@@ -14,7 +14,7 @@
  */
 
 import { recordMatchesWhere, reconnectDelayMs } from './record-matching'
-import { RecordRoomNotReadyError } from './errors'
+import { RecordRoomNotReadyError, WriteUnconfirmedError } from './errors'
 import { parseServerError } from './serverErrors'
 import type { CollectionSchema, Query } from '../../shared/types'
 import type { RoomUser, RoomConnectionState, RecordData } from './types'
@@ -96,10 +96,34 @@ export interface RecordSocketConfig {
   yjsJoinHandlers?: Map<string, Set<(canWrite: boolean) => void>>
 }
 
-interface PendingRequest {
+/**
+ * A confirmed write waiting for the server's ACK.
+ *
+ * Writes survive a dropped connection: the outbox keeps them in the order
+ * they were made and sends them again, under the same requestId, once the
+ * reconnected room is ready. The room applies a requestId at most once and
+ * answers a repeat with the first outcome (the confirmed-write ledger in
+ * server/handlers/records.ts), so the ACK is always the write's real result.
+ */
+interface PendingWrite {
+  message: { type: string; payload: Record<string, unknown> }
   resolve: (data?: unknown) => void
   reject: (error: Error) => void
-  timer: ReturnType<typeof setTimeout>
+  timeoutMs: number
+  timer: ReturnType<typeof setTimeout> | null
+  /** Sends the server left unanswered within `timeoutMs`; waiting while offline does not count. */
+  unanswered: number
+}
+
+/**
+ * A write the server leaves unanswered on this many fresh connections fails.
+ * Each unanswered send already closed the socket and reconnected, so the
+ * connection is not the problem; waiting longer would hang the write forever.
+ */
+export const MAX_UNANSWERED_SENDS = 3
+
+function randomPart(): string {
+  return Math.random().toString(36).slice(2, 10).padEnd(8, '0')
 }
 
 export class RecordSocket {
@@ -107,7 +131,12 @@ export class RecordSocket {
   private readonly subscriptions: Map<string, string> // subscriptionId → queryKey
   private readonly binaryHandlers: Set<(data: ArrayBuffer) => void>
   private readonly yjsJoinHandlers: Map<string, Set<(canWrite: boolean) => void>>
-  private readonly pendingRequests = new Map<string, PendingRequest>()
+  /** requestId → write; Map order is send order. */
+  private readonly outbox = new Map<string, PendingWrite>()
+  /** The open socket finished its handshake (USER_INFO), so writes may go out. */
+  private writable = false
+  /** The room has been ready under the current identity; until then a write is refused, not queued. */
+  private hasBeenReady = false
   private reconnectAttempt = 0
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null
   private heartbeat: ReturnType<typeof setInterval> | null = null
@@ -140,9 +169,12 @@ export class RecordSocket {
   async connect(identityTag?: string): Promise<void> {
     if (this.destroyed) return
     const { config } = this
+    const newIdentity = identityTag !== undefined && identityTag !== this.identityTag
+    // Writes made as another identity never go out as this one.
+    if (newIdentity && this.identityTag !== undefined) this.forgetIdentity()
 
     if (this.ws?.readyState === WS_OPEN) {
-      if (identityTag !== undefined && identityTag !== this.identityTag) {
+      if (newIdentity) {
         // Identity changed mid-connection (e.g. anonymous → signed-in): the
         // server derives identity from the connection's JWT, so reconnect.
         config.log?.('reconnecting with new identity', config.roomId)
@@ -217,11 +249,7 @@ export class RecordSocket {
       config.listeners.onStatus('disconnected')
       config.listeners.onReady(false)
       this.ws = null
-      for (const pending of this.pendingRequests.values()) {
-        clearTimeout(pending.timer)
-        pending.reject(new Error('WebSocket disconnected'))
-      }
-      this.pendingRequests.clear()
+      this.holdWrites()
       // Queries show loading (not silently-stale data) until the reconnect
       // resubscribes and fresh results land.
       for (const queryKey of this.subscriptions.values()) {
@@ -246,6 +274,7 @@ export class RecordSocket {
     this.connectToken++ // invalidate any in-flight connect() awaiting its token
     this.clearReconnect()
     this.teardownSocket()
+    this.forgetIdentity()
     this.config.listeners.onStatus('connecting')
     this.config.listeners.onReady(false)
     this.reconnectAttempt = 0
@@ -257,6 +286,7 @@ export class RecordSocket {
     this.connectToken++
     this.clearReconnect()
     this.teardownSocket()
+    this.dropWrites()
   }
 
   /** Zero the backoff (tab became visible, user asked to retry). */
@@ -329,6 +359,7 @@ export class RecordSocket {
   /** Close without firing onclose — prevents the zombie-reconnect. */
   private teardownSocket(): void {
     this.stopHeartbeat()
+    this.holdWrites()
     const ws = this.ws
     if (!ws) return
     this.config.log?.('closing', this.config.roomId)
@@ -351,23 +382,78 @@ export class RecordSocket {
     if (this.ws?.readyState === WS_OPEN) this.ws.send(data)
   }
 
+  /**
+   * Sends a write and resolves with the server's ACK. Once the room has been
+   * ready, a write made while the connection is down waits in the outbox and
+   * goes out, in order, after the reconnect. A write the server does not
+   * answer within `timeoutMs` marks the connection dead: the socket closes,
+   * reconnects, and sends it again. Rejects when the server refuses the write;
+   * with `WriteUnconfirmedError` when it leaves the write unanswered on
+   * MAX_UNANSWERED_SENDS connections; and with `RecordRoomNotReadyError` when
+   * the room was never ready, its identity changed, or it was torn down.
+   */
   sendConfirmed(
     message: { type: string; payload: Record<string, unknown> },
     timeoutMs = 10000,
   ): Promise<unknown> {
-    const ws = this.ws
-    if (!ws || ws.readyState !== WS_OPEN) {
+    if (this.destroyed || !this.hasBeenReady) {
       return Promise.reject(new RecordRoomNotReadyError())
     }
-    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+    // Unique per user for as long as the room's ledger remembers it (a day).
+    const requestId = `${Date.now().toString(36)}-${randomPart()}${randomPart()}`
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(requestId)
-        reject(new Error('Mutation confirmation timed out'))
-      }, timeoutMs)
-      this.pendingRequests.set(requestId, { resolve, reject, timer })
-      ws.send(JSON.stringify({ ...message, payload: { ...message.payload, requestId } }))
+      const write: PendingWrite = { message, resolve, reject, timeoutMs, timer: null, unanswered: 0 }
+      this.outbox.set(requestId, write)
+      if (this.writable) this.transmit(requestId, write)
     })
+  }
+
+  private transmit(requestId: string, write: PendingWrite): void {
+    const ws = this.ws
+    if (!ws || ws.readyState !== WS_OPEN) return
+    ws.send(JSON.stringify({ ...write.message, payload: { ...write.message.payload, requestId } }))
+    write.timer = setTimeout(() => {
+      write.timer = null
+      write.unanswered += 1
+      if (write.unanswered >= MAX_UNANSWERED_SENDS) {
+        this.outbox.delete(requestId)
+        write.reject(new WriteUnconfirmedError())
+      }
+      this.config.log?.('confirmation timed out; reconnecting', this.config.roomId)
+      if (this.ws === ws) ws.close()
+    }, write.timeoutMs)
+  }
+
+  /** The connection is gone: everything waits for the next handshake and is sent again. */
+  private holdWrites(): void {
+    this.writable = false
+    for (const write of this.outbox.values()) {
+      if (write.timer === null) continue
+      clearTimeout(write.timer)
+      write.timer = null
+    }
+  }
+
+  private dropWrites(): void {
+    for (const write of this.outbox.values()) {
+      if (write.timer) clearTimeout(write.timer)
+      write.reject(new RecordRoomNotReadyError())
+    }
+    this.outbox.clear()
+  }
+
+  /** Writes belong to the identity that made them; never send them as another. */
+  private forgetIdentity(): void {
+    this.dropWrites()
+    this.hasBeenReady = false
+  }
+
+  private flushWrites(): void {
+    this.writable = true
+    this.hasBeenReady = true
+    for (const [requestId, write] of this.outbox) {
+      if (write.timer === null) this.transmit(requestId, write)
+    }
   }
 
   // ── registrations ─────────────────────────────────────────────────────────
@@ -444,6 +530,7 @@ export class RecordSocket {
         this.reconnectAttempt = 0
         // Auto-request the user list as part of the connection handshake.
         this.sendMessage({ type: MSG.USER_LIST, payload: {} })
+        this.flushWrites()
         break
       }
 
@@ -528,12 +615,12 @@ export class RecordSocket {
           error?: string
           [key: string]: unknown
         }
-        const pending = this.pendingRequests.get(requestId)
-        if (pending) {
-          clearTimeout(pending.timer)
-          this.pendingRequests.delete(requestId)
-          if (success) pending.resolve(rest)
-          else pending.reject(new Error(error || 'Mutation rejected'))
+        const write = this.outbox.get(requestId)
+        if (write) {
+          if (write.timer) clearTimeout(write.timer)
+          this.outbox.delete(requestId)
+          if (success) write.resolve(rest)
+          else write.reject(new Error(error || 'Mutation rejected'))
         }
         break
       }

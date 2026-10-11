@@ -9,7 +9,7 @@ import type { RecordResult, PutPayload, DeletePayload } from '../../shared/types
 import type { ToolResult } from '../utils/tools'
 import { DEFAULT_DELETE_WHERE_LIMIT, MAX_DELETE_WHERE_LIMIT } from '../utils/tools'
 import { serverBuild } from '../../shared/protocol/messages'
-import { RECORD_NOT_FOUND } from '../../shared/protocol/constants'
+import { ANONYMOUS_USER_ID_PREFIX, RECORD_NOT_FOUND, isAnonymousUserId } from '../../shared/protocol/constants'
 import {
   type CollectionSchema,
   type ResolvedColumn,
@@ -184,6 +184,88 @@ export function getRecord(
 }
 
 /**
+ * The confirmed-write ledger: one row per (user, requestId) a confirmed write
+ * was applied under, with its outcome.
+ *
+ * A client resends a confirmed write when its connection closed before the
+ * ACK arrived (RecordSocket's outbox), so the first attempt may already have
+ * landed. Applying the resend again would be wrong for anything that is not
+ * a plain upsert: an append-only collection refuses the update, a delete finds
+ * the record gone. The ledger makes a resend a lookup: the same requestId gets
+ * the first attempt's answer and changes nothing. Rows outlive any realistic
+ * reconnect and are pruned after a day.
+ *
+ * Rows are keyed by the writer, so one account can never read another's
+ * outcome. An anonymous socket is minted a new id on every connection, so its
+ * resend arrives under a different id than the first attempt; anonymous
+ * writers therefore share one key, and only the requestId (random, and only
+ * ever sent back to its own socket) tells their writes apart.
+ */
+const WRITE_LEDGER_RETENTION_MS = 24 * 60 * 60 * 1000
+
+function ledgerWriter(userId: string): string {
+  return isAnonymousUserId(userId) ? ANONYMOUS_USER_ID_PREFIX : userId
+}
+
+export function ensureWriteLedger(sql: SqlStorage): void {
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS _confirmed_writes (
+      user_id TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      success INTEGER NOT NULL,
+      error TEXT,
+      record_id TEXT,
+      at INTEGER NOT NULL,
+      PRIMARY KEY (user_id, request_id)
+    );
+    CREATE INDEX IF NOT EXISTS _confirmed_writes_at ON _confirmed_writes (at);
+  `)
+}
+
+/**
+ * Runs a write at most once per (user, requestId) and ACKs its outcome; a
+ * repeated requestId gets the recorded outcome without running again.
+ */
+function applyConfirmed(
+  ctx: RecordContext,
+  ws: WebSocket,
+  userId: string,
+  requestId: string,
+  write: () => { success: boolean; error?: string; recordId?: string },
+): void {
+  const writer = ledgerWriter(userId)
+  const prior = ctx.sql
+    .exec(
+      `SELECT success, error, record_id FROM _confirmed_writes WHERE user_id = ? AND request_id = ?`,
+      writer,
+      requestId,
+    )
+    .toArray()[0] as { success: number; error: string | null; record_id: string | null } | undefined
+  const outcome = prior
+    ? { success: prior.success === 1, error: prior.error ?? undefined, recordId: prior.record_id ?? undefined }
+    : write()
+  if (!prior) {
+    const now = Date.now()
+    ctx.sql.exec(
+      `INSERT INTO _confirmed_writes (user_id, request_id, success, error, record_id, at) VALUES (?, ?, ?, ?, ?, ?)`,
+      writer,
+      requestId,
+      outcome.success ? 1 : 0,
+      outcome.error ?? null,
+      outcome.recordId ?? null,
+      now,
+    )
+    ctx.sql.exec(`DELETE FROM _confirmed_writes WHERE at < ?`, now - WRITE_LEDGER_RETENTION_MS)
+  }
+  ctx.send(
+    ws,
+    outcome.success
+      ? serverBuild.ackSuccess(requestId, outcome.recordId)
+      : serverBuild.ackFailure(requestId, outcome.error ?? 'Mutation rejected'),
+  )
+}
+
+/**
  * Handle PUT (create/update) record request via WebSocket.
  * Thin wrapper around putRecord() — translates ToolResult errors to WS messages.
  */
@@ -194,18 +276,16 @@ export function handlePut(
   payload: PutPayload,
 ): void {
   const { collection, recordId, data, requestId } = payload
-  const result = putRecord(ctx, collection, recordId, data, attachment.userId, attachment.role)
-
+  const put = () => putRecord(ctx, collection, recordId, data, attachment.userId, attachment.role)
   if (requestId) {
-    ctx.send(
-      ws,
-      result.success
-        ? serverBuild.ackSuccess(requestId, recordId)
-        : serverBuild.ackFailure(requestId, result.error),
-    )
-  } else if (!result.success) {
-    ctx.send(ws, serverBuild.error(result.error))
+    applyConfirmed(ctx, ws, attachment.userId, requestId, () => {
+      const result = put()
+      return result.success ? { success: true, recordId } : { success: false, error: result.error }
+    })
+    return
   }
+  const result = put()
+  if (!result.success) ctx.send(ws, serverBuild.error(result.error))
 }
 
 /**
@@ -219,18 +299,16 @@ export function handleDelete(
   payload: DeletePayload,
 ): void {
   const { collection, recordId, requestId } = payload
-  const result = deleteRecord(ctx, collection, recordId, attachment.userId, attachment.role)
-
+  const remove = () => deleteRecord(ctx, collection, recordId, attachment.userId, attachment.role)
   if (requestId) {
-    ctx.send(
-      ws,
-      result.success
-        ? serverBuild.ackSuccess(requestId)
-        : serverBuild.ackFailure(requestId, result.error),
-    )
-  } else if (!result.success) {
-    ctx.send(ws, serverBuild.error(result.error))
+    applyConfirmed(ctx, ws, attachment.userId, requestId, () => {
+      const result = remove()
+      return result.success ? { success: true } : { success: false, error: result.error }
+    })
+    return
   }
+  const result = remove()
+  if (!result.success) ctx.send(ws, serverBuild.error(result.error))
 }
 
 // ============================================================================

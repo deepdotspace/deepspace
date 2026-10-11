@@ -21,3 +21,9 @@ declare module 'expo-web-browser' {
   export function openAuthSessionAsync(url: string, redirectUrl?: string, options?: Record<string, unknown>): Promise<WebBrowserAuthSessionResult>
   export function openBrowserAsync(url: string, options?: Record<string, unknown>): Promise<{ type: string }>
 }
+
+declare module 'expo' {
+  import type { ComponentType } from 'react'
+  export function requireOptionalNativeModule<T = unknown>(moduleName: string): T | null
+  export function requireNativeView<P = Record<string, unknown>>(moduleName: string, viewName?: string): ComponentType<P>
+}

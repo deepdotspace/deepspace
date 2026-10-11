@@ -27,6 +27,10 @@
     "src/**/*.native.ts",
     "src/**/*.native.tsx",
     "src/__tests__/native-*.test.ts",
-    "src/__tests__/native-*.test.tsx"
+    "src/__tests__/native-*.test.tsx",
+    "src/native.web.ts",
+    "src/client/input",
+    "src/__tests__/input-*.test.ts",
+    "src/__tests__/input-*.test.tsx"
   ]
 }

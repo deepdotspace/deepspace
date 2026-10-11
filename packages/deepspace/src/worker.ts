@@ -13,6 +13,14 @@ export * from './shared/app-routing'
 export * from './shared/platform-proxy'
 export * from './shared/sandbox'
 export { authenticatedRoomRequest } from './shared/room-identity-headers'
+export { accountRoomId } from './shared/account-room'
+export {
+  accountStores,
+  registerAccountStoreRoute,
+  type AccountStores,
+  type AccountStoreEnv,
+  type AccountStoreRouteEnv,
+} from './server/account-stores'
 export * from './server/utils'
 export {
   registerDeepSpaceDocumentation,

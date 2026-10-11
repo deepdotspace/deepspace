@@ -58,6 +58,7 @@ import {
   handleYjsBinaryMessage,
   handleApiRequest,
 } from '../handlers'
+import { ensureWriteLedger } from '../handlers/records'
 import { SYSTEM_COLLECTION_SCHEMAS, handleYjsDisconnect } from '../handlers/yjs'
 
 /**
@@ -216,6 +217,7 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
       );
     `)
 
+    ensureWriteLedger(this.sql)
     this.ensureAllCollectionTables()
   }
 

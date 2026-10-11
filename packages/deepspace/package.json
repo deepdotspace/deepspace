@@ -1,6 +1,6 @@
 {
   "name": "deepspace",
-  "version": "0.40.0",
+  "version": "0.41.0",
   "engines": {
     "node": ">=22.15.0 <23 || >=24 <25 || >=26 <27"
   },
@@ -47,6 +47,8 @@
     },
     "./native": {
       "types": "./dist/native.d.ts",
+      "react-native": "./dist/native.js",
+      "browser": "./dist/native.web.js",
       "import": "./dist/native.js"
     },
     "./documentation": {
@@ -61,7 +63,9 @@
   "files": [
     "dist",
     "features",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "ios",
+    "expo-module.config.json"
   ],
   "scripts": {
     "build": "node ../../scripts/clean-artifacts.mjs dist --tsbuildinfo && tsup",
@@ -109,7 +113,8 @@
     "expo-linking": "~57.0.0",
     "expo-secure-store": "~57.0.0",
     "expo-web-browser": "~57.0.0",
-    "react-native": ">=0.76.0"
+    "react-native": ">=0.76.0",
+    "expo": "~57.0.0"
   },
   "peerDependenciesMeta": {
     "@playwright/test": {
@@ -143,6 +148,9 @@
       "optional": true
     },
     "react-native": {
+      "optional": true
+    },
+    "expo": {
       "optional": true
     }
   },

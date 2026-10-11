@@ -44,6 +44,13 @@ export function useMutations<T = unknown>(collection: string): {
   create: (data: T) => Promise<string>
   put: (recordId: string, data: Partial<T>) => Promise<void>
   remove: (recordId: string) => Promise<void>
+  /** Resolve once the server has applied the write. They survive a dropped
+   *  connection: a write made while reconnecting waits and is sent, in
+   *  order, when the room is back, and the room applies a resend at most
+   *  once. They reject when the server refuses the write; with
+   *  `WriteUnconfirmedError` if the room never answers it across several
+   *  fresh connections; and with `not_ready` before the room's first
+   *  connection. Waiting offline never rejects. */
   createConfirmed: (data: T) => Promise<string>
   putConfirmed: (recordId: string, data: Partial<T>) => Promise<void>
   removeConfirmed: (recordId: string) => Promise<void>
@@ -68,13 +75,11 @@ export function useMutations<T = unknown>(collection: string): {
     )
   }
 
-  // The single readiness gate for every mutation below. A write refused here
-  // never touches the socket, so `onWriteError` — the one surface an app can
-  // observe a rejected fire-and-forget write on — is the only place it can show
-  // up; it reports *and* throws, so callers that await keep their contract
-  // and callers that don't still get a visible failure instead of silence.
-  const assertReady = useCallback(() => {
-    if (ready) return
+  // A write refused for readiness never reaches the server, so `onWriteError`
+  // (the one surface an app can observe a rejected fire-and-forget write on)
+  // is the only place it can show up; report it *and* throw, so callers that
+  // await keep their contract and callers that don't still see the failure.
+  const reportNotReady = useCallback((): RecordRoomNotReadyError => {
     onWriteError?.({
       kind: 'not_ready',
       title: 'Not saved — still connecting',
@@ -82,8 +87,28 @@ export function useMutations<T = unknown>(collection: string): {
         `The room backing "${collection}" was not ready to accept writes yet, so the change was dropped. ` +
         `Gate the action on the \`ready\` flag from useMutations('${collection}') (e.g. \`disabled={!ready}\`) and retry once it is true.`,
     })
-    throw new RecordRoomNotReadyError(collection)
-  }, [ready, collection, onWriteError])
+    return new RecordRoomNotReadyError(collection)
+  }, [collection, onWriteError])
+
+  // The readiness gate for fire-and-forget writes, which a closed socket drops.
+  const assertReady = useCallback(() => {
+    if (!ready) throw reportNotReady()
+  }, [ready, reportNotReady])
+
+  // Confirmed writes skip the gate: once the room has been ready, the socket
+  // holds them through a reconnect and sends them in order, so a write made
+  // while `ready` is briefly false still lands.
+  const confirm = useCallback(
+    async (payload: Record<string, unknown>, type: string): Promise<void> => {
+      try {
+        await sendConfirmed({ type, payload: { collection, ...payload } })
+      } catch (error) {
+        if (error instanceof RecordRoomNotReadyError) throw reportNotReady()
+        throw error
+      }
+    },
+    [sendConfirmed, collection, reportNotReady],
+  )
 
   const create = useCallback(
     async (data: T): Promise<string> => {
@@ -113,35 +138,19 @@ export function useMutations<T = unknown>(collection: string): {
 
   const createConfirmed = useCallback(
     async (data: T): Promise<string> => {
-      assertReady()
       const recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`
-      await sendConfirmed({
-        type: MSG.PUT,
-        payload: { collection, recordId, data: data as Record<string, unknown> },
-      })
+      await confirm({ recordId, data }, MSG.PUT)
       return recordId
     },
-    [assertReady, sendConfirmed, collection],
+    [confirm],
   )
 
   const putConfirmed = useCallback(
-    async (recordId: string, data: Partial<T>): Promise<void> => {
-      assertReady()
-      await sendConfirmed({
-        type: MSG.PUT,
-        payload: { collection, recordId, data: data as Record<string, unknown> },
-      })
-    },
-    [assertReady, sendConfirmed, collection],
+    (recordId: string, data: Partial<T>) => confirm({ recordId, data }, MSG.PUT),
+    [confirm],
   )
 
-  const removeConfirmed = useCallback(
-    async (recordId: string): Promise<void> => {
-      assertReady()
-      await sendConfirmed({ type: MSG.DELETE, payload: { collection, recordId } })
-    },
-    [assertReady, sendConfirmed, collection],
-  )
+  const removeConfirmed = useCallback((recordId: string) => confirm({ recordId }, MSG.DELETE), [confirm])
 
   // Memoize the return object so consumers get a stable reference.
   // Without this, every render produces a new object, which breaks any

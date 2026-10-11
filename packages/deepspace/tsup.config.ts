@@ -56,12 +56,43 @@ export default defineConfig([
       'react',
       'react/jsx-runtime',
       'react-native',
+      'expo',
       'expo-crypto',
       'expo-linking',
       'expo-secure-store',
       'expo-web-browser',
     ],
     esbuildPlugins: [preferNativeModules(resolve(__dirname, 'src'))],
+    esbuildOptions(options) {
+      options.jsx = 'automatic'
+      options.alias = alias
+    },
+  },
+  {
+    // deepspace/native in the browser (the `browser` export condition): the
+    // same names as the native bundle, on the browser SDK's same-origin
+    // session. Its types are the native bundle's, so it emits none.
+    entry: { 'native.web': 'src/native.web.ts' },
+    format: ['esm'],
+    dts: false,
+    tsconfig: 'tsconfig.expo.json',
+    sourcemap: true,
+    external: [
+      'react',
+      'react-dom',
+      'react/jsx-runtime',
+      'react-native',
+      'expo',
+      'expo-crypto',
+      'expo-linking',
+      'expo-secure-store',
+      'expo-web-browser',
+      'better-auth',
+      'better-auth/react',
+      'better-auth/client/plugins',
+      'jose',
+      'yjs',
+    ],
     esbuildOptions(options) {
       options.jsx = 'automatic'
       options.alias = alias

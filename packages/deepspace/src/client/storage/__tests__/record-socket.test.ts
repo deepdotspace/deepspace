@@ -3,13 +3,14 @@
  *
  * These tests pin the behavior that used to live (duplicated and drifted) in
  * context.tsx and RecordScope.tsx: the connect-token guard around the async
- * auth-token fetch, resubscribe-on-open, reset-to-loading + pending-request
- * rejection on close, exponential backoff, identity-change reconnects,
+ * auth-token fetch, resubscribe-on-open, reset-to-loading on close, the
+ * confirmed-write outbox, exponential backoff, identity-change reconnects,
  * zombie-reconnect prevention on teardown, and the message dispatch.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { RecordSocket, type RecordStoreLike } from '../record-socket'
+import { MAX_UNANSWERED_SENDS, RecordSocket, type RecordStoreLike } from '../record-socket'
+import { WriteUnconfirmedError } from '../errors'
 import { MSG } from '../../../shared/protocol/constants'
 
 // ── fakes ────────────────────────────────────────────────────────────────────
@@ -361,17 +362,13 @@ describe('close', () => {
     expect(h.ws().readyState).toBe(1)
   })
 
-  it('rejects pending confirmations, resets queries to loading, schedules backoff', async () => {
+  it('resets queries to loading and schedules backoff', async () => {
     const h = makeSocket()
     h.socket.registerSubscription('sub-1', QUERY_KEY)
     await h.socket.connect()
     h.ws().serverOpen()
 
-    const confirmation = h.socket.sendConfirmed({ type: 'mutate', payload: {} })
-    const rejection = expect(confirmation).rejects.toThrow('WebSocket disconnected')
-
     h.ws().serverDrop()
-    await rejection
     expect(h.listeners.onStatus).toHaveBeenCalledWith('disconnected')
     expect(h.listeners.onReady).toHaveBeenCalledWith(false)
     expect(h.store.resetToLoading).toHaveBeenCalledWith(QUERY_KEY)
@@ -476,53 +473,160 @@ describe('close', () => {
 // ── confirmations ────────────────────────────────────────────────────────────
 
 describe('sendConfirmed', () => {
-  it('resolves on ACK success with the extra payload', async () => {
+  async function readySocket() {
     const h = makeSocket()
     await h.socket.connect()
     h.ws().serverOpen()
+    h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+    return h
+  }
 
+  function writes(h: Harness, type = 'mutate') {
+    return h.ws().sentOfType(type) as unknown as Array<{ payload: { requestId: string; n?: number } }>
+  }
+
+  function lastWrite(h: Harness, type = 'mutate') {
+    return writes(h, type).at(-1)!
+  }
+
+  function ack(h: Harness, requestId: string, success: boolean, extra: Record<string, unknown> = {}) {
+    h.ws().serverMessage(MSG.ACK, { requestId, success, ...extra })
+  }
+
+  it('resolves on ACK success with the extra payload', async () => {
+    const h = await readySocket()
     const promise = h.socket.sendConfirmed({ type: 'mutate', payload: { a: 1 } })
-    const sent = JSON.parse(h.ws().sent.at(-1)!) as { payload: { requestId: string } }
-    h.ws().serverMessage(MSG.ACK, {
-      requestId: sent.payload.requestId,
-      success: true,
-      recordId: 'r1',
-    })
+    ack(h, lastWrite(h).payload.requestId, true, { recordId: 'r1' })
     await expect(promise).resolves.toEqual({ recordId: 'r1' })
   })
 
   it('rejects on ACK failure with the server error', async () => {
-    const h = makeSocket()
-    await h.socket.connect()
-    h.ws().serverOpen()
-
+    const h = await readySocket()
     const promise = h.socket.sendConfirmed({ type: 'mutate', payload: {} })
-    const sent = JSON.parse(h.ws().sent.at(-1)!) as { payload: { requestId: string } }
-    h.ws().serverMessage(MSG.ACK, {
-      requestId: sent.payload.requestId,
-      success: false,
-      error: 'denied',
-    })
+    ack(h, lastWrite(h).payload.requestId, false, { error: 'denied' })
     await expect(promise).rejects.toThrow('denied')
   })
 
-  it('times out when no ACK arrives', async () => {
-    const h = makeSocket()
-    await h.socket.connect()
-    h.ws().serverOpen()
-
-    const promise = h.socket.sendConfirmed({ type: 'mutate', payload: {} }, 5000)
-    const rejection = expect(promise).rejects.toThrow('timed out')
-    await vi.advanceTimersByTimeAsync(5000)
-    await rejection
-  })
-
-  it('rejects immediately when not connected', async () => {
+  it('rejects with not_ready before the room has ever been ready', async () => {
     const h = makeSocket()
     await expect(h.socket.sendConfirmed({ type: 'mutate', payload: {} })).rejects.toMatchObject({
       name: 'RecordRoomNotReadyError',
       code: 'not_ready',
     })
+  })
+
+  it('holds writes through a dropped connection and resends them in order after the handshake', async () => {
+    const h = await readySocket()
+    const first = h.socket.sendConfirmed({ type: 'mutate', payload: { n: 1 } })
+    h.ws().serverDrop()
+    const second = h.socket.sendConfirmed({ type: 'mutate', payload: { n: 2 } })
+
+    await vi.advanceTimersByTimeAsync(1000)
+    h.ws().serverOpen()
+    expect(h.ws().sentOfType('mutate')).toHaveLength(0)
+    h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+
+    const resent = writes(h)
+    expect(resent.map((m) => m.payload.n)).toEqual([1, 2])
+    ack(h, resent[0].payload.requestId, true)
+    ack(h, resent[1].payload.requestId, true)
+    await expect(first).resolves.toEqual({})
+    await expect(second).resolves.toEqual({})
+  })
+
+  it('resends under the same requestId, so the room can answer a repeat with the first outcome', async () => {
+    const h = await readySocket()
+    const write = h.socket.sendConfirmed({ type: MSG.DELETE, payload: {} })
+    const first = lastWrite(h, MSG.DELETE).payload.requestId
+    h.ws().serverDrop()
+    await vi.advanceTimersByTimeAsync(1000)
+    h.ws().serverOpen()
+    h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+    expect(lastWrite(h, MSG.DELETE).payload.requestId).toBe(first)
+    ack(h, first, true)
+    await expect(write).resolves.toEqual({})
+  })
+
+  it('reports the server refusing a resent write as a refusal', async () => {
+    const h = await readySocket()
+    const write = h.socket.sendConfirmed({ type: MSG.PUT, payload: {} })
+    h.ws().serverDrop()
+    await vi.advanceTimersByTimeAsync(1000)
+    h.ws().serverOpen()
+    h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+    ack(h, lastWrite(h, MSG.PUT).payload.requestId, false, { error: "Required field 'title' is missing" })
+    await expect(write).rejects.toThrow("Required field 'title' is missing")
+  })
+
+  it('fails a write the room leaves unanswered on every one of MAX_UNANSWERED_SENDS connections', async () => {
+    const h = await readySocket()
+    const write = h.socket.sendConfirmed({ type: 'mutate', payload: {} }, 5000)
+    const rejection = expect(write).rejects.toBeInstanceOf(WriteUnconfirmedError)
+    for (let attempt = 1; attempt < MAX_UNANSWERED_SENDS; attempt++) {
+      await vi.advanceTimersByTimeAsync(5000)
+      await vi.advanceTimersByTimeAsync(30_000)
+      h.ws().serverOpen()
+      h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+    }
+    await vi.advanceTimersByTimeAsync(5000)
+    await rejection
+  })
+
+  it('never fails a write for waiting offline, however long', async () => {
+    const h = await readySocket()
+    h.ws().serverDrop()
+    const write = h.socket.sendConfirmed({ type: 'mutate', payload: {} }, 5000)
+    let settled = false
+    write.then(() => (settled = true), () => (settled = true))
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    expect(settled).toBe(false)
+    h.ws().serverOpen()
+    h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+    ack(h, lastWrite(h).payload.requestId, true)
+    await expect(write).resolves.toEqual({})
+  })
+
+  it('treats a missing ACK as a dead connection: closes, reconnects, resends', async () => {
+    const h = await readySocket()
+    const write = h.socket.sendConfirmed({ type: 'mutate', payload: {} }, 5000)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(h.listeners.onStatus).toHaveBeenCalledWith('disconnected')
+
+    await vi.advanceTimersByTimeAsync(1000)
+    h.ws().serverOpen()
+    h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+    ack(h, lastWrite(h).payload.requestId, true)
+    await expect(write).resolves.toEqual({})
+  })
+
+  it('rejects waiting writes when the identity changes or the socket is torn down', async () => {
+    const h = await readySocket()
+    h.ws().serverDrop()
+    const held = h.socket.sendConfirmed({ type: 'mutate', payload: {} })
+    h.socket.disconnect()
+    await expect(held).rejects.toMatchObject({ code: 'not_ready' })
+    // A new identity starts over: no queueing until it has been ready.
+    await expect(h.socket.sendConfirmed({ type: 'mutate', payload: {} })).rejects.toMatchObject({ code: 'not_ready' })
+
+    const other = await readySocket()
+    const pending = other.socket.sendConfirmed({ type: 'mutate', payload: {} })
+    other.socket.destroy()
+    await expect(pending).rejects.toMatchObject({ code: 'not_ready' })
+  })
+
+  it('drops held writes when a reconnect brings a new identity', async () => {
+    const h = makeSocket()
+    await h.socket.connect('user-1')
+    h.ws().serverOpen()
+    h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+    h.ws().serverDrop()
+    const held = h.socket.sendConfirmed({ type: 'mutate', payload: {} })
+
+    await h.socket.connect('user-2')
+    await expect(held).rejects.toMatchObject({ code: 'not_ready' })
+    h.ws().serverOpen()
+    h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+    expect(writes(h)).toHaveLength(0)
   })
 })
 
