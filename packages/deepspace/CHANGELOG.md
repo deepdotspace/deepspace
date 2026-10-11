@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.42.1
+
+### Patch Changes
+
+- Platform fix: requests to deployed apps no longer hang when the platform's route lookup stalls. Each wait on a route-table refresh is now bounded, so an app keeps serving from its last known routes instead of leaving some requests with no response. No app code changes are needed.
+
 ## 0.42.0
 
 ### Minor Changes
