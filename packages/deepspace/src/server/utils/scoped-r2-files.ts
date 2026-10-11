@@ -9,7 +9,7 @@
  * Each worker provides a `resolvePrefix` callback for its scoping rules.
  * The security invariants are enforced here once — not per-worker.
  *
- * Routes:
+ * Routes (shown at the default `basePath`, `/api/files`):
  *   POST   /api/files/upload              → upload one file in one request
  *   POST   /api/files/multipart           → begin a chunked upload
  *   PUT    /api/files/multipart/part      → send one part
@@ -49,6 +49,7 @@ import {
   UPLOAD_PART_BYTES,
   encodeKeyPath,
   formatBytes,
+  normalizeFilesBasePath,
   oversizeMessage,
   oversizePartMessage,
   oversizeRequestMessage,
@@ -127,6 +128,15 @@ export interface ScopedR2Config {
    * @default true
    */
   requireAuthForMutations?: boolean
+
+  /**
+   * The path this handler is mounted at. Request paths are resolved relative
+   * to it, and the `url` fields in upload and list responses point back at
+   * it. Set it when mounting the handler on an app-owned bucket at a route
+   * other than the platform files route (for example `/api/media`).
+   * @default '/api/files'
+   */
+  basePath?: string
 }
 
 /**
@@ -391,6 +401,17 @@ function multipartFailure(error: unknown): Response {
 // ============================================================================
 
 /**
+ * The request path below the mount, without a leading slash, or null when the
+ * path is not under the mount at all. Only a match at a segment boundary
+ * counts, so `/api/filesystem` is not under `/api/files`.
+ */
+function pathBelowMount(pathname: string, basePath: string): string | null {
+  if (pathname === basePath) return ''
+  if (pathname.startsWith(`${basePath}/`)) return pathname.slice(basePath.length + 1)
+  return null
+}
+
+/**
  * Create a scoped R2 files handler.
  *
  * Security guarantees:
@@ -402,13 +423,20 @@ function multipartFailure(error: unknown): Response {
  */
 export function createScopedR2Handler(config: ScopedR2Config): ScopedR2Handler {
   const requireAuthForMutations = config.requireAuthForMutations ?? true
+  const basePath = normalizeFilesBasePath(config.basePath)
 
   return async (request, url, bucket, auth) => {
     // url.pathname preserves percent-encoding (e.g. spaces → %20), but R2
     // keys are stored with raw characters. Decode so the lookup matches.
+    // A handler mounted at the wrong route must not half-work by reading the
+    // whole pathname as a key; anything outside the mount is not ours.
+    const belowMount = pathBelowMount(url.pathname, basePath)
+    if (belowMount === null) {
+      return Response.json({ error: 'Not found' }, { status: 404, headers: CORS_HEADERS })
+    }
     let subpathRaw: string
     try {
-      subpathRaw = decodeURIComponent(url.pathname.replace('/api/files', '').replace(/^\//, ''))
+      subpathRaw = decodeURIComponent(belowMount)
     } catch {
       return Response.json(
         { error: 'Invalid path encoding' },
@@ -454,13 +482,23 @@ export function createScopedR2Handler(config: ScopedR2Config): ScopedR2Handler {
         return fail(401, 'Authentication required', 'unauthorized')
       }
       return subpath === 'upload'
-        ? handleUpload(request, url, bucket, prefix, excludedPrefixes, auth, scope)
-        : handleMultipart(request, url, bucket, prefix, excludedPrefixes, auth, scope, subpath)
+        ? handleUpload(request, url, bucket, prefix, excludedPrefixes, auth, scope, basePath)
+        : handleMultipart(
+            request,
+            url,
+            bucket,
+            prefix,
+            excludedPrefixes,
+            auth,
+            scope,
+            subpath,
+            basePath,
+          )
     }
 
     // ── List ────────────────────────────────────────────────────────────
     if (!subpath && request.method === 'GET') {
-      return handleList(bucket, prefix, excludedPrefixes, url, scope, auth)
+      return handleList(bucket, prefix, excludedPrefixes, url, scope, auth, basePath)
     }
 
     // ── Download (HEAD answers with the GET's headers and no body) ──────
@@ -522,6 +560,7 @@ async function handleUpload(
   excludedPrefixes: readonly string[],
   auth: ScopedR2Auth,
   scope: string,
+  basePath: string,
 ): Promise<Response> {
   try {
     // Before anything reads the body.
@@ -597,7 +636,7 @@ async function handleUpload(
       admission.markerKey,
       admission.markerKey !== null || fileData.byteLength < replacedBytes,
     )
-    return storedFileJson(located.key, prefix, fileName, url, scope)
+    return storedFileJson(located.key, prefix, fileName, url, scope, basePath)
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Upload failed'
     console.error('[handleUpload] Error:', msg, err instanceof Error ? err.stack : '')
@@ -652,8 +691,9 @@ function storedFileJson(
   name: string,
   url: URL,
   scope: string,
+  basePath: string,
 ): Response {
-  const fileUrl = new URL(`/api/files/${encodeKeyPath(key)}`, url.origin)
+  const fileUrl = new URL(`${basePath}/${encodeKeyPath(key)}`, url.origin)
   fileUrl.searchParams.set('scope', scope)
   return Response.json(
     {
@@ -826,6 +866,7 @@ async function handleMultipart(
   auth: ScopedR2Auth,
   scope: string,
   subpath: string,
+  basePath: string,
 ): Promise<Response> {
   if (subpath === 'multipart' && request.method === 'POST') {
     return multipartInit(request, url, bucket, prefix, excludedPrefixes, auth)
@@ -834,7 +875,7 @@ async function handleMultipart(
     return multipartPart(request, url, bucket, prefix, excludedPrefixes, auth)
   }
   if (subpath === 'multipart/complete') {
-    return multipartComplete(request, url, bucket, prefix, excludedPrefixes, auth, scope)
+    return multipartComplete(request, url, bucket, prefix, excludedPrefixes, auth, scope, basePath)
   }
   return multipartAbort(url, bucket, prefix, excludedPrefixes, auth)
 }
@@ -1110,6 +1151,7 @@ async function finishCompletedMultipart(
   url: URL,
   scope: string,
   prefix: string,
+  basePath: string,
 ): Promise<Response> {
   const declaredMetadata = Number(object.customMetadata?.declaredBytes)
   const declaredBytes =
@@ -1152,7 +1194,7 @@ async function finishCompletedMultipart(
     }
   }
   const name = object.customMetadata?.originalName ?? session.uploadKey.split('/').pop() ?? 'file'
-  return storedFileJson(session.key, prefix, name, url, scope)
+  return storedFileJson(session.key, prefix, name, url, scope, basePath)
 }
 
 /**
@@ -1168,6 +1210,7 @@ async function multipartComplete(
   excludedPrefixes: readonly string[],
   auth: ScopedR2Auth,
   scope: string,
+  basePath: string,
 ): Promise<Response> {
   const body = await readControlJson(request)
   if (body instanceof Response) return body
@@ -1188,7 +1231,17 @@ async function multipartComplete(
   if (auth.storage && !reservation) {
     const completed = await completedReservationObject(bucket, session)
     if (completed) {
-      return finishCompletedMultipart(bucket, session, null, completed, auth, url, scope, prefix)
+      return finishCompletedMultipart(
+        bucket,
+        session,
+        null,
+        completed,
+        auth,
+        url,
+        scope,
+        prefix,
+        basePath,
+      )
     }
     await abandonMultipart(bucket, session, auth, null)
     return quotaUnavailable('This upload reservation is missing or does not match.')
@@ -1242,6 +1295,7 @@ async function multipartComplete(
         url,
         scope,
         prefix,
+        basePath,
       )
     }
     if (r2ErrorCode(error) === 10024 && reservation) {
@@ -1250,7 +1304,17 @@ async function multipartComplete(
     return multipartFailure(error)
   }
 
-  return finishCompletedMultipart(bucket, session, reservation, object, auth, url, scope, prefix)
+  return finishCompletedMultipart(
+    bucket,
+    session,
+    reservation,
+    object,
+    auth,
+    url,
+    scope,
+    prefix,
+    basePath,
+  )
 }
 
 /**
@@ -1292,6 +1356,7 @@ async function handleList(
   url: URL,
   scope: string,
   auth: ScopedR2Auth,
+  basePath: string,
 ): Promise<Response> {
   const userPrefix = url.searchParams.get('prefix') || ''
   const listPrefix = `${prefix}${userPrefix}`
@@ -1357,7 +1422,7 @@ async function handleList(
     frontier = after
   }
   const files = visible.slice(0, limit).map((obj) => {
-    const fileUrl = new URL(`/api/files/${encodeKeyPath(obj.key)}`, url.origin)
+    const fileUrl = new URL(`${basePath}/${encodeKeyPath(obj.key)}`, url.origin)
     fileUrl.searchParams.set('scope', scope)
     return {
       key: obj.key,

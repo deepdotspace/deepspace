@@ -205,13 +205,47 @@ export function encodeKeyPath(key: string): string {
  */
 export type AppFileScope = 'self' | 'app'
 
+/** The route the app worker mounts the platform files proxy at. */
+export const APP_FILES_BASE_PATH = '/api/files'
+
+const MOUNT_SEGMENT = /^[A-Za-z0-9_~-][A-Za-z0-9._~-]*$/
+
+/**
+ * The one spelling of a files mount, shared by the handler, the hook, and
+ * `appFilePath` so the three can never disagree. A trailing slash is dropped;
+ * anything other than a plain absolute path of unreserved segments throws,
+ * because it cannot work: a relative path resolves against the current page,
+ * `//host` is protocol-relative, percent-encodable characters never match the
+ * encoded request path, and `/` would shadow every app route.
+ */
+export function normalizeFilesBasePath(basePath: string = APP_FILES_BASE_PATH): string {
+  if (typeof basePath !== 'string') {
+    throw new TypeError(
+      `Invalid files basePath ${String(basePath)}: expected a route such as '/api/media'.`,
+    )
+  }
+  const trimmed = basePath.trim().replace(/\/+$/, '')
+  const segments = trimmed.split('/').slice(1)
+  if (
+    !trimmed.startsWith('/') ||
+    segments.length === 0 ||
+    !segments.every((segment) => MOUNT_SEGMENT.test(segment))
+  ) {
+    throw new TypeError(
+      `Invalid files basePath ${JSON.stringify(basePath)}: use an absolute route such as '/api/media'.`,
+    )
+  }
+  return trimmed
+}
+
 /**
  * Where the app serves a stored key, relative to its origin: the URL
  * `useR2Files().getUrl`, native `useFileSource`, Worker `appFiles` and the
- * CLI all report.
+ * CLI all report. `basePath` names a different mount of the same protocol,
+ * such as an app-owned bucket served through `createScopedR2Handler`.
  */
-export function appFilePath(key: string, scope: AppFileScope): string {
-  return `/api/files/${encodeKeyPath(key)}?scope=${scope}`
+export function appFilePath(key: string, scope: AppFileScope, basePath?: string): string {
+  return `${normalizeFilesBasePath(basePath)}/${encodeKeyPath(key)}?scope=${scope}`
 }
 
 /** The one oversize sentence, for whichever caller notices first. */

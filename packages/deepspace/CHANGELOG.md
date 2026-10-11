@@ -1,5 +1,12 @@
 # deepspace
 
+## 0.42.0
+
+### Minor Changes
+
+- `createScopedR2Handler` and `useR2Files` take a validated `basePath`, so the files protocol (multipart upload, Range reads, listing) can serve an app-owned R2 binding at its own route. The handler now answers 404 for paths outside its mount instead of reading them as keys, so a handler served at the site root must be mounted at a route (or have requests rewritten to `/api/files`)
+- Billing: the server helpers accept the app's own Hono context without a cast; `useSubscription` makes no request while signed out, re-reads when the user changes, never shows one user's tier to the next, and `subscribe`/`openPortal` reject with `unauthorized` while signed out
+
 ## 0.41.1
 
 ### Patch Changes

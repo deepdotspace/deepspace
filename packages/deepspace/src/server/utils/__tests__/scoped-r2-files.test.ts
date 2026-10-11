@@ -16,6 +16,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { createScopedR2Handler } from '../scoped-r2-files'
+import { appFilePath } from '../../../shared/app-files'
 
 const PREFIX = 'apps/app-a/'
 
@@ -539,5 +540,141 @@ describe('download responses', () => {
     expect(res.status).toBe(304)
     expect(res.headers.get('Content-Range')).toBeNull()
     expect(get).not.toHaveBeenCalled()
+  })
+})
+
+describe('a handler mounted at a custom basePath', () => {
+  const mediaHandler = createScopedR2Handler({
+    basePath: '/api/media/',
+    resolvePrefix: () => ({ prefix: PREFIX }),
+  })
+
+  it('resolves upload keys under the mount and reports URLs that point back at it', async () => {
+    const stored = {
+      head: async () => null,
+      put: async () => ({ etag: 'etag-1' }),
+    } as unknown as R2Bucket
+    const url = new URL('https://app.example/api/media/upload?scope=app&key=episodes/e1.vtt')
+    const body = JSON.stringify({ data: 'QQ==', name: 'e1.vtt' })
+    const request = new Request(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': String(new TextEncoder().encode(body).byteLength),
+      },
+      body,
+    })
+    const response = await mediaHandler(request, url, stored, { userId: 'user-1' })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      key: `${PREFIX}episodes/e1.vtt`,
+      relativeKey: 'episodes/e1.vtt',
+      url: `https://app.example/api/media/${PREFIX}episodes/e1.vtt?scope=app`,
+    })
+  })
+
+  it('serves a keyed download below the mount', async () => {
+    const key = `${PREFIX}episodes/e1.mp4`
+    const object = {
+      key,
+      size: 4,
+      etag: 'e1',
+      httpEtag: '"e1"',
+      uploaded: new Date('2026-10-01T00:00:00Z'),
+      httpMetadata: { contentType: 'video/mp4' },
+      customMetadata: {},
+      body: new Response('abcd').body,
+      writeHttpMetadata: () => {},
+    }
+    const read = {
+      get: vi.fn(async (k: string) => (k === key ? object : null)),
+    } as unknown as R2Bucket
+    const url = new URL(`https://app.example/api/media/${key}?scope=app`)
+    const response = await mediaHandler(new Request(url), url, read, { userId: null })
+    expect(response.status).toBe(200)
+    expect(read.get).toHaveBeenCalledWith(key)
+  })
+
+  it('lists with URLs on the mount, not on /api/files', async () => {
+    const listed = {
+      async list() {
+        return {
+          objects: [{ key: `${PREFIX}a.jpg`, size: 1, uploaded: new Date('2026-10-01T00:00:00Z') }],
+          truncated: false,
+        }
+      },
+    } as unknown as R2Bucket
+    const url = new URL('https://app.example/api/media?scope=app')
+    const response = await mediaHandler(new Request(url), url, listed, { userId: 'user-1' })
+    const body = (await response.json()) as { files: Array<{ url: string }> }
+    expect(body.files[0].url).toBe(`https://app.example/api/media/${PREFIX}a.jpg?scope=app`)
+  })
+
+  it('does not treat a sibling route sharing the prefix as the mount', async () => {
+    const url = new URL('https://app.example/api/mediakit/upload?scope=app')
+    const response = await mediaHandler(new Request(url, { method: 'POST' }), url, bucket, {
+      userId: 'user-1',
+    })
+    expect(response.status).toBe(404)
+  })
+
+  it('answers 404 for any path outside the mount instead of reading it as a key', async () => {
+    const url = new URL(`https://app.example/${PREFIX}secret.txt?scope=app`)
+    const response = await mediaHandler(new Request(url), url, bucket, { userId: 'user-1' })
+    expect(response.status).toBe(404)
+  })
+
+  it('reports the multipart-complete URL on the mount', async () => {
+    const key = `${PREFIX}episodes/e1.mp4`
+    const object = { key, size: 4, customMetadata: { originalName: 'e1.mp4', declaredBytes: '4' } }
+    const upload = {
+      complete: async () => object,
+    }
+    const completing = {
+      head: async () => null,
+      get: async () => null,
+      put: async () => ({}),
+      delete: async () => {},
+      resumeMultipartUpload: () => upload,
+    } as unknown as R2Bucket
+    const session = `uploadKey=${encodeURIComponent('episodes/e1.mp4')}&uploadId=up-1&reservationId=reservation-0001`
+    const url = new URL(`https://app.example/api/media/multipart/complete?scope=app&${session}`)
+    const body = JSON.stringify({ parts: [{ partNumber: 1, etag: 'e' }] })
+    const request = new Request(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': String(body.length) },
+      body,
+    })
+    const response = await mediaHandler(request, url, completing, { userId: 'user-1' })
+    expect(await response.json()).toMatchObject({
+      url: `https://app.example/api/media/${PREFIX}episodes/e1.mp4?scope=app`,
+    })
+  })
+})
+
+describe('files basePath normalization', () => {
+  it.each([
+    'api/media',
+    '/',
+    '',
+    '//evil.example',
+    '/api/my media',
+    '/api/../files',
+    '/api//media',
+  ])('refuses %j at construction', (basePath) => {
+    expect(() =>
+      createScopedR2Handler({ basePath, resolvePrefix: () => ({ prefix: PREFIX }) }),
+    ).toThrow(/Invalid files basePath/)
+  })
+
+  it('names a non-string basePath instead of failing on .trim', () => {
+    expect(() => appFilePath('a', 'app', null as unknown as string)).toThrow(
+      /Invalid files basePath null/,
+    )
+  })
+
+  it('accepts a trailing slash and keeps the default when unset', () => {
+    expect(appFilePath('a.jpg', 'app', '/api/media/')).toBe('/api/media/a.jpg?scope=app')
+    expect(appFilePath('a.jpg', 'self')).toBe('/api/files/a.jpg?scope=self')
   })
 })

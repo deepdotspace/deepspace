@@ -552,3 +552,85 @@ describe('useR2Files chunked upload', () => {
     }
   })
 })
+
+describe('useR2Files basePath', () => {
+  it('sends every request to the configured mount instead of /api/files', async () => {
+    let media: UseR2FilesReturn | null = null
+    function MediaProbe(): ReactElement | null {
+      media = useR2Files({ scope: 'app', basePath: '/api/media/' })
+      return null
+    }
+    const mediaContainer = document.createElement('div')
+    const mediaRoot = createRoot(mediaContainer)
+    await act(async () => {
+      mediaRoot.render(<MediaProbe />)
+      await Promise.resolve()
+    })
+    const urls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        urls.push(String(input))
+        return Response.json({ success: true, key: 'v1/a.jpg', files: [], truncated: false })
+      }),
+    )
+    await act(async () => {
+      await media!.upload(new Blob(['x']), 'a.jpg', { key: 'a.jpg' })
+      await media!.list('posters')
+    })
+    expect(media!.getUrl('v1/a.jpg')).toBe('/api/media/v1/a.jpg?scope=app')
+    expect(urls[0]).toMatch(/^\/api\/media\/upload\?scope=app&key=a\.jpg$/)
+    expect(urls[1]).toMatch(/^\/api\/media\?scope=app&prefix=posters$/)
+    await act(async () => mediaRoot.unmount())
+  })
+
+  it('runs a chunked upload and a delete against the mount', async () => {
+    let media: UseR2FilesReturn | null = null
+    function MediaProbe(): ReactElement | null {
+      media = useR2Files({ scope: 'app', basePath: '/api/media' })
+      return null
+    }
+    const mediaRoot = createRoot(document.createElement('div'))
+    await act(async () => {
+      mediaRoot.render(<MediaProbe />)
+      await Promise.resolve()
+    })
+    const calls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        calls.push(`${init?.method ?? 'GET'} ${url.split('?')[0]}`)
+        if (url.includes('/multipart/part')) return Response.json({ partNumber: 1, etag: 'e' })
+        if (url.includes('/multipart/complete'))
+          return Response.json({ success: true, key: 'v1/big.mp4' })
+        if (url.includes('/multipart')) {
+          return Response.json({
+            uploadId: 'u',
+            uploadKey: 'v1/big.mp4',
+            reservationId: 'reservation-1',
+            partSize: UPLOAD_PART_BYTES,
+          })
+        }
+        return Response.json({ success: true })
+      }),
+    )
+    const big = {
+      size: UPLOAD_PART_BYTES + 10,
+      type: 'video/mp4',
+      slice: (start: number, end: number) => ({ size: end - start }) as unknown as Blob,
+    } as unknown as Blob
+    await act(async () => {
+      await media!.upload(big, 'big.mp4', { key: 'big.mp4' })
+      await media!.deleteFile('v1/big.mp4')
+    })
+    expect(calls).toEqual([
+      'POST /api/media/multipart',
+      'PUT /api/media/multipart/part',
+      'PUT /api/media/multipart/part',
+      'POST /api/media/multipart/complete',
+      'DELETE /api/media/v1/big.mp4',
+    ])
+    await act(async () => mediaRoot.unmount())
+  })
+})

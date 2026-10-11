@@ -1,9 +1,10 @@
 // Per-app subscription state hook. Reads through the starter's same-origin
 // /_deepspace proxy, which signs with the app identity token.
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { authedJson } from '../authed-json'
-import { apiErrorCode } from '../../shared/api-error'
+import { useAuth } from '../auth/hooks'
+import { apiErrorCode, PlatformApiError } from '../../shared/api-error'
 import { isEntitled, type PlanInfo, type SubscriptionStatus } from '../../shared/subscription'
 
 // Re-export for SDK consumers — these are public types the hook is generic over.
@@ -75,24 +76,67 @@ interface UseSubscriptionReturn {
   refresh: () => Promise<void>
 }
 
-export function useSubscription(): UseSubscriptionReturn {
-  const [state, setState] = useState<SubscriptionState>({
-    tier: 'free',
-    status: 'none',
-    interval: null,
-    currentPeriodEnd: null,
-    cancelAtPeriodEnd: false,
-    trialEndsAt: null,
-    plans: [],
+const SIGNED_OUT_STATE: SubscriptionState = {
+  tier: 'free',
+  status: 'none',
+  interval: null,
+  currentPeriodEnd: null,
+  cancelAtPeriodEnd: false,
+  trialEndsAt: null,
+  plans: [],
+}
+
+/** The refusal for a billing action attempted while nobody is signed in. */
+function signedOutError(): PlatformApiError {
+  return new PlatformApiError({
+    error: 'Sign in to manage a subscription.',
+    code: 'unauthorized',
+    status: 401,
   })
+}
+
+export function useSubscription(): UseSubscriptionReturn {
+  const { isLoaded, userId } = useAuth()
+  const [state, setState] = useState<SubscriptionState>(SIGNED_OUT_STATE)
   const [isLoading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [errorCode, setErrorCode] = useState<string | null>(null)
 
+  // `/me` answers for whoever is signed in when it is sent. A response that
+  // lands after the user changed (sign-out, account switch) or after a newer
+  // read started describes someone else, so only the latest request for the
+  // current user may write state.
+  const userRef = useRef<string | null>(null)
+  const loadedRef = useRef(false)
+  const requestRef = useRef(0)
+  userRef.current = userId
+  loadedRef.current = isLoaded
+
+  const resetSignedOut = useCallback(() => {
+    requestRef.current += 1
+    setState(SIGNED_OUT_STATE)
+    setError(null)
+    setErrorCode(null)
+    setLoading(false)
+  }, [])
+
   const refresh = useCallback(async () => {
+    // Before auth resolves nobody is known to be signed in or out; the
+    // effect below reads as soon as it does.
+    if (!loadedRef.current) return
+    const forUser = userRef.current
+    // A signed-out visitor has no subscription to read: asking anyway only
+    // produced a 401, an error state, and console noise on public pages.
+    if (!forUser) {
+      resetSignedOut()
+      return
+    }
+    const request = ++requestRef.current
+    const current = () => requestRef.current === request && userRef.current === forUser
     setLoading(true)
     try {
       const r = await authedJson<SubscriptionState>('/_deepspace/subscriptions/me')
+      if (!current()) return
       setState({
         tier: r.tier,
         status: r.status,
@@ -105,16 +149,27 @@ export function useSubscription(): UseSubscriptionReturn {
       setError(null)
       setErrorCode(null)
     } catch (e) {
+      if (!current()) return
       setError(e instanceof Error ? e.message : 'Failed to load subscription')
       setErrorCode(apiErrorCode(e))
     } finally {
-      setLoading(false)
+      if (current()) setLoading(false)
     }
-  }, [])
+  }, [resetSignedOut])
 
+  // Read once auth resolves and again whenever the user changes. A new user
+  // starts from the free state, never from the previous user's tier.
   useEffect(() => {
-    refresh()
-  }, [refresh])
+    if (!isLoaded) return
+    if (!userId) {
+      resetSignedOut()
+      return
+    }
+    setState(SIGNED_OUT_STATE)
+    setError(null)
+    setErrorCode(null)
+    void refresh()
+  }, [isLoaded, userId, refresh, resetSignedOut])
 
   const entitled = isEntitled(state.tier, state.status)
   const hasTier = useCallback(
@@ -134,6 +189,7 @@ export function useSubscription(): UseSubscriptionReturn {
 
   const subscribe = useCallback(
     async (planSlug: string, opts?: SubscribeOpts): Promise<SubscribeResult> => {
+      if (loadedRef.current && !userRef.current) throw signedOutError()
       const result = await authedJson<SubscribeResult>('/_deepspace/subscriptions/checkout', {
         method: 'POST',
         body: JSON.stringify({
@@ -159,15 +215,13 @@ export function useSubscription(): UseSubscriptionReturn {
     [refresh],
   )
 
-  const openPortal = useCallback(
-    async (returnUrl?: string) => {
-      return authedJson<{ url: string }>('/_deepspace/subscriptions/portal', {
-        method: 'POST',
-        body: JSON.stringify({ returnUrl: returnUrl ?? window.location.href }),
-      })
-    },
-    [],
-  )
+  const openPortal = useCallback(async (returnUrl?: string) => {
+    if (loadedRef.current && !userRef.current) throw signedOutError()
+    return authedJson<{ url: string }>('/_deepspace/subscriptions/portal', {
+      method: 'POST',
+      body: JSON.stringify({ returnUrl: returnUrl ?? window.location.href }),
+    })
+  }, [])
 
   return {
     tier: state.tier,

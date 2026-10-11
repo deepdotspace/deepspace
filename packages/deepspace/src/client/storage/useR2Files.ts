@@ -37,6 +37,7 @@ import {
   MAX_BASE64_UPLOAD_BYTES,
   UPLOAD_PART_BYTES,
   appFilePath,
+  normalizeFilesBasePath,
   describeFilesFailure,
   encodeKeyPath,
   oversizeMessage,
@@ -250,7 +251,16 @@ export interface UseR2FilesReturn {
  *
  * Uploads under `'app'` still require a signed-in user.
  */
-export type R2Scope = { scope?: AppFileScope }
+export type R2Scope = {
+  scope?: AppFileScope
+  /**
+   * The route the files API is mounted at. Defaults to the platform proxy,
+   * `/api/files`. Point it at an app's own mount of `createScopedR2Handler`
+   * (for example `/api/media` over a custom R2 binding) to use the same
+   * upload, list, and chunking behavior against an app-owned bucket.
+   */
+  basePath?: string
+}
 
 // ============================================================================
 // Helpers
@@ -298,6 +308,7 @@ async function uploadInParts(
   key: string | undefined,
   scopeParams: string,
   authHeaders: () => Promise<Record<string, string>>,
+  basePath: string,
   onProgress?: UploadProgress,
 ): Promise<R2UploadResult> {
   const headers = await authHeaders()
@@ -312,7 +323,7 @@ async function uploadInParts(
   // The caller-named key matters only at init: the server anchors it there
   // and answers with the session's `uploadKey`, which is what parts carry.
   const sendInit = (): Promise<Response> =>
-    fetch(`/api/files/multipart?${withUploadKey(scopeParams, key)}`, {
+    fetch(`${basePath}/multipart?${withUploadKey(scopeParams, key)}`, {
       method: 'POST',
       headers: json,
       body: initBody,
@@ -350,7 +361,7 @@ async function uploadInParts(
       // The slice is rebuilt per attempt: a body is consumed once, so a retry
       // needs its own.
       const send = (): Promise<Response> =>
-        fetch(`/api/files/multipart/part?${query}&partNumber=${part.partNumber}`, {
+        fetch(`${basePath}/multipart/part?${query}&partNumber=${part.partNumber}`, {
           method: 'PUT',
           headers,
           body: file.slice(part.start, part.end),
@@ -368,7 +379,7 @@ async function uploadInParts(
       parts.push((await response.json()) as { partNumber: number; etag: string })
       onProgress?.(part.end, file.size)
     }
-    const completed = await fetch(`/api/files/multipart/complete?${query}`, {
+    const completed = await fetch(`${basePath}/multipart/complete?${query}`, {
       method: 'POST',
       headers: json,
       body: JSON.stringify({ parts }),
@@ -381,7 +392,7 @@ async function uploadInParts(
     // now is the difference between a retry loop that costs nothing and one
     // that fills the app up.
     if (!assembled) {
-      await fetch(`/api/files/multipart?${query}`, { method: 'DELETE', headers }).catch(
+      await fetch(`${basePath}/multipart?${query}`, { method: 'DELETE', headers }).catch(
         () => undefined,
       )
     }
@@ -395,6 +406,7 @@ async function uploadInParts(
 export function useR2Files(options?: R2Scope): UseR2FilesReturn {
   const [isUploading, setIsUploading] = useState(false)
   const scope = options?.scope ?? 'self'
+  const basePath = useMemo(() => normalizeFilesBasePath(options?.basePath), [options?.basePath])
 
   /** Query string that tells the worker which scope to use. */
   const scopeParams = useMemo(() => {
@@ -426,6 +438,7 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
             options?.key,
             scopeParams,
             authHeaders,
+            basePath,
             options?.onProgress,
           )
         }
@@ -435,7 +448,7 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
         if (name) formData.append('name', name)
 
         const response = await fetch(
-          `/api/files/upload?${withUploadKey(scopeParams, options?.key)}`,
+          `${basePath}/upload?${withUploadKey(scopeParams, options?.key)}`,
           {
             method: 'POST',
             headers,
@@ -450,7 +463,7 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
         setIsUploading(false)
       }
     },
-    [scopeParams, authHeaders],
+    [scopeParams, authHeaders, basePath],
   )
 
   const uploadBase64 = useCallback(
@@ -472,7 +485,7 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
         if (tooBig) return tooBig
         const headers = await authHeaders()
         const response = await fetch(
-          `/api/files/upload?${withUploadKey(scopeParams, options?.key)}`,
+          `${basePath}/upload?${withUploadKey(scopeParams, options?.key)}`,
           {
             method: 'POST',
             headers: { ...headers, 'Content-Type': 'application/json' },
@@ -486,15 +499,15 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
         setIsUploading(false)
       }
     },
-    [scopeParams, authHeaders],
+    [scopeParams, authHeaders, basePath],
   )
 
   const getUrl = useCallback(
     (fileOrKey: R2FileInfo | string): string => {
       const { key } = resolveFile(fileOrKey)
-      return appFilePath(key, scope)
+      return appFilePath(key, scope, basePath)
     },
-    [scope],
+    [scope, basePath],
   )
 
   const deleteFile = useCallback(
@@ -523,7 +536,7 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
       if (prefix) params.set('prefix', prefix)
       if (options?.limit !== undefined) params.set('limit', String(options.limit))
       if (options?.cursor) params.set('cursor', options.cursor)
-      const response = await fetch(`/api/files?${params.toString()}`, { headers })
+      const response = await fetch(`${basePath}?${params.toString()}`, { headers })
       // A failure throws instead of flattening to [] — an expired session or
       // unreachable service used to read as "no files", which callers then
       // rendered as an empty account.
@@ -542,7 +555,7 @@ export function useR2Files(options?: R2Scope): UseR2FilesReturn {
         truncated: result.truncated ?? false,
       }
     },
-    [scopeParams, authHeaders],
+    [scopeParams, authHeaders, basePath],
   )
 
   const list = useCallback(

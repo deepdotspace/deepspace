@@ -6,15 +6,8 @@
 
 import type { Context } from 'hono'
 import { apiWorkerFetch } from './utils/proxies'
-import type { ApiWorkerEnv } from './utils/proxies'
 import { appendAppIdentity } from './utils/app-identity'
-
-interface StarterAppEnv extends ApiWorkerEnv {
-  /** Absent until the app's first deploy injects it — see appendAppIdentity. */
-  APP_IDENTITY_TOKEN?: string
-  /** Immutable app id — the identity the platform verifies (HMAC input). */
-  DEEPSPACE_APP_ID: string
-}
+import type { BillingEnv } from './subscription'
 
 export interface RefundResult {
   success: boolean
@@ -30,8 +23,8 @@ export interface RefundOpts {
   requestNonce?: string
 }
 
-export async function refundInvoice(
-  c: Context<{ Bindings: StarterAppEnv }>,
+export async function refundInvoice<E extends BillingEnv>(
+  c: Context<E>,
   opts: RefundOpts,
 ): Promise<RefundResult> {
   // The platform requires a verified actor — forward the inbound user's JWT.

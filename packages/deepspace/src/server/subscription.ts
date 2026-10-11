@@ -23,15 +23,24 @@ export interface SubscriptionRead {
   plans: PlanInfo[]
 }
 
-interface StarterAppEnv extends ApiWorkerEnv {
+export interface BillingAppEnv extends ApiWorkerEnv {
   /** Absent until the app's first deploy injects it — see appendAppIdentity. */
   APP_IDENTITY_TOKEN?: string
   /** Immutable app id — the identity the platform verifies (HMAC input). */
   DEEPSPACE_APP_ID: string
 }
 
-function appIdentityHeaders(
-  c: Context<{ Bindings: StarterAppEnv }>,
+/**
+ * The Hono env shape these helpers need: bindings that carry the app
+ * identity. Every helper is generic over the app's full env, so a scaffold
+ * `Context<{ Bindings: Env }>` is accepted as-is — Hono's `Context` is
+ * invariant in its env, so a parameter typed against this minimal env alone
+ * rejected every real app context and forced a cast at each call site.
+ */
+export type BillingEnv = { Bindings: BillingAppEnv }
+
+function appIdentityHeaders<E extends BillingEnv>(
+  c: Context<E>,
   extra?: Record<string, string>,
 ): Headers {
   const h = new Headers(extra ?? {})
@@ -45,8 +54,8 @@ function appIdentityHeaders(
   return h
 }
 
-export async function getSubscription(
-  c: Context<{ Bindings: StarterAppEnv }>,
+export async function getSubscription<E extends BillingEnv>(
+  c: Context<E>,
 ): Promise<SubscriptionRead> {
   const res = await apiWorkerFetch(c.env, '/api/subscriptions/me', {
     method: 'GET',
@@ -79,8 +88,8 @@ export async function getSubscription(
  * means "this user used to be on Pro but their payment is overdue" — paid
  * features should not unlock. Same for canceled/unpaid/incomplete.
  */
-export async function requireSubscription(
-  c: Context<{ Bindings: StarterAppEnv }>,
+export async function requireSubscription<E extends BillingEnv>(
+  c: Context<E>,
   opts: { tier?: string; atLeast?: string },
 ): Promise<SubscriptionRead> {
   const sub = await getSubscription(c)
@@ -166,8 +175,8 @@ export interface CancelSubscriptionResult {
   hasMore: boolean
 }
 
-export async function cancelSubscription(
-  c: Context<{ Bindings: StarterAppEnv }>,
+export async function cancelSubscription<E extends BillingEnv>(
+  c: Context<E>,
   opts: CancelSubscriptionOpts,
 ): Promise<CancelSubscriptionResult> {
   const authz = c.req.header('authorization')
