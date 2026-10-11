@@ -14,7 +14,7 @@ export type { ScopeEntry } from './ScopeRegistry'
 export { useUser } from './hooks/useUser'
 export { useQuery } from './hooks/useQuery'
 export { useMutations } from './hooks/useMutations'
-export { RecordRoomNotReadyError, WriteUnconfirmedError } from './errors'
+export { RecordRoomNotReadyError, WriteCancelledError, WriteUnconfirmedError } from './errors'
 export { useUsers } from './hooks/useUsers'
 export { useYjsField, useYjsText, type UseYjsFieldResult, type UseYjsTextResult } from './hooks/useYjs'
 

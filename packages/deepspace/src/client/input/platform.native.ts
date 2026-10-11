@@ -13,4 +13,7 @@ export const isIOSAppOnMac: boolean = keyboard?.isIOSAppOnMac === true
  * The main input is a mouse or trackpad: click and drag, and a secondary-click
  * menu in place of swipes and touch-and-hold.
  */
-export const pointerInput: boolean = isIOSAppOnMac
+export const isPointerPrimary: boolean = isIOSAppOnMac
+
+/** @deprecated Renamed `isPointerPrimary`; this alias goes in a later minor. */
+export const pointerInput: boolean = isPointerPrimary

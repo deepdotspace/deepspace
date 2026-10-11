@@ -9,7 +9,7 @@
 import { useCallback, useContext, useMemo } from 'react'
 import { RecordContext, useRecordAuth } from '../context'
 import { useScopeRegistry } from '../ScopeRegistry'
-import { RecordRoomNotReadyError } from '../errors'
+import { RecordRoomNotReadyError, WriteCancelledError } from '../errors'
 import { MSG } from '@/shared/protocol/constants'
 
 /**
@@ -49,8 +49,10 @@ export function useMutations<T = unknown>(collection: string): {
    *  order, when the room is back, and the room applies a resend at most
    *  once. They reject when the server refuses the write; with
    *  `WriteUnconfirmedError` if the room never answers it across several
-   *  fresh connections; and with `not_ready` before the room's first
-   *  connection. Waiting offline never rejects. */
+   *  fresh connections; with `not_ready` before the room's first
+   *  connection; and with `WriteCancelledError` when it was still queued as
+   *  the account changed or the scope unmounted, or was made after the scope
+   *  unmounted. Waiting offline never rejects. */
   createConfirmed: (data: T) => Promise<string>
   putConfirmed: (recordId: string, data: Partial<T>) => Promise<void>
   removeConfirmed: (recordId: string) => Promise<void>
@@ -104,10 +106,19 @@ export function useMutations<T = unknown>(collection: string): {
         await sendConfirmed({ type, payload: { collection, ...payload } })
       } catch (error) {
         if (error instanceof RecordRoomNotReadyError) throw reportNotReady()
+        if (error instanceof WriteCancelledError) {
+          onWriteError?.({
+            kind: 'not_ready',
+            title: 'Not saved — signed out or closed first',
+            detail:
+              `A change to "${collection}" was waiting for the connection when the signed-in account changed ` +
+              `or the screen holding it closed, so it was never sent. Make the change again if it is still wanted.`,
+          })
+        }
         throw error
       }
     },
-    [sendConfirmed, collection, reportNotReady],
+    [sendConfirmed, collection, reportNotReady, onWriteError],
   )
 
   const create = useCallback(

@@ -14,7 +14,7 @@ export interface ContextMenuProps {
   items: readonly ContextMenuItem[]
   /**
    * Default true. On touch screens, touch and hold usually drags or swipes, so
-   * apps often pass `pointerInput` to offer the menu only to a mouse or trackpad.
+   * apps often pass `isPointerPrimary` to offer the menu only to a mouse or trackpad.
    */
   enabled?: boolean
   onSelect: (id: string) => void

@@ -604,14 +604,16 @@ describe('sendConfirmed', () => {
     h.ws().serverDrop()
     const held = h.socket.sendConfirmed({ type: 'mutate', payload: {} })
     h.socket.disconnect()
-    await expect(held).rejects.toMatchObject({ code: 'not_ready' })
+    await expect(held).rejects.toMatchObject({ name: 'WriteCancelledError', code: 'cancelled' })
     // A new identity starts over: no queueing until it has been ready.
     await expect(h.socket.sendConfirmed({ type: 'mutate', payload: {} })).rejects.toMatchObject({ code: 'not_ready' })
 
     const other = await readySocket()
     const pending = other.socket.sendConfirmed({ type: 'mutate', payload: {} })
     other.socket.destroy()
-    await expect(pending).rejects.toMatchObject({ code: 'not_ready' })
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' })
+    // Nor can a torn-down socket take new writes.
+    await expect(other.socket.sendConfirmed({ type: 'mutate', payload: {} })).rejects.toMatchObject({ code: 'cancelled' })
   })
 
   it('drops held writes when a reconnect brings a new identity', async () => {
@@ -623,7 +625,7 @@ describe('sendConfirmed', () => {
     const held = h.socket.sendConfirmed({ type: 'mutate', payload: {} })
 
     await h.socket.connect('user-2')
-    await expect(held).rejects.toMatchObject({ code: 'not_ready' })
+    await expect(held).rejects.toMatchObject({ code: 'cancelled' })
     h.ws().serverOpen()
     h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
     expect(writes(h)).toHaveLength(0)

@@ -14,7 +14,7 @@
  */
 
 import { recordMatchesWhere, reconnectDelayMs } from './record-matching'
-import { RecordRoomNotReadyError, WriteUnconfirmedError } from './errors'
+import { RecordRoomNotReadyError, WriteCancelledError, WriteUnconfirmedError } from './errors'
 import { parseServerError } from './serverErrors'
 import type { CollectionSchema, Query } from '../../shared/types'
 import type { RoomUser, RoomConnectionState, RecordData } from './types'
@@ -389,16 +389,16 @@ export class RecordSocket {
    * answer within `timeoutMs` marks the connection dead: the socket closes,
    * reconnects, and sends it again. Rejects when the server refuses the write;
    * with `WriteUnconfirmedError` when it leaves the write unanswered on
-   * MAX_UNANSWERED_SENDS connections; and with `RecordRoomNotReadyError` when
-   * the room was never ready, its identity changed, or it was torn down.
+   * MAX_UNANSWERED_SENDS connections; with `RecordRoomNotReadyError` before
+   * the room was ever ready; and with `WriteCancelledError` when the identity
+   * changes or the socket is torn down before the write was sent.
    */
   sendConfirmed(
     message: { type: string; payload: Record<string, unknown> },
     timeoutMs = 10000,
   ): Promise<unknown> {
-    if (this.destroyed || !this.hasBeenReady) {
-      return Promise.reject(new RecordRoomNotReadyError())
-    }
+    if (this.destroyed) return Promise.reject(new WriteCancelledError())
+    if (!this.hasBeenReady) return Promise.reject(new RecordRoomNotReadyError())
     // Unique per user for as long as the room's ledger remembers it (a day).
     const requestId = `${Date.now().toString(36)}-${randomPart()}${randomPart()}`
     return new Promise((resolve, reject) => {
@@ -437,7 +437,7 @@ export class RecordSocket {
   private dropWrites(): void {
     for (const write of this.outbox.values()) {
       if (write.timer) clearTimeout(write.timer)
-      write.reject(new RecordRoomNotReadyError())
+      write.reject(new WriteCancelledError())
     }
     this.outbox.clear()
   }

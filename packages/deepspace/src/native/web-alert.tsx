@@ -6,7 +6,8 @@
  * `AlertHost`, rendered by the web `DeepSpaceNativeProvider`, shows one alert
  * at a time and takes the keyboard while it is open (a modal shortcut layer):
  * Escape presses the cancel button, Return the focused button (at first the
- * first one that is not the cancel button). Without a mounted host the call
+ * first one that is not the cancel button), Tab cycles the buttons, and focus
+ * returns where it was when the last alert closes. Without a mounted host the call
  * falls back to the browser's confirm or alert.
  */
 import { useEffect, useRef, useSyncExternalStore, type ReactElement } from 'react'
@@ -89,9 +90,19 @@ export function AlertHost(): ReactElement | null {
     const index = elements.indexOf(document.activeElement as HTMLButtonElement)
     return index >= 0 ? buttons[index] : fallback
   }
+  // Tab and Shift-Tab cycle through the buttons and never leave the dialog.
+  const cycle = (step: number) => {
+    const elements = [...(dialog.current?.querySelectorAll('button') ?? [])]
+    if (elements.length === 0) return
+    const index = elements.indexOf(document.activeElement as HTMLButtonElement)
+    const next = index < 0 ? (step > 0 ? 0 : elements.length - 1) : (index + step + elements.length) % elements.length
+    elements[next].focus()
+  }
   useKeyboardShortcuts(
     alert
       ? [
+          { key: 'tab', whileTyping: true, run: () => cycle(1) },
+          { key: 'tab', modifiers: ['shift'], whileTyping: true, run: () => cycle(-1) },
           { key: 'escape', whileTyping: true, run: () => press(cancelOf(alert.buttons)) },
           { key: 'return', whileTyping: true, run: () => press(focusedOr(defaultOf(alert.buttons), alert.buttons)) },
         ]
@@ -99,6 +110,25 @@ export function AlertHost(): ReactElement | null {
     { enabled: alert !== undefined, modal: true },
   )
   const first = useRef<HTMLButtonElement>(null)
+  // Focus returns to whatever had it before the first alert opened, and
+  // cannot wander behind the dialog while one is open. A button's onPress
+  // runs after the queue empties, so it may move focus, and that move stands.
+  const open = alert !== undefined
+  useEffect(() => {
+    if (!open) return
+    const before = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const keepInside = (event: FocusEvent) => {
+      if (queue.length === 0) return
+      if (dialog.current && !dialog.current.contains(event.target as Node)) first.current?.focus()
+    }
+    document.addEventListener('focusin', keepInside)
+    return () => {
+      document.removeEventListener('focusin', keepInside)
+      const lost = !document.activeElement || document.activeElement === document.body
+      if (lost && before?.isConnected) before.focus()
+    }
+  }, [open])
+  // After the effect above has noted where focus was.
   useEffect(() => {
     first.current?.focus()
   }, [alert])

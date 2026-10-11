@@ -70,7 +70,7 @@ export { useUser } from './client/storage/hooks/useUser'
 export { useUsers } from './client/storage/hooks/useUsers'
 export { useUserLookup, type UserInfo } from './client/storage/hooks/useUserLookup'
 export { usePresence } from './client/storage/hooks/usePresence'
-export { RecordRoomNotReadyError, WriteUnconfirmedError } from './client/storage/errors'
+export { RecordRoomNotReadyError, WriteCancelledError, WriteUnconfirmedError } from './client/storage/errors'
 export { accountRoomId } from './shared/account-room'
 export { type ConnectionStatus, toConnectionStatus } from './client/storage/connection-status'
 export type {
@@ -114,7 +114,7 @@ export { useKeyboardShortcuts, type KeyboardShortcutOptions } from './client/inp
 export type { KeyboardShortcut, ShortcutKey, ShortcutModifier } from './client/input/shortcuts'
 export { ContextMenu } from './client/input/context-menu'
 export type { ContextMenuItem, ContextMenuProps } from './client/input/context-menu-types'
-export { isIOSAppOnMac, pointerInput } from './client/input/platform'
+export { isIOSAppOnMac, isPointerPrimary, pointerInput } from './client/input/platform'
 
 // Dialogs
 export { Alert } from './native/alert'

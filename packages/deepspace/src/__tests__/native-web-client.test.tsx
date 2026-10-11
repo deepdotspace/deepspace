@@ -133,6 +133,65 @@ describe('web Alert', () => {
     expect(cancel).toHaveBeenCalledTimes(1)
     expect(confirm).not.toHaveBeenCalled()
   })
+  it('keeps Tab inside the dialog and gives focus back when it closes', async () => {
+    const outside = document.createElement('button')
+    document.body.appendChild(outside)
+    outside.focus()
+    await act(async () =>
+      Alert.alert('Delete?', undefined, [{ text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive' }]),
+    )
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')]
+    expect(document.activeElement).toBe(buttons[1])
+    await key('Tab')
+    expect(document.activeElement).toBe(buttons[0])
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }))
+    })
+    expect(document.activeElement).toBe(buttons[1])
+    await act(async () => outside.focus())
+    expect(document.activeElement).toBe(buttons[1])
+    // A click on the backdrop leaves focus on the body; Shift-Tab then reaches the last button.
+    await act(async () => buttons[1].blur())
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }))
+    })
+    expect(document.activeElement).toBe(buttons[1])
+
+    await key('Escape')
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull()
+    expect(document.activeElement).toBe(outside)
+    outside.remove()
+  })
+
+  it('gives focus back only when the last of several queued alerts closes', async () => {
+    const outside = document.createElement('button')
+    document.body.appendChild(outside)
+    outside.focus()
+    await act(async () => {
+      Alert.alert('First')
+      Alert.alert('Second')
+    })
+    await key('Escape')
+    expect(document.querySelector('[role="alertdialog"]')?.getAttribute('aria-label')).toBe('Second')
+    expect(document.activeElement?.textContent).toBe('OK')
+    await key('Escape')
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull()
+    expect(document.activeElement).toBe(outside)
+    outside.remove()
+  })
+
+  it('leaves focus where a button moved it', async () => {
+    const outside = document.createElement('button')
+    const field = document.createElement('input')
+    document.body.append(outside, field)
+    outside.focus()
+    await act(async () => Alert.alert('Rename?', undefined, [{ text: 'Cancel', style: 'cancel' }, { text: 'Rename', onPress: () => field.focus() }]))
+    await key('Enter')
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull()
+    expect(document.activeElement).toBe(field)
+    outside.remove()
+    field.remove()
+  })
 })
 
 describe('web ContextMenu', () => {

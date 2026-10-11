@@ -25,3 +25,18 @@ export class WriteUnconfirmedError extends Error {
     this.name = 'WriteUnconfirmedError'
   }
 }
+
+/**
+ * A confirmed write was still waiting to be sent when its connection was
+ * retired: the signed-in account changed, or the scope that owned it
+ * unmounted. It was never sent, so it was not saved; waiting longer would not
+ * help, and sending it as another account would be wrong.
+ */
+export class WriteCancelledError extends Error {
+  readonly code = 'cancelled'
+
+  constructor() {
+    super('The change was not saved: the account changed or the screen closed before it was sent.')
+    this.name = 'WriteCancelledError'
+  }
+}

@@ -94,8 +94,10 @@ export type RoomConnectionState = 'connecting' | 'connected' | 'disconnected'
 export interface WriteError {
   /**
    * `permission` — RBAC denial; `validation` — data validation/other server
-   * rejection; `not_ready` — rejected client-side because the room could not
-   * accept writes yet (gate the control on `ready` from `useMutations()`).
+   * rejection; `not_ready` — rejected client-side, never sent: the room could
+   * not accept writes yet (gate the control on `ready` from `useMutations()`),
+   * or a queued confirmed write was dropped because the account changed or
+   * its scope unmounted (`WriteCancelledError`; the title says which).
    */
   kind: 'permission' | 'validation' | 'not_ready'
   /** Short human-readable summary, safe to show end users. */

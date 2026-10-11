@@ -1,5 +1,14 @@
 # deepspace
 
+## 0.41.1
+
+### Patch Changes
+
+- Follow-ups to the 0.41 mobile app kit.
+  - **Dropped queued writes say what happened.** A confirmed write still waiting to be sent when the signed-in account changes or its scope unmounts now rejects with the new `WriteCancelledError` (`code: 'cancelled'`). Before, it got `RecordRoomNotReadyError`, and `onWriteError` reported "still connecting" with advice to wait for `ready`, which could not help. A confirmed write made after its scope unmounted rejects the same way. `onWriteError` still reports these with `kind: 'not_ready'`, under their own title.
+  - **The web `Alert` keeps focus.** Tab and Shift-Tab cycle through its buttons without leaving the dialog. Focus returns to where it was when the last alert closes.
+  - **`isPointerPrimary`** is the new name for `pointerInput` in `deepspace/native`, so it reads as the boolean it is. `pointerInput` remains as a deprecated alias.
+
 ## 0.41.0
 
 ### Minor Changes

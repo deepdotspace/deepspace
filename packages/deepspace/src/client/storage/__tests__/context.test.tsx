@@ -15,7 +15,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react'
 import { RecordProvider, __resetDevWarningsForTests } from '../context'
 import { RecordScope } from '../RecordScope'
-import { RecordRoomNotReadyError } from '../errors'
+import { RecordRoomNotReadyError, WriteCancelledError } from '../errors'
 import { useMutations } from '../hooks/useMutations'
 import type { WriteError } from '../types'
 import type { CollectionSchema } from '../../../shared/types'
@@ -38,7 +38,11 @@ interface SocketListeners {
   onPermissionError?: (title: string, detail: string) => void
   onValidationError?: (title: string, detail: string) => void
 }
-const sockets = vi.hoisted(() => ({ all: [] as Array<{ listeners: SocketListeners }> }))
+const sockets = vi.hoisted(() => ({
+  all: [] as Array<{ listeners: SocketListeners }>,
+  /** What sendConfirmed rejects with; null means not_ready. */
+  confirmError: null as Error | null,
+}))
 vi.mock('../record-socket', async () => {
   const { RecordRoomNotReadyError } = await import('../errors')
   // Never connects, so like the real socket it refuses confirmed writes.
@@ -53,7 +57,7 @@ vi.mock('../record-socket', async () => {
     resetBackoff = () => {}
     sendMessage = () => {}
     sendBinary = () => {}
-    sendConfirmed = () => Promise.reject(new RecordRoomNotReadyError())
+    sendConfirmed = () => Promise.reject(sockets.confirmError ?? new RecordRoomNotReadyError())
     get isOpen() {
       return false
     }
@@ -210,6 +214,47 @@ describe('not-ready writes reach onWriteError', () => {
     }
     expect(spy).toHaveBeenCalledTimes(attempts.length)
     expect(spy.mock.calls.every(([e]) => e.kind === 'not_ready')).toBe(true)
+  })
+
+  it('a queued write dropped by an account change says so, not "still connecting"', async () => {
+    const spy = vi.fn<(e: WriteError) => void>()
+    mutations = null
+    sockets.confirmError = new WriteCancelledError()
+    try {
+      await render(
+        <RecordProvider allowAnonymous onWriteError={spy}>
+          <RecordScope roomId="app:test" schemas={[tasksSchema]}>
+            <MutationProbe />
+          </RecordScope>
+        </RecordProvider>,
+      )
+      await expect(mutations!.putConfirmed('t1', { title: 'x' })).rejects.toBeInstanceOf(WriteCancelledError)
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0][0].title).toBe('Not saved — signed out or closed first')
+      expect(spy.mock.calls[0][0].detail).not.toContain('ready')
+    } finally {
+      sockets.confirmError = null
+    }
+  })
+
+  it('a write made after its scope unmounted is cancelled, not "still connecting"', async () => {
+    const spy = vi.fn<(e: WriteError) => void>()
+    mutations = null
+    const app = (scoped: boolean) => (
+      <RecordProvider allowAnonymous onWriteError={spy}>
+        {scoped ? (
+          <RecordScope roomId="app:test" schemas={[tasksSchema]}>
+            <MutationProbe />
+          </RecordScope>
+        ) : null}
+      </RecordProvider>
+    )
+    await render(app(true))
+    const stale = mutations!
+    await render(app(false))
+    await expect(stale.putConfirmed('t1', { title: 'x' })).rejects.toBeInstanceOf(WriteCancelledError)
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy.mock.calls[0][0].title).toBe('Not saved — signed out or closed first')
   })
 
   it('the default handler covers not-ready writes when no onWriteError is passed', async () => {
