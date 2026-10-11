@@ -117,3 +117,52 @@ describe('useFileSource', () => {
     expect(source).toBeNull()
   })
 })
+
+it('changing the private image after expiry must obtain a current bearer', async () => {
+  const fake = fakeClient({ sessionToken: 's', accessToken: jwt('user-1', 'old') })
+  await render(fake.client, KEY)
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 6 * 60 * 1000)
+  const renewed = jwt('user-1', 'new')
+  vi.mocked(fake.client.getAuthToken).mockResolvedValue(renewed)
+  // Session tokens refresh on demand, not on a timer; no session event fires just from waiting.
+  try {
+    await render(fake.client, KEY + '-another-image')
+    expect(source?.headers?.Authorization).toBe(`Bearer ${renewed}`)
+  } finally {
+    clock.mockRestore()
+  }
+})
+
+it('renews a private image bearer before expiry without another API call', async () => {
+  vi.useFakeTimers()
+  try {
+    const fake = fakeClient({ sessionToken: 's', accessToken: jwt('user-1', 'old') })
+    await render(fake.client, KEY)
+    vi.mocked(fake.client.getAuthToken).mockImplementation(async () => jwt('user-1', 'renewed'))
+    await act(async () => vi.advanceTimersByTimeAsync(270_000))
+    expect(source?.headers?.Authorization).toBe(`Bearer ${jwt('user-1', 'renewed')}`)
+    expect(fake.client.getAuthToken).toHaveBeenCalledTimes(2)
+    await act(async () => root.unmount())
+    expect(vi.getTimerCount()).toBe(0)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('does not send the previous client bearer to a new app origin for the same user', async () => {
+  const first = fakeClient({ sessionToken: 'first', accessToken: jwt('user-1', 'first-app') })
+  await render(first.client, KEY)
+  expect(source?.headers?.Authorization).toBe(`Bearer ${jwt('user-1', 'first-app')}`)
+  const next = fakeClient({ sessionToken: 'next', accessToken: jwt('user-1', 'next-app') })
+  Object.defineProperty(next.client, 'origin', { value: 'https://other.app.space' })
+  let release!: (value: string) => void
+  vi.mocked(next.client.getAuthToken).mockReturnValue(new Promise((resolve) => (release = resolve)))
+  await render(next.client, KEY)
+  expect(source).toBeNull()
+  const token = jwt('user-1', 'next-app')
+  await act(async () => release(token))
+  expect(source).toEqual({
+    uri: `https://other.app.space${URI.slice(first.client.origin.length)}?scope=self`,
+    headers: { Authorization: `Bearer ${token}` },
+  })
+})

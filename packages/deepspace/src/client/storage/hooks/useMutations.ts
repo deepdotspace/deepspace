@@ -49,10 +49,12 @@ export function useMutations<T = unknown>(collection: string): {
    *  order, when the room is back, and the room applies a resend at most
    *  once. They reject when the server refuses the write; with
    *  `WriteUnconfirmedError` if the room never answers it across several
-   *  fresh connections; with `not_ready` before the room's first
-   *  connection; and with `WriteCancelledError` when it was still queued as
-   *  the account changed or the scope unmounted, or was made after the scope
-   *  unmounted. Waiting offline never rejects. */
+   *  fresh connections, its safe resend window expires, or its scope closes
+   *  after sending; with `not_ready` before the room's first connection; and
+   *  with `WriteCancelledError` when it was never sent before the account
+   *  changed or scope unmounted, or was made after the scope unmounted. Unsent
+   *  writes can wait offline indefinitely; a sent write is not retried after
+   *  the server can forget its outcome (just under a day). */
   createConfirmed: (data: T) => Promise<string>
   putConfirmed: (recordId: string, data: Partial<T>) => Promise<void>
   removeConfirmed: (recordId: string) => Promise<void>

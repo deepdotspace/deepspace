@@ -10,6 +10,8 @@
 import { useEffect, useState } from 'react'
 import { appFilePath, type AppFileScope } from '../shared/app-files'
 import { useAuth, requireNativeClient } from './session'
+import { jwtClaims } from '../expo-jwt'
+import { subscribeToForeground } from '../client/platform/foreground'
 
 /** `{ uri, headers }`, the source shape `<Image>` and expo-video take. */
 export interface FileSource {
@@ -35,34 +37,54 @@ export function useFileSource(
   const scope = options.scope ?? 'self'
   const client = requireNativeClient()
   const { userId } = useAuth()
-  const [token, setToken] = useState<string | null>(null)
+  const [bearer, setBearer] = useState<{
+    client: typeof client
+    userId: string
+    token: string
+  } | null>(null)
 
   useEffect(() => {
-    if (scope === 'app' || !userId) {
-      setToken(null)
+    if (scope === 'app' || !userId || !key) {
+      setBearer(null)
       return
     }
     let live = true
-    const load = () => {
-      void client.getAuthToken().then(
-        (next) => {
-          if (live) setToken(next)
-        },
-        () => {
-          if (live) setToken(null)
-        },
+    let request = 0
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const load = async () => {
+      const current = ++request
+      clearTimeout(timer)
+      const token = await client.getAuthToken().catch(() => null)
+      if (!live || request !== current) return
+      const exp = token ? jwtClaims(token)?.exp : undefined
+      const expiresAt = typeof exp === 'number' ? exp * 1000 : undefined
+      setBearer(
+        token && (expiresAt === undefined || expiresAt > Date.now()) ? { client, userId, token } : null,
       )
+      // Refresh before expiry even if files are the only authenticated traffic.
+      // A failed refresh retries at a bounded rate; foreground also retries.
+      if (!token || expiresAt !== undefined) {
+        const delay = Math.max(10_000, (expiresAt ?? Date.now()) - Date.now() - 30_000)
+        timer = setTimeout(() => void load(), delay)
+      }
     }
-    load()
-    const unsubscribe = client.subscribe(load)
+    void load()
+    const unsubscribe = client.subscribe(() => void load())
+    const foreground = subscribeToForeground(() => void load())
     return () => {
       live = false
+      clearTimeout(timer)
       unsubscribe()
+      foreground()
     }
-  }, [client, scope, userId])
+  }, [client, scope, userId, key])
 
   if (!key) return null
   const uri = `${client.origin}${appFilePath(key, scope)}`
   if (scope === 'app') return { uri }
-  return token ? { uri, headers: { Authorization: `Bearer ${token}` } } : null
+  const token = bearer?.client === client && bearer.userId === userId ? bearer.token : null
+  const exp = token ? jwtClaims(token)?.exp : undefined
+  return token && (typeof exp !== 'number' || exp * 1000 > Date.now())
+    ? { uri, headers: { Authorization: `Bearer ${token}` } }
+    : null
 }

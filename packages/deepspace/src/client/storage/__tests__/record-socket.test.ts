@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MAX_UNANSWERED_SENDS, RecordSocket, type RecordStoreLike } from '../record-socket'
 import { WriteUnconfirmedError } from '../errors'
-import { MSG } from '../../../shared/protocol/constants'
+import { CONFIRMED_WRITE_RETRY_MS, MSG } from '../../../shared/protocol/constants'
 
 // ── fakes ────────────────────────────────────────────────────────────────────
 
@@ -611,7 +611,8 @@ describe('sendConfirmed', () => {
     const other = await readySocket()
     const pending = other.socket.sendConfirmed({ type: 'mutate', payload: {} })
     other.socket.destroy()
-    await expect(pending).rejects.toMatchObject({ code: 'cancelled' })
+    // Already sent: closing the scope cannot tell whether the server saved it.
+    await expect(pending).rejects.toMatchObject({ code: 'unconfirmed' })
     // Nor can a torn-down socket take new writes.
     await expect(other.socket.sendConfirmed({ type: 'mutate', payload: {} })).rejects.toMatchObject({ code: 'cancelled' })
   })
@@ -746,4 +747,104 @@ describe('dispatch', () => {
     h.ws().serverMessage(MSG.QUERY_RESULT, { subscriptionId: 'sub-1', records: [] })
     expect(h.store.setQueryResult).not.toHaveBeenCalled()
   })
+})
+
+it('a sent write must not be replayed past the server deduplication horizon', async () => {
+  const h = makeSocket()
+  await h.socket.connect('alice')
+  h.ws().serverOpen()
+  h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+  const pending = h.socket
+    .sendConfirmed({
+      type: MSG.PUT,
+      payload: { collection: 'todos', recordId: 'one', data: { title: 'old' } },
+    })
+    .catch((error) => error)
+  const first = h.ws().sentOfType(MSG.PUT)[0]
+  h.ws().serverDrop()
+  vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1000)
+  await h.socket.connect('alice')
+  h.ws().serverOpen()
+  h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+  const resent = h.ws().sentOfType(MSG.PUT)
+  expect(await pending).toMatchObject({ code: 'unconfirmed' })
+  h.socket.destroy()
+  expect(resent.some((message) => message.payload.requestId === first.payload.requestId)).toBe(
+    false,
+  )
+})
+
+it('keeps never-sent offline writes eligible after the retry horizon', async () => {
+  const h = makeSocket()
+  await h.socket.connect('alice')
+  h.ws().serverOpen()
+  h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+  h.ws().serverDrop()
+  const pending = h.socket.sendConfirmed({
+    type: MSG.PUT,
+    payload: { collection: 'todos', recordId: 'one', data: { title: 'new' } },
+  })
+  vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1000)
+  await h.socket.connect('alice')
+  h.ws().serverOpen()
+  h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+  const [sent] = h.ws().sentOfType(MSG.PUT)
+  expect(sent).toBeDefined()
+  h.ws().serverMessage(MSG.ACK, { requestId: sent.payload.requestId, success: true })
+  await pending
+  h.socket.destroy()
+})
+
+it('does not extend the retry horizon when the system clock moves backward', async () => {
+  const monotonic = vi.spyOn(performance, 'now').mockReturnValue(0)
+  const h = makeSocket()
+  try {
+    await h.socket.connect('alice')
+    h.ws().serverOpen()
+    h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+    const pending = h.socket
+      .sendConfirmed({ type: MSG.PUT, payload: { collection: 'todos', data: { title: 'old' } } })
+      .catch((error) => error)
+    h.ws().serverDrop()
+
+    // More than a day elapsed, but an OS clock correction hides it from Date.now().
+    monotonic.mockReturnValue(25 * 60 * 60 * 1000)
+    vi.setSystemTime(Date.now() - 60_000)
+    await h.socket.connect('alice')
+    h.ws().serverOpen()
+    h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+    expect(h.ws().sentOfType(MSG.PUT)).toHaveLength(0)
+    expect(await pending).toMatchObject({ code: 'unconfirmed' })
+  } finally {
+    h.socket.destroy()
+    monotonic.mockRestore()
+  }
+})
+
+it.each([
+  [CONFIRMED_WRITE_RETRY_MS - 1, true],
+  [CONFIRMED_WRITE_RETRY_MS, false],
+])('resends after %i ms only while the retry window is open', async (elapsed, allowed) => {
+  const h = makeSocket()
+  await h.socket.connect('alice')
+  h.ws().serverOpen()
+  h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+  const pending = h.socket
+    .sendConfirmed({ type: MSG.DELETE, payload: { collection: 'todos', recordId: 'one' } })
+    .catch((error) => error)
+  const requestId = h.ws().sentOfType(MSG.DELETE)[0].payload.requestId
+  h.ws().serverDrop()
+  vi.setSystemTime(Date.now() + elapsed)
+  await h.socket.connect('alice')
+  h.ws().serverOpen()
+  h.ws().serverMessage(MSG.USER_INFO, { role: 'member' })
+  if (allowed) {
+    expect(h.ws().sentOfType(MSG.DELETE)[0].payload.requestId).toBe(requestId)
+    h.ws().serverMessage(MSG.ACK, { requestId, success: true })
+    expect(await pending).toEqual({})
+  } else {
+    expect(h.ws().sentOfType(MSG.DELETE)).toHaveLength(0)
+    expect(await pending).toMatchObject({ code: 'unconfirmed' })
+  }
+  h.socket.destroy()
 })

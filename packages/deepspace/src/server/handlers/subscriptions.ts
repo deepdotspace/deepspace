@@ -369,9 +369,8 @@ function executeTableQuery(
   // per-row read filter still applies, SQL would count unreadable rows (a
   // page of them reads as "no more matches"), so scan in bounded batches,
   // skipping `offset` readable records, until the limit is met, the rows run
-  // out, or the scan cap is hit. The cap counts from the batch where the page
-  // starts, keeping `limit` a bound on the page's work (reaching a deep start
-  // costs at most the one full scan an unlimited query makes), and
+  // out, or the scan cap is hit. Skipped and unreadable rows count toward
+  // the same budget: an unreachable offset must not scan the whole room.
   // `scan.capped` makes hitting it observable so a caller's drain loop cannot
   // read a capped short page as exhaustion.
   const rowFiltered = !isSystem && !skipPerRecordCheck
@@ -385,20 +384,18 @@ function executeTableQuery(
   const results: RecordResult[] = []
   const batch = Math.max(query.limit, 200)
   let skipped = 0
-  let pageStart: number | undefined = offset === 0 ? 0 : undefined
   for (let at = 0; ; at += batch) {
     const { records, scanned } = readPage(' LIMIT ? OFFSET ?', [batch, at])
     for (const record of records) {
       if (skipped < offset) {
         skipped++
-        if (skipped === offset) pageStart = at
         continue
       }
       results.push(record)
       if (results.length >= query.limit) return results
     }
     if (scanned < batch) return results
-    if (pageStart !== undefined && at + batch - pageStart >= MAX_FILTERED_SCAN_ROWS) {
+    if (at + batch >= MAX_FILTERED_SCAN_ROWS) {
       // A full final page leaves "capped" and "exhausted exactly on the
       // boundary" indistinguishable; one single-row probe settles it, so
       // `capped` never fires on a table that simply ended here.

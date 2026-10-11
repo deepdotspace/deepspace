@@ -9,7 +9,8 @@ import { useMemo, type ReactElement } from 'react'
 import { DeepSpaceAuthProvider } from '../client/auth/DeepSpaceAuthProvider'
 import { useAuth as useBrowserAuth } from '../client/auth/hooks'
 import { authClient, signOut as endBrowserSession } from '../client/auth/client'
-import { getAuthToken } from '../client/auth/token'
+import { clearAuthToken, getAuthToken } from '../client/auth/token'
+import { DeepSpaceExpoError } from '../expo-errors'
 import { KeyboardShortcutsRoot } from '../client/input/keyboard'
 import { appFilePath } from '../shared/app-files'
 import type {
@@ -32,7 +33,8 @@ import type { ActionResult } from '../server/utils/action-types'
  * origin's cookie. Methods that only exist for a keychain session behave as
  * the browser does (sign-in navigates to the provider and back).
  */
-class DeepSpaceWebClient {
+class DeepSpaceWebClient implements Pick<DeepSpaceExpoClient, keyof DeepSpaceExpoClient> {
+  constructor(_options?: DeepSpaceExpoClientOptions) {}
   // Same members the native client exposes to apps; see `DeepSpaceExpoClient`.
   get origin(): string {
     return window.location.origin
@@ -68,6 +70,19 @@ class DeepSpaceWebClient {
     return new Promise<DeepSpaceExpoUser>(() => {})
   }
 
+  signInWithGoogle(): Promise<DeepSpaceExpoUser> {
+    return this.signIn('google')
+  }
+
+  refresh(): Promise<string | null> {
+    clearAuthToken()
+    return getAuthToken()
+  }
+
+  me(): Promise<DeepSpaceExpoUser> {
+    return this.request('/api/auth/native-me')
+  }
+
   getAuthToken(): Promise<string | null> {
     return getAuthToken()
   }
@@ -79,7 +94,7 @@ class DeepSpaceWebClient {
     if (token) headers.set('Authorization', `Bearer ${token}`)
     const response = await fetch(path, { ...init, headers, credentials: 'same-origin' })
     const body = (await response.json().catch(() => ({}))) as T & { error?: string }
-    if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : `DeepSpace request failed (${response.status})`)
+    if (!response.ok) throw new DeepSpaceExpoError(typeof body.error === 'string' ? body.error : `DeepSpace request failed (${response.status})`, response.status, body)
     return body
   }
 
@@ -102,6 +117,8 @@ async function sessionFor(sessionToken: string | null): Promise<DeepSpaceExpoSes
 export { DeepSpaceWebClient as DeepSpaceExpoClient }
 
 export function createDeepSpaceExpoClient(_options?: DeepSpaceExpoClientOptions): DeepSpaceExpoClient {
+  // The implements clause checks every public member; only the native class's
+  // private fields prevent structural assignment between these runtimes.
   return new DeepSpaceWebClient() as unknown as DeepSpaceExpoClient
 }
 

@@ -18,7 +18,7 @@ import { RecordRoomNotReadyError, WriteCancelledError, WriteUnconfirmedError } f
 import { parseServerError } from './serverErrors'
 import type { CollectionSchema, Query } from '../../shared/types'
 import type { RoomUser, RoomConnectionState, RecordData } from './types'
-import { MSG } from '../../shared/protocol/constants'
+import { CONFIRMED_WRITE_RETRY_MS, MSG } from '../../shared/protocol/constants'
 import { appOrigin } from '../platform/origin'
 
 // WebSocket readyState per spec — avoids touching the global WebSocket
@@ -113,6 +113,8 @@ interface PendingWrite {
   timer: ReturnType<typeof setTimeout> | null
   /** Sends the server left unanswered within `timeoutMs`; waiting while offline does not count. */
   unanswered: number
+  /** Null until it first leaves this client; unsent offline work can still wait. */
+  firstSentAt: { wall: number; monotonic: number } | null
 }
 
 /**
@@ -389,7 +391,8 @@ export class RecordSocket {
    * answer within `timeoutMs` marks the connection dead: the socket closes,
    * reconnects, and sends it again. Rejects when the server refuses the write;
    * with `WriteUnconfirmedError` when it leaves the write unanswered on
-   * MAX_UNANSWERED_SENDS connections; with `RecordRoomNotReadyError` before
+   * MAX_UNANSWERED_SENDS connections or a resend would outlive the server ledger;
+   * with `RecordRoomNotReadyError` before
    * the room was ever ready; and with `WriteCancelledError` when the identity
    * changes or the socket is torn down before the write was sent.
    */
@@ -402,7 +405,10 @@ export class RecordSocket {
     // Unique per user for as long as the room's ledger remembers it (a day).
     const requestId = `${Date.now().toString(36)}-${randomPart()}${randomPart()}`
     return new Promise((resolve, reject) => {
-      const write: PendingWrite = { message, resolve, reject, timeoutMs, timer: null, unanswered: 0 }
+      const write: PendingWrite = {
+        message, resolve, reject, timeoutMs,
+        timer: null, unanswered: 0, firstSentAt: null,
+      }
       this.outbox.set(requestId, write)
       if (this.writable) this.transmit(requestId, write)
     })
@@ -411,6 +417,21 @@ export class RecordSocket {
   private transmit(requestId: string, write: PendingWrite): void {
     const ws = this.ws
     if (!ws || ws.readyState !== WS_OPEN) return
+    // Wall time includes device sleep on platforms whose monotonic clock pauses;
+    // monotonic time prevents a backward system-clock correction extending retries.
+    const now = { wall: Date.now(), monotonic: performance.now() }
+    if (
+      write.firstSentAt !== null &&
+      Math.max(
+        now.wall - write.firstSentAt.wall,
+        now.monotonic - write.firstSentAt.monotonic,
+      ) >= CONFIRMED_WRITE_RETRY_MS
+    ) {
+      this.outbox.delete(requestId)
+      write.reject(new WriteUnconfirmedError())
+      return
+    }
+    write.firstSentAt ??= now
     ws.send(JSON.stringify({ ...write.message, payload: { ...write.message.payload, requestId } }))
     write.timer = setTimeout(() => {
       write.timer = null
@@ -437,7 +458,7 @@ export class RecordSocket {
   private dropWrites(): void {
     for (const write of this.outbox.values()) {
       if (write.timer) clearTimeout(write.timer)
-      write.reject(new WriteCancelledError())
+      write.reject(write.firstSentAt === null ? new WriteCancelledError() : new WriteUnconfirmedError())
     }
     this.outbox.clear()
   }

@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.42.2
+
+### Patch Changes
+
+- Guard native session changes against late token refreshes, slow storage writes, and cross-account request retries. Renew private-file credentials before expiry and when the file changes, keeping bearers bound to their app client; complete the browser native client's sign-in, refresh, and identity methods. Stop replaying sent confirmed writes before the server forgets their outcome, including after system-clock changes, reporting uncertainty instead of resending stale data. Apply the record-query scan budget to skipped rows as well as returned rows.
+
 ## 0.42.1
 
 ### Patch Changes

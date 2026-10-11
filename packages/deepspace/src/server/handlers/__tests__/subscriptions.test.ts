@@ -497,3 +497,30 @@ describe('executeQuery limit', () => {
     expect(select.query).not.toContain('OFFSET')
   })
 })
+
+it('offset=1 must not remove the filtered scan budget', () => {
+  const db = new Database(':memory:')
+  const schema: CollectionSchema = {
+    name: 'notes',
+    columns: [{ name: 'sharedWith', storage: 'text', interpretation: 'plain' }],
+    collaboratorsField: 'sharedWith',
+    permissions: { member: { read: 'collaborator', create: true, update: 'own', delete: 'own' } },
+  }
+  const spy = makeSqlSpy(db)
+  const ctx = makeContext(db, [schema], spy)
+  ensureCollectionTable(ctx.sql, schema)
+  for (let i = 0; i < MAX_FILTERED_SCAN_ROWS * 2; i++)
+    insert(db, 'c_notes', { recordId: String(i), createdBy: 'bob' })
+  spy.queries.length = 0
+  const scan = { capped: false }
+  executeQuery(ctx, { collection: 'notes', limit: 1 }, 'alice', 'member', false, {
+    offset: 1,
+    scan,
+  })
+  const reads = spy.queries.filter(
+    (q) => q.query.includes('FROM "c_notes"') && q.query.includes('LIMIT'),
+  )
+  expect(reads).toHaveLength(MAX_FILTERED_SCAN_ROWS / 200 + 1)
+  expect(scan.capped).toBe(true)
+  db.close()
+})

@@ -14,8 +14,8 @@ export class RecordRoomNotReadyError extends Error {
 
 /**
  * The room left a confirmed write unanswered on several fresh connections
- * (RecordSocket's MAX_UNANSWERED_SENDS). Waiting offline never causes this;
- * the server not answering the write itself does.
+ * (RecordSocket's MAX_UNANSWERED_SENDS), its safe resend window expired, or
+ * its scope closed after sending it but before learning the outcome.
  */
 export class WriteUnconfirmedError extends Error {
   readonly code = 'unconfirmed'

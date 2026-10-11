@@ -140,3 +140,8 @@ export const ROLE_ADMIN = 'admin'
  * hit kept returning null, and that difference is an existence oracle.
  */
 export const RECORD_NOT_FOUND = 'Record not found'
+
+/** How long RecordRoom retains a confirmed write outcome. */
+export const CONFIRMED_WRITE_RETENTION_MS = 24 * 60 * 60 * 1000
+/** Stop resending before the server may prune the outcome; reserve a minute for transit. */
+export const CONFIRMED_WRITE_RETRY_MS = CONFIRMED_WRITE_RETENTION_MS - 60_000

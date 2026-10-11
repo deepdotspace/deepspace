@@ -9,7 +9,7 @@ import type { RecordResult, PutPayload, DeletePayload } from '../../shared/types
 import type { ToolResult } from '../utils/tools'
 import { DEFAULT_DELETE_WHERE_LIMIT, MAX_DELETE_WHERE_LIMIT } from '../utils/tools'
 import { serverBuild } from '../../shared/protocol/messages'
-import { ANONYMOUS_USER_ID_PREFIX, RECORD_NOT_FOUND, isAnonymousUserId } from '../../shared/protocol/constants'
+import { ANONYMOUS_USER_ID_PREFIX, CONFIRMED_WRITE_RETENTION_MS, RECORD_NOT_FOUND, isAnonymousUserId } from '../../shared/protocol/constants'
 import {
   type CollectionSchema,
   type ResolvedColumn,
@@ -201,8 +201,6 @@ export function getRecord(
  * writers therefore share one key, and only the requestId (random, and only
  * ever sent back to its own socket) tells their writes apart.
  */
-const WRITE_LEDGER_RETENTION_MS = 24 * 60 * 60 * 1000
-
 function ledgerWriter(userId: string): string {
   return isAnonymousUserId(userId) ? ANONYMOUS_USER_ID_PREFIX : userId
 }
@@ -255,7 +253,7 @@ function applyConfirmed(
       outcome.recordId ?? null,
       now,
     )
-    ctx.sql.exec(`DELETE FROM _confirmed_writes WHERE at < ?`, now - WRITE_LEDGER_RETENTION_MS)
+    ctx.sql.exec(`DELETE FROM _confirmed_writes WHERE at < ?`, now - CONFIRMED_WRITE_RETENTION_MS)
   }
   ctx.send(
     ws,

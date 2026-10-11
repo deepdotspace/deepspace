@@ -98,6 +98,10 @@ export class DeepSpaceExpoClient {
   private readonly timeoutMs: number
   private session: DeepSpaceExpoSession | null | undefined
   private refreshing: Promise<string | null> | null = null
+  private sessionGeneration = 0
+  // Expiry may clear the old session while a replacement sign-in is pending.
+  private authOperationGeneration = 0
+  private storageWrites: Promise<void> = Promise.resolve()
   private readonly listeners = new Set<DeepSpaceExpoSessionListener>()
 
   constructor(options: DeepSpaceExpoClientOptions) {
@@ -127,18 +131,24 @@ export class DeepSpaceExpoClient {
   async getSession(): Promise<DeepSpaceExpoSession | null> {
     if (this.session !== undefined) return this.session
     const raw = await this.storage.getItem(this.storageKey)
+    // A sign-in or sign-out may have completed while SecureStore was reading.
+    if (this.session !== undefined) return this.session
     if (!raw) return (this.session = null)
     try {
       const value = JSON.parse(raw) as Partial<DeepSpaceExpoSession>
       if (typeof value.sessionToken !== 'string' || typeof value.accessToken !== 'string') throw new Error('invalid session')
       return (this.session = value as DeepSpaceExpoSession)
     } catch {
-      await this.storage.deleteItem(this.storageKey)
-      return (this.session = null)
+      this.session = null
+      await this.writeStorage(() => this.storage.deleteItem(this.storageKey))
+      return this.session
     }
   }
 
   async signIn(provider: ExpoAuthProvider = 'google', state?: string): Promise<DeepSpaceExpoUser> {
+    const generation = ++this.authOperationGeneration
+    this.sessionGeneration += 1
+    this.refreshing = null
     const expectedState = state ?? createOAuthState()
     const codeVerifier = createCodeVerifier()
     const codeChallenge = await createCodeChallenge(codeVerifier)
@@ -162,8 +172,26 @@ export class DeepSpaceExpoClient {
       method: 'POST',
       body: JSON.stringify({ code, code_verifier: codeVerifier }),
     })
+    if (generation !== this.authOperationGeneration) {
+      throw new DeepSpaceExpoError('The sign-in was superseded by another session change.', 409, null)
+    }
+    this.sessionGeneration += 1
+    this.refreshing = null
     await this.saveSession(session)
-    return this.me()
+    if (
+      generation !== this.authOperationGeneration ||
+      this.session?.sessionToken !== session.sessionToken
+    ) {
+      throw new DeepSpaceExpoError('The sign-in was superseded by another session change.', 409, null)
+    }
+    const user = await this.me()
+    if (
+      generation !== this.authOperationGeneration ||
+      this.session?.sessionToken !== session.sessionToken
+    ) {
+      throw new DeepSpaceExpoError('The sign-in was superseded by another session change.', 409, null)
+    }
+    return user
   }
 
   signInWithGoogle(state?: string): Promise<DeepSpaceExpoUser> { return this.signIn('google', state) }
@@ -171,24 +199,29 @@ export class DeepSpaceExpoClient {
   /** Mint a fresh bearer from the stored session. Concurrent callers share one request. */
   refresh(): Promise<string | null> {
     if (!this.refreshing) {
-      this.refreshing = this.refreshOnce().finally(() => {
-        this.refreshing = null
+      const refreshing = this.refreshOnce().finally(() => {
+        if (this.refreshing === refreshing) this.refreshing = null
       })
+      this.refreshing = refreshing
     }
     return this.refreshing
   }
 
   private async refreshOnce(): Promise<string | null> {
+    const generation = this.sessionGeneration
     const session = await this.getSession()
-    if (!session) return null
+    if (!session || generation !== this.sessionGeneration) return null
+    const current = () => generation === this.sessionGeneration && this.session === session
     try {
       const next = await this.json<{ accessToken?: string; token?: string }>(this.paths.token, { method: 'POST', body: JSON.stringify({ sessionToken: session.sessionToken }) })
       const accessToken = next.accessToken ?? next.token
       if (!accessToken) throw new Error('DeepSpace did not issue an access token')
-      await this.saveSession({ ...session, accessToken })
-      return accessToken
+      if (!current()) return null
+      const refreshed = { ...session, accessToken }
+      await this.saveSession(refreshed)
+      return generation === this.sessionGeneration && this.session === refreshed ? accessToken : null
     } catch (error) {
-      if (error instanceof DeepSpaceExpoError && error.status === 401) await this.clearSession()
+      if (current() && error instanceof DeepSpaceExpoError && error.status === 401) await this.clearSession()
       return null
     }
   }
@@ -212,7 +245,11 @@ export class DeepSpaceExpoClient {
   }
 
   async request<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
+    const generation = this.sessionGeneration
     const token = await this.getAuthToken()
+    if (generation !== this.sessionGeneration) {
+      throw new DeepSpaceExpoError('The request was superseded by a session change.', 409, null)
+    }
     const headers = new Headers(init.headers)
     if (!headers.has('Content-Type') && init.body != null && isJsonBody(init.body)) {
       headers.set('Content-Type', 'application/json')
@@ -220,20 +257,29 @@ export class DeepSpaceExpoClient {
     if (token) headers.set('Authorization', `Bearer ${token}`)
     const response = await this.fetchWithTimeout(`${this.baseUrl}${path}`, { ...init, headers })
     const body = await response.json().catch(() => ({})) as T & { error?: string }
-    if (response.status === 401 && !retried && isReplayableBody(init.body) && (await this.getSession())?.sessionToken) {
+    if (
+      response.status === 401 && !retried && generation === this.sessionGeneration &&
+      isReplayableBody(init.body) && this.session?.sessionToken
+    ) {
       const refreshed = await this.refresh()
-      if (refreshed) return this.request<T>(path, init, true)
+      if (refreshed && generation === this.sessionGeneration) return this.request<T>(path, init, true)
     }
     if (!response.ok) throw new DeepSpaceExpoError(typeof body.error === 'string' ? body.error : `DeepSpace request failed (${response.status})`, response.status, body)
     return body
   }
 
   async signOut(): Promise<void> {
+    // Claim the change before loading storage so a later sign-in wins even
+    // when the initial SecureStore read is still in flight.
+    const generation = ++this.authOperationGeneration
+    this.sessionGeneration += 1
+    this.refreshing = null
     const session = await this.getSession()
+    if (generation !== this.authOperationGeneration) return
+    await this.clearSession()
     if (session) {
       await this.fetchWithTimeout(`${this.baseUrl}${this.paths.signOut}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionToken: session.sessionToken }) }).catch(() => undefined)
     }
-    await this.clearSession()
   }
 
   private async json<T>(path: string, init: RequestInit): Promise<T> {
@@ -245,14 +291,23 @@ export class DeepSpaceExpoClient {
 
   private async saveSession(session: DeepSpaceExpoSession) {
     this.session = session
-    await this.storage.setItem(this.storageKey, JSON.stringify(session))
-    this.notify(session)
+    await this.writeStorage(() => this.storage.setItem(this.storageKey, JSON.stringify(session)))
+    if (this.session === session) this.notify(session)
   }
 
   private async clearSession() {
+    const generation = ++this.sessionGeneration
+    this.refreshing = null
     this.session = null
-    await this.storage.deleteItem(this.storageKey)
-    this.notify(null)
+    await this.writeStorage(() => this.storage.deleteItem(this.storageKey))
+    if (generation === this.sessionGeneration) this.notify(null)
+  }
+
+  // SecureStore writes must complete in session-change order. A slow old save
+  // must never land after the delete or save that replaced it.
+  private writeStorage(write: () => Promise<void>): Promise<void> {
+    this.storageWrites = this.storageWrites.catch(() => {}).then(write)
+    return this.storageWrites
   }
 
   private notify(session: DeepSpaceExpoSession | null) {

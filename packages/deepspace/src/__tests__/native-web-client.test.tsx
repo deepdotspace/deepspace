@@ -31,7 +31,7 @@ vi.mock('../client/auth/client', () => ({
   },
   signOut: async () => {},
 }))
-vi.mock('../client/auth/token', () => ({ getAuthToken: async () => 'bearer' }))
+vi.mock('../client/auth/token', () => ({ getAuthToken: vi.fn(async () => 'bearer'), clearAuthToken: vi.fn() }))
 vi.mock('../client/auth/DeepSpaceAuthProvider', () => ({
   DeepSpaceAuthProvider: ({ children }: { children: unknown }) => children,
 }))
@@ -296,4 +296,47 @@ describe('web integration consent', () => {
     vi.spyOn(window, 'open').mockReturnValue(null)
     await expect(openIntegrationConsent('https://accounts.example.com/consent')).rejects.toThrow(/pop-ups/)
   })
+})
+
+it('the browser client implements all methods promised by its native type', () => {
+  const client = createDeepSpaceExpoClient()
+  expect(
+    ['signInWithGoogle', 'refresh', 'me'].map(
+      (name) => typeof client[name as 'signInWithGoogle' | 'refresh' | 'me'],
+    ),
+  ).toEqual(['function', 'function', 'function'])
+})
+
+it('refresh invalidates the browser bearer and me uses the authenticated identity endpoint', async () => {
+  const { clearAuthToken } = await import('../client/auth/token')
+  const client = createDeepSpaceExpoClient()
+  expect(await client.refresh()).toBe('bearer')
+  expect(clearAuthToken).toHaveBeenCalled()
+  const fetcher = vi
+    .spyOn(globalThis, 'fetch')
+    .mockResolvedValue(Response.json({ userId: 'alice', claims: { sub: 'alice' } }))
+  try {
+    expect(await client.me()).toEqual({ userId: 'alice', claims: { sub: 'alice' } })
+    expect(fetcher).toHaveBeenCalledWith(
+      '/api/auth/native-me',
+      expect.objectContaining({ headers: expect.any(Headers) }),
+    )
+    expect(new Headers(fetcher.mock.calls[0][1]?.headers).get('Authorization')).toBe(
+      'Bearer bearer',
+    )
+    fetcher.mockResolvedValue(Response.json({ error: 'denied' }, { status: 401 }))
+    const { DeepSpaceExpoError } = await import('../expo-errors')
+    await expect(client.me()).rejects.toBeInstanceOf(DeepSpaceExpoError)
+  } finally {
+    fetcher.mockRestore()
+  }
+})
+
+it('signInWithGoogle delegates to the browser OAuth redirect', async () => {
+  const client = createDeepSpaceExpoClient()
+  const signIn = vi
+    .spyOn(client, 'signIn')
+    .mockResolvedValue({ userId: 'alice', claims: { sub: 'alice' } })
+  await client.signInWithGoogle()
+  expect(signIn).toHaveBeenCalledWith('google')
 })
