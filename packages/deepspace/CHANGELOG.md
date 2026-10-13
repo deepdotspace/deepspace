@@ -1,5 +1,13 @@
 # deepspace
 
+## 0.42.3
+
+### Patch Changes
+
+- Document the planned autonomous agent account and permanent full-stack hosting
+  experience, including McAPI integration access. This release records the
+  product direction; autonomous registration remains in development.
+
 ## 0.42.2
 
 ### Patch Changes
