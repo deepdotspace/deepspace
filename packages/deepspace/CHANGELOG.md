@@ -1,5 +1,19 @@
 # deepspace
 
+## 0.42.4
+
+### Patch Changes
+
+- `streamDeepSpaceAgent` accepts `effort` (`low` to `max`) to set how much a Claude model thinks and writes, and now runs Claude Sonnet 5.5 at `medium` by default, matching Opus 5.5 and Haiku 5.5. Each catalog model that supports effort lists its default as `agentEffort`. The AI SDK's `reasoning` call option is removed from `streamDeepSpaceAgent`'s options; use `effort`.
+- `streamDeepSpaceAgent` accepts `maxToolCalls` (1 to 100, default 20) for the application profile, so an in-app assistant that does bulk work can make more tool calls per turn. When a turn reaches its limit, the agent now replies with what it did and what is left instead of returning an empty answer.
+
+  `DeepSpaceAgentProfile` no longer has `maxSteps`; a turn always allows `maxToolCalls + 1` steps. The new `maxToolCallsCeiling` is the highest override a profile accepts.
+
+- Refresh the model lineup: Claude Sonnet 5.5 and Claude Haiku 5.5 replace Claude Sonnet 5 and Haiku 4.5 in the model picker, and GPT-6.1 Sol is available for direct generation (its tool calling needs the Responses API, which the proxy does not serve). Claude Sonnet 5 and Haiku 4.5 leave the picker but still resolve by id on the server, so apps that pass them keep working. The default chat summarizer now uses Claude Haiku 5.5 at low effort.
+- Keep noindex pages crawlable so search engines can read their exclusion, enforce the scaffold's site-wide noindex policy, omit excluded pages from its sitemap, and mark client-side not-found pages noindex. Add read-only SEO adoption guidance for existing app-owned scaffolds.
+
+  Keep the Node-only prerender regression test beside the build plugin so fresh app TypeScript checks do not require Node types in the browser/Worker project.
+
 ## 0.42.3
 
 ### Patch Changes

@@ -123,9 +123,9 @@ const ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS = 64_000
 
 /**
  * OpenAI takes function tools on Chat Completions for these models only with
- * `reasoning_effort: 'none'` (GPT-6 Astra takes neither; its tools need the
- * Responses API). @ai-sdk/openai 4 drops `'none'` for GPT-6, so it is
- * restored here when a request carries tools and no effort.
+ * `reasoning_effort: 'none'` (GPT-6 Astra and GPT-6.1 Sol take neither; their
+ * tools need the Responses API). @ai-sdk/openai 4 drops `'none'` for GPT-6, so
+ * it is restored here when a request carries tools and no effort.
  */
 const OPENAI_TOOLS_NEED_NO_REASONING = /^gpt-(5\.6|6)-(sol|terra|luna)(-|$)/
 

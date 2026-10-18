@@ -17,7 +17,8 @@
  *     it for client routes (/home, /settings, …) so a refresh there never
  *     paints the landing page or hands crawlers the `/` canonical.
  *   - `sitemap.xml`, and the `Sitemap:` line appended to public/robots.txt's
- *     copy — or `Disallow: /` and no sitemap when src/seo.ts says `noindex`.
+ *     copy. With `noindex`, allow crawling of the removal directive and omit
+ *     the sitemap. Per-page noindex pages are also omitted from the sitemap.
  *
  * Why a Vite plugin: `deepspace deploy` runs `npx vite build` directly, never
  * package.json scripts, so this is the only seam that runs at deploy time.
@@ -123,6 +124,7 @@ export function prerender(): Plugin {
       // 3. Each page, in the order PAGES lists them (the template was read above,
       //    so overwriting index.html here is safe in any order).
       const routes = entry.PRERENDER_ROUTES
+      const indexableRoutes: string[] = []
       for (const route of routes) {
         const html = entry.render(route)
         const at = html.indexOf(BODY_ANCHOR)
@@ -135,13 +137,17 @@ export function prerender(): Plugin {
         if (!body.includes('<h') && !body.includes('<p')) {
           throw new Error(`[prerender] ${route} rendered an empty page — public pages must return markup without a browser.`)
         }
-        const page = stampHead(template, head).replace(
+        let page = stampHead(template, head).replace(
           ROOT_PLACEHOLDER,
           // Replacer FUNCTION: a replacement STRING would expand `$&`/`$$`
           // appearing in the page's copy. data-prerendered tells src/main.tsx
           // to hydrate this markup instead of repainting it.
           () => `<div id="root" data-prerendered="${route}">${body}</div>`,
         )
+        // Site policy applies even when a page forgets to spread seo into
+        // <Seo>. A page-level exclusion must also stay out of the sitemap.
+        if (noindex) page = withNoindexMeta(page)
+        if (!hasNoindexMeta(page)) indexableRoutes.push(route)
         if (page.includes('__DEEPSPACE_APP_ID__')) {
           throw new Error(`[prerender] ${route} contains the literal __DEEPSPACE_APP_ID__; the deploy would refuse it.`)
         }
@@ -155,13 +161,16 @@ export function prerender(): Plugin {
       //    the one line only the build knows.
       const robotsPath = join(clientDir, 'robots.txt')
       if (noindex) {
-        writeFileSync(robotsPath, 'User-agent: *\nDisallow: /\n')
+        // Crawlers must fetch the HTML to see noindex, including when an
+        // already indexed site switches policy. robots.txt is not access control.
+        writeFileSync(robotsPath, 'User-agent: *\nAllow: /\n')
+        rmSync(join(clientDir, 'sitemap.xml'), { force: true })
       } else {
         const robots = existsSync(robotsPath) ? readFileSync(robotsPath, 'utf8') : 'User-agent: *\nAllow: /\n'
         if (!/^Sitemap:/m.test(robots)) writeFileSync(robotsPath, `${robots.trimEnd()}\n\nSitemap: ${origin}/sitemap.xml\n`)
         writeFileSync(
           join(clientDir, 'sitemap.xml'),
-          `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${routes
+          `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${indexableRoutes
             .map((route) => `  <url><loc>${origin}${route}</loc></url>`)
             .join('\n')}\n</urlset>\n`,
         )
@@ -195,5 +204,14 @@ function stampHead(template: string, head: string): string {
 }
 
 function withNoindexMeta(template: string): string {
+  if (hasNoindexMeta(template)) return template
   return template.replace('</head>', () => `<meta name="robots" content="noindex, nofollow"/>\n  </head>`)
+}
+
+/** React's <Seo> serializes quoted attributes; accept either quote and order. */
+function hasNoindexMeta(html: string): boolean {
+  return (html.match(/<meta\b[^>]*>/gi) ?? []).some((tag) =>
+    /\bname\s*=\s*["']robots["']/i.test(tag) &&
+    /\bcontent\s*=\s*["'][^"']*\b(?:noindex|none)\b[^"']*["']/i.test(tag),
+  )
 }

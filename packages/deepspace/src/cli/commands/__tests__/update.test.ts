@@ -86,6 +86,20 @@ describe('app update version authority', () => {
 })
 
 describe('app update guidance', () => {
+  it('offers SEO adoption to an older scaffold without changing its indexing policy', async () => {
+    const dir = makeApp({ deepspace: '0.32.1' })
+    const path = join(dir, 'index.html')
+    const html = '<meta name="robots" content="noindex, nofollow"><div id="root"></div>'
+    writeFileSync(path, html)
+    const result = await runUpdate(dir)
+    const migrations = result.migrations as Array<{ id: string; guidance: string }>
+    const seo = migrations.find(({ id }) => id === '2026-10-public-page-seo')
+    expect(seo?.guidance).toContain('explicitly choose which pages may be indexed')
+    expect(result.writes).toEqual([])
+    expect(readFileSync(path, 'utf8')).toBe(html)
+    expect(() => readFileSync(join(dir, 'deepspace.migrations.json'))).toThrow()
+  })
+
   it('is read-only, requires no Git repository, and names the detected package manager', async () => {
     const dir = makeApp({ packageManager: 'pnpm@11.18.0' })
     mkdirSync(join(dir, 'nested', 'src'), { recursive: true })

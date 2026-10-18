@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import sdkPackage from '../../../../package.json'
 import { APP_ID_ADOPTION_EDITS, APP_ID_ADOPTION_TOGETHER } from '../../../build/app-id'
 import {
   ACTION_ROUTES_BEARER_GUARD_MIGRATION_ID,
@@ -9,6 +10,7 @@ import {
   BUILD_INJECTED_APP_ID_MIGRATION_ID,
   FILES_SESSION_COOKIE_READS_MIGRATION_ID,
   INTEGRATIONS_SIGN_IN_MIGRATION_ID,
+  PUBLIC_PAGE_SEO_MIGRATION_ID,
   SECURE_ROOM_BOUNDARIES_MIGRATION_ID,
   WORKER_OWNED_NOT_FOUND_MIGRATION_ID,
   validateAppMigrationIds,
@@ -30,6 +32,13 @@ export interface AppMigrationGuidance {
 }
 
 export const APP_MIGRATION_GUIDANCE: readonly AppMigrationGuidance[] = [
+  {
+    id: PUBLIC_PAGE_SEO_MIGRATION_ID,
+    description: 'Review public-page indexing and adopt the scaffold SEO build where appropriate',
+    files: ['index.html', 'vite.config.ts', 'prerender.ts', 'src/seo.ts', 'src/prerender-entry.tsx', 'src/components/Seo.tsx', 'src/main.tsx', 'src/server/http-routes.ts', 'public/robots.txt'],
+    guidance:
+      `Optional for private apps. A dependency upgrade does not replace copied scaffold files. Follow https://github.com/deepdotspace/deepspace/blob/v${sdkPackage.version}/docs/migrations/public-page-seo.md: explicitly choose which pages may be indexed before removing any noindex, then adopt prerendering, per-page metadata, the canonical origin, sitemap and plain SPA shell together. Keep authentication and private-route exclusions. noindex pages must remain crawlable for search engines to read the directive, and must stay out of the sitemap. Validate built HTML and browser hydration before recording this id; record it as not applicable when the app intentionally stays private.`,
+  },
   {
     id: WORKER_OWNED_NOT_FOUND_MIGRATION_ID,
     description: 'Let the worker answer misses, so deleted files 404 instead of serving HTML',

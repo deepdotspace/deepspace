@@ -12,10 +12,11 @@ const appDir = fileURLToPath(new URL('.', import.meta.url))
 //      toolchain (@cloudflare/vite-plugin, generouted, vite-plugin-checker).
 //      Vitest cannot load those plugins, and they are irrelevant to unit tests.
 //   2. Vitest's default `include` would sweep up the Playwright specs in
-//      tests/*.spec.ts and fail. Scoping to src keeps the runners separate:
-//      unit tests here, Playwright via `npm test` / tests/playwright.config.ts.
+//      tests/*.spec.ts and fail. Explicit unit-test paths keep the runners
+//      separate; Playwright runs via `npm test` / tests/playwright.config.ts.
 //
-// Unit tests live next to the source they cover (src/**/*.{test,spec}.ts[x]).
+// Unit tests live next to their source. The Node-only prerender test stays at
+// the root so it does not enter the browser/Worker TypeScript project in src/.
 export default defineConfig({
   // Same app id the bundle is built with, from the same wrangler config —
   // so a unit test importing src/constants.ts sees what the browser will.
@@ -27,7 +28,7 @@ export default defineConfig({
   },
   test: {
     // Unit tests only; tests/*.spec.ts are Playwright suites run separately.
-    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    include: ['prerender.test.ts', 'src/**/*.{test,spec}.{ts,tsx}'],
     environment: 'node',
   },
 })

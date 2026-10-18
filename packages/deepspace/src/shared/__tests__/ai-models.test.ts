@@ -18,15 +18,16 @@ describe('canonical DeepSpace model catalog', () => {
     expect(current).toEqual([
       'claude-opus-5-5',
       'claude-fable-5-1',
-      'claude-sonnet-5',
-      'claude-haiku-4-5',
+      'claude-sonnet-5-5',
+      'claude-haiku-5-5',
       'gpt-6-sol',
       'gpt-6-luna',
       'gpt-6-astra',
+      'gpt-6.1-sol',
       'gpt-oss-120b',
       'qwen-3.8-27b',
     ])
-    expect(DEEPSPACE_MODEL_CATALOG_PROVENANCE.version).toBe('2026-09-24')
+    expect(DEEPSPACE_MODEL_CATALOG_PROVENANCE.version).toBe('2026-10-13')
     expect(Object.values(DEEPSPACE_MODEL_CATALOG_PROVENANCE.sources)
       .every((source) => source.startsWith('https://'))).toBe(true)
   })
@@ -34,20 +35,21 @@ describe('canonical DeepSpace model catalog', () => {
   it('defaults agents and direct generation to Claude Opus 5.5', () => {
     expect(DEEPSPACE_AI_DEFAULTS.agent).toBe('claude-opus-5-5')
     expect(DEEPSPACE_AI_DEFAULTS.directGeneration).toBe('claude-opus-5-5')
+    expect(DEEPSPACE_AI_DEFAULTS.summarization).toBe('claude-haiku-5-5')
   })
 
   it('keeps superseded models resolvable but out of pickers', () => {
     const listed = listDeepSpaceAgentModels('application').map((model) => model.id)
-    for (const id of ['claude-opus-5', 'claude-fable-5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+    for (const id of ['claude-opus-5', 'claude-fable-5', 'claude-sonnet-5', 'claude-haiku-4-5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
       expect(getDeepSpaceAIModel(id)?.legacy).toBe(true)
       expect(resolveDeepSpaceAgentModel(id, 'application')?.modelId).toBe(id)
       expect(listed).not.toContain(id)
     }
   })
 
-  it('keeps GPT-6 Astra out of the agent loop (its tools need the Responses API)', () => {
-    expect(getDeepSpaceAIModel('gpt-6-astra')?.agentSupport).toBe('none')
-    expect(resolveDeepSpaceAgentModel('gpt-6-astra', 'application')).toBeNull()
+  it.each(['gpt-6-astra', 'gpt-6.1-sol'])('keeps %s out of the agent loop (its tools need the Responses API)', (id) => {
+    expect(getDeepSpaceAIModel(id)?.agentSupport).toBe('none')
+    expect(resolveDeepSpaceAgentModel(id, 'application')).toBeNull()
   })
 
   it('uses the same compatible selection for application and docs agents', () => {
@@ -62,9 +64,9 @@ describe('canonical DeepSpace model catalog', () => {
     expect(DEEPSPACE_AGENT_PROFILES.documentation.allowedTools)
       .toEqual(['documentation_search', 'documentation_read'])
     expect(DEEPSPACE_AGENT_PROFILES.documentation.maxToolCalls).toBe(20)
-    expect(DEEPSPACE_AGENT_PROFILES.documentation.maxSteps).toBe(21)
+    expect(DEEPSPACE_AGENT_PROFILES.documentation).not.toHaveProperty('maxToolCallsCeiling')
     expect(DEEPSPACE_AGENT_PROFILES.application.maxToolCalls).toBe(20)
-    expect(DEEPSPACE_AGENT_PROFILES.application.maxSteps).toBe(21)
+    expect(DEEPSPACE_AGENT_PROFILES.application.maxToolCallsCeiling).toBe(100)
   })
 
   it.each(['gpt-oss-120b', 'qwen-3.8-27b'])('keeps direct-generation model %s out of multi-step agent profiles', (id) => {

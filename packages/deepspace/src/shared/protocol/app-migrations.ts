@@ -39,6 +39,9 @@ export const INTEGRATIONS_SIGN_IN_MIGRATION_ID = '2026-10-integrations-sign-in'
  *  per user or team can choose each caller's room. */
 export const AGENT_TOOL_CONTEXT_MIGRATION_ID = '2026-10-agent-tool-context'
 
+/** Older copied scaffolds need an explicit public-page indexing review. */
+export const PUBLIC_PAGE_SEO_MIGRATION_ID = '2026-10-public-page-seo'
+
 export type AppMigrationIdsValidation =
   | { valid: true; ids: string[] }
   | { valid: false; reason: string }

@@ -24,6 +24,17 @@ function fixture(config: Record<string, unknown>, pages: Record<string, string>)
 }
 
 describe('DeepSpace documentation compiler', () => {
+  it('allows crawlers to read site-wide noindex while omitting pages from the sitemap', () => {
+    const appDir = fixture(
+      { url: 'https://docs.example.test', seo: { noindex: true }, navigation: [{ group: 'Start', pages: ['index'] }] },
+      { 'index.mdx': '# Hidden from search\n\nThis page is still public HTML.' },
+    )
+    const result = buildDocumentation({ appDir })
+    expect(readFileSync(join(result.outputDir, 'index.html'), 'utf8')).toContain('noindex')
+    expect(readFileSync(join(result.outputDir, 'robots.txt'), 'utf8')).toBe('User-agent: *\nAllow: /\n')
+    expect(readFileSync(join(result.outputDir, 'sitemap.xml'), 'utf8')).not.toContain('<loc>')
+  })
+
   it('builds human, search, SEO, and LLM artifacts from one graph', () => {
     const appDir = fixture(
       {

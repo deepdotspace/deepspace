@@ -8,6 +8,7 @@
  */
 
 import { generateText, type ModelMessage } from 'ai'
+import { DEEPSPACE_AI_DEFAULTS } from '../../shared/ai-models'
 import { loggableError } from '../../shared/log-events'
 import { createDeepSpaceAI, type DeepSpaceAIEnv } from './ai'
 
@@ -563,7 +564,7 @@ function formatTranscript(messages: ChatTurn[]): string {
 }
 
 /**
- * Build a default summarizer backed by Claude Haiku.
+ * Build a default summarizer backed by the catalog's summarization model.
  *
  * Billing: defaults to the app owner via `APP_OWNER_JWT` — summarization is
  * usually infrastructure, not user work. Pass `{ authToken }` to bill a
@@ -576,11 +577,12 @@ export function makeDefaultSummarizer(
   return async (messages) => {
     const anthropic = createDeepSpaceAI(env, 'anthropic', { authToken: options.authToken })
     const { text } = await generateText({
-      // Stable alias — provider bug-fix snapshots roll forward without code change.
-      model: anthropic('claude-haiku-4-5'),
-      // 2500 gives the model room to finish a sentence after hitting the
-      // "under 2000 tokens" soft limit in the prompt.
-      maxOutputTokens: 2500,
+      model: anthropic(DEEPSPACE_AI_DEFAULTS.summarization),
+      // Adaptive thinking counts toward the output cap, so low effort keeps it
+      // short and the cap leaves room past the prompt's "under 2000 tokens"
+      // soft limit for both thinking and the summary.
+      providerOptions: { anthropic: { effort: 'low' } },
+      maxOutputTokens: 8000,
       instructions: SUMMARIZER_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: formatTranscript(messages) }],
     })

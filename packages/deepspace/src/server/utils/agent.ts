@@ -1,6 +1,9 @@
 import { isStepCount, streamText, type PrepareStepFunction, type ToolSet } from 'ai'
 import {
+  DEEPSPACE_AI_EFFORTS,
   resolveDeepSpaceAgentModel,
+  type DeepSpaceAIEffort,
+  type DeepSpaceAgentProfile,
   type DeepSpaceAgentProfileId,
   type ResolvedDeepSpaceAgentModel,
 } from '../../shared/ai-models'
@@ -12,13 +15,25 @@ type StreamTextOptions<TOOLS extends ToolSet> = Parameters<typeof streamText<TOO
 
 export type DeepSpaceAgentStreamOptions<TOOLS extends ToolSet> = Omit<
   StreamTextOptions<TOOLS>,
-  'model' | 'providerOptions' | 'stopWhen'
+  'model' | 'providerOptions' | 'reasoning' | 'stopWhen'
 > & {
   profile: DeepSpaceAgentProfileId
   modelId?: unknown
   authToken?: string
   /** Scope for sandbox files and containers this turn creates (see `createDeepSpaceAI`). */
   sandboxScope?: SandboxScope
+  /**
+   * Tool calls allowed in one turn before the agent must reply (default 20,
+   * 1 to 100). Only the application profile accepts an override.
+   */
+  maxToolCalls?: number
+  /**
+   * How much a Claude model thinks and writes, from `low` (fastest, cheapest)
+   * to `max`. Defaults to the model's `agentEffort` (`medium` on Opus 5.5,
+   * Sonnet 5.5 and Haiku 5.5). Models without an effort setting (GPT, Claude
+   * Haiku 4.5) ignore it.
+   */
+  effort?: DeepSpaceAIEffort
 }
 
 export interface DeepSpaceAgentStream<TOOLS extends ToolSet> {
@@ -47,14 +62,52 @@ export class DeepSpaceAgentProfileError extends Error {
   }
 }
 
+export class DeepSpaceAgentToolLimitError extends Error {
+  readonly code = 'invalid_agent_tool_limit'
+
+  constructor(
+    readonly profile: DeepSpaceAgentProfileId,
+    readonly maxToolCalls: unknown,
+    ceiling: number | undefined,
+  ) {
+    super(
+      ceiling === undefined
+        ? `The ${profile} agent profile does not accept a maxToolCalls override`
+        : `maxToolCalls must be a whole number from 1 to ${ceiling}, got ${String(maxToolCalls)}`,
+    )
+    this.name = 'DeepSpaceAgentToolLimitError'
+  }
+}
+
+export class DeepSpaceAgentEffortError extends Error {
+  readonly code = 'invalid_agent_effort'
+
+  constructor(readonly effort: unknown) {
+    super(`effort must be one of ${DEEPSPACE_AI_EFFORTS.join(', ')}, got ${String(effort)}`)
+    this.name = 'DeepSpaceAgentEffortError'
+  }
+}
+
 /** The sole provider/model/tool-loop implementation for every DeepSpace agent surface. */
 export function streamDeepSpaceAgent<TOOLS extends ToolSet>(
   env: DeepSpaceAIEnv,
   options: DeepSpaceAgentStreamOptions<TOOLS>,
 ): DeepSpaceAgentStream<TOOLS> {
-  const { profile, modelId, authToken, sandboxScope, ...streamOptions } = options
+  const {
+    profile,
+    modelId,
+    authToken,
+    sandboxScope,
+    maxToolCalls: requestedLimit,
+    effort,
+    ...streamOptions
+  } = options
   const selection = resolveDeepSpaceAgentModel(modelId, profile)
   if (!selection) throw new DeepSpaceAgentModelError(modelId, profile)
+  const maxToolCalls = resolveToolCallLimit(selection.profile, requestedLimit)
+  if (effort !== undefined && !DEEPSPACE_AI_EFFORTS.includes(effort)) {
+    throw new DeepSpaceAgentEffortError(effort)
+  }
   if (selection.profile.allowedTools !== 'application-defined') {
     const allowed = selection.profile.allowedTools as readonly string[]
     for (const toolName of Object.keys(streamOptions.tools ?? {})) {
@@ -69,19 +122,26 @@ export function streamDeepSpaceAgent<TOOLS extends ToolSet>(
     ...(sandboxScope ? { sandboxScope } : {}),
   })
   const { prepareStep, tools, ...remainingStreamOptions } = streamOptions
-  const boundedTools = limitToolExecutions(capToolOutputs(tools), selection.profile.maxToolCalls)
+  const boundedTools = limitToolExecutions(capToolOutputs(tools), maxToolCalls)
   const result = streamText<TOOLS>({
     ...remainingStreamOptions,
     ...(boundedTools ? { tools: boundedTools } : {}),
     model: provider(selection.modelId),
-    stopWhen: isStepCount(selection.profile.maxSteps),
-    prepareStep: enforceToolCallLimit(prepareStep, selection.profile.maxToolCalls),
-    ...(selection.provider === 'openai'
-      ? { providerOptions: { openai: { reasoningEffort: 'none' as const } } }
-      : {}),
+    stopWhen: isStepCount(maxToolCalls + 1),
+    prepareStep: enforceToolCallLimit(prepareStep, maxToolCalls),
+    providerOptions: agentProviderOptions(selection, effort),
   } as StreamTextOptions<TOOLS>)
 
   return { selection, result }
+}
+
+function agentProviderOptions(
+  selection: ResolvedDeepSpaceAgentModel,
+  effort: DeepSpaceAIEffort | undefined,
+): StreamTextOptions<ToolSet>['providerOptions'] {
+  if (selection.provider === 'openai') return { openai: { reasoningEffort: 'none' } }
+  if (!selection.model.agentEffort) return undefined
+  return { anthropic: { effort: effort ?? selection.model.agentEffort } }
 }
 
 /**
@@ -116,11 +176,35 @@ function capToolOutputs<TOOLS extends ToolSet>(tools: TOOLS | undefined): TOOLS 
   ) as TOOLS
 }
 
+function resolveToolCallLimit(profile: DeepSpaceAgentProfile, requested: unknown): number {
+  const { maxToolCalls, maxToolCallsCeiling } = profile
+  if (requested === undefined) return maxToolCalls
+  const valid =
+    maxToolCallsCeiling !== undefined &&
+    Number.isInteger(requested) &&
+    (requested as number) >= 1 &&
+    (requested as number) <= maxToolCallsCeiling
+  if (!valid) throw new DeepSpaceAgentToolLimitError(profile.id, requested, maxToolCallsCeiling)
+  return requested as number
+}
+
+/**
+ * The model-facing instruction for the step after the limit. Claude 5 models
+ * reply with nothing when tools vanish mid-task unless told why, so the user
+ * would see an empty answer.
+ */
+function toolLimitReachedMessage(maxToolCalls: number): string {
+  return (
+    `You have used all ${maxToolCalls} tool calls allowed in this turn, so tools are now ` +
+    'unavailable. Reply to the user now using what you found so far: say what you did, ' +
+    'what is still unfinished, and that they can ask you to continue.'
+  )
+}
+
 function enforceToolCallLimit<TOOLS extends ToolSet>(
   prepareStep: PrepareStepFunction<TOOLS> | undefined,
-  maxToolCalls: number | undefined,
-): PrepareStepFunction<TOOLS> | undefined {
-  if (maxToolCalls === undefined) return prepareStep
+  maxToolCalls: number,
+): PrepareStepFunction<TOOLS> {
   return async (context) => {
     const prepared = await prepareStep?.(context)
     const completedToolCalls = context.steps.reduce(
@@ -128,15 +212,23 @@ function enforceToolCallLimit<TOOLS extends ToolSet>(
       0,
     )
     if (completedToolCalls < maxToolCalls) return prepared
-    return { ...prepared, activeTools: [], toolChoice: 'none' }
+    return {
+      ...prepared,
+      activeTools: [],
+      toolChoice: 'none',
+      messages: [
+        ...(prepared?.messages ?? context.messages),
+        { role: 'user', content: toolLimitReachedMessage(maxToolCalls) },
+      ],
+    }
   }
 }
 
 function limitToolExecutions<TOOLS extends ToolSet>(
   tools: TOOLS | undefined,
-  maxToolCalls: number | undefined,
+  maxToolCalls: number,
 ): TOOLS | undefined {
-  if (!tools || maxToolCalls === undefined) return tools
+  if (!tools) return tools
   let executions = 0
   return Object.fromEntries(
     Object.entries(tools).map(([name, definition]) => {

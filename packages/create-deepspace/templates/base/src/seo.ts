@@ -12,8 +12,9 @@
  * Fill `title` and `description` when you design the landing page: a headline
  * with a category descriptor ("Acme | Team task boards") and one plain
  * sentence of about 150 characters. Set `noindex: true` for an app that
- * should stay out of search engines and AI crawlers entirely (the build then
- * publishes a Disallow-all robots.txt and no sitemap).
+ * should stay out of search results (the build allows crawlers to read the
+ * noindex directive and publishes no sitemap). Crawler access and training
+ * restrictions require separate controls.
  */
 
 import { APP_NAME } from './constants'

@@ -128,7 +128,8 @@ export function renderSitemap(pages: DocumentationPage[], baseUrl: string | unde
 }
 
 export function renderRobots(baseUrl: string | undefined, noindex: boolean | undefined): string {
-  if (noindex) return 'User-agent: *\nDisallow: /\n'
+  // Search engines must fetch the page to observe its noindex directive.
+  if (noindex) return 'User-agent: *\nAllow: /\n'
   return `User-agent: *\nAllow: /\n${baseUrl ? `Sitemap: ${joinSiteUrl(baseUrl, '/sitemap.xml')}\n` : ''}`
 }
 

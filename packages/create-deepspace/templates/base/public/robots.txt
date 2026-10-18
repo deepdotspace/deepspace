@@ -4,8 +4,9 @@
 # (the top level of src/pages/). The build appends
 #   Sitemap: https://<your-origin>/sitemap.xml
 # because the origin is only known at build time; do not add that line here.
-# To keep the whole app out of search results and AI crawlers, set
-# `noindex: true` in src/seo.ts — the build then publishes "Disallow: /".
+# To keep the whole app out of search results, set
+# `noindex: true` in src/seo.ts — the build keeps crawling allowed so noindex can be read.
+# Crawler access and training restrictions require separate controls.
 
 User-agent: *
 Allow: /

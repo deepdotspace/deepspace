@@ -12,7 +12,7 @@
  *   const sheet = await files.upload(bytes, { filename: 'leads.xlsx' })
  *
  *   const result = streamText({            // stream: long jobs outlive a non-streamed call
- *     model: ai('claude-sonnet-5'),
+ *     model: ai('claude-sonnet-5-5'),
  *     tools: { code_execution: codeExecutionTool(), crm_query: callableFromSandbox(crmQuery) },
  *     prepareStep: forwardSandboxContainer,          // same container across steps
  *     providerOptions: reuseSandbox(savedContainerId), // optional: across messages

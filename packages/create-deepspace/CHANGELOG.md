@@ -1,5 +1,13 @@
 # create-deepspace
 
+## 0.42.4
+
+### Patch Changes
+
+- Keep noindex pages crawlable so search engines can read their exclusion, enforce the scaffold's site-wide noindex policy, omit excluded pages from its sitemap, and mark client-side not-found pages noindex. Add read-only SEO adoption guidance for existing app-owned scaffolds.
+
+  Keep the Node-only prerender regression test beside the build plugin so fresh app TypeScript checks do not require Node types in the browser/Worker project.
+
 ## 0.42.3
 
 ## 0.42.2

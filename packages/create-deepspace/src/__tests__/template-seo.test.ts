@@ -88,7 +88,7 @@ describe('scaffold robots.txt', () => {
     ]) {
       expect(robots, `robots.txt must allow ${bot}`).toContain(`User-agent: ${bot}\nAllow: /`)
     }
-    // The header comment explains `Disallow: /`; no directive line uses it.
+    // Public pages remain crawlable.
     expect(robots).not.toMatch(/^Disallow:/m)
   })
 
