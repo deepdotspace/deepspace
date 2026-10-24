@@ -14,7 +14,6 @@ import {
   MCP_SERVER_VERSION,
   SUPPORTED_PROTOCOL_VERSIONS,
   hasValidOrigin,
-  initializeResponse,
   jsonResponse,
   mcpError,
   mcpResult,
@@ -23,7 +22,7 @@ import {
   parseRequest,
   type JsonRpcId,
   type JsonRpcRequest,
-} from './mcp/protocol'
+} from '../../shared/mcp-protocol'
 import { callDocumentationTool, DOCUMENTATION_TOOLS } from './mcp/tools'
 
 export interface DocumentationMcpRouteEnv {
@@ -73,7 +72,7 @@ export function registerDocumentationMcpRoutes<Env extends DocumentationMcpRoute
       return mcpError(null, -32600, `Request exceeds ${MAX_REQUEST_CHARS} characters`, 413)
     }
     const parsed = parseRequest(raw)
-    if (!parsed.ok) return mcpError(null, -32700, parsed.message, 400)
+    if (!parsed.ok) return mcpError(null, parsed.code, parsed.message, 400)
     const request = parsed.request
 
     if (request.method !== 'initialize') {
@@ -85,6 +84,8 @@ export function registerDocumentationMcpRoutes<Env extends DocumentationMcpRoute
 
     const requestId = request.id
     if (requestId === undefined) return new Response(null, { status: 202 })
+    if (request.params !== undefined && !objectValue(request.params))
+      return mcpError(requestId, -32602, 'MCP params must be an object')
     const requestWithId = { ...request, id: requestId }
     if (request.method === 'initialize') return initializeResponse(requestWithId)
     if (request.method === 'ping') return mcpResult(requestId, {})
@@ -263,4 +264,27 @@ function serverCard(
       resources: [skillResource(request, manifest, publicBasePath)],
     },
   }
+}
+
+export function initializeResponse(request: JsonRpcRequest & { id: JsonRpcId }): Response {
+  const params = objectValue(request.params)
+  const requested =
+    typeof params?.protocolVersion === 'string' ? params.protocolVersion : CURRENT_PROTOCOL_VERSION
+  const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.has(requested)
+    ? requested
+    : CURRENT_PROTOCOL_VERSION
+  return mcpResult(request.id, {
+    protocolVersion,
+    capabilities: {
+      tools: { listChanged: false },
+      resources: { subscribe: false, listChanged: false },
+    },
+    serverInfo: {
+      name: 'DeepSpace Documentation',
+      title: 'DeepSpace documentation',
+      version: MCP_SERVER_VERSION,
+    },
+    instructions:
+      'Search the published documentation before answering, then read exact pages when full context is needed.',
+  })
 }

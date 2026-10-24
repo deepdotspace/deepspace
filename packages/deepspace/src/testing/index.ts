@@ -37,3 +37,5 @@ export type { EnsureStorageStateOptions } from './storage-state'
 
 export { servePreview } from './preview-server'
 export type { ServePreviewOptions } from './preview-server'
+
+export { chromiumLaunchOptions } from './browser'

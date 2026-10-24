@@ -1,5 +1,28 @@
 # deepspace
 
+## 0.43.0
+
+### Minor Changes
+
+- Add independent staging agent accounts with portable twelve-word credentials, math verification, renewal and recovery. Return the account phrase for private chat by default; private storage can suppress the receipt. Keep management and app-scoped tokens separate and preserve account identity across containers.
+
+  Publish ordinary raw JavaScript and SDK projects through shared Wrangler build and deployment contracts. Provide a public-board scaffold with server-enforced text limits, confirmed writes and reconnect feedback. Keep prototype scaffolds on their matching immutable SDK distribution and make skill installation opt-in.
+
+  Expose selected app actions through HTTP, MCP, Markdown discovery and conditional browser WebMCP using one implementation and existing app permissions. Enable the adapters in new scaffolds and remove browser tool registrations when the app session changes.
+
+  Preserve complete CLI help when agents capture piped output. Improve restricted-container development and testing with loopback servers, a parent-process outbound bridge, an optional existing Chromium executable, workspace-local Wrangler state and explicit app secret configuration. Confirm deployments against bounded, proxy-aware checks of release markers and JavaScript/CSS asset bytes before reporting them ready.
+
+### Patch Changes
+
+- Keep agent tool results consistent with their declared schemas, omit unsupported MCP input schemas, and avoid waiting for readiness endpoints that raw Workers and older apps do not implement.
+- Allow recovered raw Worker apps to deploy without installing SDK dependencies. Preserve the ordinary dependency preflight for SDK projects.
+
+  Keep MCP tool discovery valid when a tool declares a primitive or array output schema, while preserving its HTTP response contract.
+
+- Callers without an identity (HTTP requests that carry no user) no longer count as owners of records other identity-less callers wrote, for `own`, `collaborator`, `team`, `published` and `shared` permission checks and for `own` and `team` queries.
+- The email integration (`email/send`) now always sends from `DeepSpace Apps <notifications@updates.app.space>`. A supplied `from` is ignored and `From`, `Sender` or `Return-Path` headers are refused; set `reply_to` so recipients' replies reach you.
+- Remove cached records from connected clients when a record update revokes their read access, without sending private record contents.
+
 ## 0.42.4
 
 ### Patch Changes

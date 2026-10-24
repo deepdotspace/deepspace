@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url'
 import { wrapCommandErrors, errorCode, formatCliError } from './lib/cli-errors'
 import { forTerminal, humanCommand, stripAnsi } from './lib/cli-format'
 import { stopActiveSpinner } from './lib/spinner'
+import { writeStreamText } from './lib/stdio'
 import { executableAction, printAction, withSlug } from './lib/output'
 import { unknownOptionMessage, unknownOptionNamesFromRaw } from './lib/command'
 import {
@@ -35,6 +36,7 @@ import {
 } from './lib/command-suggestions'
 import { DEEPSPACE_ENV } from './env'
 import login from './commands/login'
+import agentAccount from './commands/agent-account'
 import logout from './commands/logout'
 import dev from './commands/dev'
 import kill from './commands/kill'
@@ -168,7 +170,7 @@ const rename = <T extends { meta?: unknown }>(cmd: T, name: string): T =>
 
 const auth = defineCommand({
   meta: { name: 'auth', description: 'Session: login, logout, whoami' },
-  subCommands: { login, logout, whoami },
+  subCommands: { login, logout, whoami, agent: agentAccount },
 })
 
 const app = defineCommand({
@@ -435,7 +437,9 @@ if (rawArgs.includes('--json') && !wantsHelp) {
   runMain(wrapCommandErrors(main), {
     showUsage: async (cmd, parent) => {
       try {
-        console.log(forTerminal(await renderUsage(cmd, parent)) + '\n')
+        // Citty exits immediately after this callback. Await the stream write
+        // so piped help reaches the caller in full before that exit.
+        await writeStreamText(process.stdout, forTerminal(await renderUsage(cmd, parent)) + '\n\n')
       } catch (error) {
         console.error(error)
       }

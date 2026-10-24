@@ -5,6 +5,29 @@ import { pathToFileURL } from 'node:url'
 import { normalizeApiError } from '../../../shared/api-error'
 import { API_URL } from '../../env'
 import { createSpinner } from '../../lib/spinner'
+import { Refusal } from '../../lib/command'
+
+/** Agent hosting cannot configure paid capabilities. Check before publishing. */
+export async function validateAgentCommerce(appDir: string): Promise<void> {
+  if (process.env.DEEPSPACE_AGENT_CREDENTIAL_FILE === undefined) return
+  for (const [file, key] of [
+    ['products.ts', 'oneTimeProducts'],
+    ['subscriptions.ts', 'subscriptionPlans'],
+  ]) {
+    const items = await loadDeclaration(appDir, file, `agent-${file}.mjs`, key)
+    if (items === undefined && !existsSync(join(appDir, 'src', file))) continue
+    if (!Array.isArray(items))
+      throw new Refusal(
+        `src/${file} must export an array named ${key}.`,
+        'invalid_commerce_declaration',
+      )
+    if (items.length)
+      throw new Refusal(
+        `src/${file} declares payments, which require a human account. This agent can deploy hosting-only apps. No release was published.`,
+        'agent_capability_unavailable',
+      )
+  }
+}
 
 interface PlanChange {
   slug: string
@@ -209,6 +232,9 @@ export async function syncOneTimeProducts(
   appName: string,
   token: string,
 ): Promise<void> {
+  // Empty human catalogs must still sync to deactivate previously sold products.
+  // Agent declarations were checked before publishing and cannot contain products.
+  if (process.env.DEEPSPACE_AGENT_CREDENTIAL_FILE !== undefined) return
   if (!existsSync(join(appDir, 'src', 'products.ts'))) return
   let products: unknown
   try {

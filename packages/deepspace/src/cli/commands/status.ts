@@ -19,6 +19,7 @@ import { displayLines } from '../lib/cli-format'
 import * as p from '@clack/prompts'
 import { existsSync, readFileSync } from 'node:fs'
 import { SESSION_PATH, TOKEN_PATH, ensureToken } from '../auth'
+import { readAgentCredential } from '../agent-credentials'
 import { DEEPSPACE_ENV, effectivePlatformUrls } from '../env'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { findAppDir, detectAppName } from '../lib/app-context'
@@ -157,10 +158,7 @@ export default defineCommand({
       'DEEPSPACE_PLATFORM_URL',
     ].filter((k) => process.env[k])
     const urls = effectivePlatformUrls()
-    lines.push([
-      'Env',
-      [DEEPSPACE_ENV, ...urlOverrides.map((k) => `${k} set`)].join(' · '),
-    ])
+    lines.push(['Env', [DEEPSPACE_ENV, ...urlOverrides.map((k) => `${k} set`)].join(' · ')])
     json.env = DEEPSPACE_ENV
     json.services = urls
     if (DEEPSPACE_ENV !== 'production' || urlOverrides.length > 0) {
@@ -177,69 +175,103 @@ export default defineCommand({
     // `session` alone contradicts `auth whoami` in both directions, and an
     // agent that reads `loggedIn: false` starts an interactive browser OAuth
     // nobody is there to complete.
-    facts.loggedIn = existsSync(SESSION_PATH) || existsSync(TOKEN_PATH)
     let userId: string | null = null
-    if (!facts.loggedIn) {
-      lines.push(['Session', 'not logged in'])
-      json.loggedIn = false
-      json.sessionError = sessionError('Not logged in. Run `deepspace auth login` first.')
-    } else {
-      let who: string | null = null
-      let undecodableToken = false
+    if (process.env.DEEPSPACE_AGENT_CREDENTIAL_FILE !== undefined) {
+      json.accountType = 'agent'
       try {
-        const payload = decodeJwtPayload<{ email?: string; sub?: string }>(
-          readFileSync(TOKEN_PATH, 'utf-8').trim(),
-        )
-        if (payload.email) who = payload.email
-        userId = payload.sub ?? null
-      } catch {
-        // An ABSENT token file is fine — the session still mints on next
-        // use. A PRESENT one that does not decode is suspect, but not
-        // sentence-worthy on its own: the file is a non-atomically-written
-        // CACHE, and a truncated one beside a VALID session self-heals (the
-        // first review of this fix reported that healthy state as dead).
-        undecodableToken = existsSync(TOKEN_PATH)
-      }
-      let sessionLineEmitted = false
-      if (undecodableToken) {
-        // Resolve the truth the way every other verb does: ensureToken()
-        // ignores an unreadable cached token and re-mints from the session
-        // (rewriting the file). Only a real auth failure is a dead session;
-        // offline stays "logged in, unverified" — the same rule the cloud
-        // section applies. This is what makes a garbage credential PAIR
-        // finally read as the not_authenticated every other verb reports
-        // (2026-08-28 collab AX F1), without lying about the healable state.
-        try {
-          const healed = await ensureToken()
-          const payload = decodeJwtPayload<{ email?: string; sub?: string }>(healed)
-          if (payload.email) who = payload.email
-          userId = payload.sub ?? null
-        } catch (err) {
-          sessionLineEmitted = true
-          const offline = err instanceof TypeError || errorCode(err) === 'network_error'
-          if (offline) {
-            lines.push(['Session', 'logged in · stored token unreadable, could not verify offline'])
-            json.loggedIn = true
-          } else {
-            lines.push(['Session', 'stored credentials unusable — run `deepspace auth login`'])
-            facts.loggedIn = false
-            json.loggedIn = false
-            json.sessionError = sessionError(
-              'Stored credentials are unusable. Run `deepspace auth login`.',
-            )
-          }
-        }
-      }
-      if (!sessionLineEmitted) {
+        const identity = readAgentCredential()
+        userId = identity?.userId ?? null
+        facts.loggedIn = !!userId
+        json.loggedIn = facts.loggedIn
+        json.userId = userId
+        json.verificationRequired =
+          !identity?.verifiedUntil || Date.parse(identity.verifiedUntil) <= Date.now()
         lines.push([
           'Session',
-          `${who ?? 'logged in'} · renews on use (re-login only after 30 idle days)`,
+          userId
+            ? `${identity!.name} (agent); verification ${json.verificationRequired ? 'required' : 'current'}`
+            : 'Agent signup required',
         ])
-        json.loggedIn = true
-        // `user` is an email in every run that has an identity, so a placeholder
-        // string there would silently fail an identity comparison. Omit the key
-        // when the identity is genuinely unknown.
-        if (who) json.user = who
+        if (!userId)
+          json.sessionError = {
+            code: 'agent_not_registered',
+            error: 'Use deepspace auth agent register.',
+          }
+      } catch (error) {
+        json.loggedIn = false
+        json.sessionError = {
+          code: errorCode(error),
+          error: error instanceof Error ? error.message : String(error),
+        }
+        lines.push(['Session', 'Agent credential unavailable'])
+      }
+    } else {
+      facts.loggedIn = existsSync(SESSION_PATH) || existsSync(TOKEN_PATH)
+      if (!facts.loggedIn) {
+        lines.push(['Session', 'not logged in'])
+        json.loggedIn = false
+        json.sessionError = sessionError('Not logged in. Run `deepspace auth login` first.')
+      } else {
+        let who: string | null = null
+        let undecodableToken = false
+        try {
+          const payload = decodeJwtPayload<{ email?: string; sub?: string }>(
+            readFileSync(TOKEN_PATH, 'utf-8').trim(),
+          )
+          if (payload.email) who = payload.email
+          userId = payload.sub ?? null
+        } catch {
+          // An ABSENT token file is fine — the session still mints on next
+          // use. A PRESENT one that does not decode is suspect, but not
+          // sentence-worthy on its own: the file is a non-atomically-written
+          // CACHE, and a truncated one beside a VALID session self-heals (the
+          // first review of this fix reported that healthy state as dead).
+          undecodableToken = existsSync(TOKEN_PATH)
+        }
+        let sessionLineEmitted = false
+        if (undecodableToken) {
+          // Resolve the truth the way every other verb does: ensureToken()
+          // ignores an unreadable cached token and re-mints from the session
+          // (rewriting the file). Only a real auth failure is a dead session;
+          // offline stays "logged in, unverified" — the same rule the cloud
+          // section applies. This is what makes a garbage credential PAIR
+          // finally read as the not_authenticated every other verb reports
+          // (2026-08-28 collab AX F1), without lying about the healable state.
+          try {
+            const healed = await ensureToken()
+            const payload = decodeJwtPayload<{ email?: string; sub?: string }>(healed)
+            if (payload.email) who = payload.email
+            userId = payload.sub ?? null
+          } catch (err) {
+            sessionLineEmitted = true
+            const offline = err instanceof TypeError || errorCode(err) === 'network_error'
+            if (offline) {
+              lines.push([
+                'Session',
+                'logged in · stored token unreadable, could not verify offline',
+              ])
+              json.loggedIn = true
+            } else {
+              lines.push(['Session', 'stored credentials unusable — run `deepspace auth login`'])
+              facts.loggedIn = false
+              json.loggedIn = false
+              json.sessionError = sessionError(
+                'Stored credentials are unusable. Run `deepspace auth login`.',
+              )
+            }
+          }
+        }
+        if (!sessionLineEmitted) {
+          lines.push([
+            'Session',
+            `${who ?? 'logged in'} · renews on use (re-login only after 30 idle days)`,
+          ])
+          json.loggedIn = true
+          // `user` is an email in every run that has an identity, so a placeholder
+          // string there would silently fail an identity comparison. Omit the key
+          // when the identity is genuinely unknown.
+          if (who) json.user = who
+        }
       }
     }
 
@@ -508,7 +540,11 @@ export default defineCommand({
           // WHICH build that is.
           if (!releaseResult.ok) reportRemoteFailure('Live', 'live', releaseResult.error)
           else if (!appsResult.ok) reportRemoteFailure('Live', 'live', appsResult.error)
-          else reportLive(releaseResult.value, appsResult.value.find((a) => a.appId === appId))
+          else
+            reportLive(
+              releaseResult.value,
+              appsResult.value.find((a) => a.appId === appId),
+            )
           function reportRemoteFailure(label: string, key: string, error: unknown): void {
             const failure = statusRemoteFailure(error)
             lines.push([label, failure.human])

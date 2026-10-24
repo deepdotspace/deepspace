@@ -27,6 +27,7 @@ interface InstallerCommand {
 /** Avoid a nested `npx` shim when the creator itself is running under npm exec. */
 export function agentSkillInstallerCommand(
   environment: Readonly<Record<string, string | undefined>> = process.env,
+  skillSource = SKILL_REPOSITORY,
 ): InstallerCommand {
   const args = [
     'exec',
@@ -35,7 +36,7 @@ export function agentSkillInstallerCommand(
     '--',
     'skills',
     'add',
-    SKILL_REPOSITORY,
+    skillSource,
     '-y',
     // Pin the canonical universal target (.agents/skills). On a host with no
     // detected agents, `-y` alone installs to EVERY agent the installer
@@ -67,8 +68,10 @@ export async function completeProjectSetup(
   project: PreparedProject,
   progress: Progress,
   install: InstallCommand,
+  skillSource = SKILL_REPOSITORY,
+  withSkill = false,
 ): Promise<void> {
-  await installAgentSkill(project.appDir, progress)
+  if (withSkill) await installAgentSkill(project.appDir, progress, skillSource)
   await installDependencies(project.appDir, install)
   // A scaffold comes out IDENTITY-LESS, always. `wrangler.toml` keeps the
   // `__APP_ID__` placeholder and the repo keeps its unborn HEAD; the first
@@ -80,7 +83,11 @@ export async function completeProjectSetup(
   printNextSteps(project)
 }
 
-async function installAgentSkill(appDir: string, progress: Progress): Promise<void> {
+async function installAgentSkill(
+  appDir: string,
+  progress: Progress,
+  skillSource: string,
+): Promise<void> {
   progress.start('Installing DeepSpace agent skill')
   try {
     assertClaudeSkillLinkAvailable(appDir)
@@ -88,7 +95,7 @@ async function installAgentSkill(appDir: string, progress: Progress): Promise<vo
     // or it can silently skip Claude Code's symlink.
     mkdirSync(join(appDir, '.claude'), { recursive: true })
     await new Promise<void>((resolve, reject) => {
-      const installer = agentSkillInstallerCommand()
+      const installer = agentSkillInstallerCommand(process.env, skillSource)
       const child = spawn(installer.command, installer.args, {
         cwd: appDir,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -127,7 +134,7 @@ async function installAgentSkill(appDir: string, progress: Progress): Promise<vo
   } catch (error) {
     progress.stop(
       'Skill install failed — see .deepspace/skill.err, then run ' +
-        `\`npx -y ${SKILLS_INSTALLER_PACKAGE} add ${SKILL_REPOSITORY}\``,
+        `\`npx -y ${SKILLS_INSTALLER_PACKAGE} add ${skillSource} -y --agent codex\``,
     )
     try {
       mkdirSync(join(appDir, '.deepspace'), { recursive: true })
@@ -230,9 +237,7 @@ async function installDependencies(appDir: string, install: InstallCommand): Pro
       ? `${display} failed to start: ${result.error.message}`
       : `${display} exited with code ${result.status}`
     writeFileSync(join(sentinelDirectory, 'install.err'), message + '\n')
-    p.log.error(
-      `Dependency install failed — run \`${display}\` in the app dir, then retry.`,
-    )
+    p.log.error(`Dependency install failed — run \`${display}\` in the app dir, then retry.`)
     throw new Error(message)
   } else {
     writeFileSync(join(sentinelDirectory, 'install.done'), new Date().toISOString() + '\n')
@@ -269,12 +274,16 @@ export function installedSdkVersion(appDir: string): string | null {
 export function nextStepsLines(project: Pick<PreparedProject, 'appName' | 'isInPlace'>): string[] {
   return [
     ...(project.isInPlace ? [] : [`cd ${project.appName}`]),
-    '# The first command that needs an app id registers this app to whichever',
-    '# account this shell is logged in as (`npx deepspace auth login` to switch).',
-    '# Commit after the first deploy (`deploy`/`app init` create the initial',
-    '# commit) — committing the `__APP_ID__` placeholder first refuses, with a',
-    '# one-step fix.',
-    'npx deepspace dev start',
+    '# First use registers this app to the selected account. Check it:',
+    'npx deepspace auth whoami',
+    '# Register the app before committing its app id:',
+    'npx deepspace app init --json',
+    '# Before deploying, review git status and commit your app changes.',
+    '# A new repository gets its initial commit at registration; an existing',
+    '# repository keeps your changes uncommitted for review.',
+    '',
+    'Develop locally:',
+    '  npx deepspace dev start',
     '',
     'Deploy:',
     '  npx deepspace deploy',

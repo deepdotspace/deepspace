@@ -282,10 +282,13 @@ function executeTableQuery(
     const filterCol = schema.teamField === '_rowId'
       ? '_row_id'
       : columns.find(c => c.name === schema.teamField)?.id
-    const teamIds = filterCol ? preloadUserTeamIds(ctx, userId) : null
+    const teamIds = filterCol && userId ? preloadUserTeamIds(ctx, userId) : null
 
     if (filterCol) {
-      if (teamIds && teamIds.length > 0) {
+      // A caller with no identity belongs to no team and owns nothing.
+      if (!userId) {
+        whereClauses.push('0')
+      } else if (teamIds && teamIds.length > 0) {
         const placeholders = teamIds.map(() => '?').join(', ')
         whereClauses.push(`("${filterCol}" IN (${placeholders}) OR _created_by = ?)`)
         params.push(...teamIds, userId)
@@ -303,8 +306,13 @@ function executeTableQuery(
       ? columns.find(c => c.name === schema.ownerField)?.id
       : '_created_by'
     if (ownerCol) {
-      whereClauses.push(`"${ownerCol}" = ?`)
-      params.push(userId)
+      // A caller with no identity owns nothing, matching `isOwner`.
+      if (userId) {
+        whereClauses.push(`"${ownerCol}" = ?`)
+        params.push(userId)
+      } else {
+        whereClauses.push('0')
+      }
       skipPerRecordCheck = true
     }
   } else if (!skipUserRbac && perms.read === true) {
@@ -443,13 +451,16 @@ export function recordMatchesSubscription(
  * Instead of matching subscriptions (which are lost on hibernation),
  * we broadcast to ALL clients and include the collection name.
  * The client filters based on its local subscriptions.
+ * Readers who lose access on an update receive an ID-only delete so their
+ * cached copy is removed without sending the newly private contents.
  */
 export function broadcastChange(
   ctx: SubscriptionContext,
   state: DurableObjectState,
   collection: string,
   record: RecordResult,
-  changeType: 'create' | 'update' | 'delete'
+  changeType: 'create' | 'update' | 'delete',
+  previousRecord?: RecordResult,
 ): void {
   const isSystem = SYSTEM_COLLECTIONS.has(collection)
   const schema = ctx.schemaRegistry.get(collection)
@@ -469,6 +480,23 @@ export function broadcastChange(
 
     if (canBroadcast) {
       ctx.send(ws, { type: MSG.RECORD_CHANGE, payload: { collection, record, changeType } })
+    } else if (
+      changeType === 'update' &&
+      previousRecord &&
+      recordMatchesSubscription(
+        previousRecord,
+        collection,
+        { collection },
+        attachment.userId,
+        attachment.role,
+        schema!,
+        ctx.getPermissionContext(),
+      )
+    ) {
+      ctx.send(ws, {
+        type: MSG.RECORD_CHANGE,
+        payload: { collection, record: { recordId: record.recordId }, changeType: 'delete' },
+      })
     }
   }
 }

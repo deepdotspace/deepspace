@@ -143,6 +143,11 @@ describe("executeQuery with read: 'own'", () => {
     expect(records.map(r => r.recordId)).toEqual(['r1'])
   })
 
+  it('a caller with no identity sees no rows, including other identity-less rows', () => {
+    insert(db, 'c_roles', { recordId: 'r3', createdBy: '', cols: { gameId: 'g1', role: 'seer' } })
+    expect(executeQuery(ctx, { collection: 'roles' }, '', 'member')).toEqual([])
+  })
+
   it('omitting skipUserRbac matches passing false (backward compat)', () => {
     const omitted = executeQuery(ctx, { collection: 'roles' }, 'alice', 'member')
     const explicit = executeQuery(ctx, { collection: 'roles' }, 'alice', 'member', false)
@@ -224,6 +229,16 @@ describe("executeQuery with read: 'team'", () => {
     // Two docs: one in team_x (Alice's team), one in team_y (not Alice's)
     insert(db, 'c_docs', { recordId: 'd1', createdBy: 'alice', cols: { teamId: 'team_x', title: 'Mine' } })
     insert(db, 'c_docs', { recordId: 'd2', createdBy: 'bob',   cols: { teamId: 'team_y', title: 'Theirs' } })
+  })
+
+  it('a caller with no identity sees no team rows, including other identity-less rows', () => {
+    insert(db, 'c_team_members', {
+      recordId: 'tm2',
+      createdBy: '',
+      cols: { userId: '', teamId: 'team_x', status: 'active' },
+    })
+    insert(db, 'c_docs', { recordId: 'd3', createdBy: '', cols: { teamId: 'team_y', title: 'Anon' } })
+    expect(executeQuery(ctx, { collection: 'docs' }, '', 'member')).toEqual([])
   })
 
   it('default behavior: SQL pushdown filters to caller\'s teams', () => {

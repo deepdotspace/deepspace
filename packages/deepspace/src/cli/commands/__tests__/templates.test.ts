@@ -108,6 +108,19 @@ describe('assembled templates', () => {
         }
       })
 
+      it('serves /home, where sign-in completion and the 404 page land', () => {
+        const pages = join(makeAssembled(overlay), 'src', 'pages')
+        const routes = sourceFiles(pages).map((file) =>
+          file
+            .slice(pages.length)
+            .replaceAll('\\', '/')
+            .replace(/\.tsx?$/, '')
+            .replace(/\/\([^/]+\)/g, '')
+            .replace(/\/index$/, ''),
+        )
+        expect(routes).toContain('/home')
+      })
+
       it('assembles worker routes in security-sensitive order', () => {
         const app = makeAssembled(overlay)
         const worker = readFileSync(join(app, 'worker.ts'), 'utf-8')
@@ -115,7 +128,7 @@ describe('assembled templates', () => {
           'registerAuthAndIntegrationRoutes(app)',
           'registerRealtimeRoutes(app)',
           'registerActionRoutes(app, resolveAuth)',
-          'registerAgent(app, { tools: buildTools })',
+          'registerAgent(app, {',
           'registerPlatformProxyRoutes(app)',
           'registerStaticRoutes(app)',
         ]
@@ -144,11 +157,18 @@ describe('assembled templates', () => {
 
       it('renders <Seo> first on the public landing, fed from src/seo.ts', () => {
         const app = makeAssembled(overlay)
+        if (overlay === 'public-board') {
+          expect(existsSync(join(app, 'src/pages/(app)/index.tsx'))).toBe(true)
+          expect(readFileSync(join(app, 'src/seo.ts'), 'utf-8')).toContain('noindex: true')
+          return
+        }
         const landing = readFileSync(join(app, 'src/pages/index.tsx'), 'utf-8')
         expect(landing).toContain("import { Seo } from '../components/Seo'")
         expect(landing).toContain("import { seo } from '../seo'")
         expect(landing.indexOf('<Seo {...seo} path="/" />')).toBeGreaterThan(-1)
-        expect(landing.indexOf('<Seo ')).toBeLessThan(landing.indexOf('data-testid="static-landing"'))
+        expect(landing.indexOf('<Seo ')).toBeLessThan(
+          landing.indexOf('data-testid="static-landing"'),
+        )
       })
 
       it('has no dangling relative or @/ imports', () => {
@@ -184,7 +204,13 @@ describe('assembled templates', () => {
         })
 
         const agentGuide = readFileSync(join(app, 'AGENTS.md'), 'utf-8')
-        expect(agentGuide).toContain('npx deepspace auth login')
+        // `npm run login` lets the prototype scaffold swap in agent registration.
+        if (agentGuide.includes('npm run login')) {
+          expect(pkg.scripts?.login).toBe('deepspace auth login')
+        } else {
+          expect(agentGuide).toContain('npx deepspace auth login')
+        }
+        expect(agentGuide).not.toContain('registerAgent(')
         expect(agentGuide).toContain('npx deepspace dev start')
         expect(agentGuide).toMatch(/default DeepSpace\s+source/)
         expect(agentGuide).toMatch(/ships from GitHub \(latched from the checkout/)

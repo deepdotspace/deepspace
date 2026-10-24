@@ -31,6 +31,9 @@ export * from './server/auth'
 export { SYSTEM_COLLECTIONS } from './server/handlers/yjs'
 export {
   registerAgentToolRoutes,
+  registerAgentToolTransports,
+  AgentToolError,
+  type AgentToolTransportOptions,
   createUserToolExecutor,
   AGENT_TOOL_REQUEST_BODY_CAP,
   AGENT_TOOL_RESPONSE_BODY_CAP,
@@ -71,3 +74,21 @@ export { workerErrorHandler } from './server/worker-error'
 // this one bounds the REPO store, a different allocation with a different
 // writer (platform/deploy-worker/src/vc/storage-quota.ts).
 export { REPO_STORE_LIMIT_BYTES } from './shared/app-files'
+
+// The same standard project config and raw artifact preparation serve CLI and hosted builds.
+export {
+  projectConfig,
+  projectPath,
+  identifyProject,
+  rawProjectConfig,
+  prepareRawProject,
+  projectArtifactForm,
+} from './shared/project-build'
+export type { ProjectArtifact } from './shared/project-build'
+
+export {
+  agentCredentialFromEntropy,
+  normalizeAgentCredential,
+  agentCredentialBearer,
+  AGENT_CREDENTIAL_INSTRUCTIONS,
+} from './shared/agent-credential'

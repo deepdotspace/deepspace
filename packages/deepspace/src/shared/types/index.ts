@@ -32,6 +32,8 @@ export interface ColumnDefinition {
   userBound?: boolean
   immutable?: boolean
   required?: boolean
+  /** Maximum text length in UTF-16 code units, enforced before persistence. */
+  maxLength?: number
   default?: unknown
   timestampTrigger?: { field: string; value?: unknown }
 }

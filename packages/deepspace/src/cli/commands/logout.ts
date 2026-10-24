@@ -16,7 +16,7 @@ import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { AUTH_URL } from '../env'
 import { SESSION_COOKIE } from '../session'
 import { credentialPaths } from '../auth'
-import { defineDeepspaceCommand } from '../lib/command'
+import { defineDeepspaceCommand, Refusal } from '../lib/command'
 
 // Per-plane paths from the shared helper — logging out of staging must not
 // delete the production session (and vice versa).
@@ -52,6 +52,8 @@ export default defineDeepspaceCommand({
     description: 'Sign out and remove cached credentials',
   },
   async run({ args }) {
+    if (process.env.DEEPSPACE_AGENT_CREDENTIAL_FILE !== undefined)
+      throw new Refusal('Use auth agent revoke to revoke this credential, or unset DEEPSPACE_AGENT_CREDENTIAL_FILE to deselect it.', 'agent_identity_selected')
     // Read the session token before deleting it so we can revoke server-side.
     const sessionToken = existsSync(SESSION_PATH)
       ? readFileSync(SESSION_PATH, 'utf-8').trim()

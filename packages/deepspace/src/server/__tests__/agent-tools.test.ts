@@ -1,4 +1,4 @@
-import { tool, type ToolSet } from 'ai'
+import { jsonSchema, tool, type ToolSet } from 'ai'
 import { Hono } from 'hono'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod/v4'
@@ -229,6 +229,37 @@ describe('agent tool routes', () => {
     expect(requests).toEqual([])
   })
 
+  it('keeps an unusual validator exception inside the input-refusal boundary', async () => {
+    const { env } = makeEnv()
+    const execute = vi.fn()
+    const app = makeApp(env, {
+      buildTools: () => ({
+        echo: tool({
+          inputSchema: jsonSchema(
+            { type: 'object' },
+            {
+              validate: () => {
+                throw null
+              },
+            },
+          ),
+          execute,
+        }),
+      }),
+    })
+    const response = await app.request(
+      'https://app.test/_deepspace/agent/tools/echo',
+      {
+        method: 'POST',
+        body: '{"input":{}}',
+      },
+      env,
+    )
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ code: 'invalid_tool_input' })
+    expect(execute).not.toHaveBeenCalled()
+  })
+
   it('enforces the published additionalProperties: an unknown top-level key refuses, named', async () => {
     // Zod's runtime default STRIPS unknown keys, so without the route-level
     // check a typo'd argument validated and reported success under the
@@ -308,6 +339,26 @@ describe('agent tool routes', () => {
     expect(body.code).toBe('tool_not_found')
     expect(body.error).toContain('records_create')
     expect(body.error).toContain('records_query')
+  })
+
+  it('reports an unknown tool before reading its request body', async () => {
+    const { env } = makeEnv()
+    const app = makeApp(env, {
+      buildTools: () => ({
+        records_create: tool({ inputSchema: z.object({}), execute: async () => null }),
+      }),
+    })
+
+    const response = await app.request(
+      'https://app.test/_deepspace/agent/tools/records.create',
+      { method: 'POST', body: 'not json' },
+      env,
+    )
+
+    expect(response.status).toBe(404)
+    const body = (await json(response)) as { code: string; error: string }
+    expect(body.code).toBe('tool_not_found')
+    expect(body.error).toContain('records_create')
   })
 
   it('uses the canonical app room as the caller without app-action bypasses', async () => {
@@ -403,14 +454,31 @@ describe('agent tool routes', () => {
 
     expect(response.status).toBe(200)
     const text = await response.text()
-    expect(new TextEncoder().encode(text).byteLength).toBeLessThan(DEFAULT_CONTEXT_CONFIG.toolResultCap + 100)
+    expect(new TextEncoder().encode(text).byteLength).toBeLessThan(
+      DEFAULT_CONTEXT_CONFIG.toolResultCap + 100,
+    )
     const { result } = JSON.parse(text) as {
-      result: { data: { records: unknown[]; count: number; nextOffset: number; truncated: boolean; returned: number; total: number } }
+      result: {
+        data: {
+          records: unknown[]
+          count: number
+          nextOffset: number
+          truncated: boolean
+          returned: number
+          total: number
+        }
+      }
     }
     const kept = result.data.records.length
     expect(kept).toBeGreaterThan(0)
     expect(kept).toBeLessThan(400)
-    expect(result.data).toMatchObject({ truncated: true, returned: kept, total: 400, count: kept, nextOffset: 100 + kept })
+    expect(result.data).toMatchObject({
+      truncated: true,
+      returned: kept,
+      total: 400,
+      count: kept,
+      nextOffset: 100 + kept,
+    })
   })
 
   it('runs tools in the room the access grant names', async () => {
@@ -627,5 +695,324 @@ describe('agent tool routes', () => {
       code: 'payload_too_large',
       error: 'The request body is too large.',
     })
+  })
+})
+
+describe('shared agent transports', () => {
+  const base = 'https://app.test/_deepspace/agent'
+  const rpc = (method: string, params?: unknown, headers?: Record<string, string>) => ({
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+  })
+  it.each([
+    ['{', -32700],
+    ['{}', -32600],
+    ['{"jsonrpc":"2.0","id":[],"method":"ping"}', -32600],
+  ])('reports the appropriate JSON-RPC error for %s', async (body, code) => {
+    const { env } = makeEnv()
+    const app = makeApp(env)
+    const response = await app.request(base + '/mcp', { method: 'POST', body }, env)
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ error: { code } })
+  })
+  it('does not replace explicit null input with an executable empty object', async () => {
+    const { env } = makeEnv()
+    const execute = vi.fn(async () => ({ saved: true }))
+    const app = makeApp(env, {
+      buildTools: () => ({ save: tool({ inputSchema: z.object({}), execute }) }),
+    })
+    const response = await app.request(
+      base + '/mcp',
+      rpc('tools/call', {
+        name: 'save',
+        arguments: null,
+      }),
+      env,
+    )
+    expect(await response.json()).toMatchObject({ error: { code: -32602 } })
+    expect(execute).not.toHaveBeenCalled()
+  })
+  it.each([null, [], 'invalid'])('refuses invalid MCP params %j', async (params) => {
+    const { env } = makeEnv()
+    const response = await makeApp(env).request(base + '/mcp', rpc('tools/list', params), env)
+    expect(await response.json()).toMatchObject({ error: { code: -32602 } })
+  })
+  it('discovers the same executable definitions through HTTP, Markdown and MCP', async () => {
+    const { env } = makeEnv()
+    const app = makeApp(env)
+    const http = (await (await app.request(base + '/tools', {}, env)).json()) as {
+      tools: Array<{ inputSchema: unknown }>
+    }
+    const mcp = (await (await app.request(base + '/mcp', rpc('tools/list'), env)).json()) as {
+      result: { tools: unknown[] }
+    }
+    expect(mcp.result.tools).toEqual(http.tools)
+    const md = await app.request(base + '/tools.md', {}, env)
+    expect(md.headers.get('Cache-Control')).toBe('no-store')
+    expect(await md.text()).toContain(JSON.stringify(http.tools[0].inputSchema))
+    const init = await (
+      await app.request(base + '/mcp', rpc('initialize', { protocolVersion: '2025-06-18' }), env)
+    ).json()
+    expect((init as { result: { protocolVersion: string } }).result.protocolVersion).toBe(
+      '2025-06-18',
+    )
+  })
+  it('keeps scalar-input tools on HTTP without invalidating MCP discovery', async () => {
+    const { env } = makeEnv()
+    const app = makeApp(env, {
+      buildTools: () => ({
+        scalar: tool({ inputSchema: z.string(), execute: async (value) => value }),
+        object: tool({ inputSchema: z.object({}), execute: async () => ({ ok: true }) }),
+      }),
+    })
+    const list = (await (await app.request(base + '/mcp', rpc('tools/list'), env)).json()) as {
+      result: { tools: Array<{ name: string; inputSchema: { type: string } }> }
+    }
+    expect(list.result.tools.map((entry) => entry.name)).toEqual(['object'])
+    expect(list.result.tools[0].inputSchema.type).toBe('object')
+    const response = await app.request(
+      base + '/tools/scalar',
+      {
+        method: 'POST',
+        body: JSON.stringify({ input: 'hello' }),
+      },
+      env,
+    )
+    expect(await response.json()).toEqual({ ok: true, result: 'hello' })
+    expect(
+      await (
+        await app.request(
+          base + '/mcp',
+          rpc('tools/call', {
+            name: 'scalar',
+            arguments: 'hello',
+          }),
+          env,
+        )
+      ).json(),
+    ).toMatchObject({ error: { code: -32602 } })
+  })
+  it('refuses an oversized typed output instead of returning schema-invalid success', async () => {
+    const { env } = makeEnv()
+    const app = makeApp(env, {
+      buildTools: () => ({
+        list: tool({
+          inputSchema: z.object({}),
+          outputSchema: z.strictObject({ items: z.array(z.string()).length(1000) }),
+          execute: async () => ({ items: Array.from({ length: 1000 }, () => 'x'.repeat(200)) }),
+        }),
+      }),
+    })
+    const response = (await (
+      await app.request(
+        base + '/mcp',
+        rpc('tools/call', {
+          name: 'list',
+          arguments: {},
+        }),
+        env,
+      )
+    ).json()) as {
+      result: { isError: boolean; structuredContent?: unknown; content: Array<{ text: string }> }
+    }
+    expect(response.result.isError).toBe(true)
+    expect(response.result).not.toHaveProperty('structuredContent')
+    expect(JSON.parse(response.result.content[0].text)).toMatchObject({
+      code: 'tool_result_too_large',
+    })
+  })
+  const outputCases: Array<{
+    name: string
+    schema: z.ZodType
+    value: unknown
+    objectSchema: boolean
+  }> = [
+    { name: 'number', schema: z.number(), value: 3, objectSchema: false },
+    { name: 'string', schema: z.string(), value: 'hello', objectSchema: false },
+    { name: 'boolean', schema: z.boolean(), value: true, objectSchema: false },
+    { name: 'null', schema: z.null(), value: null, objectSchema: false },
+    { name: 'array', schema: z.array(z.number()), value: [1, 2], objectSchema: false },
+    {
+      name: 'nullable object',
+      schema: z.object({ count: z.number() }).nullable(),
+      value: { count: 3 },
+      objectSchema: false,
+    },
+    {
+      name: 'object',
+      schema: z.object({ count: z.number() }),
+      value: { count: 3 },
+      objectSchema: true,
+    },
+  ]
+  it.each(outputCases)(
+    'keeps $name outputs MCP-compatible without changing the HTTP contract',
+    async ({ schema, value, objectSchema }) => {
+      const { env } = makeEnv()
+      const app = makeApp(env, {
+        buildTools: () => ({
+          result: tool({
+            inputSchema: z.object({}),
+            outputSchema: schema,
+            execute: async () => value,
+          }),
+        }),
+      })
+      const httpList = (await (await app.request(base + '/tools', {}, env)).json()) as {
+        tools: Array<{ outputSchema: unknown }>
+      }
+      const mcpList = (await (await app.request(base + '/mcp', rpc('tools/list'), env)).json()) as {
+        result: { tools: Array<{ outputSchema?: unknown }> }
+      }
+      // MCP's Tool schema permits only object-root input and output schemas.
+      const mcpSchema = z.object({ type: z.literal('object') }).passthrough()
+      expect(
+        z
+          .array(
+            z
+              .object({
+                name: z.string(),
+                inputSchema: mcpSchema,
+                outputSchema: mcpSchema.optional(),
+              })
+              .passthrough(),
+          )
+          .safeParse(mcpList.result.tools).success,
+      ).toBe(true)
+      expect(httpList.tools[0].outputSchema).toBeDefined()
+      expect(mcpList.result.tools[0].outputSchema).toEqual(
+        objectSchema ? httpList.tools[0].outputSchema : undefined,
+      )
+
+      const httpCall = await (
+        await app.request(base + '/tools/result', { method: 'POST', body: '{"input":{}}' }, env)
+      ).json()
+      expect(httpCall).toEqual({ ok: true, result: value })
+      const mcpCall = (await (
+        await app.request(base + '/mcp', rpc('tools/call', { name: 'result', arguments: {} }), env)
+      ).json()) as {
+        result: { content: Array<{ type: string; text: string }>; structuredContent?: unknown }
+      }
+      expect(mcpCall.result.content).toEqual([{ type: 'text', text: JSON.stringify(value) }])
+      if (objectSchema) expect(mcpCall.result.structuredContent).toEqual(value)
+      else if (mcpCall.result.structuredContent !== undefined)
+        expect(
+          z.record(z.string(), z.unknown()).safeParse(mcpCall.result.structuredContent).success,
+        ).toBe(true)
+    },
+  )
+  it('preserves validation and execution results across HTTP and MCP', async () => {
+    const { env } = makeEnv()
+    const app = makeApp(env)
+    for (const input of [{ message: 'hello' }, { message: 7 }, { message: 'hello', typo: true }]) {
+      const http = await (
+        await app.request(
+          base + '/tools/echo',
+          { method: 'POST', body: JSON.stringify({ input }) },
+          env,
+        )
+      ).json()
+      const mcp = await (
+        await app.request(base + '/mcp', rpc('tools/call', { name: 'echo', arguments: input }), env)
+      ).json()
+      const httpBody = http as { ok: boolean; result?: unknown }
+      const mcpBody = mcp as { result: { isError: boolean; content: Array<{ text: string }> } }
+      expect(mcpBody.result.isError).toBe(!httpBody.ok)
+      expect(JSON.parse(mcpBody.result.content[0].text)).toEqual(
+        httpBody.ok ? httpBody.result : httpBody,
+      )
+    }
+  })
+  it.each([401, 403, 503] as const)(
+    'keeps all discovery and invocation behind the same %i gate',
+    async (status) => {
+      const { env } = makeEnv()
+      const buildTools = vi.fn()
+      const app = makeApp(env, { resolveAccess: async () => ({ ok: false, status }), buildTools })
+      for (const [path, init] of [
+        ['/tools.md', {}],
+        ['/mcp', rpc('initialize')],
+        ['/mcp', rpc('tools/list')],
+        ['/mcp', rpc('tools/call', { name: 'echo', arguments: { message: 'x' } })],
+      ] as const)
+        expect((await app.request(base + path, init, env)).status).toBe(status)
+      expect(buildTools).not.toHaveBeenCalled()
+    },
+  )
+  it('rejects cross-origin requests and oversized MCP bodies before execution', async () => {
+    const { env } = makeEnv()
+    const execute = vi.fn()
+    const app = makeApp(env, {
+      buildTools: () => ({
+        echo: tool({ inputSchema: z.object({ message: z.string() }), execute }),
+      }),
+    })
+    expect(
+      (
+        await app.request(
+          base + '/mcp',
+          rpc('tools/call', { name: 'echo', arguments: {} }, { Origin: 'https://elsewhere.test' }),
+          env,
+        )
+      ).status,
+    ).toBe(403)
+    expect(
+      (
+        await app.request(
+          base + '/mcp',
+          rpc('tools/call', {
+            name: 'echo',
+            arguments: { message: 'x'.repeat(AGENT_TOOL_REQUEST_BODY_CAP) },
+          }),
+          env,
+        )
+      ).status,
+    ).toBe(413)
+    expect(execute).not.toHaveBeenCalled()
+  })
+  it('does not execute notification calls or advertise an SSE/session transport', async () => {
+    const { env } = makeEnv()
+    const execute = vi.fn()
+    const app = makeApp(env, {
+      buildTools: () => ({ echo: tool({ inputSchema: z.object({}), execute }) }),
+    })
+    const response = await app.request(
+      base + '/mcp',
+      {
+        method: 'POST',
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/call', params: { name: 'echo' } }),
+      },
+      env,
+    )
+    expect(response.status).toBe(202)
+    expect(execute).not.toHaveBeenCalled()
+    expect((await app.request(base + '/mcp', {}, env)).status).toBe(405)
+  })
+  it('does not widen native credentials when browser sessions are enabled', async () => {
+    const { env } = makeEnv()
+    const app = new Hono<{ Bindings: AgentToolRouteEnv }>()
+    registerAgentToolRoutes(app, {
+      resolveAccess: async (r) =>
+        r.headers.get('Authorization') === 'Bearer native' ? access : { ok: false, status: 401 },
+      resolveBrowserAccess: async (r) =>
+        r.headers.get('Authorization') === 'Bearer browser' ? access : { ok: false, status: 401 },
+      buildTools: (execute) => ({
+        current: tool({ inputSchema: z.object({}), execute: () => execute('user.current', {}) }),
+      }),
+    })
+    for (const [path, token, status] of [
+      ['', 'browser', 401],
+      ['/browser', 'native', 401],
+      ['', 'native', 200],
+      ['/browser', 'browser', 200],
+    ] as const) {
+      const response = await app.request(
+        base + path + '/tools/current',
+        { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: '{"input":{}}' },
+        env,
+      )
+      expect(response.status).toBe(status)
+    }
   })
 })

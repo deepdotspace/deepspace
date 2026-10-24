@@ -2,7 +2,15 @@
 
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -20,10 +28,13 @@ import {
 import { acquireDeployLock, deployLockPath } from '../deploy/lock'
 import { MAX_DEPLOY_ASSET_FILE_BYTES } from '../../../shared/app-files'
 import {
+  buildDeployBundle,
+  ensureDeployInstallReady,
   collectAssets,
   collectWorkerBundle,
   extractRunWorkerFirst,
   clientAppIdRefusal,
+  publicAssetsForReadiness,
   isDeployAssetControlFile,
   oversizedAssetRefusal,
   readDeployAssetConfig,
@@ -31,6 +42,7 @@ import {
   type DeployAsset,
   type DeployWorkerBundle,
 } from '../deploy/build'
+import { rawProjectConfig } from '../../../shared/project-build'
 import {
   ASSET_UPLOAD_ATTEMPTS,
   ASSET_UPLOAD_ATTEMPT_TIMEOUT_MS,
@@ -109,6 +121,100 @@ describe('extractRunWorkerFirst', () => {
     expect(
       resolveDeployRunWorkerFirst({ assets: { run_worker_first: ['/docs', '/docs/*'] } }),
     ).toEqual(['/docs', '/docs/*'])
+  })
+})
+
+describe('raw Worker project builds', () => {
+  beforeEach(() => vi.stubEnv('DEEPSPACE_NO_INSTALL', '1'))
+  afterEach(() => vi.unstubAllEnvs())
+
+  it('uses the shared artifact manifest for exact binary assets and Worker modules', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'deepspace-raw-build-'))
+    try {
+      const appId = 'app_01M4Y1HZCX11EFMZZD0EHEQQ1Q'
+      const bytes = Buffer.from([0, 255, 128, 10])
+      mkdirSync(join(dir, 'public'))
+      mkdirSync(join(dir, '.deepspace'))
+      writeFileSync(join(dir, 'wrangler.toml'), rawProjectConfig('raw-test', appId))
+      writeFileSync(join(dir, 'worker.js'), 'export default {}')
+      writeFileSync(join(dir, '.deepspace', 'private.js'), 'do not publish')
+      writeFileSync(join(dir, 'public', 'image.png'), bytes)
+      writeFileSync(join(dir, 'public', '_headers'), '/*\n  X-Test: yes')
+      expect(existsSync(join(dir, 'package.json'))).toBe(false)
+      expect(() => ensureDeployInstallReady(dir, undefined)).not.toThrow()
+      expect(existsSync(join(dir, '.deepspace', 'install.started'))).toBe(false)
+      const bundle = await buildDeployBundle({
+        appDir: dir,
+        appName: 'raw-test',
+        appId,
+        envName: undefined,
+        output: {
+          json: false,
+          nonInteractive: true,
+          emitJson() {},
+          showIntro() {},
+          die(message) {
+            throw new Error(message)
+          },
+        },
+        spinner: { start() {}, stop() {}, message() {} },
+      })
+      expect(bundle.worker.modules).toEqual([{ name: 'worker.js', content: 'export default {}' }])
+      expect(bundle.assetConfig).toEqual({ _headers: '/*\n  X-Test: yes' })
+      expect(bundle.assets).toEqual([
+        {
+          path: '/image.png',
+          hash: createHash('sha256').update(bytes).digest('hex'),
+          size: bytes.length,
+          sourcePath: join(dir, 'public', 'image.png'),
+        },
+      ])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it.each([false, undefined])('keeps the SDK install gate with no_bundle=%s', (noBundle) => {
+    const dir = mkdtempSync(join(tmpdir(), 'deepspace-sdk-preflight-'))
+    try {
+      writeFileSync(join(dir, 'package.json'), '{"dependencies":{"deepspace":"*"}}')
+      writeFileSync(
+        join(dir, 'wrangler.toml'),
+        `name = "sdk-test"\n${noBundle === false ? 'no_bundle = false\n' : ''}`,
+      )
+      expect(() => ensureDeployInstallReady(dir, undefined)).toThrow(
+        expect.objectContaining({ code: 'deps_missing' }),
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps the SDK install gate for a named environment that requires a build', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'deepspace-raw-env-preflight-'))
+    try {
+      writeFileSync(
+        join(dir, 'wrangler.toml'),
+        rawProjectConfig('raw-test', 'app_01M4Y1HZCX11EFMZZD0EHEQQ1Q'),
+      )
+      expect(() => ensureDeployInstallReady(dir, 'staging')).toThrow(
+        expect.objectContaining({ code: 'deps_missing' }),
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('validates raw project configuration before bypassing installation', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'deepspace-raw-invalid-preflight-'))
+    try {
+      writeFileSync(join(dir, 'wrangler.toml'), 'no_bundle = true\nmain = "worker.js"\n')
+      expect(() => ensureDeployInstallReady(dir, undefined)).toThrow(
+        'wrangler.toml is not a valid DeepSpace project',
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 
@@ -947,6 +1053,25 @@ describe('clientAppIdRefusal', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   }
+
+  it('keeps public bundle readiness from probing private documentation backing paths', () => {
+    withClient(
+      {
+        'assets/lazy.js': 'export const loaded = true',
+        'assets/site.css': 'body{color:blue}',
+        '_documentation/assets/page.js': 'export const page = 1',
+        '_documentation-root/assets/page.js': 'export const page = 2',
+      },
+      (assets) => {
+        expect(assets).toHaveLength(4)
+        expect(
+          publicAssetsForReadiness(assets)
+            .map((asset) => asset.path)
+            .sort(),
+        ).toEqual(['/assets/lazy.js', '/assets/site.css'])
+      },
+    )
+  })
 
   it('passes a bundle built against the id being deployed', () => {
     withClient({ 'app.js': `const a="${TARGET}";console.log(a)` }, (assets) => {

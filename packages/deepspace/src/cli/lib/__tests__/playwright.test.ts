@@ -21,6 +21,7 @@ afterEach(() => {
   spawnSyncMock.mockReset()
   execSyncMock.mockReset()
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
 })
 
 /** Run the preflight as if it were root on Linux, where `--with-deps` fires. */
@@ -38,6 +39,34 @@ function asLinuxRoot(run: () => void): void {
 }
 
 describe('test-run child output routing', () => {
+  it('uses a configured executable without downloading browsers or running apt as root', () => {
+    vi.stubEnv('DEEPSPACE_TEST_BROWSER_EXECUTABLE_PATH', process.execPath)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    asLinuxRoot(() => ensurePlaywright('/app', { allowExecutableOverride: true }))
+    expect(execSyncMock).toHaveBeenCalledWith('npx playwright --version', expect.anything())
+    expect(spawnSyncMock).not.toHaveBeenCalled()
+  })
+
+  it('refuses a bad override before any install or network call', () => {
+    vi.stubEnv('DEEPSPACE_TEST_BROWSER_EXECUTABLE_PATH', '/missing/deepspace-browser')
+    expect(() => ensurePlaywright('/app', { allowExecutableOverride: true })).toThrow(
+      'must name an existing executable file',
+    )
+    expect(execSyncMock).not.toHaveBeenCalled()
+    expect(spawnSyncMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps managed-browser installation for callers that cannot consume a test config', () => {
+    vi.stubEnv('DEEPSPACE_TEST_BROWSER_EXECUTABLE_PATH', process.execPath)
+    spawnSyncMock.mockReturnValue({ status: 0 })
+    ensurePlaywright('/app')
+    expect(spawnSyncMock).toHaveBeenCalledWith(
+      'npx',
+      ['playwright', 'install', 'chromium'],
+      expect.anything(),
+    )
+  })
+
   it('sends the preflight child stdout to stderr under the same flag as the suite', () => {
     spawnSyncMock.mockReturnValue({ status: 0 })
 

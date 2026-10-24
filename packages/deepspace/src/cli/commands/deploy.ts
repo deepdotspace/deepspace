@@ -8,7 +8,6 @@ import { DEPLOY_URL } from '../env'
 import { commitScaffoldIfUnborn, ensureAppRegistered, healRefusal } from '../lib/app-registration'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { readAppId } from '../lib/app-identity'
-import { ensureInstallReady } from '../lib/install-status'
 import type { CliAction } from '../lib/output'
 import { preflightNodeVersion } from '../lib/preflight'
 import { createSpinner, setPlainProgress } from '../lib/spinner'
@@ -26,8 +25,17 @@ import {
   resolveAppNameForEnv,
   type WranglerConfig,
 } from '../lib/wrangler-env'
-import { buildDeployBundle, oversizedAssetRefusal } from './deploy/build'
-import { syncOneTimeProducts, syncSubscriptionPlans } from './deploy/commerce'
+import {
+  buildDeployBundle,
+  ensureDeployInstallReady,
+  oversizedAssetRefusal,
+  publicAssetsForReadiness,
+} from './deploy/build'
+import {
+  syncOneTimeProducts,
+  syncSubscriptionPlans,
+  validateAgentCommerce,
+} from './deploy/commerce'
 import { createDeployOutput, type DeployOutput } from './deploy/output'
 import { CliExit, Refusal, errorCode, formatCliError } from '../lib/cli-errors'
 import {
@@ -176,6 +184,7 @@ async function runLockedDeploy(
 ): Promise<void> {
   p.intro('Deploying DeepSpace app')
   output.showIntro()
+  await validateAgentCommerce(appDir)
 
   const wranglerConfig: WranglerConfig = readWranglerConfig(appDir)
   const nameResult = resolveAppNameForEnv(wranglerConfig, envName)
@@ -199,7 +208,7 @@ async function runLockedDeploy(
   // hit not_authenticated) and inside the deploy lock (no concurrent installs
   // into one node_modules).
   try {
-    ensureInstallReady(appDir)
+    ensureDeployInstallReady(appDir, envName)
   } catch (error: unknown) {
     const refusal = error as { message?: string; code?: string; action?: CliAction }
     return output.die(refusal.message ?? String(error), refusal.code ?? 'install_failed', {
@@ -398,36 +407,41 @@ async function runLockedDeploy(
   }
 
   let serving: ReleaseWait = 'unverifiable'
-  // The stamp probe proves only the static edge; the data plane (Durable
+  // The marker and client-asset probes prove only the static edge; the data plane (Durable
   // Object bindings) can lag behind on script-version rollout, answering 500
   // after "confirmed" (AX S3). Reported as its own field, never folded into
   // `serving`, whose meaning is pinned.
-  let dataPlane: Exclude<ReleaseWait, 'unverifiable'> = 'unconfirmed'
+  let dataPlane: ReleaseWait = 'unconfirmed'
   const edgeWaitStarted = Date.now()
   if (body.url) {
     spinner.message('Waiting for the edge to serve this release...')
-    serving = await waitForLiveRelease(body.url, body.releaseStamp, 90_000)
+    serving = await waitForLiveRelease(
+      body.url,
+      body.releaseStamp,
+      90_000,
+      publicAssetsForReadiness(bundle.assets),
+    )
     if (serving === 'confirmed') {
       dataPlane = await waitForDataPlane(body.url, appId, 30_000)
       await wakeWorker(body.url)
       if (dataPlane === 'unconfirmed') {
         p.log.warn(
-          'The edge serves the new release, but its worker still answered 5xx on the data ' +
-            'plane — Durable Object bindings can lag a redeploy briefly. First requests may ' +
-            'fail; retry before asserting against the app.',
+          'The edge serves the new release, but the CLI could not confirm its data plane. ' +
+            'The worker may still be rolling out, or the CLI may be unable to reach it. ' +
+            'Open the live app and verify its backend before reporting it ready.',
         )
       }
     }
     if (serving !== 'confirmed') {
       spinner.stop(
         serving === 'unconfirmed'
-          ? 'Deployed — the edge is still rolling this release out'
+          ? 'Deployed — readiness could not be confirmed from here'
           : 'Deployed — serving could not be verified from here',
       )
       p.log.warn(
         serving === 'unconfirmed'
-          ? 'Some requests still get the previous release. Cloudflare rolls a version out per ' +
-              'edge machine; it usually settles within a couple of minutes. Wait before asserting against it.'
+          ? 'The CLI could not confirm the new release marker and client assets. The edge may still be ' +
+              'rolling out, or this environment may be unable to reach it. Check the live URL before retrying deployment.'
           : 'This release carries no serving stamp (older platform, or a resumed deploy), so the ' +
               'CLI cannot tell which release the edge answers with.',
       )

@@ -10,6 +10,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest'
 import { createServer, type Server } from 'node:http'
+import { createHash } from 'node:crypto'
 import {
   RELEASE_STAMP_PATH,
   waitForDataPlane,
@@ -31,8 +32,15 @@ afterEach(async () => {
  */
 async function startEdge(answers: string[]): Promise<{ url: string; requests: number }> {
   const state = { requests: 0 }
+  const releases = new WeakMap<object, string>()
   server = createServer((req, res) => {
-    const release = answers[state.requests % answers.length]
+    // Bind the release to the socket, so accidentally pooling probes cannot
+    // simulate independent edge machines by incrementing a request counter.
+    let release = releases.get(req.socket)
+    if (release === undefined) {
+      release = answers[state.requests % answers.length]
+      releases.set(req.socket, release)
+    }
     state.requests++
     if (!req.url?.startsWith(RELEASE_STAMP_PATH)) {
       res.writeHead(404).end()
@@ -43,9 +51,13 @@ async function startEdge(answers: string[]): Promise<{ url: string; requests: nu
   })
   await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve))
   const port = (server!.address() as { port: number }).port
-  return Object.defineProperty({ url: `http://127.0.0.1:${port}` } as { url: string; requests: number }, 'requests', {
-    get: () => state.requests,
-  })
+  return Object.defineProperty(
+    { url: `http://127.0.0.1:${port}` } as { url: string; requests: number },
+    'requests',
+    {
+      get: () => state.requests,
+    },
+  )
 }
 
 describe('waitForLiveRelease', () => {
@@ -77,9 +89,9 @@ describe('waitForLiveRelease', () => {
     })
     await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve))
     const port = (server!.address() as { port: number }).port
-    await expect(
-      waitForLiveRelease(`http://127.0.0.1:${port}`, 'new', 30_000),
-    ).resolves.toBe('confirmed')
+    await expect(waitForLiveRelease(`http://127.0.0.1:${port}`, 'new', 30_000)).resolves.toBe(
+      'confirmed',
+    )
   })
 
   it('reports unverifiable without a stamp instead of pretending to check', async () => {
@@ -97,11 +109,80 @@ describe('waitForLiveRelease', () => {
   })
 })
 
+describe('release client assets', () => {
+  const script = 'export const version = "new"'
+  const style = 'body{color:blue}'
+  const assets = [
+    {
+      path: '/assets/lazy.mjs',
+      hash: createHash('sha256').update(script).digest('hex'),
+      size: Buffer.byteLength(script),
+    },
+    {
+      path: '/assets/index.css',
+      hash: createHash('sha256').update(style).digest('hex'),
+      size: Buffer.byteLength(style),
+    },
+  ]
+
+  async function startAssets(
+    answer: (path: string, request: number) => { status: number; body: string },
+  ) {
+    const counts = new Map<string, number>()
+    server = createServer((req, res) => {
+      const url = new URL(req.url!, 'http://localhost')
+      expect(url.searchParams.get('_deepspace_probe')).toBe('readiness')
+      const count = (counts.get(url.pathname) ?? 0) + 1
+      counts.set(url.pathname, count)
+      if (url.pathname === RELEASE_STAMP_PATH) {
+        res.writeHead(200).end(JSON.stringify({ release: 'new' }))
+        return
+      }
+      const result = answer(url.pathname, count)
+      res.writeHead(result.status).end(result.body)
+    })
+    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve))
+    return { url: `http://127.0.0.1:${(server!.address() as { port: number }).port}`, counts }
+  }
+
+  it('waits for lazy chunks and styles even when every marker already matches', async () => {
+    const edge = await startAssets((path, request) =>
+      request === 1
+        ? { status: 404, body: '' }
+        : { status: 200, body: path.endsWith('.css') ? style : script },
+    )
+    await expect(waitForLiveRelease(edge.url, 'new', 5000, assets)).resolves.toBe('confirmed')
+    expect(edge.counts.get('/assets/lazy.mjs')).toBe(2)
+    expect(edge.counts.get('/assets/index.css')).toBe(2)
+  })
+
+  it.each([
+    [
+      'missing CSS',
+      (path: string) => ({ status: path.endsWith('.css') ? 404 : 200, body: script }),
+    ],
+    ['SPA HTML fallback', () => ({ status: 200, body: '<html>fallback</html>' })],
+    [
+      'same-sized wrong bytes',
+      (path: string) => ({
+        status: 200,
+        body: path.endsWith('.css') ? style : script.replace('new', 'old'),
+      }),
+    ],
+    ['oversized response', () => ({ status: 200, body: 'x'.repeat(100_000) })],
+  ])('does not confirm %s behind a matching marker', async (_name, answer) => {
+    const edge = await startAssets(answer)
+    await expect(waitForLiveRelease(edge.url, 'new', 1000, assets)).resolves.toBe('unconfirmed')
+    expect(edge.counts.get('/assets/lazy.mjs')).toBeGreaterThan(0)
+    expect(edge.counts.get('/assets/index.css')).toBeGreaterThan(0)
+  })
+})
+
 /** Per-connection status cycle, mirroring startEdge for the status-code waits. */
-async function startStatusEdge(statuses: number[]): Promise<{ url: string }> {
+async function startStatusEdge(statuses: number[], body = ''): Promise<{ url: string }> {
   const state = { requests: 0 }
   server = createServer((_req, res) => {
-    res.writeHead(statuses[state.requests % statuses.length]!).end()
+    res.writeHead(statuses[state.requests % statuses.length]!).end(body)
     state.requests++
   })
   await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve))
@@ -123,15 +204,43 @@ describe('waitForHostReleased (the undeploy counterpart)', () => {
 })
 
 describe('waitForDataPlane (post-deploy DO probe)', () => {
-  it('confirms on the healthy 404 a room answers a non-upgrade GET with', async () => {
-    const edge = await startStatusEdge([404])
+  it('confirms only an initialized acknowledgment from the intended app room', async () => {
+    const edge = await startStatusEdge(
+      [200],
+      JSON.stringify({ ok: true, room: 'record', scopeId: 'app:app_x' }),
+    )
     await expect(waitForDataPlane(edge.url, 'app_x', 30_000)).resolves.toBe('confirmed')
   })
 
   it('does NOT confirm while edges on the old script version answer 5xx', async () => {
     // The AX S3 failure mode: "Durable Object Namespace was deleted" 500s
     // after serving was already confirmed.
-    const edge = await startStatusEdge([500, 404])
+    const edge = await startStatusEdge(
+      [500, 200],
+      JSON.stringify({ ok: true, room: 'record', scopeId: 'app:app_x' }),
+    )
     await expect(waitForDataPlane(edge.url, 'app_x', 3_000)).resolves.toBe('unconfirmed')
   })
+})
+
+it.each([[200, JSON.stringify({ ok: true, room: 'record', scopeId: 'app:other' })]])(
+  'does not treat status %s with an unrelated response as data-plane readiness',
+  async (status, body) => {
+    const edge = await startStatusEdge([status], body)
+    await expect(waitForDataPlane(edge.url, 'app_x', 100)).resolves.toBe('unconfirmed')
+  },
+)
+
+it.each([
+  [404, 'Not Found'],
+  [401, 'Unauthorized'],
+  [403, 'Forbidden'],
+  [200, '<html>SPA fallback</html>'],
+  [200, '<html>' + 'Large raw app '.repeat(1000) + '</html>'],
+  [200, JSON.stringify({ ok: true })],
+])('reports unsupported data-plane probes immediately (HTTP %s)', async (status, body) => {
+  const edge = await startStatusEdge([status], body)
+  const started = Date.now()
+  expect(await waitForDataPlane(edge.url, 'app_x', 30_000)).toBe('unverifiable')
+  expect(Date.now() - started).toBeLessThan(1000)
 })

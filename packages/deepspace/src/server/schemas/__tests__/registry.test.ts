@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { CollectionSchema } from '../../../shared/types'
-import { checkUnclaimedOwnerTransition, lintSchema, lintSchemas } from '../registry'
+import {
+  canDelete,
+  canRead,
+  canUpdate,
+  checkUnclaimedOwnerTransition,
+  lintSchema,
+  lintSchemas,
+} from '../registry'
 
 const claimableSchema: CollectionSchema = {
   name: 'tasks',
@@ -19,6 +26,57 @@ const claimableSchema: CollectionSchema = {
     admin: { read: true, create: true, update: true, delete: true },
   },
 }
+
+describe('own permissions without an identity', () => {
+  const notes: CollectionSchema = {
+    name: 'notes',
+    columns: [{ name: 'text', storage: 'text', interpretation: 'plain' }],
+    permissions: { viewer: { read: 'own', create: true, update: 'own', delete: 'own' } },
+  }
+  const anonymousNote = { data: { text: 'mine' }, createdBy: '' }
+
+  it('gives an identity-less caller no ownership of identity-less records', () => {
+    expect(canRead(notes, 'viewer', anonymousNote, '')).toBe(false)
+    expect(canUpdate(notes, 'viewer', anonymousNote, '')).toBe(false)
+    expect(canDelete(notes, 'viewer', anonymousNote, '')).toBe(false)
+  })
+
+  it('still lets an identified caller act on its own records', () => {
+    expect(canUpdate(notes, 'viewer', { ...anonymousNote, createdBy: 'user-1' }, 'user-1')).toBe(
+      true,
+    )
+  })
+
+  it('does not count an identity-less caller as a collaborator', () => {
+    const shared: CollectionSchema = {
+      name: 'shared',
+      columns: [{ name: 'collaborators', storage: 'text', interpretation: 'plain' }],
+      collaboratorsField: 'collaborators',
+      permissions: {
+        viewer: { read: 'collaborator', create: true, update: 'collaborator', delete: 'own' },
+      },
+    }
+    const record = { data: { collaborators: JSON.stringify(['']) }, createdBy: 'user-1' }
+    expect(canRead(shared, 'viewer', record, '')).toBe(false)
+    expect(canUpdate(shared, 'viewer', record, '')).toBe(false)
+  })
+
+  it('does not count an identity-less caller as a team member', () => {
+    const docs: CollectionSchema = {
+      name: 'docs',
+      columns: [{ name: 'teamId', storage: 'text', interpretation: 'plain' }],
+      teamField: 'teamId',
+      permissions: { viewer: { read: 'team', create: true, update: 'team', delete: 'team' } },
+    }
+    const teamDoc = { data: { teamId: 'team-1' }, createdBy: 'user-1' }
+    const ctx = {
+      isTeamMember: (teamId: string, userId: string) => teamId === 'team-1' && userId === '',
+    }
+    expect(canRead(docs, 'viewer', teamDoc, '', ctx)).toBe(false)
+    expect(canUpdate(docs, 'viewer', teamDoc, '', ctx)).toBe(false)
+    expect(canDelete(docs, 'viewer', teamDoc, '', ctx)).toBe(false)
+  })
+})
 
 describe('checkUnclaimedOwnerTransition', () => {
   it('allows an unclaimed row, a self-claim, and an unclaim', () => {

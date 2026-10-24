@@ -17,6 +17,7 @@ import { ensureToken, loginAction } from '../auth'
 import { DASHBOARD_URL } from '../env'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
+import { readAgentCredential } from '../agent-credentials'
 
 interface JwtPayload {
   sub?: string
@@ -26,6 +27,7 @@ interface JwtPayload {
   iss?: string
   iat?: number
   exp?: number
+  agentAccount?: boolean
 }
 
 export default defineDeepspaceCommand({
@@ -41,17 +43,28 @@ export default defineDeepspaceCommand({
     try {
       payload = decodeJwtPayload<JwtPayload>(jwt)
     } catch {
-      throw new Refusal('Malformed session token. Run `deepspace auth login` again.', 'not_authenticated', {
-        action: loginAction(),
-      })
+      throw new Refusal(
+        'Malformed session token. Run `deepspace auth login` again.',
+        'not_authenticated',
+        {
+          action: loginAction(),
+        },
+      )
     }
 
     const isTestAccount = !!payload.email?.endsWith('@deepspace.test')
-    const accountType: 'developer' | 'test-account' | 'unknown' = isTestAccount
-      ? 'test-account'
-      : payload.email
-        ? 'developer'
-        : 'unknown'
+    const accountType: 'agent' | 'developer' | 'test-account' | 'unknown' =
+      payload.agentAccount === true
+        ? 'agent'
+        : isTestAccount
+          ? 'test-account'
+          : payload.email
+            ? 'developer'
+            : 'unknown'
+    const verifiedUntil =
+      accountType === 'agent' ? (readAgentCredential()?.verifiedUntil ?? null) : null
+    const renewalDueSoon =
+      verifiedUntil !== null && Date.parse(verifiedUntil) - Date.now() <= 30 * 60_000
 
     if (!args.json) {
       console.log(`Name:       ${payload.name ?? '(none)'}`)
@@ -65,7 +78,11 @@ export default defineDeepspaceCommand({
       if (payload.exp) {
         console.log(`Expires:    ${new Date(payload.exp * 1000).toISOString()} (renews on use)`)
       }
-      console.log(`Dashboard:  ${DASHBOARD_URL}`)
+      if (accountType === 'agent') {
+        console.log(`Verified:   ${verifiedUntil ?? '(unknown)'}`)
+        console.log('Renew:      deepspace auth agent renew --json (solve the returned challenge)')
+        console.log('Identity:   Keep the account phrase in the private chat or private storage.')
+      } else console.log(`Dashboard:  ${DASHBOARD_URL}`)
       if (isTestAccount) {
         console.log('')
         console.log('Note: this is a test account, not a real OAuth developer.')
@@ -81,6 +98,15 @@ export default defineDeepspaceCommand({
         accountType,
         issuer: payload.iss ?? null,
         expiresAt: payload.exp ? new Date(payload.exp * 1000).toISOString() : null,
+        ...(accountType === 'agent'
+          ? {
+              verifiedUntil,
+              renewalDueSoon,
+              renewalCommand: ['deepspace', 'auth', 'agent', 'renew', '--json'],
+              credentialBackup:
+                'Keep the account phrase in the private chat or private storage to restore access after this container disappears; losing all copies loses account access.',
+            }
+          : {}),
       },
     }
   },

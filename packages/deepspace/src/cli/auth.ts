@@ -16,6 +16,7 @@ import { registerAuthRefresh } from './lib/api'
 import { cliAction, Refusal } from './lib/command'
 import type { CliAction } from './lib/output'
 import { writeSecretFileSync } from './lib/secure-file'
+import { ensureAgentToken, mintAgentAppToken } from './agent-credentials'
 
 /** The plane whose credentials keep the historical un-suffixed filenames. */
 const PROD_AUTH_URL = PLANE_AUTH_URLS.production
@@ -109,6 +110,8 @@ function writeCachedToken(token: string): void {
  * Returns the JWT string or throws if not logged in / session expired.
  */
 export async function ensureToken(options: EnsureTokenOptions = {}): Promise<string> {
+  if (process.env.DEEPSPACE_AGENT_CREDENTIAL_FILE !== undefined)
+    return ensureAgentToken(false, options.minimumValidityMs)
   const minimumValidityMs = options.minimumValidityMs ?? 30_000
   // Try existing token first — if it's still valid, skip the refresh
   const existing = readCredential(TOKEN_PATH)
@@ -202,6 +205,7 @@ function isTokenValid(jwt: string, minimumValidityMs: number): boolean {
  * coded error so a rejected bearer is never misreported as an expired login.
  */
 export async function refreshTokenFromSession(): Promise<string | null> {
+  if (process.env.DEEPSPACE_AGENT_CREDENTIAL_FILE !== undefined) return ensureAgentToken(true)
   return await exchangeStoredSession()
 }
 
@@ -210,6 +214,7 @@ export async function refreshTokenFromSession(): Promise<string | null> {
  * replacing the CLI's ordinary platform-token cache.
  */
 export async function mintAgentToken(target: string): Promise<string> {
+  if (process.env.DEEPSPACE_AGENT_CREDENTIAL_FILE !== undefined) return mintAgentAppToken(target)
   const sessionToken = readCredential(SESSION_PATH)
   if (sessionToken === null) throw notAuthenticated('Not logged in')
   const token = await exchangeAgentSession(AUTH_URL, sessionToken, target)

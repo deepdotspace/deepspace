@@ -1,7 +1,71 @@
-import { describe, expect, it } from 'vitest'
-import { nodeRuntimeRefusal, parseArgs, validateAppName } from '../cli-input'
+import { describe, expect, it, vi } from 'vitest'
+import { nodeRuntimeRefusal, parseArgs, readCliInput, validateAppName } from '../cli-input'
 
 const argv = (...args: string[]) => ['node', 'create-deepspace', ...args]
+
+describe('prototype distribution guidance', () => {
+  const url = 'https://example.com/pinned/deepspace.tgz'
+  const templates = () => [{ name: 'starter', description: 'Starter' }]
+
+  it('defaults to the matching archive while respecting explicit SDK and local selections', async () => {
+    expect(
+      await readCliInput(argv('my-app'), () => '0.42.3', templates, 'starter', url),
+    ).toMatchObject({ sdkUrl: url })
+    const override = 'https://example.com/other/deepspace.tgz'
+    expect(
+      await readCliInput(
+        argv('my-app', '--sdk-url', override),
+        () => '0.42.3',
+        templates,
+        'starter',
+        url,
+      ),
+    ).toMatchObject({ sdkUrl: override })
+    expect(
+      await readCliInput(
+        argv('my-app', '--local', '/tmp/sdk'),
+        () => '0.42.3',
+        templates,
+        'starter',
+        url,
+      ),
+    ).toMatchObject({ local: '/tmp/sdk', sdkUrl: undefined })
+    expect(await readCliInput(argv('my-app'), () => '0.42.3', templates, 'starter')).toMatchObject({
+      sdkUrl: undefined,
+    })
+  })
+
+  it('keeps prototype help and missing-name guidance on the installed command', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const exit = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`exit:${code}`)
+    })
+    try {
+      await expect(
+        readCliInput(argv('--help'), () => '0.42.3', templates, 'starter', url),
+      ).rejects.toThrow('exit:0')
+      const help = log.mock.calls.flat().join('\n')
+      expect(help).toContain(url)
+      expect(help).toContain('create-deepspace my-app --template public-board')
+      expect(help).not.toContain('@latest')
+      await expect(readCliInput(argv(), () => '0.42.3', templates, 'starter', url)).rejects.toThrow(
+        'exit:1',
+      )
+      expect(error.mock.calls.flat().join('\n')).toContain('create-deepspace --help')
+      expect(error.mock.calls.flat().join('\n')).not.toContain('@latest')
+      log.mockClear()
+      await expect(
+        readCliInput(argv('--help'), () => '0.42.3', templates, 'starter'),
+      ).rejects.toThrow('exit:0')
+      expect(log.mock.calls.flat().join('\n')).toContain('npm create deepspace@latest')
+    } finally {
+      log.mockRestore()
+      error.mockRestore()
+      exit.mockRestore()
+    }
+  })
+})
 
 describe('parseArgs', () => {
   it('parses positional, separate, and equals-form values', () => {
@@ -79,4 +143,29 @@ describe('nodeRuntimeRefusal', () => {
     'refuses unsupported runtime %s before scaffolding',
     (version) => expect(nodeRuntimeRefusal(version)).toContain(`current: ${version}`),
   )
+})
+
+it('accepts an exact SDK archive URL and refuses unsafe or conflicting sources', () => {
+  const url = 'https://example.com/commit/deepspace.tgz'
+  expect(parseArgs(['node', 'create-deepspace', 'board', '--sdk-url', url]).sdkUrl).toBe(url)
+  for (const source of [
+    'http://example.com/sdk.tgz',
+    'https://user:secret@example.com/sdk.tgz',
+    'file:/tmp/sdk.tgz',
+    'https://example.com/sdk',
+  ]) {
+    expect(
+      parseArgs(['node', 'create-deepspace', 'board', '--sdk-url', source]).invalid,
+    ).toBeTruthy()
+  }
+  expect(
+    parseArgs(['node', 'create-deepspace', 'board', '--sdk-url', url, '--local', '/tmp/sdk'])
+      .invalid,
+  ).toBeTruthy()
+})
+
+it('requires explicit opt-in to modify agent skill configuration', () => {
+  expect(parseArgs(argv('app')).withSkill).toBe(false)
+  expect(parseArgs(argv('app', '--yes')).withSkill).toBe(false)
+  expect(parseArgs(argv('app', '--with-skill')).withSkill).toBe(true)
 })

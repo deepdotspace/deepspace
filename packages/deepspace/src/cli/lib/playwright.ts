@@ -1,6 +1,7 @@
 import { Refusal } from './command'
 import { execSync, type StdioOptions } from 'node:child_process'
 import { sync as spawnSync } from 'cross-spawn'
+import { chromiumLaunchOptions } from '../../testing/browser'
 
 /**
  * `--json` reserves stdout for the single envelope line, so every child a test
@@ -24,7 +25,20 @@ export function childStdio(): StdioOptions {
   return childStdoutToStderr ? ['inherit', 2, 2] : 'inherit'
 }
 
-export function ensurePlaywright(appDir: string) {
+export function ensurePlaywright(
+  appDir: string,
+  options: { allowExecutableOverride?: boolean } = {},
+) {
+  // `playwright screenshot` does not consume an app's test config, so only
+  // the test runner opts in. Validate before any install or network work.
+  let executablePath: string | undefined
+  if (options.allowExecutableOverride) {
+    try {
+      executablePath = chromiumLaunchOptions().executablePath
+    } catch (error) {
+      throw new Refusal((error as Error).message, 'invalid_test_browser')
+    }
+  }
   try {
     // execSync interprets the command via shell, so it handles npx/npx.cmd
     // resolution on its own. Only spawn()/spawnSync() need cross-spawn.
@@ -34,6 +48,14 @@ export function ensurePlaywright(appDir: string) {
     // result, and stdout may be carrying a JSON envelope.
     console.error('Installing Playwright...')
     execSync('npm install -D @playwright/test', { cwd: appDir, stdio: 'pipe' })
+  }
+
+  if (executablePath) {
+    console.error(
+      'Using DEEPSPACE_TEST_BROWSER_EXECUTABLE_PATH; skipping browser download and system-library install. ' +
+        'Your tests/playwright.config.ts must set use.launchOptions to chromiumLaunchOptions() from deepspace/testing.',
+    )
+    return
   }
 
   // `playwright install` is idempotent: a fast no-op when Chromium already
@@ -57,7 +79,8 @@ export function ensurePlaywright(appDir: string) {
 
   if (result.status !== 0) {
     throw new Refusal(
-      'Playwright install failed. On Linux, system libs may be missing. Try: sudo npx playwright install --with-deps chromium',
+      'Playwright install failed. If Chromium/Chrome is already installed, set DEEPSPACE_TEST_BROWSER_EXECUTABLE_PATH to its absolute path and use chromiumLaunchOptions() from deepspace/testing in your test config. ' +
+        'Otherwise check network access and a writable PLAYWRIGHT_BROWSERS_PATH. For missing Linux libraries, run: sudo npx playwright install --with-deps chromium',
       'playwright_install_failed',
     )
   }

@@ -1,21 +1,10 @@
 # AGENTS.md
 
-**Load the `deepspace` skill before working in this repo.** It is the source
-of truth for the SDK; read project source afterward for repo-specific details.
-
-The scaffold installs the portable skill at
-`.agents/skills/deepspace/SKILL.md`. Restart the agent session to load newly
-installed skills, or read that file directly. If it is missing, scaffold-time
-installation failed (typically a network issue); reinstall:
-
-```sh
-npx -y skills@latest add deepdotspace/deepspace-skill -y                 # this project
-npx -y skills@latest add deepdotspace/deepspace-skill -g -y              # globally, every project
-npx -y skills@latest add deepdotspace/deepspace-skill --agent codex -y   # specific agent
-```
-
-If installation is unavailable, read
-<https://github.com/deepdotspace/deepspace-skill/blob/main/skills/deepspace/SKILL.md>.
+Read <https://docs.deep.space/llms.txt>, then fetch the relevant documentation
+page as Markdown by appending `.md`. The installed package types and CLI
+`--help` describe the exact version in this project. Use your existing HTTP,
+shell, and browser tools; no skill, plugin, connector, or session restart is
+required. Installing the optional skill is a separate explicit choice.
 
 ## About this project
 
@@ -23,8 +12,8 @@ This is a **DeepSpace** app — a real-time collaborative app built on the
 [`deepspace`](https://www.npmjs.com/package/deepspace) SDK and deployed to
 Cloudflare Workers via `npx deepspace deploy`. It was scaffolded from the
 **copilot template**: a three-panel shell (collapsible sidebar, main panel,
-AI chat dock) — the shell is the app's layout and stays; the skill
-(`.agents/skills/deepspace/SKILL.md`) carries its layout and AI-chat rules.
+AI chat dock). Keep this layout; consult the design and AI documentation
+before changing its providers or chat wiring.
 
 ## Project commands
 

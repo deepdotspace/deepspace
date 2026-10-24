@@ -26,8 +26,10 @@ import { decodeRoomIdentityHeader } from '../../../shared/room-identity-headers'
  * each other below.
  */
 const templateSource = (path: string) => readFileSync(join(TEMPLATES_DIR, 'base', path), 'utf8')
-const SPA_SHELL_PATH = /const SPA_SHELL_PATH = '([^']+)'/.exec(templateSource('src/server/http-routes.ts'))?.[1] ?? ''
-const SPA_SHELL_FILE = /const SHELL_FILE = '([^']+)'/.exec(templateSource('prerender.ts'))?.[1] ?? ''
+const SPA_SHELL_PATH =
+  /const SPA_SHELL_PATH = '([^']+)'/.exec(templateSource('src/server/http-routes.ts'))?.[1] ?? ''
+const SPA_SHELL_FILE =
+  /const SHELL_FILE = '([^']+)'/.exec(templateSource('prerender.ts'))?.[1] ?? ''
 
 interface TestEnv {
   ASSETS?: Fetcher
@@ -516,7 +518,29 @@ describe('generated worker route owners', () => {
     expect(agentAtWebsite.status).toBe(401)
     expect(discovery.status).toBe(403)
     expect(invoke.status).toBe(403)
-    expect(authorizations).toBe(3)
+    const browser = await app.request(
+      'https://app.test/_deepspace/agent/browser/tools',
+      { headers: websiteHeaders },
+      bindings,
+    )
+    expect(browser.status).toBe(403)
+    const wrongBrowserCredential = await app.request(
+      'https://app.test/_deepspace/agent/browser/tools',
+      { headers: agentHeaders },
+      bindings,
+    )
+    expect(wrongBrowserCredential.status).toBe(401)
+    const mcp = await app.request(
+      'https://app.test/_deepspace/agent/mcp',
+      {
+        method: 'POST',
+        headers: agentHeaders,
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      },
+      bindings,
+    )
+    expect(mcp.status).toBe(403)
+    expect(authorizations).toBe(5)
   })
 
   it('allows the website and local assistant registrations to be configured independently', async () => {
@@ -579,7 +603,9 @@ describe('generated worker route owners', () => {
       env({ NATIVE_AUTH_REDIRECT_URIS: 'myapp://auth/callback' }),
     )
     expect(nativeCallback.status).toBe(302)
-    expect(nativeCallback.headers.get('location')).toBe('myapp://auth/callback?code=one-time-code&state=s-1')
+    expect(nativeCallback.headers.get('location')).toBe(
+      'myapp://auth/callback?code=one-time-code&state=s-1',
+    )
   })
 
   it('keeps debug and user-billed integration routes closed by default', async () => {
@@ -606,7 +632,11 @@ describe('generated worker route owners', () => {
       APP_OWNER_JWT: 'owner-jwt',
     })
     const call = (name: string) =>
-      app.request(`https://app.test/api/integrations/${name}/list-rooms`, { method: 'POST' }, routeEnv)
+      app.request(
+        `https://app.test/api/integrations/${name}/list-rooms`,
+        { method: 'POST' },
+        routeEnv,
+      )
 
     expect((await call('livekit')).status).toBe(401)
     expect(apiFetch).not.toHaveBeenCalled()
@@ -1034,7 +1064,11 @@ describe('generated worker route owners', () => {
     const staticApp = new Hono<TestContext>()
     registerStaticRoutes(staticApp)
 
-    const home = await staticApp.request('https://app.test/home', undefined, env({ ASSETS: assets }))
+    const home = await staticApp.request(
+      'https://app.test/home',
+      undefined,
+      env({ ASSETS: assets }),
+    )
     expect(home.status).toBe(200)
     expect(await home.text()).toBe(shell)
     expect(assetRequests).toEqual(['/home', SPA_SHELL_PATH])
@@ -1176,15 +1210,27 @@ describe('generated worker route owners', () => {
     const staticApp = new Hono<TestContext>()
     registerStaticRoutes(staticApp)
 
-    const robots = await staticApp.request('https://app.test/robots.txt', undefined, env({ ASSETS: assets }))
+    const robots = await staticApp.request(
+      'https://app.test/robots.txt',
+      undefined,
+      env({ ASSETS: assets }),
+    )
     expect(robots.status).toBe(200)
     expect(await robots.text()).toBe('User-agent: *\nAllow: /\n')
-    const sitemap = await staticApp.request('https://app.test/sitemap.xml', undefined, env({ ASSETS: assets }))
+    const sitemap = await staticApp.request(
+      'https://app.test/sitemap.xml',
+      undefined,
+      env({ ASSETS: assets }),
+    )
     expect(sitemap.status).toBe(200)
 
     const bare = new Hono<TestContext>()
     registerStaticRoutes(bare)
-    const missing = await bare.request('https://app.test/sitemap.xml', undefined, env({ ASSETS: spaAssetLayer().assets }))
+    const missing = await bare.request(
+      'https://app.test/sitemap.xml',
+      undefined,
+      env({ ASSETS: spaAssetLayer().assets }),
+    )
     expect(missing.status).toBe(404)
     expect(await missing.json()).toEqual({ error: 'not_found' })
   })
@@ -1302,6 +1348,8 @@ describe('client hooks and the app proxy allow-list', () => {
     expect(called.size).toBeGreaterThan(0)
     const proxied = new Set(BROWSER_PROXY_ROUTES.map((route) => route.path))
     for (const path of called) {
+      // Agent tools execute in this app Worker before platform proxies.
+      if (path === '/_deepspace/agent/browser') continue
       expect(
         [...proxied],
         `${path} is called by a client hook but missing from BROWSER_PROXY_ROUTES — ` +

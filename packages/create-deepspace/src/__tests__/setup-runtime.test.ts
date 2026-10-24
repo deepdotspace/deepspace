@@ -50,21 +50,22 @@ describe('installedSdkVersion', () => {
 describe('nextStepsLines', () => {
   const project = { appName: 'demo', isInPlace: false }
 
-  it('never lists registration as a step of its own', () => {
+  it('registers explicitly and offers local development before deploy', () => {
     const lines = nextStepsLines(project)
-    expect(lines).not.toContain('npx deepspace app init')
-    // `auth login` is named inside the ownership note, never as a command an
-    // already-signed-in user is told to run.
+    expect(lines).toContain('npx deepspace app init --json')
+    // Inspect the selected identity without redirecting independent agents to OAuth.
     expect(lines).not.toContain('npx deepspace auth login')
     expect(lines.slice(0, 1)).toEqual(['cd demo'])
-    expect(lines).toContain('npx deepspace dev start')
-    expect(lines).toContain('  npx deepspace deploy')
+    expect(lines.indexOf('  npx deepspace dev start')).toBeGreaterThan(-1)
+    expect(lines.indexOf('  npx deepspace dev start')).toBeLessThan(
+      lines.indexOf('  npx deepspace deploy'),
+    )
   })
 
   it('says which account first use will register the app to', () => {
     const note = nextStepsLines(project).join('\n')
     expect(note).toContain('registers this app')
-    expect(note).toContain('npx deepspace auth login')
+    expect(note).toContain('npx deepspace auth whoami')
   })
 
   it('drops the cd line when scaffolding in place', () => {
@@ -73,6 +74,13 @@ describe('nextStepsLines', () => {
 })
 
 describe('agentSkillInstallerCommand', () => {
+  it('installs the exact skill revision selected by a prototype distribution', () => {
+    const source = `https://github.com/deepdotspace/deepspace-skill/tree/${'a'.repeat(40)}/skills/deepspace`
+    const command = agentSkillInstallerCommand({}, source)
+    expect(command.args[command.args.indexOf('add') + 1]).toBe(source)
+    expect(command.args.slice(-3)).toEqual(['-y', '--agent', 'codex'])
+  })
+
   it('executes npm through the current Node runtime when nested under npm exec', () => {
     expect(agentSkillInstallerCommand({ npm_execpath: '/npm/lib/npm-cli.js' })).toEqual({
       command: process.execPath,

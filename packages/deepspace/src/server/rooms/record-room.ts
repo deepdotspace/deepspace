@@ -171,6 +171,21 @@ export class RecordRoom<E = Record<string, unknown>> extends BaseRoom<E> {
     await this.ensureInitialized()
     const initMs = Date.now() - fetchStart
 
+    // Public, read-only acknowledgment after the real DO and schemas are ready.
+    // No records, credentials, or internal configuration are exposed.
+    if (
+      request.method === 'GET' &&
+      url.pathname.startsWith('/ws/') &&
+      url.searchParams.get('_deepspace_probe') === 'readiness'
+    ) {
+      return Response.json(
+        { ok: true, room: 'record', scopeId: this.state.id.name },
+        {
+          headers: { 'cache-control': 'no-store' },
+        },
+      )
+    }
+
     // HTTP API endpoints (tools, debug, etc.)
     if (url.pathname.startsWith('/api/')) {
       if (url.pathname.startsWith('/api/debug/') && !this.debugRoutesEnabled) {

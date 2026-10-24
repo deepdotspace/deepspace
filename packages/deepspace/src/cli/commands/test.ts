@@ -35,7 +35,7 @@
  */
 
 import { registerForLocalRun } from '../lib/app-registration'
-import { existsSync, readFileSync, readdirSync, rmSync, type Dirent } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, type Dirent } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
 import { sync as spawnSync } from 'cross-spawn'
 import { ensureToken, loginAction } from '../auth'
@@ -47,7 +47,7 @@ import { decodeJwtPayload } from '../../shared/jwt'
 import { ensureInstallReady } from '../lib/install-status'
 import { childStdio, ensurePlaywright, routeChildStdoutToStderr } from '../lib/playwright'
 import { preflightNodeVersion, preflightWindowsWorkerd } from '../lib/preflight'
-import { refreshSecretsCache } from '../lib/secrets'
+import { refreshSecretsCache, resolveSecretsConfigName } from '../lib/secrets'
 import { ensurePortFree, DEFAULT_PORT, resolveDevServerPort } from '../lib/port'
 import {
   prepareWranglerEnvConfig,
@@ -56,6 +56,7 @@ import {
 } from '../lib/wrangler-env'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
 import { syncTestAccountStore } from '../lib/test-account-service'
+import { nodeOptionsWithOutboundHook, writeNodeOutboundHook } from '../lib/node-outbound-hook'
 // Same refusal text `dev` uses — one source so the two can't drift.
 import { noAppDirRefusal } from './dev'
 
@@ -218,6 +219,13 @@ export default defineDeepspaceCommand({
         'wrangler.toml [env.<name>] block to test (uses secrets config <name> by default).',
       required: false,
     },
+    'secrets-config': {
+      type: 'string',
+      description:
+        'App secrets config to materialize (default: the --env name, or "prd"). ' +
+        'Use this when the service plane and Wrangler app slot are intentionally different.',
+      required: false,
+    },
   },
   async run({ args }) {
     // One switch for every child this run spawns — the dependency preflight
@@ -235,6 +243,7 @@ export default defineDeepspaceCommand({
     const suite = (args.suite as string | undefined) ?? 'default'
     const wranglerEnv =
       typeof args.env === 'string' && args.env.trim() ? args.env.trim() : undefined
+    const secretsConfig = resolveSecretsConfigName(args['secrets-config'], wranglerEnv)
     const forwarded: PlaywrightForwardedFlags = {
       grep: typeof args.grep === 'string' && args.grep ? args.grep : undefined,
       project: typeof args.project === 'string' && args.project ? args.project : undefined,
@@ -298,7 +307,13 @@ export default defineDeepspaceCommand({
     const appIdForSecrets = await registerForLocalRun(appDir, token, wranglerEnv)
     if (appIdForSecrets) {
       try {
-        const refreshed = await refreshSecretsCache(DEPLOY_URL, token, appIdForSecrets, wranglerEnv)
+        const refreshed = await refreshSecretsCache(
+          DEPLOY_URL,
+          token,
+          appIdForSecrets,
+          wranglerEnv,
+          secretsConfig,
+        )
         generatedSecretsCache = refreshed.rendered
         if (refreshed.summary) say(refreshed.summary)
       } catch (err: unknown) {
@@ -311,6 +326,11 @@ export default defineDeepspaceCommand({
 
     // CLI-001: an unresolvable id surfaces as writeDevVars' own Refusal,
     // already carrying the env-aware `app init` action.
+    // Workerd does not inherit the host proxy/DNS setup in some agent
+    // containers, while the parent Node process can reach the selected
+    // staging plane. The Playwright child preloads Wrangler's Node outbound
+    // bridge below, so the app keeps its real
+    // staging URLs and no deploy-time variable or hosted service is added.
     await writeDevVars(appDir, ownerId, token, wranglerEnv, {
       generatedSecretsCache,
     })
@@ -328,7 +348,7 @@ export default defineDeepspaceCommand({
 
     if (suite !== 'unit') {
       preflightWindowsWorkerd(appDir)
-      ensurePlaywright(appDir)
+      ensurePlaywright(appDir, { allowExecutableOverride: true })
     }
 
     let exitCode = 0
@@ -440,7 +460,15 @@ export default defineDeepspaceCommand({
       })
     }
     return {
-      data: { suite, port, appDir, wranglerEnv: wranglerEnv ?? null, skippedSpecs, skippedTests },
+      data: {
+        suite,
+        port,
+        appDir,
+        wranglerEnv: wranglerEnv ?? null,
+        secretsConfig,
+        skippedSpecs,
+        skippedTests,
+      },
     }
   },
 })
@@ -489,10 +517,23 @@ function runPlaywright(
   wranglerEnv?: string,
   flags: PlaywrightForwardedFlags = {},
 ): { exitCode: number; skippedTests: SkippedTest[] } {
+  // Wrangler's local worker can need a registry directory even when the app
+  // has no container bindings. Agents frequently run with a synthetic HOME
+  // that does not contain its parent config tree, so the default global path
+  // fails before the worker starts. Keep this ephemeral state inside the
+  // already ignored app workspace and make the parent explicit.
+  const deepspaceStatePath = join(appDir, '.deepspace')
+  const wranglerRegistryPath = join(deepspaceStatePath, 'wrangler-registry')
+  const xdgConfigPath = join(deepspaceStatePath, 'config')
+  mkdirSync(xdgConfigPath, { recursive: true })
   const resultsPath = join(appDir, '.deepspace', 'playwright-results.json')
+  const outboundHookPath = writeNodeOutboundHook(appDir)
   rmSync(resultsPath, { force: true })
   const exitCode = runSuite(appDir, playwrightTestArgs(testFiles, flags), wranglerEnv, {
     DEEPSPACE_PORT: String(port),
+    WRANGLER_REGISTRY_PATH: wranglerRegistryPath,
+    XDG_CONFIG_HOME: xdgConfigPath,
+    NODE_OPTIONS: nodeOptionsWithOutboundHook(process.env.NODE_OPTIONS, outboundHookPath),
     PLAYWRIGHT_HTML_OUTPUT_DIR: '.deepspace/playwright-report',
     PLAYWRIGHT_JSON_OUTPUT_FILE: resultsPath,
   })

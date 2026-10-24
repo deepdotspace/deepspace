@@ -16,6 +16,7 @@ import {
   quoteDotenvValue,
   refreshSecretsCache,
   renderSecretsCache,
+  resolveSecretsConfigName,
   shellSingleQuote,
   validateConfigName,
   validateSecretName,
@@ -61,6 +62,16 @@ describe('validation', () => {
   it('config default follows the wrangler-env convention', () => {
     expect(defaultConfigNameForEnv()).toBe('prd')
     expect(defaultConfigNameForEnv('staging')).toBe('staging')
+  })
+
+  it('allows a secrets config to differ from the Wrangler app slot', () => {
+    expect(resolveSecretsConfigName(undefined)).toBe('prd')
+    expect(resolveSecretsConfigName(undefined, 'staging')).toBe('staging')
+    expect(resolveSecretsConfigName('shared', 'staging')).toBe('shared')
+    expect(resolveSecretsConfigName(' shared ', 'staging')).toBe('shared')
+    expect(() => resolveSecretsConfigName('bad name', 'staging')).toThrow(/Invalid config/)
+    expect(() => resolveSecretsConfigName('', 'staging')).toThrow(/Invalid config/)
+    expect(() => resolveSecretsConfigName('  ', 'staging')).toThrow(/Invalid config/)
   })
 })
 

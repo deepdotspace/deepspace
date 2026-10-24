@@ -1,21 +1,10 @@
 # AGENTS.md
 
-**Load the `deepspace` skill before working in this repo.** It is the source
-of truth for the SDK; read project source afterward for repo-specific details.
-
-The scaffold installs the portable skill at
-`.agents/skills/deepspace/SKILL.md`. Restart the agent session to load newly
-installed skills, or read that file directly. If it is missing, scaffold-time
-installation failed (typically a network issue); reinstall:
-
-```sh
-npx -y skills@latest add deepdotspace/deepspace-skill -y                 # this project
-npx -y skills@latest add deepdotspace/deepspace-skill -g -y              # globally, every project
-npx -y skills@latest add deepdotspace/deepspace-skill --agent codex -y   # specific agent
-```
-
-If installation is unavailable, read
-<https://github.com/deepdotspace/deepspace-skill/blob/main/skills/deepspace/SKILL.md>.
+Read <https://docs.deep.space/llms.txt>, then fetch the relevant documentation
+page as Markdown by appending `.md`. The installed package types and CLI
+`--help` describe the exact version in this project. Use your existing HTTP,
+shell, and browser tools; no skill, plugin, connector, or session restart is
+required. Installing the optional skill is a separate explicit choice.
 
 ## About this project
 
@@ -45,19 +34,18 @@ npx deepspace auth login   # authenticate with app.space
 npx deepspace dev start    # local dev server (vite + miniflare)
 npx deepspace deploy       # deploy to <app>.app.space
 npx deepspace push         # sync code to the app's cloud repo
+npx deepspace agent tools <app> --json # discover tools and their input schemas
+npx deepspace agent invoke <app> <tool> --input-file tool-input.json --json
 npx deepspace add --list   # list optional features (messaging, etc.)
 npx deepspace add <feature>
 ```
 
-This starter does not register local agent tool routes by default. To expose
-the app's tools to a local assistant, add
-`registerAgent(app, { tools: buildTools, inApp: false })` in `worker.ts`
-(imports from `src/ai/agent.ts` and `src/ai/tools.ts`) and deploy. After that,
-`npx deepspace agent tools <app> --json` discovers the tools and their input
-schemas, and `npx deepspace agent invoke <app> <tool> --input-file input.json
---json` runs one — always run `agent tools` first and follow the returned
-schema rather than guessing arguments. Both reuse the current CLI login. If
-they report `not_authenticated`, run the refusal's action when present. In a
+`worker.ts` already exposes the tools from `src/ai/tools.ts` over HTTP, MCP and
+browser tools; add tools there instead of registering the routes again. For
+local app tools, always run `agent tools` first and follow the returned
+description and input schema rather than guessing arguments. `agent invoke`
+reuses the current CLI login and requires no separate connection. If it reports
+`not_authenticated`, run the refusal's action when present. In a
 headless shell without an action, run `npx deepspace auth login --help` and use
 the operator-supplied credential path it names; never invent credentials or put
 a password on the command line.

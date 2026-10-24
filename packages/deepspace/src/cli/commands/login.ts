@@ -64,6 +64,8 @@ export default defineDeepspaceCommand({
     },
   },
   async run({ args }) {
+    if (process.env.DEEPSPACE_AGENT_CREDENTIAL_FILE !== undefined)
+      throw new Refusal('An independent agent credential is selected. Use auth agent register or unset DEEPSPACE_AGENT_CREDENTIAL_FILE before human login.', 'agent_identity_selected')
     const json = args.json
     // Non-interactive mode for CI/agents. Password from --password-stdin
     // (safest), $DEEPSPACE_PASSWORD, or --password (discouraged — visible in

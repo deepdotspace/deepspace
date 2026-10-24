@@ -56,8 +56,8 @@ export function checkedInstallCommand(
       error:
         `create-deepspace requires npm ${npmRange} (current: ${version || 'unknown'}). ` +
         "Older npm versions can crash while resolving the template's peer dependencies. " +
-        'Update npm (`npm install --global npm@11`) and rerun the same scaffold command, ' +
-        'or use `pnpm create deepspace@latest`. No project files were changed.',
+        'Update npm (`npm install --global npm@11`) and rerun the same scaffold command. ' +
+        'No project files were changed.',
     }
   }
   const installer = npmCommand(selected.args, environment)

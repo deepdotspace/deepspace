@@ -40,7 +40,7 @@ export interface AppLogEvent {
    * that escaped the Worker), not on `outcome !== 'ok'` alone.
    */
   outcome?: string
-  request?: { method: string; path: string; status?: number }
+  request?: { method: string; path: string; status?: number; probe?: 'readiness' }
   /**
    * The exception that ESCAPED the Worker (`eventType: 'exception'`). An
    * error the app catches and `console.error`s is a plain `log` line — and
@@ -110,7 +110,7 @@ export function logEventText(e: AppLogEvent): string {
   if (e.eventType === 'request' && e.request) {
     const status = e.request.status !== undefined ? ` ${e.request.status}` : ''
     const outcome = e.outcome && e.outcome !== 'ok' ? ` (${e.outcome})` : ''
-    return `${e.request.method} ${e.request.path}${status}${outcome}`
+    return `${e.request.probe ? '[readiness probe] ' : ''}${e.request.method} ${e.request.path}${status}${outcome}`
   }
   return e.message
 }

@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test'
+import { chromiumLaunchOptions } from 'deepspace/testing'
 
 /**
  * Port comes from $DEEPSPACE_PORT (set by `deepspace test run [--port N]`),
@@ -10,7 +11,11 @@ import { defineConfig } from '@playwright/test'
  * parallel, give each one a different --port.
  */
 const PORT = Number(process.env.DEEPSPACE_PORT ?? 5173)
-const BASE_URL = `http://localhost:${PORT}`
+// Use the address the test server binds to. New Chromium releases can apply
+// Local Network Access checks to top-level `localhost` navigation in an agent
+// container; the explicit loopback address keeps the browser and Vite on the
+// same local origin without relying on hostname classification.
+const BASE_URL = `http://127.0.0.1:${PORT}`
 
 export default defineConfig({
   testDir: '.',
@@ -20,9 +25,13 @@ export default defineConfig({
   use: {
     baseURL: BASE_URL,
     headless: true,
+    launchOptions: chromiumLaunchOptions(),
   },
   webServer: {
-    command: `npx vite --port ${PORT} --strictPort --host`,
+    // Bind the local test server directly. A bare `--host` asks Vite to
+    // enumerate every interface, which fails in restricted containers before
+    // the app can start (`uv_interface_addresses`).
+    command: `npx vite --port ${PORT} --strictPort --host 127.0.0.1`,
     cwd: '..',
     // Readiness gates on the auth plane, not just vite: /api/auth/ok only
     // answers once workerd behind /api/* has booted, so no test starts

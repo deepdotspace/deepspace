@@ -1,5 +1,15 @@
 import { InputError } from './cli-errors'
 
+/** Finish a queued pipe write before a caller that exits the process returns. */
+export function writeStreamText(stream: NodeJS.WritableStream, text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    stream.write(text, (error?: NodeJS.ErrnoException | null) => {
+      if (error && error.code !== 'EPIPE') reject(error)
+      else resolve()
+    })
+  })
+}
+
 /** Bound for credential and secrets documents; integration bodies retain the
  * same size behavior whether they arrive from stdin or a named file. */
 export const MAX_STDIN_BYTES = 1024 * 1024

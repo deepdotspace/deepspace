@@ -40,3 +40,6 @@ export * from './shared/log-events'
 // page advertised 5 GB against an enforced 128 MiB for months precisely
 // because those were two numbers instead of one.
 export { ACCOUNT_STORAGE_LIMIT_BYTES, storageLimitForTier, formatBytes } from './shared/app-files'
+
+export { connectAgentTools, type ConnectAgentToolsOptions } from './client/agent-tools'
+export { AgentTools } from './client/AgentTools'

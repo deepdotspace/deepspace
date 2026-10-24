@@ -175,6 +175,18 @@ describe('--json output routing', () => {
     expect(suiteSpawnStdio()).toBe('inherit')
     expect(childStdio()).toBe('inherit')
   })
+
+  it('keeps Wrangler registry state inside the app workspace', async () => {
+    const dir = makeAppWithSpecs([...DEFAULT_SUITE_SPECS])
+    await runDefaultSuite(dir, false)
+
+    const call = spawnSyncMock.mock.calls.find(
+      (args: unknown[]) => Array.isArray(args[1]) && args[1][0] === 'playwright',
+    )
+    const env = (call?.[2] as { env: NodeJS.ProcessEnv } | undefined)?.env
+    expect(env?.WRANGLER_REGISTRY_PATH).toBe(join(dir, '.deepspace', 'wrangler-registry'))
+    expect(env?.XDG_CONFIG_HOME).toBe(join(dir, '.deepspace', 'config'))
+  })
 })
 
 /**

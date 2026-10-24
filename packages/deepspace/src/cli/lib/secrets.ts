@@ -119,6 +119,14 @@ export function defaultConfigNameForEnv(wranglerEnv?: string): string {
   return wranglerEnv ?? 'prd'
 }
 
+/** Resolve the config used to materialize local app secrets. This is separate
+ * from Wrangler's app-slot selection: a staging service run may intentionally
+ * use the top-level app id while selecting a named secrets config. */
+export function resolveSecretsConfigName(raw: unknown, wranglerEnv?: string): string {
+  const value = typeof raw === 'string' ? raw.trim() : undefined
+  return validateConfigName(value ?? defaultConfigNameForEnv(wranglerEnv))
+}
+
 // ── HTTP plumbing ────────────────────────────────────────────────────────────
 
 /** The secrets routes on the deploy worker, through the ONE authenticated

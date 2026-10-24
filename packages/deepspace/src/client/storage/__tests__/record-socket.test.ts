@@ -12,6 +12,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MAX_UNANSWERED_SENDS, RecordSocket, type RecordStoreLike } from '../record-socket'
 import { WriteUnconfirmedError } from '../errors'
 import { CONFIRMED_WRITE_RETRY_MS, MSG } from '../../../shared/protocol/constants'
+import { RecordStore } from '../store'
+import type { Query } from '../types'
 
 // ── fakes ────────────────────────────────────────────────────────────────────
 
@@ -121,6 +123,54 @@ function makeSocket(over: { getToken?: () => Promise<string | null> } = {}): Har
 }
 
 const QUERY_KEY = JSON.stringify({ collection: 'todos', where: { done: false } })
+
+describe('access removal with an ID-only delete', () => {
+  it.each<{ name: string; query: Query }>([
+    { name: 'ordinary', query: { collection: 'todos' } },
+    { name: 'filtered', query: { collection: 'todos', where: { done: false } } },
+    { name: 'ordered', query: { collection: 'todos', orderBy: 'title' } },
+    { name: 'limited', query: { collection: 'todos', limit: 2 } },
+  ])('removes the cached row from a $name query', async ({ query }) => {
+    const store = new RecordStore()
+    const queryKey = JSON.stringify(query)
+    store.initQuery(queryKey)
+    const socket = new RecordSocket({
+      roomId: 'app:test',
+      store,
+      getToken: async () => 'jwt-token',
+      listeners: fakeListeners(),
+      wsUrl: 'https://example.test',
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
+    })
+    socket.registerSubscription('sub-1', queryKey)
+    await socket.connect()
+    const ws = FakeWebSocket.instances[0]
+    ws.serverOpen()
+    const records = ['revoked', 'retained'].map((recordId) => ({
+      recordId,
+      data: { title: recordId, done: false },
+      createdBy: 'owner',
+      createdAt: '2026-10-15',
+      updatedAt: '2026-10-15',
+    }))
+    ws.serverMessage(MSG.QUERY_RESULT, { subscriptionId: 'sub-1', records })
+    expect(store.getSnapshot(queryKey).records).toHaveLength(2)
+    const subscriptionsBefore = ws.sentOfType(MSG.SUBSCRIBE).length
+
+    ws.serverMessage(MSG.RECORD_CHANGE, {
+      collection: 'todos',
+      record: { recordId: 'revoked' },
+      changeType: 'delete',
+    })
+
+    if (query.orderBy !== undefined || query.limit !== undefined) {
+      expect(ws.sentOfType(MSG.SUBSCRIBE)).toHaveLength(subscriptionsBefore + 1)
+      ws.serverMessage(MSG.QUERY_RESULT, { subscriptionId: 'sub-1', records: [records[1]] })
+    }
+    expect(store.getSnapshot(queryKey).records).toEqual([records[1]])
+    socket.destroy()
+  })
+})
 
 beforeEach(() => {
   vi.useFakeTimers()

@@ -19,7 +19,7 @@
 import { Suspense, useCallback, useState, type ReactNode } from 'react'
 import { Outlet } from 'react-router-dom'
 import { DeepSpaceAuthProvider, useAuthStatus } from 'deepspace'
-import { RecordProvider, RecordScope } from 'deepspace'
+import { RecordProvider, RecordScope, AgentTools } from 'deepspace'
 import { AppSidebar, SidebarMobileHeader } from '../../components/sidebar/AppSidebar'
 import { ChatDock } from '../../components/shell/ChatDock'
 import { useToast } from '@/components/ui'
@@ -92,6 +92,7 @@ function AuthBoot({ children }: { children: ReactNode }) {
       }
     >
       <RecordScope roomId={SCOPE_ID} schemas={schemas}>
+        <AgentTools />
         {children}
       </RecordScope>
     </RecordProvider>

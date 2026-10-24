@@ -36,6 +36,8 @@ export interface CreateRemoteTestAccountInput {
 }
 
 function sessionCookie(): string {
+  if (process.env.DEEPSPACE_AGENT_CREDENTIAL_FILE !== undefined)
+    throw new TestAccountServiceError('Human-session test accounts are not available to independent agent accounts in this prototype.', 'agent_capability_unavailable')
   const token = readFileSync(SESSION_PATH, 'utf-8').trim()
   return `${SESSION_COOKIE}=${encodeURIComponent(token)}`
 }

@@ -9,7 +9,7 @@ import {
   toolResult,
   type JsonRpcId,
   type JsonRpcRequest,
-} from './protocol'
+} from '../../../shared/mcp-protocol'
 
 export interface DocumentationMcpToolEnv {
   ASSETS: Fetcher

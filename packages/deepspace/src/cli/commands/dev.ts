@@ -44,9 +44,14 @@ import { decodeJwtPayload } from '../../shared/jwt'
 import { ensureInstallReady } from '../lib/install-status'
 import { preflightNodeVersion, preflightWindowsWorkerd } from '../lib/preflight'
 import { removeMacosJunk } from '../lib/macos-junk'
-import { refreshSecretsCache } from '../lib/secrets'
+import { refreshSecretsCache, resolveSecretsConfigName } from '../lib/secrets'
 import { lintProjectSchemas, formatSchemaLintFindings } from '../lib/schema-lint'
-import { DEFAULT_PORT, ensurePortFree, resolveDevServerPort, waitForPortListening } from '../lib/port'
+import {
+  DEFAULT_PORT,
+  ensurePortFree,
+  resolveDevServerPort,
+  waitForPortListening,
+} from '../lib/port'
 
 /** What vite's bare `--host` means: every interface. */
 const DEFAULT_DEV_HOST = '0.0.0.0'
@@ -101,6 +106,13 @@ export default defineDeepspaceCommand({
         "Applies the env's overrides at build time.",
       required: false,
     },
+    'secrets-config': {
+      type: 'string',
+      description:
+        'App secrets config to materialize (default: the --env name, or "prd"). ' +
+        'Use this when the service plane and Wrangler app slot are intentionally different.',
+      required: false,
+    },
     port: {
       type: 'string',
       description: `Port to bind (default ${DEFAULT_PORT}, or $DEEPSPACE_PORT)`,
@@ -119,6 +131,7 @@ export default defineDeepspaceCommand({
     preflightNodeVersion('dev start')
     const wranglerEnv =
       typeof args.env === 'string' && args.env.trim() ? args.env.trim() : undefined
+    const secretsConfig = resolveSecretsConfigName(args['secrets-config'], wranglerEnv)
     const host =
       typeof args.host === 'string' && args.host.trim() ? args.host.trim() : DEFAULT_DEV_HOST
 
@@ -212,6 +225,7 @@ export default defineDeepspaceCommand({
     // it's obvious which app slot a session is hitting when it's set.
     say(`Logged in as ${payload.name ?? payload.email}`)
     if (wranglerEnv) say(`Wrangler env: ${wranglerEnv}`)
+    say(`Secrets config: ${secretsConfig}`)
     say(`Port: ${port}`)
     if (host !== DEFAULT_DEV_HOST) say(`Host: ${host}`)
 
@@ -233,7 +247,13 @@ export default defineDeepspaceCommand({
     const appIdForSecrets = await registerForLocalRun(appDir, token, wranglerEnv)
     if (appIdForSecrets) {
       try {
-        const refreshed = await refreshSecretsCache(DEPLOY_URL, token, appIdForSecrets, wranglerEnv)
+        const refreshed = await refreshSecretsCache(
+          DEPLOY_URL,
+          token,
+          appIdForSecrets,
+          wranglerEnv,
+          secretsConfig,
+        )
         generatedSecretsCache = refreshed.rendered
         if (refreshed.summary) say(refreshed.summary)
       } catch (err: unknown) {
@@ -345,6 +365,15 @@ export default defineDeepspaceCommand({
         extra: { port, appDir, exitCode: code },
       })
     }
-    return { data: { port, host, url, appDir, wranglerEnv: wranglerEnv ?? null } }
+    return {
+      data: {
+        port,
+        host,
+        url,
+        appDir,
+        wranglerEnv: wranglerEnv ?? null,
+        secretsConfig,
+      },
+    }
   },
 })

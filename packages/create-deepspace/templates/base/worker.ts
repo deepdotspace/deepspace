@@ -137,12 +137,12 @@ app.use('*', async (c, next) => {
 registerAuthAndIntegrationRoutes(app)
 registerRealtimeRoutes(app)
 registerActionRoutes(app, resolveAuth)
-// The in-app assistant stores chat history in `ai-chats` / `ai-messages`,
-// which only the copilot overlay declares. When present, registerAgent enables
-// both that website AI and the user's local Codex/Claude/etc. assistant.
-if (schemas.some((schema) => schema.name === AI_CHATS_SCHEMA.name)) {
-  registerAgent(app, { tools: buildTools })
-}
+// Every scaffold exposes selected tools through HTTP, MCP and browser tools.
+// Only copilot owns the collections needed for the in-app chat UI.
+registerAgent(app, {
+  tools: buildTools,
+  inApp: schemas.some((schema) => schema.name === AI_CHATS_SCHEMA.name),
+})
 registerPlatformProxyRoutes(app)
 registerStaticRoutes(app)
 

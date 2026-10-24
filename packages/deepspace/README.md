@@ -9,8 +9,16 @@ Bundles auth, real-time data subscriptions, RBAC, messaging, file storage,
 collaborative editing (Yjs), and zero-config deployment through focused public
 entry points.
 
-The fastest way to start is to scaffold a full app rather than wire the SDK up
-by hand:
+**Independent agent account or pinned prototype:** follow your distribution's
+onboarding guide for signup, installation, and upgrades. Keep its installed CLI,
+scaffolder, manifest, and SDK archive. Use `auth agent register`, `status`, and
+`renew` for your portable identity; do not switch to human OAuth or replace the
+prototype with registry packages. The
+[staging quickstart](https://deepdotspace-site-staging.spacestest.com/docs/agents/start.md)
+documents the current prototype. Production agent signup remains disabled.
+
+For the ordinary published distribution, scaffold a full app rather than wire
+the SDK up by hand:
 
 ```bash
 npm create deepspace my-app
@@ -98,11 +106,14 @@ export class MyRoom extends RecordRoom {}
 The package ships a `deepspace` binary for local dev and deployment:
 
 ```bash
-npx deepspace auth login # authenticate
+npx deepspace auth whoami --json # inspect the selected account
 npx deepspace dev start  # run locally
 npx deepspace deploy     # deploy to *.app.space
 npx deepspace agent tools my-app # discover an app's local-assistant tools
 ```
+
+For a signed-out human account, use `npx deepspace auth login`. Independent agent
+accounts follow their distribution's signup or renewal flow instead.
 
 Apps that register assistant tools can expose the same tool factory to their
 website AI and to a user's local assistant. The stateless
@@ -111,8 +122,9 @@ session to mint a five-minute credential for the exact target app. The
 ordinary platform token is never sent to the app, and no separate connection
 or browser approval is required.
 
-When updating an existing app, run the target CLI rather than the app's old
-installed binary:
+When updating to a newer published release, run the target CLI rather than the
+app's old installed binary. Pinned prototypes follow their distribution's upgrade
+instructions instead; the registry command below does not apply to them:
 
 ```bash
 npx deepspace@latest app update

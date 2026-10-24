@@ -164,3 +164,59 @@ describe('empty text values', () => {
     expect(getRecord(ctx.sql, 'standups', 's3', standups)?.data.points).toBeUndefined()
   })
 })
+
+describe('server text bounds', () => {
+  it('rejects oversized or non-text values on create and update, including privileged writes', () => {
+    const schema: CollectionSchema = {
+      name: 'bounded',
+      columns: [{ name: 'text', storage: 'text', interpretation: 'plain', maxLength: 4 }],
+      permissions: openPermissions,
+    }
+    const ctx = makeContext([schema])
+    expect(putRecord(ctx, 'bounded', 'one', { text: 'four' }, 'visitor', 'viewer').success).toBe(
+      true,
+    )
+    for (const value of ['12345', 12345, { text: 'x' }]) {
+      expect(putRecord(ctx, 'bounded', 'two', { text: value }, 'visitor', 'viewer').success).toBe(
+        false,
+      )
+      expect(
+        putRecord(ctx, 'bounded', 'one', { text: value }, 'admin', 'admin', true).success,
+      ).toBe(false)
+    }
+    expect(getRecord(ctx.sql, 'bounded', 'one', schema)?.data.text).toBe('four')
+    expect(getRecord(ctx.sql, 'bounded', 'two', schema)).toBeNull()
+  })
+
+  it('checks only the fields an update writes', () => {
+    const unbounded: CollectionSchema = {
+      name: 'notes',
+      columns: [
+        { name: 'text', storage: 'text', interpretation: 'plain' },
+        { name: 'tag', storage: 'text', interpretation: 'plain' },
+      ],
+      permissions: openPermissions,
+    }
+    const ctx = makeContext([unbounded])
+    expect(
+      putRecord(ctx, 'notes', 'old', { text: 'longer than four' }, 'u', 'viewer').success,
+    ).toBe(true)
+    // The same stored row after the schema adds a limit to `text`.
+    const bounded = {
+      ...ctx,
+      schemaRegistry: new SchemaRegistry([
+        {
+          ...unbounded,
+          columns: [
+            { name: 'text', storage: 'text', interpretation: 'plain', maxLength: 4 },
+            { name: 'tag', storage: 'text', interpretation: 'plain' },
+          ],
+        },
+      ]),
+    }
+    expect(putRecord(bounded, 'notes', 'old', { tag: 'done' }, 'u', 'viewer').success).toBe(true)
+    expect(putRecord(bounded, 'notes', 'old', { text: 'still long' }, 'u', 'viewer').success).toBe(
+      false,
+    )
+  })
+})

@@ -13,6 +13,36 @@ afterEach(() => {
 describe('configurePackageJson', () => {
   const noProgress = { start: () => {}, stop: () => {} }
 
+  it.each([true, false])(
+    'routes login according to the selected distribution (agent=%s)',
+    (agentAccount) => {
+      const appDir = mkdtempSync(join(tmpdir(), 'create-deepspace-login-'))
+      tempDirs.push(appDir)
+      writeFileSync(
+        join(appDir, 'package.json'),
+        JSON.stringify({
+          name: '@deepspace/base',
+          scripts: { login: 'deepspace auth login', build: 'vite build' },
+          dependencies: { deepspace: 'workspace:*' },
+        }),
+      )
+      configurePackageJson(
+        appDir,
+        'my-app',
+        { name: 'starter', description: '' },
+        '0.42.3',
+        undefined,
+        noProgress,
+        undefined,
+        agentAccount,
+      )
+      expect(JSON.parse(readFileSync(join(appDir, 'package.json'), 'utf8')).scripts).toEqual({
+        login: agentAccount ? 'deepspace auth agent register --json' : 'deepspace auth login',
+        build: 'vite build',
+      })
+    },
+  )
+
   /**
    * `create-deepspace@X` scaffolds files generated for exactly X, so it must
    * ask for exactly X. A caret let a pinned scaffolder install a newer SDK —
@@ -31,7 +61,14 @@ describe('configurePackageJson', () => {
       }),
     )
 
-    configurePackageJson(appDir, 'my-app', { name: 'starter', description: '' }, '0.23.2', undefined, noProgress)
+    configurePackageJson(
+      appDir,
+      'my-app',
+      { name: 'starter', description: '' },
+      '0.23.2',
+      undefined,
+      noProgress,
+    )
 
     expect(JSON.parse(readFileSync(join(appDir, 'package.json'), 'utf8'))).toMatchObject({
       name: 'my-app',
@@ -57,4 +94,26 @@ describe('writeGitignoreIfMissing', () => {
     expect(entries).toContain('playwright-report/')
     expect(entries.filter((entry) => entry === 'test-results/')).toHaveLength(1)
   })
+})
+
+it('keeps an exact remote prototype SDK dependency for fresh-container recovery', () => {
+  const appDir = mkdtempSync(join(tmpdir(), 'create-sdk-url-'))
+  tempDirs.push(appDir)
+  writeFileSync(
+    join(appDir, 'package.json'),
+    JSON.stringify({ dependencies: { deepspace: 'workspace:*' } }),
+  )
+  const url = 'https://example.com/commit/deepspace.tgz'
+  configurePackageJson(
+    appDir,
+    'board',
+    { name: 'public-board', description: '' },
+    '0.42.3',
+    undefined,
+    { start() {}, stop() {} },
+    url,
+  )
+  expect(
+    JSON.parse(readFileSync(join(appDir, 'package.json'), 'utf8')).dependencies.deepspace,
+  ).toBe(url)
 })

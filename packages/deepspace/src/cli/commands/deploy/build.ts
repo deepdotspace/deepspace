@@ -1,4 +1,6 @@
 import * as p from '@clack/prompts'
+import { parse as parseToml } from 'smol-toml'
+import { projectConfig, projectPath, prepareRawProject } from '../../../shared/project-build'
 import { execSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
@@ -19,6 +21,7 @@ import {
 } from '../../../server/rooms/binding-manifest'
 import { readAppliedAppMigrations } from '../update/app-migrations'
 import { removeMacosJunk } from '../../lib/macos-junk'
+import { ensureInstallReady } from '../../lib/install-status'
 import { MAX_DEPLOY_ASSET_FILE_BYTES, formatBytes } from '../../../shared/app-files'
 import { RESERVED_RUN_WORKER_FIRST as PLATFORM_RESERVED_ROUTES } from '../../../shared/app-routing'
 import { formatSchemaLintFindings, lintProjectSchemas } from '../../lib/schema-lint'
@@ -108,6 +111,20 @@ function declaredCompatibilityDate(config: OutputWranglerConfig): string | null 
   return typeof declared === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(declared) ? declared : null
 }
 
+function readRawDeployConfig(appDir: string, envName: string | undefined) {
+  const path = join(appDir, 'wrangler.toml')
+  if (envName || !existsSync(path)) return null
+  const text = readFileSync(path, 'utf8')
+  if (parseToml(text).no_bundle !== true) return null
+  return { text, config: projectConfig(text) }
+}
+
+/** Raw Workers already contain their deployable modules and need no local SDK.
+ *  Use the builder's validated config decision before attempting an install. */
+export function ensureDeployInstallReady(appDir: string, envName: string | undefined): void {
+  if (!readRawDeployConfig(appDir, envName)) ensureInstallReady(appDir)
+}
+
 export async function buildDeployBundle(options: {
   appDir: string
   appName: string
@@ -119,6 +136,48 @@ export async function buildDeployBundle(options: {
   spinner: Spinner
 }): Promise<DeployBundle> {
   const { appDir, appName, appId, envName, output, spinner } = options
+  const raw = readRawDeployConfig(appDir, envName)
+  if (raw) {
+    const directory = projectPath(raw.config.assets.directory)
+    const assetPrefix = `${directory}/`
+    const files: Record<string, string | Uint8Array> = { 'wrangler.toml': raw.text }
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (
+          ['.git', 'node_modules', '.deepspace', '.wrangler', '.npmrc', '.DS_Store'].includes(
+            entry.name,
+          ) ||
+          entry.name.startsWith('.dev.vars') ||
+          entry.name.startsWith('.env')
+        )
+          continue
+        const path = join(dir, entry.name)
+        if (entry.isDirectory()) walk(path)
+        else if (entry.isFile()) {
+          const name = relative(appDir, path).split(sep).join('/')
+          if (name.startsWith(assetPrefix)) {
+            files[name] = isDeployAssetControlFile(name.slice(assetPrefix.length))
+              ? readFileSync(path, 'utf8')
+              : readFileSync(path)
+          } else if (WORKER_ES_MODULE.test(name)) {
+            files[name] = readFileSync(path, 'utf8')
+          }
+        }
+      }
+    }
+    walk(appDir)
+    const artifact = await prepareRawProject(files)
+    return {
+      ...artifact,
+      worker: artifact.worker as DeployWorkerBundle,
+      assets: artifact.assets.map(({ path, hash, size }) => ({
+        path,
+        hash,
+        size,
+        sourcePath: join(appDir, directory, path.slice(1)),
+      })),
+    }
+  }
   const junk = removeMacosJunk(appDir)
   if (junk > 0) p.log.info(`Removed ${junk} macOS metadata file(s) (._*, .DS_Store)`)
 
@@ -400,6 +459,12 @@ const CLIENT_CODE_ASSET = /\.(?:js|mjs|html)$/i
  *  in documentation/vite.ts: a root-mounted docs site emits
  *  `_documentation-root/` alongside `_documentation/`. */
 const DOCUMENTATION_OUTPUT = /(?:^|\/)_documentation[^/]*\//i
+
+/** Docs output has private backing paths and separate public route rewrites.
+ * Probe only directly public assets at their uploaded paths. */
+export function publicAssetsForReadiness(assets: DeployAsset[]): DeployAsset[] {
+  return assets.filter((asset) => !DOCUMENTATION_OUTPUT.test(asset.path))
+}
 
 /** `app_` + 26 Crockford base32 chars, anywhere in a file (not anchored — the
  *  point is to find it inside minified code). Mirrors `APP_ID_RE`, which is

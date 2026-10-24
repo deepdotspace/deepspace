@@ -1,3 +1,4 @@
+import { projectArtifactForm } from '../../../shared/project-build'
 import * as p from '@clack/prompts'
 import { readFileSync } from 'node:fs'
 import { ApiError } from '../../lib/api'
@@ -236,50 +237,8 @@ export async function deployBuiltBundle(options: {
   }
 
   const makeForm = (): FormData => {
-    const form = new FormData()
-    const main = bundle.worker.modules.find((module) => module.name === bundle.worker.main)
-    if (!main) return output.die('Built Worker bundle has no main module.', 'build_output_invalid')
-    form.append(
-      'worker',
-      new Blob([main.content], { type: 'application/javascript+module' }),
-      main.name,
-    )
-    form.append('workerMain', bundle.worker.main)
-    const additionalModules = bundle.worker.modules.filter(
-      (module) => module.name !== bundle.worker.main,
-    )
-    if (additionalModules.length) {
-      form.append('workerModules', JSON.stringify(additionalModules.map((module) => module.name)))
-      for (const module of additionalModules) {
-        form.append(
-          'workerModule',
-          new Blob([module.content], { type: 'application/javascript+module' }),
-          module.name,
-        )
-      }
-    }
-    form.append('assetManifest', JSON.stringify(assetManifest(bundle.assets)))
-    form.append('appMigrations', JSON.stringify(bundle.appMigrations))
-    if (bundle.doManifest) form.append('doManifest', JSON.stringify(bundle.doManifest))
-    if (bundle.customBindings.length) {
-      form.append('bindingManifest', JSON.stringify(bundle.customBindings))
-    }
+    const form = projectArtifactForm(bundle)
     form.append('secretsConfig', secretsConfig)
-    if (bundle.extraRoutes === true || bundle.extraRoutes.length) {
-      form.append('extraRunWorkerFirst', JSON.stringify(bundle.extraRoutes))
-    }
-    if (Object.keys(bundle.assetConfig).length) {
-      form.append('assetConfig', JSON.stringify(bundle.assetConfig))
-    }
-    if (bundle.compatibilityDate) {
-      form.append('compatibilityDate', bundle.compatibilityDate)
-    }
-    if (bundle.compatibilityFlags.length) {
-      form.append('compatibilityFlags', JSON.stringify(bundle.compatibilityFlags))
-    }
-    if (bundle.notFoundHandling) {
-      form.append('notFoundHandling', bundle.notFoundHandling)
-    }
     form.append('name', appName)
     if (confirmRename) form.append('confirmRename', 'true')
     if (claimReleased) form.append('claimReleased', 'true')

@@ -10,30 +10,11 @@ export interface JsonRpcRequest {
 }
 
 export const CURRENT_PROTOCOL_VERSION = '2025-11-25'
-export const SUPPORTED_PROTOCOL_VERSIONS = new Set([CURRENT_PROTOCOL_VERSION, '2025-06-18', '2025-03-26'])
-export function initializeResponse(request: JsonRpcRequest & { id: JsonRpcId }): Response {
-  const params = objectValue(request.params)
-  const requested =
-    typeof params?.protocolVersion === 'string' ? params.protocolVersion : CURRENT_PROTOCOL_VERSION
-  const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.has(requested)
-    ? requested
-    : CURRENT_PROTOCOL_VERSION
-  return mcpResult(request.id, {
-    protocolVersion,
-    capabilities: {
-      tools: { listChanged: false },
-      resources: { subscribe: false, listChanged: false },
-    },
-    serverInfo: {
-      name: 'DeepSpace Documentation',
-      title: 'DeepSpace documentation',
-      version: MCP_SERVER_VERSION,
-    },
-    instructions:
-      'Search the published documentation before answering, then read exact pages when full context is needed.',
-  })
-}
-
+export const SUPPORTED_PROTOCOL_VERSIONS = new Set([
+  CURRENT_PROTOCOL_VERSION,
+  '2025-06-18',
+  '2025-03-26',
+])
 export function hasValidOrigin(request: Request): boolean {
   const origin = request.headers.get('Origin')
   if (!origin) return true
@@ -46,16 +27,16 @@ export function hasValidOrigin(request: Request): boolean {
 
 export function parseRequest(
   raw: string,
-): { ok: true; request: JsonRpcRequest } | { ok: false; message: string } {
+): { ok: true; request: JsonRpcRequest } | { ok: false; code: -32700 | -32600; message: string } {
   let value: unknown
   try {
     value = JSON.parse(raw)
   } catch {
-    return { ok: false, message: 'Invalid JSON' }
+    return { ok: false, code: -32700, message: 'Invalid JSON' }
   }
   const candidate = objectValue(value)
   if (!candidate || candidate.jsonrpc !== '2.0' || typeof candidate.method !== 'string') {
-    return { ok: false, message: 'Invalid JSON-RPC request' }
+    return { ok: false, code: -32600, message: 'Invalid JSON-RPC request' }
   }
   if (
     candidate.id !== undefined &&
@@ -63,7 +44,7 @@ export function parseRequest(
     typeof candidate.id !== 'string' &&
     typeof candidate.id !== 'number'
   )
-    return { ok: false, message: 'Invalid JSON-RPC id' }
+    return { ok: false, code: -32600, message: 'Invalid JSON-RPC id' }
   return {
     ok: true,
     request: {

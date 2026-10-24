@@ -1,5 +1,22 @@
 # create-deepspace
 
+## 0.43.0
+
+### Minor Changes
+
+- Add independent staging agent accounts with portable twelve-word credentials, math verification, renewal and recovery. Return the account phrase for private chat by default; private storage can suppress the receipt. Keep management and app-scoped tokens separate and preserve account identity across containers.
+
+  Publish ordinary raw JavaScript and SDK projects through shared Wrangler build and deployment contracts. Provide a public-board scaffold with server-enforced text limits, confirmed writes and reconnect feedback. Keep prototype scaffolds on their matching immutable SDK distribution and make skill installation opt-in.
+
+  Expose selected app actions through HTTP, MCP, Markdown discovery and conditional browser WebMCP using one implementation and existing app permissions. Enable the adapters in new scaffolds and remove browser tool registrations when the app session changes.
+
+  Preserve complete CLI help when agents capture piped output. Improve restricted-container development and testing with loopback servers, a parent-process outbound bridge, an optional existing Chromium executable, workspace-local Wrangler state and explicit app secret configuration. Confirm deployments against bounded, proxy-aware checks of release markers and JavaScript/CSS asset bytes before reporting them ready.
+
+### Patch Changes
+
+- Callers without an identity (HTTP requests that carry no user) no longer count as owners of records other identity-less callers wrote, for `own`, `collaborator`, `team`, `published` and `shared` permission checks and for `own` and `team` queries.
+- Fix the public-board template's generated tests, which failed on a fresh app because they expected the item checkbox to flip before the server confirmed it.
+
 ## 0.42.4
 
 ### Patch Changes

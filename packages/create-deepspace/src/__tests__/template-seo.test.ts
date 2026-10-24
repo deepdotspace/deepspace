@@ -32,6 +32,10 @@ describe('scaffold SEO source of truth', () => {
     expect(vite).toMatch(/^\s*prerender\(\),$/m)
   })
 
+  it('keeps restricted agent containers off the inspector network probe', () => {
+    expect(template('base/vite.config.ts')).toContain('inspectorPort: false')
+  })
+
   it('ships the prerender plugin and its render entry as app code', () => {
     // deep.space's approach, in the scaffold: a root-level Vite plugin and an
     // explicit page list — no SDK build dependency to keep in step.

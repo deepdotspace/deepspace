@@ -9,7 +9,12 @@ import type { RecordResult, PutPayload, DeletePayload } from '../../shared/types
 import type { ToolResult } from '../utils/tools'
 import { DEFAULT_DELETE_WHERE_LIMIT, MAX_DELETE_WHERE_LIMIT } from '../utils/tools'
 import { serverBuild } from '../../shared/protocol/messages'
-import { ANONYMOUS_USER_ID_PREFIX, CONFIRMED_WRITE_RETENTION_MS, RECORD_NOT_FOUND, isAnonymousUserId } from '../../shared/protocol/constants'
+import {
+  ANONYMOUS_USER_ID_PREFIX,
+  CONFIRMED_WRITE_RETENTION_MS,
+  RECORD_NOT_FOUND,
+  isAnonymousUserId,
+} from '../../shared/protocol/constants'
 import {
   type CollectionSchema,
   type ResolvedColumn,
@@ -240,7 +245,11 @@ function applyConfirmed(
     )
     .toArray()[0] as { success: number; error: string | null; record_id: string | null } | undefined
   const outcome = prior
-    ? { success: prior.success === 1, error: prior.error ?? undefined, recordId: prior.record_id ?? undefined }
+    ? {
+        success: prior.success === 1,
+        error: prior.error ?? undefined,
+        recordId: prior.record_id ?? undefined,
+      }
     : write()
   if (!prior) {
     const now = Date.now()
@@ -422,6 +431,25 @@ export function putRecord(
     }
   }
 
+  for (const col of columns) {
+    if (col.maxLength === undefined || col.readonly) continue
+    if (col.storage !== 'text' || !Number.isSafeInteger(col.maxLength) || col.maxLength < 0)
+      return { success: false, error: `Invalid maxLength for '${col.name}'` }
+    // An update is checked only on the fields it writes, so a stored value from
+    // before the limit does not block edits to other fields.
+    if (isUpdate && !Object.hasOwn(data, col.name)) continue
+    const value = mergedData[col.name]
+    if (
+      value !== undefined &&
+      value !== null &&
+      (typeof value !== 'string' || value.length > col.maxLength)
+    )
+      return {
+        success: false,
+        error: `Field '${col.name}' must be text of at most ${col.maxLength} characters`,
+      }
+  }
+
   const finalData = { ...mergedData }
 
   // RBAC checks
@@ -556,7 +584,14 @@ export function putRecord(
     createdAt: saved.createdAt,
     updatedAt: saved.updatedAt,
   }
-  broadcastChange(ctx, ctx.state, collection, record, isUpdate ? 'update' : 'create')
+  broadcastChange(
+    ctx,
+    ctx.state,
+    collection,
+    record,
+    isUpdate ? 'update' : 'create',
+    existing ? { recordId, ...existing } : undefined,
+  )
   notifyTeamMembershipChange(ctx, collection, record)
 
   return { success: true, data: { recordId, record } }
@@ -688,20 +723,33 @@ export function refuseInvalidPage(
 ): ToolResult | null {
   const { orderBy, orderDir, limit, offset } = params
   if (orderBy !== undefined && !orderColumn(schema, orderBy)) {
-    const sortable = ['createdAt', 'updatedAt', ...(schema?.columns ?? []).map((c) => resolveColumn(c).name)]
+    const sortable = [
+      'createdAt',
+      'updatedAt',
+      ...(schema?.columns ?? []).map((c) => resolveColumn(c).name),
+    ]
     return {
       success: false,
       error: `Unknown orderBy for "${collection}": ${JSON.stringify(orderBy)} — sortable fields: ${sortable.join(', ')}`,
     }
   }
   if (orderDir !== undefined && orderDir !== 'asc' && orderDir !== 'desc') {
-    return { success: false, error: `orderDir must be "asc" or "desc", not ${JSON.stringify(orderDir)}` }
+    return {
+      success: false,
+      error: `orderDir must be "asc" or "desc", not ${JSON.stringify(orderDir)}`,
+    }
   }
   if (limit !== undefined && !(Number.isInteger(limit) && (limit as number) >= 1)) {
-    return { success: false, error: `limit must be a whole number of at least 1, not ${JSON.stringify(limit)}` }
+    return {
+      success: false,
+      error: `limit must be a whole number of at least 1, not ${JSON.stringify(limit)}`,
+    }
   }
   if (offset !== undefined && !(Number.isInteger(offset) && (offset as number) >= 0)) {
-    return { success: false, error: `offset must be a whole number of at least 0, not ${JSON.stringify(offset)}` }
+    return {
+      success: false,
+      error: `offset must be a whole number of at least 0, not ${JSON.stringify(offset)}`,
+    }
   }
   return null
 }

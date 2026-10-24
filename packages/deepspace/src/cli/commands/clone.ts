@@ -30,7 +30,7 @@ import {
 import { repoApi } from '../lib/repo-api'
 import { createSpinner } from '../lib/spinner'
 import { defineDeepspaceCommand, Refusal } from '../lib/command'
-import { detectPackageManager } from '../lib/package-manager'
+import { recoveryInstallArgv } from '../lib/package-manager'
 
 /**
  * Tidy a PRE-EXISTING target dir after a failed clone. git removes a clone
@@ -170,6 +170,7 @@ export default defineDeepspaceCommand({
     if (!args.json && !branch) {
       p.log.warn('HEAD is detached — check `git branch -a`.')
     }
+    const install = recoveryInstallArgv(dir)
     return {
       data: {
         appId,
@@ -178,10 +179,9 @@ export default defineDeepspaceCommand({
         branch,
         remoteBranches: branches.map((r) => r.name.replace(/^refs\/heads\//, '')),
       },
-      // One runnable follow-up instead of the old five-line "Next steps" block:
-      // nothing else in the clone works until the deps are installed. Secrets
-      // and `dev` (which refreshes `.dev.vars` itself) follow from there.
-      action: { cwd: dir, argv: [detectPackageManager(dir), 'install'] },
+      // SDK projects need their dependencies restored; raw Worker projects
+      // have no install step and are already usable.
+      ...(install ? { action: { cwd: dir, argv: install } } : {}),
     }
   },
 })

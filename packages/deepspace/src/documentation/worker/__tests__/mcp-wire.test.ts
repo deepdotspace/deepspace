@@ -11,7 +11,7 @@ import { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
 import { createMcpTestClient, McpRpcError, McpTransportError } from '../../../testing/mcp'
 import { registerDocumentationMcpRoutes, type DocumentationMcpRouteEnv } from '../mcp-routes'
-import { CURRENT_PROTOCOL_VERSION } from '../mcp/protocol'
+import { CURRENT_PROTOCOL_VERSION } from '../../../shared/mcp-protocol'
 
 interface WireExchange {
   request: Request

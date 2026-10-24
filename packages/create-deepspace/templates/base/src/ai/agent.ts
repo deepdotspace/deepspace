@@ -97,6 +97,7 @@ export function registerAgent(app: Hono<AppContext>, options: RegisterAgentOptio
     registerAgentToolRoutes(app, {
       buildTools: options.tools,
       resolveAccess: createAccessResolver(options, resolveAgentAuth),
+      resolveBrowserAccess: createAccessResolver(options, resolveAuth),
     })
   }
 }

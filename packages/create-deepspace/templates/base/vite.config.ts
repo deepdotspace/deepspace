@@ -13,7 +13,14 @@ export default defineConfig({
   plugins: [
     react(),
     generouted(),
-    cloudflare(),
+    // The Cloudflare plugin otherwise searches for a free inspector port by
+    // enumerating every network interface. Restricted agent containers can
+    // reject that OS call (`uv_interface_addresses`) even when loopback is
+    // available. Inspector debugging is optional, so disable that probe in
+    // the generated app and keep local dev/test startup deterministic.
+    cloudflare({
+      inspectorPort: false,
+    }),
     // The app id `define`, the preview-secret cleanup, and the client dedupe
     // hint — all shipped by the SDK so a fix to any of them arrives with a
     // version bump, not an app edit. The app id is read from the wrangler

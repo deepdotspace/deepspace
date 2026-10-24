@@ -9,11 +9,8 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import {
-  CURRENT_PROTOCOL_VERSION,
-  SUPPORTED_PROTOCOL_VERSIONS,
-  initializeResponse,
-} from '../mcp/protocol'
+import { CURRENT_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS } from '../../../shared/mcp-protocol'
+import { initializeResponse } from '../mcp-routes'
 
 async function initialize(protocolVersion?: string): Promise<string> {
   const response = initializeResponse({

@@ -34,6 +34,7 @@ export interface ResolvedColumn {
   userBound?: boolean
   immutable?: boolean
   required?: boolean
+  maxLength?: number
   default?: unknown
   timestampTrigger?: { field: string; value?: unknown }
 }
@@ -65,6 +66,7 @@ export function resolveColumn(col: ColumnDefinition): ResolvedColumn {
     userBound: col.userBound,
     immutable: col.immutable,
     required: col.required,
+    maxLength: col.maxLength,
     default: col.default,
     timestampTrigger: col.timestampTrigger,
   }
@@ -232,6 +234,9 @@ export function isOwner(
   record: { data: Record<string, unknown>; createdBy: string },
   userId: string,
 ): boolean {
+  // An empty id is a caller with no identity (an HTTP request without one),
+  // so it owns nothing, including records other identity-less callers wrote.
+  if (!userId) return false
   if (schema.ownerField) return record.data[schema.ownerField] === userId
   return record.createdBy === userId
 }
@@ -241,7 +246,7 @@ function isCollaborator(
   record: { data: Record<string, unknown> },
   userId: string,
 ): boolean {
-  if (!schema.collaboratorsField) return false
+  if (!schema.collaboratorsField || !userId) return false
   const collab = record.data[schema.collaboratorsField]
   if (typeof collab === 'string') {
     try {
@@ -290,7 +295,7 @@ function checkPermissionLevel(
     if (isCollaborator(schema, record, userId)) return true
     if (schema.teamField) {
       const teamId = record.data[schema.teamField]
-      if (typeof teamId === 'string' && ctx.isTeamMember(teamId, userId)) return true
+      if (userId && typeof teamId === 'string' && ctx.isTeamMember(teamId, userId)) return true
     }
     return false
   }

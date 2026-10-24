@@ -44,6 +44,7 @@ interface PackageJson {
   version: string
   private: boolean
   files?: unknown
+  scripts?: Record<string, string>
   dependencies?: Record<string, string>
   devDependencies?: Record<string, string>
 }
@@ -129,6 +130,8 @@ export function prepareProject(
     creatorVersion,
     input.local,
     progress,
+    input.sdkUrl,
+    input.agentAccount,
   )
   if (!input.local) progress.stop('Project configured')
 
@@ -269,6 +272,8 @@ export function configurePackageJson(
   creatorVersion: string,
   localSdkRoot: string | undefined,
   progress: Progress,
+  sdkUrl?: string,
+  agentAccount = false,
 ): void {
   const packagePath = join(appDir, 'package.json')
   const packageJson = JSON.parse(readFileSync(packagePath, 'utf-8')) as PackageJson
@@ -276,6 +281,11 @@ export function configurePackageJson(
   packageJson.version = '0.0.1'
   packageJson.private = true
   delete packageJson.files
+
+  if (agentAccount) {
+    packageJson.scripts ??= {}
+    packageJson.scripts.login = 'deepspace auth agent register --json'
+  }
 
   if (template.dependencies) {
     packageJson.dependencies = { ...packageJson.dependencies, ...template.dependencies }
@@ -295,6 +305,11 @@ export function configurePackageJson(
       // reproducing "built on X" was measuring a different version.
       packageJson[section]![dependency] = creatorVersion
     }
+  }
+
+  if (sdkUrl) {
+    packageJson.dependencies ??= {}
+    packageJson.dependencies.deepspace = sdkUrl
   }
 
   if (localSdkRoot) {
