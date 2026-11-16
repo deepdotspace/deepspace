@@ -102,8 +102,8 @@ export interface ActionTools {
    * Call an integration endpoint (e.g. 'openai/chat-completion') via the
    * api-worker. On success, `result.data` is the integration's response
    * body directly — there is no `.response` wrapper. So an OpenAI call
-   * yields `result.data.choices`, a Freepik image call yields
-   * `result.data.images`, etc. On failure, `result.error` is human-readable;
+   * yields `result.data.choices`, a Gemini image call yields
+   * `result.data.base64Images`, etc. On failure, `result.error` is human-readable;
    * branch on `result.code` and inspect `status`, `details`, or `issues` when
    * present.
    */

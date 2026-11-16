@@ -10,6 +10,7 @@ import integrations, {
   exampleBody,
   isInteractive,
   priceLabel,
+  requireEndpoint,
   runInvoke,
 } from '../integrations'
 
@@ -219,5 +220,83 @@ describe('isInteractive (FEAT-13 — both streams must be a TTY)', () => {
   })
   it('is NOT interactive when neither is a TTY (CI)', () => {
     expect(isInteractive({}, {})).toBe(false)
+  })
+})
+
+describe('retired integrations (the catalog carries the API\'s message)', () => {
+  const catalog = {
+    integrations: { fal: [] },
+    retired: {
+      freepik: {
+        'remove-background': 'The Freepik integration was retired. Use pixelcut/background-removal instead.',
+        '*': 'The Freepik integration was retired. Use fal/run-model instead.',
+      },
+    },
+  }
+
+  it('refuses with the endpoint\'s message, or the integration-wide one', () => {
+    expect(() => requireEndpoint(catalog, 'freepik', 'remove-background')).toThrow(
+      expect.objectContaining({
+        code: 'integration_retired',
+        message: 'The Freepik integration was retired. Use pixelcut/background-removal instead.',
+      }),
+    )
+    expect(() => requireEndpoint(catalog, 'freepik', 'text-to-image-classic')).toThrow(
+      expect.objectContaining({
+        code: 'integration_retired',
+        message: 'The Freepik integration was retired. Use fal/run-model instead.',
+      }),
+    )
+  })
+
+  it('refuses a retired endpoint of a live integration, and only that endpoint', () => {
+    const search = {
+      endpoint: 'search',
+      billing: { model: 'per_actual_cost', baseCost: 1, currency: 'USD' },
+      inputSchema: null,
+      example: null,
+    }
+    const partly = {
+      integrations: { exa: [search] },
+      retired: { exa: { research: 'The exa/research endpoint was retired. Use exa/search instead.' } },
+    }
+    expect(() => requireEndpoint(partly, 'exa', 'research')).toThrow(
+      expect.objectContaining({
+        code: 'integration_retired',
+        message: 'The exa/research endpoint was retired. Use exa/search instead.',
+      }),
+    )
+    expect(requireEndpoint(partly, 'exa', 'search')).toBe(search)
+    expect(() => requireEndpoint(partly, 'exa', 'answer-v2')).toThrow(
+      expect.objectContaining({ code: 'unknown_endpoint' }),
+    )
+  })
+
+  it('never resolves a name through Object.prototype', () => {
+    expect(() => requireEndpoint(catalog, 'constructor', 'name')).toThrow(
+      expect.objectContaining({ code: 'unknown_integration' }),
+    )
+    expect(() => requireEndpoint(catalog, 'freepik', 'constructor')).toThrow(
+      expect.objectContaining({ message: 'The Freepik integration was retired. Use fal/run-model instead.' }),
+    )
+  })
+
+  it('invoke shows the message before any call', async () => {
+    const calls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request) => {
+        calls.push(String(input))
+        return Response.json(catalog)
+      }),
+    )
+    try {
+      await expect(
+        runInvoke({ target: 'freepik/remove-background', body: '{}', json: true }),
+      ).rejects.toMatchObject({ code: 'integration_retired' })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+    expect(calls.every((url) => !url.includes('/api/integrations/freepik/'))).toBe(true)
   })
 })

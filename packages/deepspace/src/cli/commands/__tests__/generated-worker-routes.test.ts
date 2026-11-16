@@ -35,6 +35,7 @@ interface TestEnv {
   ASSETS?: Fetcher
   API_WORKER?: Fetcher
   APP_OWNER_JWT?: string
+  APP_IDENTITY_TOKEN?: string
   APP_NAME?: string
   AUTH_JWT_ISSUER?: string
   AUTH_JWT_PUBLIC_KEY?: string
@@ -659,6 +660,56 @@ describe('generated worker route owners', () => {
     }
   })
 
+  it("forwards a Composio call as the signed-in user and never forwards the browser's act-as header", async () => {
+    const app = new Hono<TestContext>()
+    registerAuthAndIntegrationRoutes(app)
+    const apiFetch = vi.fn(async () => Response.json({ success: true, data: {} }))
+    const token = await signTestJwt('browser-user')
+    const routeEnv = env({
+      API_WORKER: { fetch: apiFetch } as unknown as Fetcher,
+      APP_OWNER_JWT: 'owner-jwt',
+      APP_IDENTITY_TOKEN: 'identity-token',
+      DEEPSPACE_APP_ID: 'app_test',
+      AUTH_JWT_PUBLIC_KEY: TEST_JWT_PUBLIC_KEY,
+      AUTH_JWT_ISSUER: TEST_JWT_ISSUER,
+    })
+    const res = await app.request(
+      'https://app.test/api/integrations/composio/list-connections',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'x-act-as-user': 'someone-else' },
+        body: '{}',
+      },
+      routeEnv,
+    )
+    expect(res.status).toBe(200)
+    const sent = new Headers((apiFetch.mock.calls[0] as unknown as [string, RequestInit])[1].headers)
+    expect(sent.get('Authorization')).toBe(`Bearer ${token}`)
+    expect(sent.get('x-act-as-user')).toBeNull()
+
+    // Owner billing is the dangerous mode (owner token + app identity), and the
+    // header is still never forwarded.
+    templateIntegrations.composio = { billing: 'developer' }
+    try {
+      const ownerRes = await app.request(
+        'https://app.test/api/integrations/composio/list-connections',
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'x-act-as-user': 'someone-else' },
+          body: '{}',
+        },
+        routeEnv,
+      )
+      expect(ownerRes.status).toBe(200)
+      const ownerSent = new Headers((apiFetch.mock.calls[1] as unknown as [string, RequestInit])[1].headers)
+      expect(ownerSent.get('Authorization')).toBe('Bearer owner-jwt')
+      expect(ownerSent.get('x-app-identity-token')).toBe('identity-token')
+      expect(ownerSent.get('x-act-as-user')).toBeNull()
+    } finally {
+      templateIntegrations.composio = { billing: 'user' }
+    }
+  })
+
   it('requires owner/admin auth after production debug routes are enabled', async () => {
     const app = new Hono<TestContext>()
     registerAuthAndIntegrationRoutes(app)
@@ -1003,6 +1054,57 @@ describe('generated worker route owners', () => {
         'https://api-worker/api/integrations/shotstack/render',
         expect.objectContaining({
           headers: expect.objectContaining({ Authorization: 'Bearer owner-jwt' }),
+        }),
+      )
+    } finally {
+      delete templateActions[actionName]
+    }
+  })
+
+  it('calls Composio from an action as the caller, with the app identity', async () => {
+    // Without the identity the api-worker files Composio calls under
+    // `_default:<user>`, never seeing the connection the user made in the app.
+    const actionName = '__composio_identity_test__'
+    templateActions[actionName] = async ({ tools }) =>
+      tools.integration('composio/list-connections', {})
+
+    const apiFetch = vi.fn(async () => Response.json({ success: true, data: { connections: [] } }))
+    const recordRooms = {
+      idFromName: (name: string) => name,
+      get: () => ({ fetch: vi.fn() }),
+    } as unknown as DurableObjectNamespace
+    const actions = new Hono<TestContext>()
+    registerActionRoutes(actions, async () => ({
+      userId: 'verified-user',
+      claims: { sub: 'verified-user' },
+    }))
+
+    try {
+      const response = await actions.request(
+        `https://app.test/api/actions/${actionName}`,
+        {
+          method: 'POST',
+          headers: { Authorization: 'Bearer caller-jwt', 'Content-Type': 'application/json' },
+          body: '{}',
+        },
+        env({
+          API_WORKER: { fetch: apiFetch } as unknown as Fetcher,
+          APP_OWNER_JWT: 'owner-jwt',
+          APP_IDENTITY_TOKEN: 'identity-token',
+          DEEPSPACE_APP_ID: 'app_test',
+          RECORD_ROOMS: recordRooms,
+        }),
+      )
+
+      expect(response.status).toBe(200)
+      expect(apiFetch).toHaveBeenCalledWith(
+        'https://api-worker/api/integrations/composio/list-connections',
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: 'Bearer caller-jwt',
+            'x-app-identity-token': 'identity-token',
+            'x-app-id': 'app_test',
+          }),
         }),
       )
     } finally {

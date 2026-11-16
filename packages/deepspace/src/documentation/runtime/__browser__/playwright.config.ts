@@ -17,13 +17,13 @@ export default defineConfig({
   timeout: 60_000,
   use: { browserName: 'chromium', headless: true },
   projects: [
-    // `routing.browser.ts` asserts the default fixture's own titles and canonical
-    // URLs, so it stays on the default runtime; everything else is
-    // runtime-agnostic and runs against both.
+    // `routing.browser.ts` and `locales.browser.ts` assert the default fixture's
+    // own titles, canonical URLs, and Spanish translations, so they stay on the
+    // default runtime; everything else is runtime-agnostic and runs against both.
     { name: 'default-runtime', use: { baseURL: defaultRuntime } },
     {
       name: 'custom-runtime',
-      testIgnore: 'routing.browser.ts',
+      testIgnore: ['routing.browser.ts', 'locales.browser.ts'],
       use: { baseURL: customRuntime },
     },
   ],

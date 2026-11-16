@@ -34,7 +34,13 @@ export {
   type SandboxFilesOptions,
   type SandboxUploadOptions,
 } from './sandbox'
-export { composioTools, type ComposioToolsOptions } from './composio-tools'
+export {
+  callComposio,
+  composioTools,
+  type ComposioCaller,
+  type ComposioEnv,
+  type ComposioToolsOptions,
+} from './composio-tools'
 export {
   apiWorkerFetch,
   platformWorkerFetch,

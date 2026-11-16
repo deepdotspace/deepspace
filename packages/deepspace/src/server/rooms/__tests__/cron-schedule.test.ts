@@ -54,6 +54,48 @@ describe('nextCronFire', () => {
   })
 })
 
+describe('nextCronFire for rare and impossible schedules', () => {
+  it('finds a leap day more than a year away', () => {
+    const next = nextCronFire('0 0 29 2 *', 'UTC', new Date('2026-11-11T12:00:00Z'))
+    expect(next?.toISOString()).toBe('2028-02-29T00:00:00.000Z')
+  })
+
+  it('returns null for a day that no month has', () => {
+    expect(nextCronFire('0 0 30 2 *', 'UTC', new Date('2026-11-11T12:00:00Z'))).toBeNull()
+  })
+
+  it('searches eight years quickly', () => {
+    const started = performance.now()
+    // Feb 29 on a Monday: none until 2044, past the search window.
+    expect(nextCronFire('0 0 29 2 1', 'UTC', new Date('2026-11-11T12:00:00Z'))).toBeNull()
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+
+  it('does not skip past a clock change on a quarter hour (Chatham, 2:45 to 3:45)', () => {
+    const next = nextCronFire('50 3 * * *', 'Pacific/Chatham', new Date('2026-09-26T13:00:00Z'))
+    expect(next?.toISOString()).toBe('2026-09-26T14:05:00.000Z')
+  })
+
+  it('does not jump past midnight on a day the clocks go forward', () => {
+    // New York springs forward on Sunday 2026-03-08; Monday midnight is next.
+    const ny = nextCronFire('0 0 * * 1', 'America/New_York', new Date('2026-03-08T05:30:00Z'))
+    expect(ny?.toISOString()).toBe('2026-03-09T04:00:00.000Z')
+    // Troll jumps two hours (+00 to +02) early on Sunday 2026-03-29.
+    const troll = nextCronFire('30 0 * * 1', 'Antarctica/Troll', new Date('2026-03-27T12:00:00Z'))
+    expect(troll?.toISOString()).toBe('2026-03-29T22:30:00.000Z')
+  })
+
+  it('handles half-hour and quarter-hour offsets', () => {
+    const from = new Date('2026-11-11T12:00:00Z')
+    expect(nextCronFire('0 9 * * *', 'Asia/Kathmandu', from)?.toISOString()).toBe(
+      '2026-11-12T03:15:00.000Z',
+    )
+    expect(nextCronFire('30 2 * * *', 'Australia/Lord_Howe', from)?.toISOString()).toBe(
+      '2026-11-11T15:30:00.000Z',
+    )
+  })
+})
+
 describe('validateTask', () => {
   it('accepts a valid interval task', () => {
     expect(() => validateTask({ name: 'heartbeat', intervalMinutes: 1 })).not.toThrow()

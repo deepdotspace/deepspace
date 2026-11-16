@@ -113,6 +113,25 @@ export interface DocumentationSeoConfig {
   metaTags?: Record<string, string>
 }
 
+export interface DocumentationLocale {
+  /** Canonical BCP 47 casing, used verbatim as the `hreflang` and `lang` value. */
+  code: string
+  /** Switcher label, written in the locale's own language. */
+  label: string
+}
+
+export interface DocumentationAlternateLocale extends DocumentationLocale {
+  /** Lowercased code: the source folder and public route prefix. */
+  prefix: string
+  /** Navigation group and link labels, keyed by their default-locale label. */
+  navigationLabels: Record<string, string>
+}
+
+export interface DocumentationLocalesConfig {
+  default: DocumentationLocale
+  alternates: DocumentationAlternateLocale[]
+}
+
 export interface DocumentationConfig {
   $schema?: string
   name: string
@@ -132,6 +151,8 @@ export interface DocumentationConfig {
   mcp: DocumentationMcpConfig
   contextual: DocumentationContextualConfig
   seo: DocumentationSeoConfig
+  /** Absent unless the site opts into translated pages. */
+  locales?: DocumentationLocalesConfig
 }
 
 export interface DocumentationFrontmatter {
@@ -140,6 +161,8 @@ export interface DocumentationFrontmatter {
   slug?: string
   hidden?: boolean
   noindex?: boolean
+  /** Translations only: the hash of the default-locale source they were translated from. */
+  sourceHash?: string
 }
 
 export interface DocumentationHeading {
@@ -163,6 +186,27 @@ export interface DocumentationPage {
   sourceFormat: 'markdown' | 'mdx' | 'generated'
   kind: 'page' | 'openapi'
   openapi?: DocumentationOpenApiOperation
+  /**
+   * MDX pages only: the authored source with references resolved and the
+   * shell-owned H1 removed, which the executable runtime compiles.
+   */
+  mdxSource?: string
+  /** Set only on translations; default-locale pages carry no locale. */
+  locale?: string
+  /** Every published language version of this page, itself included, when it has more than one. */
+  alternates?: DocumentationPageAlternate[]
+  translation?: DocumentationTranslationSource
+}
+
+export interface DocumentationPageAlternate {
+  locale: string
+  route: string
+}
+
+export interface DocumentationTranslationSource {
+  sourceRoute: string
+  /** The default-locale source changed after this translation recorded its `sourceHash`. */
+  stale: boolean
 }
 
 export interface DocumentationNavigationPage {
@@ -245,6 +289,8 @@ export interface DocumentationGraph {
   config: DocumentationConfig
   pages: DocumentationPage[]
   navigation: DocumentationNavigationNode[]
+  /** Per-locale navigation keyed by locale code, derived from `navigation`. */
+  localizedNavigation?: Record<string, DocumentationNavigationNode[]>
   sourceHash: string
 }
 
@@ -304,6 +350,20 @@ export interface DocumentationRuntimePage {
   openapi?: DocumentationOpenApiOperation
 }
 
+export interface DocumentationRuntimeLocale extends DocumentationLocale {
+  /** Route prefix without slashes; empty for the default locale. */
+  prefix: string
+  /** Where the switcher lands when the current page has no version in this locale. */
+  home?: string
+}
+
+/** Site-wide language context for one locale's pages. */
+export interface DocumentationRuntimeLocalization {
+  locale: string
+  /** Default locale first, then the alternates in configuration order. */
+  locales: DocumentationRuntimeLocale[]
+}
+
 export interface DocumentationRuntimeData {
   /** Public mount (`/docs` on an app host, empty on an explicit documentation domain). */
   basePath: string
@@ -316,9 +376,20 @@ export interface DocumentationRuntimeData {
   breadcrumbs: string[]
   previous?: DocumentationRuntimePageLink
   next?: DocumentationRuntimePageLink
+  localization?: DocumentationRuntimeLocalization
+  alternates?: DocumentationPageAlternate[]
+  translation?: Pick<DocumentationTranslationSource, 'sourceRoute' | 'stale'>
 }
 
-export type DocumentationRuntimeRouteData = Omit<DocumentationRuntimeData, 'config' | 'navigation'>
+export type DocumentationRuntimeRouteData = Omit<
+  DocumentationRuntimeData,
+  'config' | 'navigation' | 'localization'
+>
+
+export interface DocumentationLanguageAlternate {
+  hreflang: string
+  href: string
+}
 
 /** Small per-route payload used by the hydrated documentation router. */
 export interface DocumentationRuntimeRouteDocument {
@@ -328,6 +399,8 @@ export interface DocumentationRuntimeRouteDocument {
   openGraph: Record<'og:title' | 'og:description' | 'og:url', string | null>
   robots: string | null
   title: string
+  /** Absolute `hreflang` alternates; absent when the page has a single language version. */
+  languageAlternates?: DocumentationLanguageAlternate[]
 }
 
 export class DocumentationError extends Error {

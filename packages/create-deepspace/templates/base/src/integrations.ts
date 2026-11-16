@@ -12,11 +12,12 @@
  *
  * Integrations not listed here default to 'developer' with sign-in required.
  *
- * IMPORTANT: any integration backed by per-user OAuth tokens (Google,
- * etc.) must be 'user' — the api-worker looks up the row keyed by the
- * JWT subject. With 'developer' the app owner's JWT is forwarded and
- * the handler operates on the app owner's connected account regardless
- * of who's signed in client-side.
+ * IMPORTANT: any integration backed by per-user connected accounts (Google,
+ * Composio) must be 'user' — the api-worker resolves the account from the
+ * JWT subject. With 'developer' the app owner's JWT is forwarded, so every
+ * signed-in user connects and acts on the app owner's account. Server code
+ * that acts for a user in the background (e.g. a cron job) uses
+ * `callComposio(env, ..., { asUser })` from 'deepspace/worker' instead.
  */
 
 export const integrations: Record<
@@ -24,5 +25,6 @@ export const integrations: Record<
   { billing: 'developer' | 'user'; anonymous?: boolean }
 > = {
   google: { billing: 'user' },
+  composio: { billing: 'user' },
   // openai: { billing: 'developer', anonymous: true },
 }

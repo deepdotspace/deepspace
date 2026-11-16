@@ -205,16 +205,21 @@ export function createDeepSpaceAuth(config: DeepSpaceAuthConfig) {
     // relaxes the handshake cookie for Google/GitHub/Microsoft on the same
     // instance — which is safe, since the state is encrypted and verified
     // independently of SameSite (plus a separate per-flow CSRF cookie).
-    ...(config.apple
-      ? {
-          advanced: {
+    advanced: {
+      // Better Auth 1.7 introspects the schema (a sqlite_schema query plus a
+      // pragma_table_info per table) once per adapter instance. Workers build
+      // an instance per request, so that would add those reads to every auth
+      // request; checked-in migrations own this schema.
+      database: { validateSchema: false },
+      ...(config.apple
+        ? {
             cookies: {
               state: { attributes: { sameSite: 'none' as const, secure: true } },
               oauth_state: { attributes: { sameSite: 'none' as const, secure: true } },
             },
-          },
-        }
-      : {}),
+          }
+        : {}),
+    },
     // Observer hook for new-user creation (see DeepSpaceAuthConfig.onUserCreated).
     // Two-layer wiring guard — be honest about what each layer catches:
     //  1. buildDatabaseHooks's return type is pinned to

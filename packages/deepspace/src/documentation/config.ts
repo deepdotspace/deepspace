@@ -23,6 +23,7 @@ import {
   validateLinks,
   validateRedirects,
 } from './config/validation'
+import { localePrefix } from './locales'
 import { errorMessage } from './text'
 
 export interface LoadedDocumentationConfig {
@@ -196,6 +197,20 @@ export function loadDocumentationConfig(appDir: string): LoadedDocumentationConf
         ? { metaTags: data.seo.metaTags ?? data.seo.metatags }
         : {}),
     },
+    ...(data.locales
+      ? {
+          locales: {
+            default: {
+              code: data.locales.default.code,
+              label: data.locales.default.label ?? localeDisplayName(data.locales.default.code),
+            },
+            alternates: data.locales.alternates.map((locale) => ({
+              ...locale,
+              prefix: localePrefix(locale.code),
+            })),
+          },
+        }
+      : {}),
   }
   validateRedirects(config.redirects, configPath)
   validateLinks(config.links, 'links', configPath)
@@ -262,6 +277,15 @@ export function loadDocumentationConfig(appDir: string): LoadedDocumentationConf
   }
 
   return { config, configPath, sourceDir, outputDir, raw, warnings }
+}
+
+/** A locale's name in its own language (`en` → `English`), falling back to the code. */
+function localeDisplayName(code: string): string {
+  try {
+    return new Intl.DisplayNames([code], { type: 'language' }).of(code) ?? code
+  } catch {
+    return code
+  }
 }
 
 function normalizeLocalAsset(value: string, sourceDir: string): string {

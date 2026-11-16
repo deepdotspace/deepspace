@@ -263,7 +263,7 @@ export function parseFrontmatter(
   }
   const raw = value as Record<string, unknown>
   const frontmatter: DocumentationFrontmatter = {}
-  for (const key of ['title', 'description', 'slug'] as const) {
+  for (const key of ['title', 'description', 'slug', 'sourceHash'] as const) {
     if (raw[key] !== undefined && typeof raw[key] !== 'string') {
       throw frontmatterTypeError(file, key, 'string')
     }
@@ -451,9 +451,20 @@ function validateExecutableMdx(body: string, file: string): void {
   }
 }
 
+const FENCED_CODE_BLOCK = /^([ \t]*)(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1\2[ \t]*(?=\n|$)/gm
+const INLINE_CODE_SPAN = /`([^`\n]+)`/g
+
+/** Apply `transform` outside fenced blocks and inline code spans, so code samples keep their text. */
+export function mapOutsideCode(source: string, transform: (text: string) => string): string {
+  const code: string[] = []
+  const hold = (block: string): string => `@@DEEPSPACE_CODE_${code.push(block) - 1}@@`
+  const masked = source.replace(FENCED_CODE_BLOCK, hold).replace(INLINE_CODE_SPAN, hold)
+  return transform(masked).replace(/@@DEEPSPACE_CODE_(\d+)@@/g, (_match, index: string) => code[Number(index)]!)
+}
+
 function protectCode(source: string, placeholders: string[]): string {
   const fenced = source.replace(
-    /^([ \t]*)(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1\2[ \t]*(?=\n|$)/gm,
+    FENCED_CODE_BLOCK,
     (block, indentation: string) => {
       const normalized = indentation
         ? block.split('\n').map((line) => line.startsWith(indentation) ? line.slice(indentation.length) : line).join('\n')
@@ -463,13 +474,14 @@ function protectCode(source: string, placeholders: string[]): string {
       return `\n\n@@DEEPSPACE_COMPONENT_${index}@@\n\n`
     },
   )
-  return fenced.replace(/`([^`\n]+)`/g, (_match, code: string) => {
+  return fenced.replace(INLINE_CODE_SPAN, (_match, code: string) => {
     const index = placeholders.push(`<code>${escapeHtml(code)}</code>`) - 1
     return `@@DEEPSPACE_COMPONENT_${index}@@`
   })
 }
 
-function stripCodeForValidation(source: string): string {
+/** Blank out fenced and inline code, keeping every offset. */
+export function stripCodeForValidation(source: string): string {
   return source
     .replace(
       /^([ \t]*)(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1\2[ \t]*(?=\n|$)/gm,

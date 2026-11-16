@@ -108,13 +108,6 @@ export function parsePushPorcelain(out: string): PushRefResult[] {
   return results
 }
 
-/** The server could not resolve this push's thin REF_DELTA bases and asks for
- *  a full-pack retry. Keyed on the server's own token, so no filename in the
- *  reason can trigger a needless full re-upload. */
-export function isThinPackRejection(result: PushRefResult): boolean {
-  return result.status === 'rejected' && result.code === 'thin_pack'
-}
-
 /** Whether pull is the one deterministic recovery for a failed push. */
 export function isRecoverablePushFailure(status: PushRefStatus): boolean {
   return status === 'non_fast_forward' || status === 'ref_conflict'
@@ -266,33 +259,24 @@ export function pushToSpace(
   refspec: string,
   opts: { force?: boolean; remote?: string } = {},
 ): PushRefResult {
-  const doPush = (extra: string[]): PushRefResult => {
-    const result = runGitRemote(
-      cwd,
-      token,
-      [
-        'push',
-        '--porcelain',
-        ...(opts.force ? ['--force'] : []),
-        ...extra,
-        opts.remote ?? SPACE_REMOTE,
-        refspec,
-      ],
-      { allowFail: true },
-    )
-    const parsed = parsePushPorcelain(result.stdout.toString('utf-8'))
-    if (parsed.length === 0) {
-      const stderr = result.stderr.toString('utf-8').trim()
-      throw new GitError(
-        stderr || `git push exited ${result.status} without reporting a ref status`,
-      )
-    }
-    return representativeResult(parsed)
+  const result = runGitRemote(
+    cwd,
+    token,
+    [
+      'push',
+      '--porcelain',
+      ...(opts.force ? ['--force'] : []),
+      opts.remote ?? SPACE_REMOTE,
+      refspec,
+    ],
+    { allowFail: true },
+  )
+  const parsed = parsePushPorcelain(result.stdout.toString('utf-8'))
+  if (parsed.length === 0) {
+    const stderr = result.stderr.toString('utf-8').trim()
+    throw new GitError(stderr || `git push exited ${result.status} without reporting a ref status`)
   }
-  const first = doPush([])
-  // The server asks for a full pack when it cannot resolve this push's thin
-  // REF_DELTA bases; `--no-thin` sends whole objects instead.
-  return isThinPackRejection(first) ? doPush(['--no-thin']) : first
+  return representativeResult(parsed)
 }
 
 /** Mirrors deploy-worker's per-object cap; the server remains the enforcer. */
@@ -363,9 +347,24 @@ function fixForObjects(objects: OversizedObject[]): string {
   )
 }
 
-/** Name over-cap objects when possible so the correction is mechanical. */
-export function oversizedPushFix(cwd?: string, cap: number = SERVER_OBJECT_CAP_BYTES): string {
-  return fixForObjects(cwd ? findOversizedObjects(cwd, cap) : [])
+/**
+ * The remedy for a push over one of the server's size ceilings — the HTTP 413
+ * and the `push_too_large` refusal both use it. A file over the per-file cap
+ * has to leave history, so it is named when the repo is at hand. With none in
+ * the local repo, the push as a whole is what is too big, which smaller
+ * pushes fix. `cap` is a test seam.
+ */
+export function sizeRemedy(cwd?: string, cap: number = SERVER_OBJECT_CAP_BYTES): string {
+  const objects = cwd ? findOversizedObjects(cwd, cap) : []
+  if (cwd && objects.length === 0) {
+    return (
+      `No single file is over the per-file cap, so the push as a whole is too big — push it in ` +
+      `smaller batches (\`git push space <earlier-commit>:refs/heads/<branch>\` first, then the ` +
+      `rest). A commit that changes several large files can be split into commits that change ` +
+      `fewer.`
+    )
+  }
+  return fixForObjects(objects)
 }
 
 /**
@@ -388,17 +387,7 @@ export function pushTooLargeMessage(cwd?: string): string {
     `${formatBytes(SERVER_OBJECT_CAP_BYTES)} per file and ` +
     `${formatBytes(SERVER_PACK_CAP_BYTES)} of compressed history per push. ` +
     `Large media never compresses, so every clone would pay for it forever.`
-  const objects = cwd ? findOversizedObjects(cwd, SERVER_OBJECT_CAP_BYTES) : []
-  if (objects.length === 0) {
-    // Nothing over the per-file cap, so the pack cap is what was hit: the
-    // history is simply too big for one push, which splitting does fix.
-    return (
-      `${ceilings} No single file is over the per-file cap, so this is the volume of history — ` +
-      `push it in smaller batches (\`git push space <earlier-commit>:refs/heads/<branch>\` first, ` +
-      `then the rest). ${OVERSIZED_PUSH_FIX}`
-    )
-  }
-  return `${ceilings} ${fixForObjects(objects)}`
+  return `${ceilings} ${sizeRemedy(cwd)}`
 }
 
 export interface RejectionVerdict {
@@ -426,16 +415,21 @@ const REFUSAL_ADVICE: Record<
   string,
   (ctx: { detail?: string; cwd?: string }) => RejectionVerdict
 > = {
+  // One code covers every per-push ceiling: a file over the per-file cap, or
+  // the push as a whole (its pack, what it inflates to, or the stored files
+  // its changes build on). `sizeRemedy` tells the two apart.
   push_too_large: ({ cwd }) => ({
     code: 'push_too_large',
-    message: `An object exceeds the server's size cap, so retrying cannot succeed. ${oversizedPushFix(cwd)}`,
+    message:
+      `This push is over a server size limit, so retrying cannot succeed. ` + sizeRemedy(cwd),
   }),
   repo_full: () => ({
     code: 'repo_full',
     message:
-      `The cloud repo is at its size ceiling, so retrying cannot succeed. Large objects ` +
-      `already committed upload through their history, so untracking them is not enough — ` +
-      `${removeFromHistoryAdvice(null)}`,
+      `The cloud repo is at its object limit (every file version, folder and commit in its ` +
+      `history counts), so retrying cannot succeed. Push a shorter history: squash old ` +
+      `commits, or drop generated or vendored folders from it ` +
+      `(\`git filter-repo --path <dir> --invert-paths\`).`,
   }),
   secret_committed: ({ detail }) => {
     // The server joins the offending basenames with ', ' (vc/receive.ts).
@@ -458,15 +452,20 @@ const REFUSAL_ADVICE: Record<
           : 'A secret file is committed in the history being pushed. Rewrite that history to drop it (untracking alone is not enough), then push again.',
     }
   },
+  storage_full: () => ({
+    code: 'storage_full',
+    message:
+      `The limit covers the app's Git history and deploy files and is the same on every plan. ` +
+      `If a push a minute from now is still refused, the history your branches use is too big: ` +
+      `large media belongs in app files (\`deepspace app files\`), not in Git.`,
+  }),
   missing_objects: () => ({
     code: 'missing_objects',
     message: 'Retry; if it persists, report it with `deepspace feedback`.',
   }),
   thin_pack: () => ({
     code: 'thin_pack',
-    // `pushToSpace` already retried once with `--no-thin`; reaching a caller
-    // means that retry also failed.
-    message: 'Retry with `git push --no-thin`; if it persists, report it with `deepspace feedback`.',
+    message: 'Retry the push in a minute; if it persists, report it with `deepspace feedback`.',
   }),
   // No `stale_ref` entry: it is encoded once, in `parsePushPorcelain`, as the
   // `ref_conflict` STATUS. That is what drives the pull action and exit 2, and

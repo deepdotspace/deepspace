@@ -178,6 +178,25 @@ describe('createDeepSpaceAuth OAuth error page', () => {
   })
 })
 
+describe('createDeepSpaceAuth advanced options', () => {
+  it('skips per-instance schema validation and keeps the Apple cookie attributes', () => {
+    const base = {
+      database: fakeD1,
+      baseURL: 'https://auth.example',
+      secret: 'test-secret-at-least-32-characters-long',
+    }
+    expect(createDeepSpaceAuth(base).options.advanced).toEqual({
+      database: { validateSchema: false },
+    })
+    const apple = createDeepSpaceAuth({
+      ...base,
+      apple: { clientId: 'apple-client', teamId: 'TEAM', keyId: 'KEY', privateKey: 'unused' },
+    }).options.advanced
+    expect(apple?.database?.validateSchema).toBe(false)
+    expect(apple?.cookies?.oauth_state?.attributes).toEqual({ sameSite: 'none', secure: true })
+  })
+})
+
 describe('createDeepSpaceAuth state cookie check', () => {
   it('keeps the check unless one instance is told to skip it', () => {
     const base = {

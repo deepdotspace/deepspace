@@ -16,6 +16,7 @@ import {
 import { validateDocumentation } from './graph'
 import { buildCustomDocumentationRuntime, runtimeEntry } from './custom-runtime'
 import { readBundledFont, resolveDocumentationFonts } from './fonts'
+import { localeForRoute } from './locales'
 import { DocumentationOutput } from './output'
 import { artifactPathsForRoute } from './routing'
 import { documentationPublicPath, normalizeDocumentationBasePath } from './routing'
@@ -23,6 +24,7 @@ import { encodeNativeDocumentationPath, isNativeDocumentationResourcePath } from
 import { createDocumentationSkillArtifacts } from './skill'
 import {
   createPageRuntime,
+  createRuntimeLocales,
   createNotFoundPage,
   renderDocumentationFavicon,
   renderPage,
@@ -35,6 +37,7 @@ import {
   DocumentationError,
   type DocumentationBuildManifest,
   type DocumentationBuildResult,
+  type DocumentationRuntimeLocalization,
 } from './types'
 
 export interface BuildDocumentationOptions {
@@ -55,20 +58,27 @@ export function buildDocumentation(options: BuildDocumentationOptions): Document
     : validation.graph.config
 
   const write = output.write.bind(output)
+  const graph = validation.graph
+  const locales = graph.config.locales
+  const defaultPages = graph.pages.filter((page) => !page.locale)
+  const runtimeLocales = createRuntimeLocales(graph)
+  const localization = (locale: string): { localization?: DocumentationRuntimeLocalization } =>
+    runtimeLocales ? { localization: { locale, locales: runtimeLocales } } : {}
 
   const customRuntime = buildCustomDocumentationRuntime(validation, basePath)
   if (customRuntime) {
     for (const asset of customRuntime.browserAssets) write(`assets/${asset.path}`, asset.content)
   }
 
-  for (const page of validation.graph.pages) {
+  for (const page of graph.pages) {
     const artifactPaths = artifactPathsForRoute(page.route)
     const renderOptions = {
       config: renderConfig,
       basePath,
       page,
-      pages: validation.graph.pages,
-      navigation: validation.graph.navigation,
+      pages: graph.pages,
+      navigation: page.locale ? graph.localizedNavigation?.[page.locale] ?? [] : graph.navigation,
+      ...localization(page.locale ?? locales?.default.code ?? ''),
     }
     const runtime = createPageRuntime(renderOptions)
     write(
@@ -92,8 +102,9 @@ export function buildDocumentation(options: BuildDocumentationOptions): Document
     write(artifactPaths.data, stableJson(runtime.document))
     write(artifactPaths.markdown, pageMarkdown(page, basePath))
   }
-  for (const [from, to] of Object.entries(validation.graph.config.redirects)) {
-    write(artifactPathsForRoute(from).html, renderRedirect(to, basePath))
+  for (const [from, to] of Object.entries(graph.config.redirects)) {
+    const lang = runtimeLocales ? localeForRoute(to, { locales: runtimeLocales }) : undefined
+    write(artifactPathsForRoute(from).html, renderRedirect(to, basePath, lang))
   }
 
   const notFoundPage = createNotFoundPage()
@@ -102,7 +113,8 @@ export function buildDocumentation(options: BuildDocumentationOptions): Document
     basePath,
     page: notFoundPage,
     pages: [notFoundPage],
-    navigation: validation.graph.navigation,
+    navigation: graph.navigation,
+    ...localization(locales?.default.code ?? ''),
   }
   const notFoundRuntime = createPageRuntime(notFoundOptions)
   write(
@@ -132,20 +144,43 @@ export function buildDocumentation(options: BuildDocumentationOptions): Document
     write('assets/favicon.svg', renderDocumentationFavicon(renderConfig.theme))
   if (!customRuntime)
     write('assets/documentation-runtime.js', buildDocumentationRuntime().trimStart())
-  write('search.json', stableJson(createSearchEntries(validation.graph.pages)))
-  write('assistant-index.json', stableJson(createAssistantChunks(validation.graph.pages)))
-  const openApiOperations = validation.graph.pages.flatMap((page) =>
+  // Search, the assistant corpus, the root agent indexes, and the skill cover
+  // the default locale; each translated locale gets its own search and indexes.
+  write('search.json', stableJson(createSearchEntries(defaultPages)))
+  write('assistant-index.json', stableJson(createAssistantChunks(defaultPages)))
+  const openApiOperations = defaultPages.flatMap((page) =>
     page.openapi ? [{ route: page.route, ...page.openapi }] : [],
   )
   if (openApiOperations.length > 0) write('openapi.json', stableJson(openApiOperations))
-  const machinePages = pagesInNavigationOrder(validation.graph.pages, validation.graph.navigation)
-  write('llms.txt', renderLlmsIndex(machinePages, validation.graph.config.name, basePath))
-  write('llms-full.txt', renderLlmsFull(machinePages, validation.graph.config.name, basePath))
-  const skill = createDocumentationSkillArtifacts(validation.graph, renderConfig.url, basePath)
+  const translatedLocales = (locales?.alternates ?? [])
+    .map((locale) => ({ locale, pages: graph.pages.filter((page) => page.locale === locale.code) }))
+    .filter((entry) => entry.pages.length > 0)
+  const llmsIndexes = [
+    ...(locales && translatedLocales.length > 0
+      ? [{ code: locales.default.code, label: locales.default.label, href: documentationPublicPath(basePath, '/llms.txt') }]
+      : []),
+    ...translatedLocales.map(({ locale }) => ({
+      code: locale.code,
+      label: locale.label,
+      href: documentationPublicPath(basePath, `/${locale.prefix}/llms.txt`),
+    })),
+  ]
+  const otherIndexes = (code: string | undefined) => llmsIndexes.filter((index) => index.code !== code)
+  const machinePages = pagesInNavigationOrder(defaultPages, graph.navigation)
+  write('llms.txt', renderLlmsIndex(machinePages, graph.config.name, basePath, otherIndexes(locales?.default.code)))
+  write('llms-full.txt', renderLlmsFull(machinePages, graph.config.name, basePath))
+  for (const { locale, pages } of translatedLocales) {
+    const localePages = pagesInNavigationOrder(pages, graph.localizedNavigation?.[locale.code] ?? [])
+    const name = `${graph.config.name} (${locale.label})`
+    write(`${locale.prefix}/search.json`, stableJson(createSearchEntries(pages)))
+    write(`${locale.prefix}/llms.txt`, renderLlmsIndex(localePages, name, basePath, otherIndexes(locale.code)))
+    write(`${locale.prefix}/llms-full.txt`, renderLlmsFull(localePages, name, basePath))
+  }
+  const skill = createDocumentationSkillArtifacts({ ...graph, pages: defaultPages }, renderConfig.url, basePath)
   write('skill.md', skill.markdown)
   write(`.well-known/agent-skills/${skill.name}/skill.md`, skill.markdown)
   write('.well-known/agent-skills/index.json', stableJson(skill.discoveryIndex))
-  write('sitemap.xml', renderSitemap(validation.graph.pages, renderConfig.url))
+  write('sitemap.xml', renderSitemap(graph.pages, renderConfig.url, Boolean(locales)))
   write('robots.txt', renderRobots(renderConfig.url, renderConfig.seo.noindex))
   output.copyMedia(
     validation.sourceDir,

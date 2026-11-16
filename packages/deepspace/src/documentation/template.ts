@@ -1,8 +1,12 @@
 import type {
   DocumentationConfig,
+  DocumentationGraph,
+  DocumentationLanguageAlternate,
   DocumentationNavigationNode,
   DocumentationPage,
   DocumentationRuntimeData,
+  DocumentationRuntimeLocale,
+  DocumentationRuntimeLocalization,
   DocumentationRuntimeRouteDocument,
   ResolvedDocumentationTheme,
 } from './types'
@@ -13,6 +17,7 @@ import {
   safeFontFamily,
   type DocumentationResolvedFont,
 } from './fonts'
+import { localizedRoute, pageLanguageAlternates } from './locales'
 import { renderDefaultDocumentation } from './renderer'
 import { documentationPublicPath, joinSiteUrl, markdownUrlForRoute } from './routing'
 import { escapeHtml } from './text'
@@ -24,6 +29,8 @@ export interface DocumentationPageRenderOptions {
   page: DocumentationPage
   pages: DocumentationPage[]
   navigation: DocumentationNavigationNode[]
+  /** The page's locale context; absent unless the site configures locales. */
+  localization?: DocumentationRuntimeLocalization
 }
 
 export interface DocumentationPageRuntime {
@@ -56,7 +63,7 @@ export function renderPage(options: DocumentationPageRenderOptions, assets: {
   const favicon = theme.favicon ?? documentationPublicPath(options.basePath, '/assets/favicon.svg')
 
   return `<!doctype html>
-<html lang="en" data-theme-mode="${defaultMode}" data-theme-strict="${theme.strictMode ? 'true' : 'false'}" data-code-mode="${theme.codeBlockMode ?? 'dark'}" data-density="${theme.density ?? 'comfortable'}" data-background-decoration="${theme.backgroundDecoration ?? 'none'}" data-eyebrow-style="${theme.eyebrowStyle ?? 'section'}">
+<html lang="${escapeHtml(page.locale ?? config.locales?.default.code ?? 'en')}" data-theme-mode="${defaultMode}" data-theme-strict="${theme.strictMode ? 'true' : 'false'}" data-code-mode="${theme.codeBlockMode ?? 'dark'}" data-density="${theme.density ?? 'comfortable'}" data-background-decoration="${theme.backgroundDecoration ?? 'none'}" data-eyebrow-style="${theme.eyebrowStyle ?? 'section'}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -65,7 +72,7 @@ export function renderPage(options: DocumentationPageRenderOptions, assets: {
   <meta name="generator" content="DeepSpace Documentation Orbit">
   <meta name="color-scheme" content="light dark">
   ${runtimeDocument.robots ? `<meta name="robots" content="${escapeHtml(runtimeDocument.robots)}">` : ''}
-  ${runtimeDocument.canonical ? `<link rel="canonical" href="${escapeHtml(runtimeDocument.canonical)}">` : ''}
+  ${runtimeDocument.canonical ? `<link rel="canonical" href="${escapeHtml(runtimeDocument.canonical)}">` : ''}${renderLanguageAlternates(runtimeDocument.languageAlternates)}
   <meta property="og:type" content="article">
   <meta property="og:title" content="${escapeHtml(runtimeDocument.openGraph['og:title'] ?? '')}">
   <meta property="og:description" content="${escapeHtml(runtimeDocument.openGraph['og:description'] ?? '')}">
@@ -89,6 +96,14 @@ export function renderPage(options: DocumentationPageRenderOptions, assets: {
   <script${assets.runtimeModule ? ' type="module"' : ''} src="${escapeHtml(assets.runtimeScript ?? `${assetRoot}/documentation-runtime.js`)}" defer></script>
 </body>
 </html>`
+}
+
+function renderLanguageAlternates(alternates: DocumentationLanguageAlternate[] | undefined): string {
+  if (!alternates) return ''
+  return alternates
+    .map((alternate) =>
+      `\n  <link rel="alternate" hreflang="${escapeHtml(alternate.hreflang)}" href="${escapeHtml(alternate.href)}">`)
+    .join('')
 }
 
 function renderFontFaces(fonts: DocumentationResolvedFont[]): string {
@@ -154,19 +169,15 @@ export function renderNotFound(
   return renderPage({ config, basePath, page, pages: [page], navigation }, assets)
 }
 
-export function createRuntimeRouteDocument(options: {
-  config: DocumentationConfig
-  basePath: string
-  page: DocumentationPage
-  pages: DocumentationPage[]
-  navigation: DocumentationNavigationNode[]
-}): DocumentationRuntimeRouteDocument {
+export function createRuntimeRouteDocument(
+  options: DocumentationPageRenderOptions,
+): DocumentationRuntimeRouteDocument {
   return createPageRuntime(options).document
 }
 
 export function createPageRuntime(options: DocumentationPageRenderOptions): DocumentationPageRuntime {
   const { config, page, pages, navigation } = options
-  const data = createRuntimeData(config, page, pages, navigation, options.basePath)
+  const data = createRuntimeData(config, page, pages, navigation, options.basePath, options.localization)
   return {
     data,
     document: createRuntimeRouteDocumentFromData(config, page, data),
@@ -184,9 +195,14 @@ function createRuntimeRouteDocumentFromData(
     breadcrumbs: runtimeData.breadcrumbs,
     ...(runtimeData.previous ? { previous: runtimeData.previous } : {}),
     ...(runtimeData.next ? { next: runtimeData.next } : {}),
+    ...(runtimeData.alternates ? { alternates: runtimeData.alternates } : {}),
+    ...(runtimeData.translation ? { translation: runtimeData.translation } : {}),
   }
   const canonical = config.url ? joinSiteUrl(config.url, page.route) : null
   const description = page.description ?? config.description ?? `${page.title} — ${config.name}`
+  const languageAlternates = config.url && !page.noindex
+    ? pageLanguageAlternates(page, config.url)
+    : undefined
   return {
     canonical,
     data,
@@ -198,12 +214,39 @@ function createRuntimeRouteDocumentFromData(
     },
     robots: page.noindex ? 'noindex, nofollow' : null,
     title: `${page.title} · ${config.name}`,
+    ...(languageAlternates ? { languageAlternates } : {}),
   }
 }
 
-export function renderRedirect(to: string, basePath = '/docs'): string {
+/** Every locale with its landing route, default first; absent unless the site configures locales. */
+export function createRuntimeLocales(
+  graph: Pick<DocumentationGraph, 'config' | 'pages' | 'navigation' | 'localizedNavigation'>,
+): DocumentationRuntimeLocale[] | undefined {
+  const locales = graph.config.locales
+  if (!locales) return undefined
+  const routes = new Set(graph.pages.map((page) => page.route))
+  const home = (prefix: string, navigation: DocumentationNavigationNode[] | undefined): string | undefined => {
+    const index = prefix ? localizedRoute(prefix, '/') : '/'
+    return routes.has(index) ? index : orderedRoutes(navigation ?? [])[0]
+  }
+  const defaultHome = home('', graph.navigation)
+  return [
+    { ...locales.default, prefix: '', ...(defaultHome ? { home: defaultHome } : {}) },
+    ...locales.alternates.map((alternate) => {
+      const alternateHome = home(alternate.prefix, graph.localizedNavigation?.[alternate.code])
+      return {
+        code: alternate.code,
+        label: alternate.label,
+        prefix: alternate.prefix,
+        ...(alternateHome ? { home: alternateHome } : {}),
+      }
+    }),
+  ]
+}
+
+export function renderRedirect(to: string, basePath = '/docs', lang = 'en'): string {
   const safe = escapeHtml(documentationPublicPath(basePath, to))
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="robots" content="noindex"><meta http-equiv="refresh" content="0;url=${safe}"><link rel="canonical" href="${safe}"><title>Redirecting…</title></head><body><p>Redirecting to <a href="${safe}">${safe}</a>.</p></body></html>`
+  return `<!doctype html><html lang="${escapeHtml(lang)}"><head><meta charset="utf-8"><meta name="robots" content="noindex"><meta http-equiv="refresh" content="0;url=${safe}"><link rel="canonical" href="${safe}"><title>Redirecting…</title></head><body><p>Redirecting to <a href="${safe}">${safe}</a>.</p></body></html>`
 }
 
 function publicTheme(theme: ResolvedDocumentationTheme, basePath: string): ResolvedDocumentationTheme {
@@ -244,6 +287,7 @@ export function createRuntimeData(
   pages: DocumentationPage[],
   navigation: DocumentationNavigationNode[],
   basePath: string,
+  localization?: DocumentationRuntimeLocalization,
 ): DocumentationRuntimeData {
   const ordered = orderedRoutes(navigation)
   const pageIndex = ordered.indexOf(page.route)
@@ -279,6 +323,11 @@ export function createRuntimeData(
     breadcrumbs: findBreadcrumbs(navigation, page.route) ?? [config.name, page.title],
     ...(previous ? { previous: { route: previous.route, title: previous.title } } : {}),
     ...(next ? { next: { route: next.route, title: next.title } } : {}),
+    ...(localization ? { localization } : {}),
+    ...(page.alternates ? { alternates: page.alternates } : {}),
+    ...(page.translation
+      ? { translation: { sourceRoute: page.translation.sourceRoute, stale: page.translation.stale } }
+      : {}),
   }
 }
 

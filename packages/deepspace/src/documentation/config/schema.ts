@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { DOCUMENTATION_LOCALE_CODE_PATTERN, canonicalLocaleCode } from '../locales'
 import {
   DEFAULT_DOCUMENTATION_CONTEXTUAL_ACTIONS,
   DOCUMENTATION_CONTEXTUAL_ACTIONS,
@@ -147,6 +148,39 @@ const hostnameSchema = z
   .toLowerCase()
   .refine((value) => value.includes('.'), 'must include a public suffix')
 
+const localeCodeSchema = z
+  .string()
+  .trim()
+  .regex(
+    DOCUMENTATION_LOCALE_CODE_PATTERN,
+    'must be an ISO 639-1 language with an optional script and region, such as es, zh-Hans, or pt-BR',
+  )
+  .transform(canonicalLocaleCode)
+
+const localesSchema = z
+  .object({
+    default: z.union([
+      localeCodeSchema.transform((code) => ({ code, label: undefined })),
+      z.object({ code: localeCodeSchema, label: z.string().trim().min(1).optional() }),
+    ]),
+    alternates: z
+      .array(
+        z.object({
+          code: localeCodeSchema,
+          label: z.string().trim().min(1),
+          navigationLabels: z.record(z.string(), z.string().trim().min(1)).default({}),
+        }),
+      )
+      .min(1),
+  })
+  .refine(
+    (locales) => {
+      const codes = [locales.default.code, ...locales.alternates.map((locale) => locale.code)]
+      return new Set(codes.map((code) => code.toLowerCase())).size === codes.length
+    },
+    { message: 'locale codes must be unique', path: ['alternates'] },
+  )
+
 export const rawConfigSchema = z.object({
   $schema: z.string().optional(),
   name: z.string().trim().min(1),
@@ -235,6 +269,7 @@ export const rawConfigSchema = z.object({
       metatags: z.record(z.string(), z.string()).optional(),
     })
     .default({}),
+  locales: localesSchema.optional(),
 })
 
 export const RAW_CONFIG_KEYS = new Set([
@@ -264,4 +299,5 @@ export const RAW_CONFIG_KEYS = new Set([
   'mcp',
   'contextual',
   'seo',
+  'locales',
 ])

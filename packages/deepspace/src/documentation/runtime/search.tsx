@@ -16,19 +16,25 @@ import { ChevronRightIcon, FileIcon, HashIcon, OrbitMark, SearchIcon, SparkIcon 
 export function SearchCommand({
   assistantEnabled,
   basePath,
+  indexPath = '/search.json',
   name,
   onAssistantOpen,
   onClose,
   onNavigate,
   open,
+  segmentLocale,
 }: {
   assistantEnabled: boolean
   basePath: string
+  /** Logical path of this locale's search index. */
+  indexPath?: string
   name: string
   onAssistantOpen: (seed?: string) => void
   onClose: () => void
   onNavigate?: (href: string) => void
   open: boolean
+  /** Sites with locales match any script and split queries into words with this locale. */
+  segmentLocale?: string
 }): ReactElement | null {
   const dialogRef = useRef<HTMLDivElement>(null)
   const resultsRef = useRef<HTMLDivElement>(null)
@@ -40,12 +46,12 @@ export function SearchCommand({
   useEffect(() => {
     if (!open || index || loading) return
     setLoading(true)
-    fetch(documentationPublicPath(basePath, '/search.json'))
+    fetch(documentationPublicPath(basePath, indexPath))
       .then((response) => response.ok ? response.json() as Promise<DocumentationSearchEntry[]> : [])
       .then(setIndex)
       .catch(() => setIndex([]))
       .finally(() => setLoading(false))
-  }, [basePath, index, loading, open])
+  }, [basePath, index, indexPath, loading, open])
   useEffect(() => {
     if (!open) {
       setQuery('')
@@ -58,8 +64,12 @@ export function SearchCommand({
       ?.querySelector(`#documentation-search-option-${activeIndex}`)
       ?.scrollIntoView({ block: 'nearest' })
   }, [activeIndex, query])
-  const preparedIndex = useMemo(() => prepareSearchIndex(index ?? []), [index])
-  const results = useMemo(() => rankSearch(preparedIndex, query), [preparedIndex, query])
+  const unicode = segmentLocale !== undefined
+  const preparedIndex = useMemo(() => prepareSearchIndex(index ?? [], unicode), [index, unicode])
+  const results = useMemo(
+    () => rankSearch(preparedIndex, query, segmentLocale),
+    [preparedIndex, query, segmentLocale],
+  )
   if (!open) return null
   const selectableCount = results.length + (assistantEnabled && query.trim() ? 1 : 0)
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>): void => {
@@ -175,20 +185,24 @@ interface PreparedSearchEntry {
   haystack: string
 }
 
-function prepareSearchIndex(index: DocumentationSearchEntry[]): PreparedSearchEntry[] {
+function prepareSearchIndex(index: DocumentationSearchEntry[], unicode: boolean): PreparedSearchEntry[] {
   return index.map((entry) => ({
     entry,
-    title: normalizeSearch(entry.title),
-    headings: entry.headings.map((heading) => ({ heading, normalized: normalizeSearch(heading.text) })),
-    headingText: normalizeSearch(entry.headings.map((heading) => heading.text).join(' ')),
-    haystack: normalizeSearch(`${entry.description ?? ''} ${entry.text}`),
+    title: normalizeSearch(entry.title, unicode),
+    headings: entry.headings.map((heading) => ({ heading, normalized: normalizeSearch(heading.text, unicode) })),
+    headingText: normalizeSearch(entry.headings.map((heading) => heading.text).join(' '), unicode),
+    haystack: normalizeSearch(`${entry.description ?? ''} ${entry.text}`, unicode),
   }))
 }
 
-function rankSearch(index: PreparedSearchEntry[], query: string): DocumentationSearchResult[] {
-  const normalized = normalizeSearch(query)
+function rankSearch(
+  index: PreparedSearchEntry[],
+  query: string,
+  segmentLocale?: string,
+): DocumentationSearchResult[] {
+  const normalized = normalizeSearch(query, segmentLocale !== undefined)
   if (!normalized) return []
-  const tokens = normalized.split(' ').filter(Boolean)
+  const tokens = searchTokens(normalized, segmentLocale)
   const scored: Array<{ result: DocumentationSearchResult; score: number; route: string }> = []
   for (const { entry, title, headings, headingText, haystack } of index) {
     let score = title === normalized ? 180 : title.startsWith(normalized) ? 110 : title.includes(normalized) ? 75 : 0
@@ -246,6 +260,21 @@ function highlightMatch(value: string, query: string): ReactNode {
   return <>{value.slice(0, index)}<mark>{value.slice(index, index + normalizedQuery.length)}</mark>{value.slice(index + normalizedQuery.length)}</>
 }
 
-function normalizeSearch(value: string): string {
-  return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+/**
+ * Fold case and Latin accents. Sites without locales keep ASCII letters and
+ * digits; sites with locales keep every script's letters, digits, and marks,
+ * whichever language is the default.
+ */
+function normalizeSearch(value: string, unicode = false): string {
+  const folded = value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+  return (unicode ? folded.replace(/[^\p{L}\p{N}\p{M}]+/gu, ' ') : folded.replace(/[^a-z0-9]+/g, ' ')).trim()
+}
+
+/** Scripts written without spaces, such as Chinese, need word segmentation to match per word. */
+function searchTokens(normalized: string, segmentLocale?: string): string[] {
+  const words = normalized.split(' ').filter(Boolean)
+  if (!segmentLocale || typeof Intl.Segmenter !== 'function') return words
+  const segmenter = new Intl.Segmenter(segmentLocale, { granularity: 'word' })
+  return words.flatMap((word) =>
+    [...segmenter.segment(word)].filter((part) => part.isWordLike).map((part) => part.segment))
 }

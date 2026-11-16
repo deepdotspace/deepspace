@@ -8,6 +8,7 @@ import {
   AGENT_TOOL_CONTEXT_MIGRATION_ID,
   AI_SDK_7_MIGRATION_ID,
   BUILD_INJECTED_APP_ID_MIGRATION_ID,
+  COMPOSIO_USER_BILLING_MIGRATION_ID,
   FILES_SESSION_COOKIE_READS_MIGRATION_ID,
   INTEGRATIONS_SIGN_IN_MIGRATION_ID,
   PUBLIC_PAGE_SEO_MIGRATION_ID,
@@ -100,6 +101,13 @@ export const APP_MIGRATION_GUIDANCE: readonly AppMigrationGuidance[] = [
     files: ['src/ai/agent.ts', 'src/ai/chat-routes.ts'],
     guidance:
       "Optional; nothing breaks without it. The executor passed to `buildTools` now returns whole record results, and `streamDeepSpaceAgent` and the local agent route cap each tool's result for the model instead, so existing tools stay bounded. To give tools the request: in both files, replace `type ToolFactory = typeof buildTools` with `type ToolFactory = AgentToolRouteOptions<Env>['buildTools']`, importing `AgentToolRouteOptions` from 'deepspace/worker'. In chat-routes.ts, pass `{ env: c.env, userId: auth.userId, request: c.req.raw }` as the second argument where it calls `buildTools(createUserToolExecutor(...))`; the local agent route already passes it. A tool then declares `buildTools(executor, context)` and uses `context.env` (for example `appFiles(context.env, { scope: 'self', userId: context.userId })`). Only for an app that keeps a record room per user or team: add `room?: (userId: string, env: Env) => string` to RegisterAgentOptions in agent.ts; in createAccessResolver compute `const room = options.room?.(auth.userId, env)`, pass `{ room }` as the fourth argument of `resolveAppMembership`, and return `{ ok: true, auth, room }`. The local agent route then runs tools in that room. In chat-routes.ts, have `requireAccess` return the whole grant (`if (access.ok) return access`), read `const { auth } = access` in each route, and pass `{ room: access.room }` as the fourth argument of `createUserToolExecutor`.",
+  },
+  {
+    id: COMPOSIO_USER_BILLING_MIGRATION_ID,
+    description: "Give each signed-in user their own Composio connection instead of the owner's",
+    files: ['src/integrations.ts', 'src/server/action-routes.ts, when server actions call Composio'],
+    guidance:
+      "Only for apps that call Composio through /api/integrations or a server action's `tools.integration`. Add `composio: { billing: 'user' }` next to `google` in src/integrations.ts. Without it the proxy forwards the owner's token, so every user connects and acts on the owner's account; users who already connected must reconnect afterwards, and their old connections stay filed under the owner. If server actions call Composio, also have `callIntegration` in src/server/action-routes.ts send `x-app-identity-token: env.APP_IDENTITY_TOKEN` and `x-app-id: env.DEEPSPACE_APP_ID` on Composio calls when the token is set, as the /api/integrations proxy does; without them an action looks for the user's connection in a different namespace and reports it as not connected. Clean up the old connections from the app's server code, since the CLI looks in a different namespace: call `callComposio(env, 'list-connections', {}, { authToken: env.APP_OWNER_JWT })`, then `callComposio(env, 'disconnect', { connectedAccountId }, { authToken: env.APP_OWNER_JWT })` for every connection it returns. The list does not say who made each connection, so the owner's own are removed too; the owner reconnects afterwards. Server code that acts for a user in the background uses `callComposio(env, endpoint, params, { asUser })` from 'deepspace/worker'.",
   },
 ]
 

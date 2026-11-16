@@ -78,6 +78,9 @@ interface EndpointInfo {
 
 interface Catalog {
   integrations: Record<string, EndpointInfo[]>
+  /** Retired integration → endpoint (or `*`) → the message the API answers
+   *  with. Optional: older servers do not send it. */
+  retired?: Record<string, Record<string, string>>
 }
 
 interface InvokeArgs {
@@ -192,12 +195,21 @@ async function fetchCatalog(opts: { summary?: boolean } = {}): Promise<Catalog> 
   }
 }
 
+/** The catalog's endpoints for an integration name typed on the command line.
+ *  Own keys only, so a name such as `constructor` is unknown rather than
+ *  resolving through Object.prototype. */
+function integrationEndpoints(catalog: Catalog, integration: string): EndpointInfo[] | undefined {
+  return Object.hasOwn(catalog.integrations, integration)
+    ? catalog.integrations[integration]
+    : undefined
+}
+
 function findEndpoint(
   catalog: Catalog,
   integration: string,
   endpoint: string,
 ): EndpointInfo | null {
-  const endpoints = catalog.integrations[integration]
+  const endpoints = integrationEndpoints(catalog, integration)
   if (!endpoints) return null
   return endpoints.find((e) => e.endpoint === endpoint) ?? null
 }
@@ -358,10 +370,26 @@ async function runList(args: ListArgs): Promise<CommandResult> {
  * Prints the schema + example body for a single endpoint.
  */
 /** The endpoint's catalog entry, or the one refusal `info` and `invoke` share for a name the catalog does not know. */
-function requireEndpoint(catalog: Catalog, integration: string, endpoint: string): EndpointInfo {
+export function requireEndpoint(
+  catalog: Catalog,
+  integration: string,
+  endpoint: string,
+): EndpointInfo {
   const info = findEndpoint(catalog, integration, endpoint)
   if (info) return info
-  const available = catalog.integrations[integration]
+  // A retired integration lists each endpoint plus `*`; a retired endpoint of
+  // a live integration is listed alone, so its other names fall through.
+  const retired =
+    catalog.retired && Object.hasOwn(catalog.retired, integration)
+      ? catalog.retired[integration]
+      : undefined
+  const message = retired && (Object.hasOwn(retired, endpoint) ? retired[endpoint] : retired['*'])
+  if (message) {
+    throw new Refusal(message, 'integration_retired', {
+      action: cliAction('deepspace', 'integrations', 'list'),
+    })
+  }
+  const available = integrationEndpoints(catalog, integration)
   if (!available) {
     const names = Object.keys(catalog.integrations).sort().join(', ')
     throw new Refusal(

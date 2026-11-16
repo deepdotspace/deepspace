@@ -1,6 +1,6 @@
 /** CronRoom Durable Object state, execution, and authorization tests. */
 
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import Database from 'better-sqlite3'
 import { CronRoom, armCronRoom, CRON_TASKS_INTERNAL_PATH, type CronRoomConfig } from '../cron-room'
 import { MSG } from '../../../shared/protocol/constants'
@@ -23,7 +23,7 @@ function makeSql(db: Database.Database): SqlStorage {
   return {
     exec(query: string, ...bindings: unknown[]): { toArray: () => unknown[] } {
       const trimmed = query.trim()
-      const isSelect = /^(SELECT|PRAGMA)/i.test(trimmed)
+      const isSelect = /^(SELECT|PRAGMA)/i.test(trimmed) || /\bRETURNING\b/i.test(trimmed)
 
       if (bindings.length === 0 && !isSelect) {
         db.exec(query)
@@ -48,9 +48,9 @@ function makeSql(db: Database.Database): SqlStorage {
 
 // ---------------------------------------------------------------------------
 // Minimal DurableObjectState shim — only the surface CronRoom + BaseRoom
-// touch synchronously when no real WebSocket is connected. The room's
-// constructor calls setWebSocketAutoResponse; ensureInitialized calls
-// storage.setAlarm; broadcast walks getWebSockets (empty list is fine).
+// touch when no real WebSocket is connected. The room's constructor calls
+// setWebSocketAutoResponse; ensureInitialized calls storage.setAlarm; each
+// run awaits storage.sync; broadcast walks getWebSockets (empty is fine).
 // ---------------------------------------------------------------------------
 
 function makeState(db: Database.Database): { state: DurableObjectState; alarms: number[] } {
@@ -60,6 +60,9 @@ function makeState(db: Database.Database): { state: DurableObjectState; alarms: 
       sql: makeSql(db),
       setAlarm(time: number) {
         alarms.push(time)
+      },
+      async sync() {
+        // better-sqlite3 writes are already on disk.
       },
     },
     setWebSocketAutoResponse() {
@@ -728,5 +731,375 @@ describe('CronRoom logs one structured line per run', () => {
     } finally {
       error.mockRestore()
     }
+  })
+})
+
+describe('CronRoom claims each run before invoking the task', () => {
+  // A daily task ahead of an hourly one in the same alarm loop.
+  const tasks = [
+    { name: 'daily-backup', schedule: '0 3 * * *', timezone: 'UTC' },
+    { name: 'report', intervalMinutes: 60 },
+  ]
+  const nextRunAt = (db: Database.Database, name: string) =>
+    (
+      db.prepare(`SELECT next_run_at FROM cron_tasks WHERE name = ?`).get(name) as {
+        next_run_at: string | null
+      }
+    ).next_run_at
+  const history = (db: Database.Database) =>
+    db.prepare(`SELECT task_name, success, completed_at, error FROM cron_history ORDER BY id`).all()
+  // The backup's 03:00 slot has passed, so the next alarm runs it ahead of the report.
+  const backupOverdue = (db: Database.Database) =>
+    db
+      .prepare(`UPDATE cron_tasks SET next_run_at = '2026-11-03T03:00:00.000Z' WHERE name = ?`)
+      .run('daily-backup')
+  // Let pending microtasks (the claim's storage.sync) settle without moving the faked clock.
+  const settle = () => new Promise((resolve) => setImmediate(resolve))
+  // The isolate is reset while `hangOn` runs: that run never returns.
+  const hangingRoom = (hangOn: string) =>
+    class extends TestCronRoom {
+      protected onTask(taskName: string): void | Promise<void> {
+        this.executed.push(taskName)
+        if (taskName === hangOn) return new Promise(() => {})
+      }
+    }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-03T12:00:00.000Z'))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('writes the claim and opens the run, then waits for storage.sync before the task code runs', async () => {
+    const db = new Database(':memory:')
+    const { state } = makeState(db)
+    const order: string[] = []
+    let release!: () => void
+    vi.spyOn(state.storage, 'sync').mockImplementation(() => {
+      const open = db
+        .prepare(`SELECT COUNT(*) AS n FROM cron_history WHERE completed_at IS NULL`)
+        .get() as { n: number }
+      order.push(`sync next_run_at=${nextRunAt(db, 'daily-backup')} open=${open.n}`)
+      return new Promise<void>((resolve) => {
+        release = resolve
+      })
+    })
+    class ObservingRoom extends TestCronRoom {
+      protected onTask(taskName: string): void {
+        order.push(`task ${taskName}`)
+      }
+    }
+    const room = new ObservingRoom(state, {}, { tasks })
+    room.init()
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    const run = room.dispatch({ type: MSG.CRON_TRIGGER, payload: { taskName: 'daily-backup' } })
+    await settle()
+    expect(order).toEqual(['sync next_run_at=2026-11-04T03:00:00.000Z open=1'])
+
+    release()
+    await run
+    expect(order).toEqual(['sync next_run_at=2026-11-04T03:00:00.000Z open=1', 'task daily-backup'])
+    expect(history(db)).toEqual([
+      {
+        task_name: 'daily-backup',
+        success: 1,
+        completed_at: '2026-11-03T12:00:00.000Z',
+        error: null,
+      },
+    ])
+  })
+
+  it('a run the isolate never finished is recorded as interrupted, not retried, and the tasks behind it still run', async () => {
+    const db = new Database(':memory:')
+    const crashed = new (hangingRoom('daily-backup'))(makeState(db).state, {}, { tasks })
+    crashed.init()
+    backupOverdue(db)
+    void crashed.alarm()
+    await settle()
+    expect(crashed.executed).toEqual(['daily-backup'])
+    expect(history(db)).toEqual([
+      { task_name: 'daily-backup', success: 0, completed_at: null, error: null },
+    ])
+
+    // The runtime retries the alarm on a fresh room over the same storage.
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { state, alarms } = makeState(db)
+    const restarted = new TestCronRoom(state, {}, { tasks })
+    await restarted.alarm()
+
+    expect(restarted.executed).toEqual(['report'])
+    expect(error.mock.calls).toEqual([['[cron] daily-backup interrupted']])
+    expect(log.mock.calls.map((c) => c[0])).toEqual([
+      expect.stringMatching(/^\[cron\] report ok \d+ms$/),
+    ])
+    expect(history(db)).toEqual([
+      {
+        task_name: 'daily-backup',
+        success: 0,
+        completed_at: '2026-11-03T12:00:00.000Z',
+        error: 'interrupted (the run never finished)',
+      },
+      { task_name: 'report', success: 1, completed_at: '2026-11-03T12:00:00.000Z', error: null },
+    ])
+    expect(nextRunAt(db, 'daily-backup')).toBe('2026-11-04T03:00:00.000Z')
+    expect(nextRunAt(db, 'report')).toBe('2026-11-03T13:00:00.000Z')
+    // The next alarm waits for the report's next slot instead of re-firing
+    // the backup a second later.
+    expect(alarms.at(-1)).toBe(Date.parse('2026-11-03T13:00:00.000Z'))
+  })
+
+  it('a run that dies after its next slot has passed does not hold the head of the line', async () => {
+    const db = new Database(':memory:')
+    const tasks = [
+      { name: 'minutely', intervalMinutes: 1 },
+      { name: 'report', intervalMinutes: 60 },
+    ]
+    const HangsOnMinutely = hangingRoom('minutely')
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    // The report last ran at 11:00. At 12:00 the minutely task starts and
+    // its isolate is reset 70 s in, after its 12:01 slot.
+    vi.setSystemTime(new Date('2026-11-03T11:00:00.000Z'))
+    const first = new HangsOnMinutely(makeState(db).state, {}, { tasks })
+    first.init()
+    await first.dispatch({ type: MSG.CRON_TRIGGER, payload: { taskName: 'report' } })
+    vi.setSystemTime(new Date('2026-11-03T12:00:00.000Z'))
+    void first.alarm()
+    await settle()
+    expect(first.executed).toEqual(['report', 'minutely'])
+
+    // At 12:01:10 both are due; the report runs before the minutely task dies again.
+    vi.setSystemTime(new Date('2026-11-03T12:01:10.000Z'))
+    const restarted = new HangsOnMinutely(makeState(db).state, {}, { tasks })
+    void restarted.alarm()
+    await settle()
+    expect(restarted.executed).toEqual(['report', 'minutely'])
+    expect(nextRunAt(db, 'report')).toBe('2026-11-03T13:01:10.000Z')
+  })
+
+  it('a task that throws is recorded as failed and the next task still runs', async () => {
+    const db = new Database(':memory:')
+    class ThrowingRoom extends TestCronRoom {
+      protected onTask(taskName: string): void {
+        this.executed.push(taskName)
+        if (taskName === 'daily-backup') throw new Error('backup exploded')
+      }
+    }
+    const room = new ThrowingRoom(makeState(db).state, {}, { tasks })
+    room.init()
+    backupOverdue(db)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await room.alarm()
+
+    expect(room.executed).toEqual(['daily-backup', 'report'])
+    expect(history(db)).toEqual([
+      {
+        task_name: 'daily-backup',
+        success: 0,
+        completed_at: '2026-11-03T12:00:00.000Z',
+        error: 'backup exploded',
+      },
+      { task_name: 'report', success: 1, completed_at: '2026-11-03T12:00:00.000Z', error: null },
+    ])
+    expect(nextRunAt(db, 'daily-backup')).toBe('2026-11-04T03:00:00.000Z')
+  })
+
+  it('schedules an interval task from when its run completed', async () => {
+    const db = new Database(':memory:')
+    class SlowRoom extends TestCronRoom {
+      protected onTask(): void {
+        vi.setSystemTime(Date.now() + 90_000)
+      }
+    }
+    const room = new SlowRoom(makeState(db).state, {}, { tasks })
+    room.init()
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    await room.dispatch({ type: MSG.CRON_TRIGGER, payload: { taskName: 'report' } })
+
+    expect(nextRunAt(db, 'report')).toBe('2026-11-03T13:01:30.000Z')
+  })
+
+  it('trims history when a run is claimed, so runs that keep dying cannot grow it forever', async () => {
+    const db = new Database(':memory:')
+    const room = new (hangingRoom('daily-backup'))(makeState(db).state, {}, { tasks })
+    room.init()
+    const insert = db.prepare(
+      `INSERT INTO cron_history (task_name, started_at, completed_at, success, created_at) VALUES (?, ?, ?, 1, ?)`,
+    )
+    for (let i = 0; i < 600; i++) {
+      insert.run(
+        'report',
+        '2026-11-03T11:00:00.000Z',
+        '2026-11-03T11:00:00.000Z',
+        '2026-11-03T11:00:00.000Z',
+      )
+    }
+
+    void room.dispatch({ type: MSG.CRON_TRIGGER, payload: { taskName: 'daily-backup' } })
+    await settle()
+
+    expect(db.prepare(`SELECT COUNT(*) AS n, MAX(id) AS newest FROM cron_history`).get()).toEqual({
+      n: 500,
+      newest: 601,
+    })
+  })
+
+  it('history and status broadcasts carry finished runs only, so a run in progress never reads as failed', async () => {
+    const db = new Database(':memory:')
+    const room = new (hangingRoom('daily-backup'))(makeState(db).state, {}, { tasks })
+    room.init()
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    await room.dispatch({ type: MSG.CRON_TRIGGER, payload: { taskName: 'report' } })
+    void room.dispatch({ type: MSG.CRON_TRIGGER, payload: { taskName: 'daily-backup' } })
+    await settle()
+
+    await room.dispatch({ type: MSG.CRON_HISTORY, payload: {} })
+    expect(room.sent.at(-1)).toMatchObject({
+      type: MSG.CRON_HISTORY,
+      payload: { history: [{ taskName: 'report', success: true }] },
+    })
+    expect(
+      room.broadcasts.map((b) => (b.payload as { recentHistory: unknown[] }).recentHistory.length),
+    ).toEqual([1])
+  })
+
+  it('a task triggered by hand while the alarm is busy is not run again by that alarm', async () => {
+    const db = new Database(':memory:')
+    let release!: () => void
+    class GatedRoom extends TestCronRoom {
+      protected onTask(taskName: string): void | Promise<void> {
+        this.executed.push(taskName)
+        if (taskName === 'daily-backup' && this.executed.length === 1) {
+          return new Promise<void>((resolve) => {
+            release = resolve
+          })
+        }
+      }
+    }
+    const room = new GatedRoom(makeState(db).state, {}, { tasks })
+    room.init()
+    backupOverdue(db)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    const alarm = room.alarm()
+    await settle()
+    await room.dispatch({ type: MSG.CRON_TRIGGER, payload: { taskName: 'report' } })
+    release()
+    await alarm
+
+    expect(room.executed).toEqual(['daily-backup', 'report'])
+  })
+
+  it('an open run the live room abandoned is closed as interrupted on the first alarm 16 minutes on', async () => {
+    const db = new Database(':memory:')
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    const room = new (hangingRoom('daily-backup'))(makeState(db).state, {}, { tasks })
+    room.init()
+    backupOverdue(db)
+    void room.alarm()
+    await settle()
+
+    vi.setSystemTime(new Date('2026-11-03T12:15:00.000Z'))
+    await room.alarm()
+    expect(history(db)[0]).toMatchObject({ task_name: 'daily-backup', completed_at: null })
+
+    vi.setSystemTime(new Date('2026-11-03T12:16:00.000Z'))
+    await room.alarm()
+    expect(history(db)[0]).toEqual({
+      task_name: 'daily-backup',
+      success: 0,
+      completed_at: '2026-11-03T12:16:00.000Z',
+      error: 'interrupted (the run never finished)',
+    })
+    expect(error.mock.calls).toEqual([['[cron] daily-backup interrupted']])
+  })
+})
+
+describe('CronRoom gives each task its first slot when the room starts', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('runs an interval task at once and a scheduled task at its time, never both at once', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-03T12:00:00.000Z'))
+    const db = new Database(':memory:')
+    const { state, alarms } = makeState(db)
+    const room = new TestCronRoom(
+      state,
+      {},
+      {
+        tasks: [
+          { name: 'heartbeat', intervalMinutes: 5 },
+          { name: 'nightly', schedule: '0 3 * * *', timezone: 'UTC' },
+        ],
+      },
+    )
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    await room.alarm()
+
+    expect(room.executed).toEqual(['heartbeat'])
+    expect(db.prepare(`SELECT name, next_run_at FROM cron_tasks ORDER BY rowid`).all()).toEqual([
+      { name: 'heartbeat', next_run_at: '2026-11-03T12:05:00.000Z' },
+      { name: 'nightly', next_run_at: '2026-11-04T03:00:00.000Z' },
+    ])
+    expect(alarms.at(-1)).toBe(Date.parse('2026-11-03T12:05:00.000Z'))
+  })
+
+  it('a schedule with no matching day is never due and says so once per start', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-03T12:00:00.000Z'))
+    const db = new Database(':memory:')
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    const room = new TestCronRoom(
+      makeState(db).state,
+      {},
+      {
+        tasks: [
+          { name: 'feb-30', schedule: '0 0 30 2 *', timezone: 'UTC' },
+          { name: 'heartbeat', intervalMinutes: 1 },
+        ],
+      },
+    )
+
+    await room.alarm()
+    vi.setSystemTime(new Date('2026-11-03T12:01:00.000Z'))
+    await room.alarm()
+
+    expect(room.executed).toEqual(['heartbeat', 'heartbeat'])
+    expect(error.mock.calls).toEqual([
+      ['[cron] feb-30 never runs: "0 0 30 2 *" has no upcoming time'],
+    ])
+  })
+
+  it('a redeploy keeps the slot unless the schedule changed', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-03T12:00:00.000Z')) // a Tuesday
+    const db = new Database(':memory:')
+    const deploy = (schedule: string) => {
+      new TestCronRoom(
+        makeState(db).state,
+        {},
+        { tasks: [{ name: 'report', schedule, timezone: 'UTC' }] },
+      ).init()
+      return db.prepare(`SELECT next_run_at FROM cron_tasks`).get()
+    }
+
+    expect(deploy('0 9 * * 1')).toEqual({ next_run_at: '2026-11-09T09:00:00.000Z' })
+    expect(deploy('0 9 * * 1')).toEqual({ next_run_at: '2026-11-09T09:00:00.000Z' })
+    expect(deploy('0 9 * * *')).toEqual({ next_run_at: '2026-11-04T09:00:00.000Z' })
   })
 })

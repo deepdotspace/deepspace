@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { composioTools } from '../composio-tools'
+import { callComposio, composioTools } from '../composio-tools'
 
-const env = { API_WORKER_URL: 'https://api.example.com' }
+const env = {
+  API_WORKER_URL: 'https://api.example.com',
+  DEEPSPACE_APP_ID: 'app_test',
+  APP_IDENTITY_TOKEN: 'identity-token',
+  APP_OWNER_JWT: 'owner-jwt',
+}
+const header = (init: RequestInit, name: string) => new Headers(init.headers).get(name)
 const execOpts = { toolCallId: 't1', messages: [] } as never
 
 function jsonResponse(body: unknown, status = 200) {
@@ -48,8 +54,56 @@ describe('composioTools', () => {
     globalThis.fetch = fetchSpy as unknown as typeof globalThis.fetch
   }
 
-  it('requires authToken', async () => {
-    await expect(composioTools(env, {} as never)).rejects.toThrow(/authToken is required/)
+  it('requires a caller', async () => {
+    await expect(composioTools(env, {} as never)).rejects.toThrow(/authToken .* or asUser/)
+  })
+
+  it('sends the app identity on every call, so it reaches connections made in this app', async () => {
+    mock(() => jsonResponse(oneTool))
+    await composioTools(env, { authToken: 'jwt' })
+    const init = fetchSpy.mock.calls[0][1]
+    expect(header(init, 'x-app-id')).toBe('app_test')
+    expect(header(init, 'x-app-identity-token')).toBe('identity-token')
+    expect(header(init, 'x-act-as-user')).toBeNull()
+  })
+
+  it('asUser runs as that user, billed to the owner', async () => {
+    mock((url) =>
+      url.includes('/list-tools') ? jsonResponse(oneTool) : jsonResponse({ success: true, data: {} }),
+    )
+    const tools = await composioTools(env, { toolkit: 'gmail', asUser: 'alice' })
+    await tools.GMAIL_SEND_EMAIL.execute!({ to: 'a@b.com' }, execOpts)
+    for (const [, init] of fetchSpy.mock.calls) {
+      expect(header(init, 'Authorization')).toBe('Bearer owner-jwt')
+      expect(header(init, 'x-act-as-user')).toBe('alice')
+      expect(header(init, 'x-app-id')).toBe('app_test')
+    }
+  })
+
+  it('a blank asUser is refused rather than falling back to the owner', async () => {
+    mock(() => jsonResponse(oneTool))
+    await expect(composioTools(env, { asUser: '  ' })).rejects.toThrow(/must be a user id/)
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('asUser without APP_OWNER_JWT fails clearly', async () => {
+    await expect(
+      composioTools({ ...env, APP_OWNER_JWT: undefined }, { asUser: 'alice' }),
+    ).rejects.toThrow(/APP_OWNER_JWT/)
+  })
+
+  it('callComposio returns data, and throws on failure', async () => {
+    mock(() => jsonResponse({ success: true, data: { messages: [] } }))
+    await expect(
+      callComposio(env, 'execute-tool', { slug: 'GMAIL_FETCH_EMAILS' }, { asUser: 'alice' }),
+    ).resolves.toEqual({ messages: [] })
+    expect(String(fetchSpy.mock.calls[0][0])).toBe(
+      'https://api.example.com/api/integrations/composio/execute-tool',
+    )
+    mock(() => jsonResponse({ success: false, message: 'Composio API error 401' }, 502))
+    await expect(
+      callComposio(env, 'execute-tool', { slug: 'X' }, { asUser: 'alice' }),
+    ).rejects.toThrow(/execute-tool failed: Composio API error 401/)
   })
 
   it('builds a ToolSet keyed by slug from list-tools, with auth + scope', async () => {
@@ -64,7 +118,7 @@ describe('composioTools', () => {
 
     const [url, init] = fetchSpy.mock.calls[0]
     expect(String(url)).toBe('https://api.example.com/api/integrations/composio/list-tools')
-    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer jwt-123')
+    expect(header(init, 'Authorization')).toBe('Bearer jwt-123')
     expect(JSON.parse(init.body as string)).toMatchObject({ toolkit: 'gmail', limit: 5 })
   })
 
@@ -88,7 +142,7 @@ describe('composioTools', () => {
     expect(result).toEqual({ id: 'msg_1', sent: true })
     const execCall = fetchSpy.mock.calls.find((c) => String(c[0]).includes('/execute-tool'))!
     expect(String(execCall[0])).toBe('https://api.example.com/api/integrations/composio/execute-tool')
-    expect((execCall[1].headers as Record<string, string>).Authorization).toBe('Bearer jwt-xyz')
+    expect(header(execCall[1], 'Authorization')).toBe('Bearer jwt-xyz')
     expect(JSON.parse(execCall[1].body as string)).toEqual({
       slug: 'GMAIL_SEND_EMAIL',
       arguments: { to: 'a@b.com' },

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -19,6 +20,10 @@ writeFileSync(
       url: `http://${host}:${port}/docs`,
       navigation: [{ group: 'Start', pages: ['index', 'guide', 'reference'] }],
       assistant: { access: 'public' },
+      locales: {
+        default: 'en',
+        alternates: [{ code: 'es', label: 'Español', navigationLabels: { Start: 'Inicio' } }],
+      },
     },
     null,
     2,
@@ -37,6 +42,18 @@ const body = (title: string, links: string): string =>
 writeFileSync(join(sourceDir, 'index.md'), body('Home', '[Guide](/guide) · [Reference](/reference)'))
 writeFileSync(join(sourceDir, 'guide.md'), body('Guide', '[Home](/) · [Reference](/reference)'))
 writeFileSync(join(sourceDir, 'reference.md'), body('Reference', '[Home](/) · [Guide](/guide)'))
+
+/** Spanish home and guide; the reference stays English, so its link crosses locales. */
+const translate = (page: string, title: string, links: string): void => {
+  const sourceHash = createHash('sha256').update(readFileSync(join(sourceDir, `${page}.md`))).digest('hex').slice(0, 16)
+  mkdirSync(join(sourceDir, 'es'), { recursive: true })
+  writeFileSync(
+    join(sourceDir, 'es', `${page}.md`),
+    `---\ntitle: ${title}\nsourceHash: "${sourceHash}"\n---\n\n# ${title}\n\n${links}\n`,
+  )
+}
+translate('index', 'Portada', '[Guía](/guide) · [Referencia](/reference)')
+translate('guide', 'Guía', '[Portada](/) · [Referencia](/reference)')
 
 const outputDir = buildDocumentation({ appDir }).outputDir
 const contentTypes: Record<string, string> = {

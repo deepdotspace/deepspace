@@ -11,8 +11,13 @@ export interface DocumentationHistoryState {
   [key: string]: unknown
 }
 
+const LANGUAGE_ALTERNATE_SELECTOR = 'link[rel="alternate"][hreflang]'
+
 export function currentRuntimeDocument(data: DocumentationRuntimeData): RuntimeDocument {
+  const languageAlternates = [...document.head.querySelectorAll<HTMLLinkElement>(LANGUAGE_ALTERNATE_SELECTOR)]
+    .map((link) => ({ hreflang: link.hreflang, href: link.href }))
   return {
+    ...(languageAlternates.length > 0 ? { languageAlternates } : {}),
     canonical: document.querySelector<HTMLLinkElement>('link[rel="canonical"]')?.href ?? null,
     data,
     description: document.querySelector<HTMLMetaElement>('meta[name="description"]')?.content ?? null,
@@ -27,6 +32,7 @@ export function syncDocument(runtime: RuntimeDocument, target: URL): void {
   syncMeta('description', runtime.description)
   syncMeta('robots', runtime.robots)
   syncLink('canonical', runtime.canonical)
+  syncLanguageAlternates(runtime.languageAlternates)
   for (const property of ['og:title', 'og:description', 'og:url'] as const) {
     syncMeta(property, runtime.openGraph[property], 'property')
   }
@@ -56,6 +62,17 @@ function syncMeta(name: string, content: string | null, attribute: 'name' | 'pro
     document.head.appendChild(element)
   }
   element.content = content
+}
+
+function syncLanguageAlternates(alternates: RuntimeDocument['languageAlternates']): void {
+  for (const link of document.head.querySelectorAll(LANGUAGE_ALTERNATE_SELECTOR)) link.remove()
+  for (const alternate of alternates ?? []) {
+    const link = document.createElement('link')
+    link.rel = 'alternate'
+    link.hreflang = alternate.hreflang
+    link.href = alternate.href
+    document.head.appendChild(link)
+  }
 }
 
 function syncLink(rel: string, href: string | null): void {

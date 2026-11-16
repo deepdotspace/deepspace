@@ -1,5 +1,15 @@
 # create-deepspace
 
+## 0.44.0
+
+### Minor Changes
+
+- Composio from server code: `composioTools` now sends the app's identity, so it finds the connections users made inside the app instead of reporting them as not connected. Its env now needs `DEEPSPACE_APP_ID` (every app has it), and `ComposioToolsOptions` takes either `authToken` or the new `asUser`. `asUser` and the new `callComposio` helper let background code such as a cron job act for one of the app's users, billed to the app owner. New apps default Composio to `billing: 'user'`, so each signed-in user connects their own account rather than the owner's, and server actions' `tools.integration` now sends the app identity on Composio calls, so an action finds the same connections. Existing apps: `deepspace app update` lists the change (migration `2026-11-composio-user-billing`).
+
+### Patch Changes
+
+- Update `better-auth` from 1.6.23 to 1.7.14. This clears four advisories published 2026-10-27 that fail the packed-scaffold audit (OAuth Proxy, Magic Link, device authorization, and Postgres rate limits); DeepSpace uses none of those features. The auth tables are unchanged, so no schema migration is needed. One stored value does change: Better Auth 1.7 identifies a Microsoft account by its ID token's `oid` claim, where 1.6 used `sub`. Apps that sign in through DeepSpace's auth service need no action. If you call `createDeepSpaceAuth` with Microsoft sign-in yourself, set each Microsoft account row's `accountId` to the `oid` in that row's stored `idToken` right after deploying; otherwise a returning Microsoft user is refused with `account_not_linked`, or gets a second account row if both sides mark the email verified. `zod` now requires `^4.5.4`, the floor better-auth 1.7 needs, so an app resolves a single copy. Better Auth 1.7's per-instance database schema check is turned off, because Workers create an auth instance per request and the check would add a query per table to each one. ID-token sign-in, which DeepSpace disables, is now refused with 404 `ID_TOKEN_NOT_SUPPORTED` instead of 401.
+
 ## 0.43.0
 
 ### Minor Changes

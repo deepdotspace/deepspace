@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { hydrateRoot } from 'react-dom/client'
 import type { DocumentationRuntimeData, DocumentationRuntimeRouteDocument } from '../types'
-import { documentationPublicPath } from '../routing'
+import { localeForRoute } from '../locales'
+import { documentationLogicalPath, documentationPublicPath } from '../routing'
 import {
   currentHistoryState,
   currentRuntimeDocument,
@@ -42,7 +43,11 @@ export function DocumentationRuntimeRoot({
   const [navigating, setNavigating] = useState(false)
   const cacheRef = useRef(new Map<string, RuntimeDocument>())
   const inFlightRef = useRef(new Map<string, Promise<RuntimeDocument>>())
-  const siteDataRef = useRef({ config: initialData.config, navigation: initialData.navigation })
+  const siteDataRef = useRef({
+    config: initialData.config,
+    navigation: initialData.navigation,
+    ...(initialData.localization ? { localization: initialData.localization } : {}),
+  })
   const navigationIdRef = useRef(0)
   const restoringHistoryRef = useRef(false)
   const scrollFrameRef = useRef<number | null>(null)
@@ -111,14 +116,24 @@ export function DocumentationRuntimeRoot({
     }
   }, [basePath])
 
+  // Each locale has its own navigation and search index, so crossing into
+  // another locale is a document load rather than a route swap.
+  const crossesLocale = useCallback((target: URL): boolean => {
+    const localization = initialData.localization
+    if (!localization) return false
+    const logical = documentationLogicalPath(basePath, target.pathname)
+    return logical !== null && localeForRoute(logical, localization) !== localization.locale
+  }, [basePath, initialData.localization])
+
   const navigate = useCallback(async (
     href: string,
     historyMode: HistoryMode = 'push',
     restoredScroll?: number,
   ): Promise<void> => {
     const target = new URL(href, window.location.href)
-    if (target.origin !== window.location.origin) {
-      window.location.assign(target.href)
+    if (target.origin !== window.location.origin || crossesLocale(target)) {
+      if (historyMode === 'none') window.location.reload()
+      else window.location.assign(target.href)
       return
     }
     const currentUrl = new URL(window.location.href)
@@ -176,15 +191,16 @@ export function DocumentationRuntimeRoot({
     } finally {
       window.clearTimeout(progressTimer)
     }
-  }, [load, loadPage])
+  }, [crossesLocale, load, loadPage])
 
   const prefetch = useCallback((href: string): void => {
     const target = new URL(href, window.location.href)
     if (target.origin !== window.location.origin || cacheRef.current.has(locationKey(target))) return
+    if (crossesLocale(target)) return
     void load(target).then((runtime) => loadPage?.(runtime.data.page.route)).catch(() => {
       // Prefetch is opportunistic; an explicit navigation still retries.
     })
-  }, [load, loadPage])
+  }, [crossesLocale, load, loadPage])
 
   useEffect(() => {
     const root = document.getElementById('deepspace-documentation-root')
@@ -200,6 +216,7 @@ export function DocumentationRuntimeRoot({
       if (!href || !shouldHandleDocumentationNavigation(href, basePath)) return
       const url = new URL(href, window.location.href)
       if (url.origin !== window.location.origin) return
+      if (anchor.hasAttribute('hreflang') || crossesLocale(url)) return
       if (url.pathname === window.location.pathname && url.search === window.location.search && url.hash) return
       event.preventDefault()
       void navigate(`${url.pathname}${url.search}${url.hash}`)
@@ -228,7 +245,7 @@ export function DocumentationRuntimeRoot({
       root.removeEventListener('pointerdown', handlePrefetch)
       root.removeEventListener('dragstart', handleDragStart)
     }
-  }, [basePath, navigate, prefetch])
+  }, [basePath, crossesLocale, navigate, prefetch])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {

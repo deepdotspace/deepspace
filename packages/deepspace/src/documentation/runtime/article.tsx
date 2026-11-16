@@ -60,6 +60,8 @@ export function Article({
         </div>
         <h1>{data.page.title}</h1>
         {data.page.description && <p className="documentation-lede">{data.page.description}</p>}
+        {/* Inside the header: an extra article child would shift React's useId tree and every tab id. */}
+        {data.translation?.stale && <StaleTranslationNotice data={data} />}
       </header>
       <OutlineDisclosure headings={outlineHeadings(data.page.headings)} />
       <CodeBlockControlsProvider value={controls}>
@@ -89,6 +91,24 @@ export function Article({
         ) : <span />}
       </nav>
     </article>
+  )
+}
+
+/** A translation whose default-locale source changed after it was translated. */
+function StaleTranslationNotice({ data }: { data: DocumentationRuntimeData }): ReactElement | null {
+  if (!data.translation) return null
+  const source = data.localization?.locales[0]
+  return (
+    <aside className="documentation-callout documentation-callout-warning documentation-translation-notice" role="note">
+      <p>
+        This translation may be out of date.{' '}
+        <a
+          href={documentationPublicPath(data.basePath, data.translation.sourceRoute)}
+          hrefLang={source?.code}
+          lang={source?.code}
+        >Read the original</a>
+      </p>
+    </aside>
   )
 }
 

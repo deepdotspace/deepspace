@@ -526,37 +526,44 @@ describe('agent tool routes', () => {
   })
 
   it('forwards the route abort signal into a DO tool request', async () => {
-    let releaseFetch: (() => void) | undefined
-    const fetchReleased = new Promise<void>((resolve) => {
-      releaseFetch = resolve
-    })
-    const { env, requests } = makeEnv(async () => {
-      await fetchReleased
-      return Response.json({ success: true })
-    })
-    const app = makeApp(env, {
-      buildTools: (executor) => ({
-        records: tool({
-          inputSchema: z.object({}),
-          execute: (input) => executor('schema.list', input),
+    // Node's Request follows an init signal through a weakly held controller,
+    // so after a garbage collection the DO request's copy can miss the abort
+    // (workerd links them natively). Assert the hand-off instead: the DO
+    // request is built from the incoming request's own signal.
+    const initSignals: Array<{ url: string; signal?: AbortSignal | null }> = []
+    const NodeRequest = globalThis.Request
+    vi.stubGlobal(
+      'Request',
+      class extends NodeRequest {
+        constructor(input: RequestInfo | URL, init?: RequestInit) {
+          super(input, init)
+          initSignals.push({ url: this.url, signal: init?.signal })
+        }
+      },
+    )
+    try {
+      const { env, requests } = makeEnv()
+      const app = makeApp(env, {
+        buildTools: (executor) => ({
+          records: tool({
+            inputSchema: z.object({}),
+            execute: (input) => executor('schema.list', input),
+          }),
         }),
-      }),
-    })
-    const controller = new AbortController()
-    const responsePromise = app.fetch(
-      new Request('https://app.test/_deepspace/agent/tools/records', {
+      })
+      const incoming = new NodeRequest('https://app.test/_deepspace/agent/tools/records', {
         method: 'POST',
         body: JSON.stringify({ input: {} }),
-        signal: controller.signal,
-      }),
-      env,
-    )
-    await vi.waitFor(() => expect(requests).toHaveLength(1))
-    controller.abort()
-    releaseFetch?.()
+        signal: new AbortController().signal,
+      })
+      await app.fetch(incoming, env)
 
-    await responsePromise
-    expect(requests[0].signal.aborted).toBe(true)
+      expect(requests).toHaveLength(1)
+      const doRequest = initSignals.find((entry) => entry.url === 'https://internal/api/tools/execute')
+      expect(doRequest?.signal).toBe(incoming.signal)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('does not expose missing or non-executable tools', async () => {

@@ -8,8 +8,13 @@
  * and per-user billing apply. This is the managed-proxy equivalent of
  * Composio's `@composio/vercel` provider, which talks straight to Composio.
  *
- * `authToken` must be the END USER's JWT: Composio resolves the user's
- * connected accounts by the JWT subject, and that user is billed.
+ * Every call carries the app's identity, so it reaches the connections users
+ * made inside this app (the same ones the browser connect flow creates). Who
+ * the call runs as is the `ComposioCaller`:
+ *   - `authToken`: the signed-in user's JWT. Runs as them and bills them.
+ *   - `asUser`: a user id, for the app's own server code with no user request
+ *     in hand (e.g. a cron job). Runs as that user on the connections they made
+ *     in this app, billed to the app owner via APP_OWNER_JWT.
  *
  * Usage (inside a request handler, e.g. /api/ai/chat):
  *
@@ -20,14 +25,31 @@
  *   const result = streamText({ model: ai('claude-sonnet-5-5'), prompt, tools })
  *
  * Merge with your own tools: `tools: { ...buildTools(executor), ...composio }`.
+ *
+ * Without an LLM (e.g. an hourly cron reading each user's inbox):
+ *
+ *   const data = await callComposio(env, 'execute-tool',
+ *     { slug: 'GMAIL_FETCH_EMAILS', arguments: { max_results: 10 } }, { asUser: userId })
  */
 
 import { tool, jsonSchema, type ToolSet } from 'ai'
 import { apiWorkerFetch, type ApiWorkerEnv } from './proxies'
+import { appendAppIdentity, type AppIdentityEnv } from './app-identity'
 
-export interface ComposioToolsOptions {
-  /** End user's JWT. Required: the tools run as this user and bill them. */
-  authToken: string
+export interface ComposioEnv extends ApiWorkerEnv, AppIdentityEnv {
+  /** Bills `asUser` calls to the app owner. Injected at deploy time. */
+  APP_OWNER_JWT?: string
+}
+
+/** Who a Composio call runs as (and who pays). */
+export type ComposioCaller =
+  /** The signed-in user's JWT: runs as that user and bills them. */
+  | { authToken: string; asUser?: never }
+  /** A user id, from the app's own server code: runs as that user on the
+   *  connections they made in this app, billed to the app owner. */
+  | { asUser: string; authToken?: never }
+
+export type ComposioToolsOptions = ComposioCaller & {
   /** Restrict to one toolkit (e.g. 'gmail', 'github'). */
   toolkit?: string
   /** Explicit tool slugs to expose (e.g. ['GMAIL_SEND_EMAIL']). */
@@ -47,21 +69,40 @@ interface ComposioToolItem {
 
 const EMPTY_SCHEMA = { type: 'object', properties: {} }
 
+function composioHeaders(env: ComposioEnv, caller: ComposioCaller): Headers {
+  // A blank id would be dropped in transit and the call would run as the owner.
+  if (caller.asUser !== undefined && !caller.asUser.trim()) {
+    throw new Error('Composio asUser must be a user id.')
+  }
+  const token = caller.asUser ? env.APP_OWNER_JWT : caller.authToken
+  if (!token) {
+    throw new Error(
+      caller.asUser
+        ? 'Composio asUser calls need env.APP_OWNER_JWT (injected at deploy time; ' +
+            '`deepspace dev start` writes it into .dev.vars).'
+        : "Composio calls need a caller: authToken (the signed-in user's JWT) or " +
+            'asUser (a user id, from server code).',
+    )
+  }
+  const headers = new Headers({ 'Content-Type': 'application/json', Authorization: `Bearer ${token}` })
+  appendAppIdentity(headers, env)
+  if (caller.asUser) headers.set('x-act-as-user', caller.asUser)
+  return headers
+}
+
 /** POST a Composio endpoint through the api-worker proxy and parse the
  *  `{ success, data }` envelope. Text-first so a non-JSON gateway error still
- *  yields a useful detail string instead of a parse failure. Never throws. */
+ *  yields a useful detail string instead of a parse failure. Upstream refusals
+ *  come back in the envelope; a bad caller or a network failure throws. */
 async function requestComposio(
-  env: ApiWorkerEnv,
+  env: ComposioEnv,
   endpoint: string,
   params: Record<string, unknown>,
-  authToken: string,
+  caller: ComposioCaller,
 ): Promise<{ ok: boolean; success: boolean; data: unknown; detail: string }> {
   const res = await apiWorkerFetch(env, `/api/integrations/composio/${endpoint}`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${authToken}`,
-    },
+    headers: composioHeaders(env, caller),
     body: JSON.stringify(params),
   })
   const text = await res.text()
@@ -75,6 +116,22 @@ async function requestComposio(
   return { ok: res.ok, success: parsed.success === true, data: parsed.data, detail }
 }
 
+/**
+ * Call one Composio endpoint (e.g. 'execute-tool', 'list-connections') and
+ * return its `data`. Throws on failure. A user who has not connected the
+ * tool's app comes back as `{ requiresConnection: true, toolkit }`, not an error.
+ */
+export async function callComposio(
+  env: ComposioEnv,
+  endpoint: string,
+  params: Record<string, unknown>,
+  caller: ComposioCaller,
+): Promise<unknown> {
+  const r = await requestComposio(env, endpoint, params, caller)
+  if (!r.ok || !r.success) throw new Error(`Composio ${endpoint} failed: ${r.detail}`)
+  return r.data
+}
+
 /** Composio slugs are already valid tool-name chars; sanitize + cap at 64 only
  *  as a guard (Anthropic rejects longer names). The real slug is always used
  *  for execution regardless of the key. */
@@ -86,21 +143,12 @@ function toolKey(slug: string): string {
 /**
  * Fetch Composio tools for the given scope and return them as a Vercel AI SDK
  * `ToolSet`. One `list-tools` call provides each tool's JSON Schema; each tool
- * executes via `composio/execute-tool` as the authenticated user.
+ * executes via `composio/execute-tool` as the options' caller.
  */
 export async function composioTools(
-  env: ApiWorkerEnv,
+  env: ComposioEnv,
   options: ComposioToolsOptions,
 ): Promise<ToolSet> {
-  const { authToken } = options
-  if (!authToken) {
-    throw new Error(
-      'composioTools: options.authToken is required. Pass the end user\'s JWT so the ' +
-        'tools run as that user (Composio resolves their connected accounts by it) and ' +
-        'the calls are billed to them.',
-    )
-  }
-
   const list = await requestComposio(
     env,
     'list-tools',
@@ -110,7 +158,7 @@ export async function composioTools(
       search: options.search,
       limit: options.limit ?? 20,
     },
-    authToken,
+    options,
   )
   if (!list.ok || !list.success) {
     throw new Error(`composioTools: failed to list Composio tools: ${list.detail}`)
@@ -133,7 +181,7 @@ export async function composioTools(
           env,
           'execute-tool',
           { slug, arguments: args ?? {} },
-          authToken,
+          options,
         )
         if (!r.ok || !r.success) {
           // Surface a readable error to the model instead of throwing, so the

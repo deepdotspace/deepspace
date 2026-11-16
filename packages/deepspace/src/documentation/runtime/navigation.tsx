@@ -87,6 +87,7 @@ export function DesktopSidebar({ data }: { data: DocumentationRuntimeData }): Re
         <NavigationTree activeRoute={data.page.route} basePath={data.basePath} nodes={data.navigation} />
       </nav>
       <div className="documentation-sidebar-footer">
+        <LanguageLinks data={data} />
         {!data.config.theme.strictMode && <ThemeControls defaultMode={data.config.theme.defaultMode ?? 'system'} />}
         {data.config.footer.length > 0 && (
           <nav aria-label="Documentation footer">
@@ -98,6 +99,37 @@ export function DesktopSidebar({ data }: { data: DocumentationRuntimeData }): Re
         <span>{`Built with deepspace ${sdkVersion}`}</span>
       </div>
     </aside>
+  )
+}
+
+/**
+ * Plain links to this page in every other locale, or to that locale's landing
+ * page when this page is untranslated or is the 404 page. The `hreflang` attribute makes the router
+ * leave them to a full document load, since each locale has its own navigation
+ * and search index.
+ */
+function LanguageLinks({ data }: { data: DocumentationRuntimeData }): ReactElement | null {
+  const localization = data.localization
+  if (!localization) return null
+  const links = localization.locales.flatMap((locale) => {
+    const route = locale.code === localization.locale && data.page.route !== '/404'
+      ? data.page.route
+      : data.alternates?.find((alternate) => alternate.locale === locale.code)?.route ?? locale.home
+    return route ? [{ ...locale, route }] : []
+  })
+  if (links.length < 2) return null
+  return (
+    <nav className="documentation-language-links" aria-label="Language">
+      {links.map((locale) => (
+        <a
+          aria-current={locale.code === localization.locale ? 'true' : undefined}
+          href={documentationPublicPath(data.basePath, locale.route)}
+          hrefLang={locale.code}
+          key={locale.code}
+          lang={locale.code}
+        >{locale.label}</a>
+      ))}
+    </nav>
   )
 }
 
@@ -181,6 +213,7 @@ export function MobileNavigation({
         </header>
         <nav className="documentation-page-tree"><NavigationTree activeRoute={data.page.route} basePath={data.basePath} nodes={data.navigation} /></nav>
         <footer>
+          <LanguageLinks data={data} />
           {!data.config.theme.strictMode && <ThemeControls defaultMode={data.config.theme.defaultMode ?? 'system'} />}
           {data.config.footer.map((link) => <a key={`${link.label}:${link.href}`} href={link.href} {...externalProps(link.href)}>{link.label}</a>)}
         </footer>

@@ -129,25 +129,29 @@ function parseField(field: string, min: number, max: number, label: string): Set
   return result
 }
 
+const MINUTE_MS = 60_000
+// Feb 29 can be eight years away (2096 to 2104), so search that far.
+const SEARCH_MS = 8 * 366 * 24 * 60 * MINUTE_MS
+const DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+const WEEKDAYS: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }
+
 /**
- * Find the next UTC minute whose wall-clock fields match in `timezone`.
- * The one-year bound rejects schedules that are not useful to this room.
+ * Find the next UTC minute whose wall-clock fields match in `timezone`, or
+ * null when the schedule has no such minute in the next eight years (for
+ * example `0 0 30 2 *`). Stretches that cannot match are skipped: a day that
+ * does not match jumps to 22:00 local, and a non-matching hour moves a quarter
+ * hour at a time. Clocks change only on quarter hours (Chatham at :45) and by
+ * at most two hours (Troll), so no skip passes over a match.
  */
 export function nextCronFire(expression: string, timezone: string, from: Date): Date | null {
   const parsed = parseCronExpression(expression)
-  const start = Math.floor(from.getTime() / 60_000) * 60_000 + 60_000
-  const limit = start + 366 * 24 * 60 * 60_000
-  for (let timestamp = start; timestamp < limit; timestamp += 60_000) {
-    const candidate = new Date(timestamp)
-    if (cronMatches(parsed, timezone, candidate)) return candidate
-  }
-  return null
-}
+  const hasDay = [...parsed.month].some((month) =>
+    [...parsed.dayOfMonth].some((day) => day <= DAYS_IN_MONTH[month - 1]),
+  )
+  if (!hasDay) return null
 
-function cronMatches(parsed: ParsedCron, timezone: string, date: Date): boolean {
   const formatter = new Intl.DateTimeFormat('en-US', {
     timeZone: timezone,
-    year: 'numeric',
     month: 'numeric',
     day: 'numeric',
     hour: 'numeric',
@@ -155,28 +159,27 @@ function cronMatches(parsed: ParsedCron, timezone: string, date: Date): boolean 
     weekday: 'short',
     hour12: false,
   })
-  const parts = Object.fromEntries(
-    formatter.formatToParts(date).map((part) => [part.type, part.value]),
-  )
-  const minute = Number.parseInt(parts.minute, 10)
-  const hour = Number.parseInt(parts.hour, 10) % 24
-  const dayOfMonth = Number.parseInt(parts.day, 10)
-  const month = Number.parseInt(parts.month, 10)
-  const weekday: Record<string, number> = {
-    Sun: 0,
-    Mon: 1,
-    Tue: 2,
-    Wed: 3,
-    Thu: 4,
-    Fri: 5,
-    Sat: 6,
+  let timestamp = Math.floor(from.getTime() / MINUTE_MS) * MINUTE_MS + MINUTE_MS
+  const limit = timestamp + SEARCH_MS
+  while (timestamp < limit) {
+    const parts = Object.fromEntries(
+      formatter.formatToParts(new Date(timestamp)).map((part) => [part.type, part.value]),
+    )
+    const minute = Number.parseInt(parts.minute, 10)
+    const hour = Number.parseInt(parts.hour, 10) % 24
+    const dayMatches =
+      parsed.dayOfMonth.has(Number.parseInt(parts.day, 10)) &&
+      parsed.month.has(Number.parseInt(parts.month, 10)) &&
+      parsed.dayOfWeek.has(WEEKDAYS[parts.weekday])
+    if (!dayMatches && hour < 22) {
+      timestamp += ((22 - hour) * 60 - minute) * MINUTE_MS
+    } else if (!dayMatches || !parsed.hour.has(hour)) {
+      timestamp += (15 - (minute % 15)) * MINUTE_MS
+    } else if (parsed.minute.has(minute)) {
+      return new Date(timestamp)
+    } else {
+      timestamp += MINUTE_MS
+    }
   }
-  const dayOfWeek = weekday[parts.weekday] ?? 0
-  return (
-    parsed.minute.has(minute) &&
-    parsed.hour.has(hour) &&
-    parsed.dayOfMonth.has(dayOfMonth) &&
-    parsed.month.has(month) &&
-    parsed.dayOfWeek.has(dayOfWeek)
-  )
+  return null
 }

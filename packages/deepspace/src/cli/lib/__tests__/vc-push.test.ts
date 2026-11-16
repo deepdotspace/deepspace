@@ -10,13 +10,12 @@ import {
   classifyPushTransportFailure,
   classifyRejection,
   isRecoverablePushFailure,
-  isThinPackRejection,
-  oversizedPushFix,
   parsePushPorcelain,
   parseRefusalCode,
   representativeResult,
   pushFailureMessage,
   pushToSpace,
+  sizeRemedy,
   type PushRefResult,
 } from '../vc-push'
 import { SPACE_REMOTE } from '../vc-remote'
@@ -76,7 +75,7 @@ describe('parsePushPorcelain', () => {
   it('keeps every other tagged refusal a hard rejection, token parsed', () => {
     for (const [code, sentence] of [
       ['push_too_large', 'object exceeds the 20 MiB limit'],
-      ['repo_full', 'repository is at its size ceiling'],
+      ['repo_full', 'repository is at its object limit'],
       ['secret_committed', 'a secret file is in this history — .env'],
       ['unpacker_error', 'the pack could not be unpacked'],
       ['missing_objects', 'missing necessary objects'],
@@ -183,25 +182,6 @@ describe('push rejection decisions', () => {
     ...(parseRefusalCode(reason) ? { code: parseRefusalCode(reason)!.code } : {}),
   })
 
-  it('uses the full-pack retry only for the server thin-pack token', () => {
-    expect(isThinPackRejection(rejected('thin_pack: thin pack bases unresolved'))).toBe(true)
-    for (const reason of [
-      'push_too_large: object exceeds the 20 MiB limit',
-      'unpacker_error: the pack could not be unpacked',
-      'some untagged reason about a thin pack',
-      // A pusher-chosen path echoed INSIDE another refusal's sentence cannot
-      // reach offset 0, so it cannot fire a wasteful full re-upload.
-      'secret_committed: a secret is in this history — thin_pack: notes.txt',
-    ]) {
-      expect(isThinPackRejection(rejected(reason)), reason).toBe(false)
-    }
-    for (const status of ['committed', 'up_to_date', 'non_fast_forward', 'ref_conflict'] as const) {
-      expect(
-        isThinPackRejection({ ...rejected('thin_pack: unresolved'), status }),
-        status,
-      ).toBe(false)
-    }
-  })
 
   it('marks only pull-recoverable divergence statuses recoverable', () => {
     expect(isRecoverablePushFailure('non_fast_forward')).toBe(true)
@@ -452,7 +432,7 @@ describe('push rejection decisions', () => {
     })
 
     it('names every step the recipe depends on, including the empty-commit case', () => {
-      const advice = oversizedPushFix()
+      const advice = sizeRemedy()
       expect(advice).toContain('git reset --soft')
       expect(advice).toContain('git restore --staged')
       // .gitignore governs Git, not the deploy bundle — the file has to move.
@@ -498,7 +478,7 @@ describe('push rejection decisions', () => {
     ).toMatch(/Retry/i)
     for (const reason of [
       'push_too_large: object exceeds the 20 MiB limit',
-      'repo_full: repository is at its size ceiling',
+      'repo_full: repository is at its object limit',
       'unpacker_error: the pack could not be unpacked',
       // Untagged: the old sentence, which now classifies as the catch-all.
       'missing necessary objects — retry the push',
@@ -506,6 +486,51 @@ describe('push rejection decisions', () => {
       expect(pushFailureMessage('Workspace upload', rejected(reason)), reason).not.toMatch(
         /Retry;/,
       )
+    }
+  })
+
+  it('tells a full app to retry in a minute and never to upgrade', () => {
+    const reason =
+      'storage_full: app storage is full, DeepSpace is clearing history no branch uses so retry in a minute — sizes'
+    const message = pushFailureMessage('The push of main', rejected(reason))
+    expect(message.match(/in a minute/g)).toHaveLength(1)
+    expect(message).toMatch(/a minute from now is still refused/)
+    expect(message).toMatch(/same on every plan/)
+    expect(message).not.toMatch(/upgrade/i)
+  })
+
+  it('advises smaller batches for push_too_large only when no file is over the cap', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ds-push-volume-'))
+    try {
+      initRepo(repo, 'main')
+      runGit(repo, ['config', 'user.email', 'test@example.com'])
+      runGit(repo, ['config', 'user.name', 'Test'])
+      writeFileSync(join(repo, 'small.txt'), 'fine')
+      runGit(repo, ['add', '-A'])
+      runGit(repo, ['commit', '-q', '-m', 'small'])
+      // The inflated or stored-bases ceiling trips with every file under the
+      // per-file cap: splitting the push fixes it, removing a file does not.
+      const volume = classifyRejection(
+        'push_too_large: push is over a size limit, remove the oversized file or split the push — the pack inflates past the 48 MiB limit',
+        repo,
+      )
+      expect(volume.code).toBe('push_too_large')
+      expect(volume.message).toContain('smaller batches')
+      expect(volume.message).toContain('retrying cannot succeed')
+      expect(volume.message).not.toContain('An object exceeds')
+      expect(volume.message).not.toContain('deepspace app files put')
+
+      writeFileSync(join(repo, 'huge.bin'), Buffer.alloc(21 * 1024 * 1024, 1))
+      runGit(repo, ['add', '-A'])
+      runGit(repo, ['commit', '-q', '-m', 'add media'])
+      const object = classifyRejection(
+        'push_too_large: push is over a size limit, remove the oversized file or split the push — one object is over the 20 MiB per-object limit',
+        repo,
+      )
+      expect(object.message).toContain('The oversized file is huge.bin (21.0 MiB)')
+      expect(object.message).not.toContain('smaller batches')
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
     }
   })
 
@@ -519,7 +544,7 @@ describe('push rejection decisions', () => {
       writeFileSync(join(repo, 'big.bin'), Buffer.alloc(1_572_864, 0x78))
       runGit(repo, ['add', '-A'])
       runGit(repo, ['commit', '-q', '-m', 'add assets'])
-      const named = oversizedPushFix(repo, 1000)
+      const named = sizeRemedy(repo, 1000)
       expect(named.indexOf('big.bin')).toBeLessThan(named.indexOf('model.bin'))
       expect(named).toContain('1.5 MiB')
       expect(named).toContain('5 KiB')
@@ -671,6 +696,7 @@ describe('the refusal grammar is parsed, never the prose', () => {
     const expected: Record<string, string> = {
       push_too_large: 'push_too_large',
       repo_full: 'repo_full',
+      storage_full: 'storage_full',
       secret_committed: 'secret_in_history',
       missing_objects: 'missing_objects',
       thin_pack: 'thin_pack',

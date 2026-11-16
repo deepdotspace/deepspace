@@ -42,6 +42,10 @@ export const AGENT_TOOL_CONTEXT_MIGRATION_ID = '2026-10-agent-tool-context'
 /** Older copied scaffolds need an explicit public-page indexing review. */
 export const PUBLIC_PAGE_SEO_MIGRATION_ID = '2026-10-public-page-seo'
 
+/** Composio defaulted to owner billing, which also ran every signed-in user's
+ *  connection on the owner's account. Scaffolds now list it as 'user'. */
+export const COMPOSIO_USER_BILLING_MIGRATION_ID = '2026-11-composio-user-billing'
+
 export type AppMigrationIdsValidation =
   | { valid: true; ids: string[] }
   | { valid: false; reason: string }

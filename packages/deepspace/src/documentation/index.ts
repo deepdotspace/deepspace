@@ -1,6 +1,6 @@
 export { buildDocumentation, type BuildDocumentationOptions } from './build'
 export { loadDocumentationConfig, type LoadedDocumentationConfig } from './config'
-export { validateDocumentation } from './graph'
+export { translationSourceHash, validateDocumentation } from './graph'
 export { normalizeRoute, routeFromRelativePath } from './routing'
 export { htmlToText, parseFrontmatter, parseMarkdown, slugify } from './markdown'
 export {

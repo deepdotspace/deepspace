@@ -14,11 +14,15 @@ interface DocumentationViteServer {
     on(event: 'ready', handler: () => void): void
   }
   config: {
-    logger: {
+    logger: DocumentationViteLogger & {
       info(message: string): void
       error(message: string): void
     }
   }
+}
+
+interface DocumentationViteLogger {
+  warn?(message: string): void
 }
 
 /**
@@ -37,12 +41,22 @@ export function deepSpaceDocumentation(): {
   ): {
     server: { watch: { ignored: string[] } }
   }
-  configResolved(config: { root: string }): void
+  configResolved(config: { root: string; logger?: DocumentationViteLogger }): void
   configureServer(server: DocumentationViteServer): void
 } {
   let appDir = process.cwd()
   let outputDir = resolve(appDir, '.deepspace', 'documentation')
   let result: DocumentationBuildResult | null = null
+  let reported: DocumentationBuildResult | null = null
+
+  // Other compiler warnings stay silent; a stale translation needs a person.
+  const reportStaleTranslations = (logger: DocumentationViteLogger | undefined): void => {
+    if (!result || result === reported || !logger?.warn) return
+    reported = result
+    for (const warning of result.warnings) {
+      if (warning.code === 'translation_stale') logger.warn(`[deepspace] ${warning.message}`)
+    }
+  }
 
   const rebuild = (): DocumentationBuildResult | null => {
     if (!existsSync(resolve(appDir, DOCUMENTATION_CONFIG_FILE))) {
@@ -102,6 +116,7 @@ export function deepSpaceDocumentation(): {
       appDir = resolvedRoot
       outputDir = resolve(appDir, 'public', '_documentation')
       if (rootChanged) rebuild()
+      reportStaleTranslations(config.logger)
     },
     configureServer(server) {
       if (!result) return
@@ -132,6 +147,7 @@ export function deepSpaceDocumentation(): {
               server.config.logger.info(
                 `[deepspace] rebuilt ${next.manifest.pageCount} documentation page(s)`,
               )
+              reportStaleTranslations(server.config.logger)
               if (
                 changed === canonicalPath(configPath) &&
                 !sameDomains(previousDomains, next.manifest.domains)

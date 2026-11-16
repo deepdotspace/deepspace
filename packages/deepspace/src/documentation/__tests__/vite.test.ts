@@ -25,6 +25,33 @@ describe('DeepSpace documentation Vite bridge', () => {
     expect(JSON.parse(readFileSync(manifestPath, 'utf-8'))).toMatchObject({ pageCount: 1 })
   })
 
+  it('prints stale-translation warnings once and keeps other compiler warnings quiet', () => {
+    const appDir = mkdtempSync(join(tmpdir(), 'deepspace-documentation-stale-'))
+    writeFileSync(
+      join(appDir, 'documentation.json'),
+      JSON.stringify({
+        name: 'Stale fixture',
+        navigation: { groups: [{ group: 'Guides', pages: ['index'] }] },
+        locales: { default: 'en', alternates: [{ code: 'fr', label: 'Français', navigationLabels: { Guides: 'Guides' } }] },
+      }),
+    )
+    mkdirSync(join(appDir, 'documentation', 'fr'), { recursive: true })
+    writeFileSync(join(appDir, 'documentation', 'index.md'), '# Built documentation')
+    writeFileSync(
+      join(appDir, 'documentation', 'fr', 'index.md'),
+      '---\nsourceHash: "0000000000000000"\n---\n# Documentation',
+    )
+    const plugin = deepSpaceDocumentation()
+    plugin.config({ root: appDir }, { command: 'build' })
+    const warnings: string[] = []
+    const logger = { warn: (message: string) => warnings.push(message) }
+    plugin.configResolved({ root: appDir, logger })
+    plugin.configResolved({ root: appDir, logger })
+
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toMatch(/^\[deepspace\] fr\/index\.md was translated from an earlier index\.md/)
+  })
+
   it('uses the same ASSETS source in development and removes obsolete private caches', () => {
     const appDir = mkdtempSync(join(tmpdir(), 'deepspace-documentation-serve-'))
     writeFileSync(

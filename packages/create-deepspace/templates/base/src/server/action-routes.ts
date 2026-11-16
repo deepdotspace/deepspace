@@ -92,13 +92,23 @@ function createActionTools(env: Env, userId: string, callerJwt: string): ActionT
     // The api-worker bills the JWT subject: owner for developer mode, caller
     // for user mode. It does not accept a client-supplied billing override.
     const jwt = billingMode === 'developer' ? env.APP_OWNER_JWT : callerJwt
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${jwt}`,
+    }
+
+    // Composio files connections per app, so identify this app as the
+    // /api/integrations proxy does; otherwise an action looks for the user's
+    // connection in a different namespace. Pre-first-deploy there is no token:
+    // omit both and let the api-worker fail closed.
+    if (integrationName === 'composio' && env.APP_IDENTITY_TOKEN) {
+      headers['x-app-identity-token'] = env.APP_IDENTITY_TOKEN
+      headers['x-app-id'] = env.DEEPSPACE_APP_ID
+    }
 
     const res = await apiWorkerFetch(env, `/api/integrations/${endpoint}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${jwt}`,
-      },
+      headers,
       body: JSON.stringify(data ?? {}),
     })
     const payload = (await res.json()) as Record<string, unknown>

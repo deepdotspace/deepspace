@@ -42,6 +42,13 @@ export interface CronExecution {
   error?: string
 }
 
+/** The `cron_tasks` columns that decide when a task runs next. */
+type TaskSchedule = {
+  interval_minutes: number | null
+  schedule: string | null
+  timezone: string | null
+}
+
 interface CronAttachment extends UserAttachment {
   /** True for member/admin roles; false for viewers and unauthenticated anon. */
   canWrite: boolean
@@ -53,6 +60,10 @@ interface CronAttachment extends UserAttachment {
  * note on `BaseRoom.fetch`); answers `{ tasks }` in the `cron.tasks` shape.
  */
 export const CRON_TASKS_INTERNAL_PATH = '/internal/cron/tasks'
+
+// A run still open this long was abandoned without its isolate restarting:
+// alarm handlers are cut off after 15 minutes (the same bound JobRoom uses).
+const ABANDONED_RUN_MS = 16 * 60 * 1000
 
 // Cron commands that mutate scheduler state. Read-only messages
 // (CRON_TASKS, CRON_HISTORY) are allowed for any connected client per the
@@ -106,9 +117,14 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
       )
     `)
 
+    // This runs once per isolate before any run starts, so every open run
+    // belongs to an isolate that was reset mid-task.
+    this.closeInterruptedRuns(Date.now())
+
     // Sync configured tasks. Insert new ones; refresh schedule/interval/timezone
     // on existing ones (so editing src/cron.ts and re-deploying picks up the
-    // change without a manual reset). Preserve last_run_at / paused.
+    // change without a manual reset). Preserve last_run_at / paused. A changed
+    // schedule clears next_run_at, so the task gets a new slot below.
     for (const task of this.tasks) {
       const existing = this.sql
         .exec(`SELECT name FROM cron_tasks WHERE name = ?`, task.name)
@@ -124,13 +140,15 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
           task.paused ? 1 : 0,
         )
       } else {
+        const timing = [task.intervalMinutes ?? null, task.schedule ?? null, task.timezone ?? null]
         this.sql.exec(
           `UPDATE cron_tasks
-             SET interval_minutes = ?, schedule = ?, timezone = ?
+             SET next_run_at = CASE WHEN interval_minutes IS ? AND schedule IS ? AND timezone IS ?
+                                    THEN next_run_at END,
+                 interval_minutes = ?, schedule = ?, timezone = ?
            WHERE name = ?`,
-          task.intervalMinutes ?? null,
-          task.schedule ?? null,
-          task.timezone ?? null,
+          ...timing,
+          ...timing,
           task.name,
         )
       }
@@ -143,6 +161,23 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
       if (!configNames.has((row as { name: string }).name)) {
         this.sql.exec(`DELETE FROM cron_tasks WHERE name = ?`, (row as { name: string }).name)
       }
+    }
+
+    // Give each task without a slot (new, or its schedule just changed) one:
+    // an interval task runs now, a scheduled task at its next matching minute.
+    // A task left without a slot (a schedule with no matching minute) is never
+    // due.
+    const now = new Date()
+    const unscheduled = this.sql
+      .exec(
+        `SELECT name, interval_minutes, schedule, timezone FROM cron_tasks WHERE next_run_at IS NULL`,
+      )
+      .toArray() as (TaskSchedule & { name: string })[]
+    for (const task of unscheduled) {
+      const first = task.interval_minutes ? now.toISOString() : computeNextRunAt(task, now)
+      if (!first)
+        console.error(`[cron] ${task.name} never runs: "${task.schedule}" has no upcoming time`)
+      this.sql.exec(`UPDATE cron_tasks SET next_run_at = ? WHERE name = ?`, first, task.name)
     }
 
     // Schedule the next alarm
@@ -329,22 +364,22 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
   protected async onAlarm(): Promise<void> {
     this.ensureInitialized()
     const now = new Date()
+    this.closeInterruptedRuns(now.getTime() - ABANDONED_RUN_MS)
 
-    // Find all tasks due to run
-    const tasks = this.sql
-      .exec(
-        `SELECT * FROM cron_tasks WHERE paused = 0 AND (next_run_at IS NULL OR next_run_at <= ?)`,
-        now.toISOString(),
-      )
-      .toArray()
-
-    for (const row of tasks) {
-      const task = row as {
-        name: string
-        interval_minutes: number | null
-        schedule: string | null
-        timezone: string | null
-      }
+    // Run due tasks one at a time, longest overdue first and in first-added
+    // order on a tie. Each pick re-reads the table, so a task claimed by a
+    // manual trigger or paused meanwhile is not run again. A claim moves
+    // next_run_at past `now`, so a task whose runs keep dying cannot hold the
+    // head of the line, and the loop ends.
+    for (;;) {
+      const task = this.sql
+        .exec(
+          `SELECT name FROM cron_tasks WHERE paused = 0 AND next_run_at <= ?
+           ORDER BY next_run_at, rowid LIMIT 1`,
+          now.toISOString(),
+        )
+        .toArray()[0] as { name: string } | undefined
+      if (!task) break
       await this.executeTask(task.name)
     }
 
@@ -361,12 +396,28 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
     // successful execution.
     const taskRow = this.sql
       .exec(`SELECT interval_minutes, schedule, timezone FROM cron_tasks WHERE name = ?`, taskName)
-      .toArray()[0] as
-      | { interval_minutes: number | null; schedule: string | null; timezone: string | null }
-      | undefined
+      .toArray()[0] as TaskSchedule | undefined
     if (!taskRow) return null
 
+    // Claim the run and open its history row on disk before invoking
+    // application code. If the isolate is reset mid-task, the task waits for
+    // its next slot instead of re-running on every alarm retry and starving
+    // the tasks queued behind it, and the run is later closed as interrupted.
     const startedAt = new Date().toISOString()
+    this.recordRun(taskName, taskRow, startedAt)
+    const historyId = (
+      this.sql
+        .exec(
+          `INSERT INTO cron_history (task_name, started_at, created_at) VALUES (?, ?, ?) RETURNING id`,
+          taskName,
+          startedAt,
+          startedAt,
+        )
+        .toArray()[0] as { id: number }
+    ).id
+    this.trimHistory()
+    await this.state.storage.sync()
+
     const start = Date.now()
     let success = true
     let error: string | undefined
@@ -396,36 +447,52 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
       console.error(`[cron] ${taskName} failed ${durationMs}ms: ${loggableError(thrown)}`)
     }
 
-    // Record execution
+    // Close the run's history row
     this.sql.exec(
-      `INSERT INTO cron_history (task_name, started_at, completed_at, success, duration_ms, error, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      taskName,
-      startedAt,
+      `UPDATE cron_history SET completed_at = ?, success = ?, duration_ms = ?, error = ? WHERE id = ?`,
       completedAt,
       success ? 1 : 0,
       durationMs,
       error ?? null,
-      completedAt,
+      historyId,
     )
 
-    // Update last_run_at and compute next_run_at
-    const nextRunAt = computeNextRunAt(taskRow, new Date(completedAt))
-    this.sql.exec(
-      `UPDATE cron_tasks SET last_run_at = ?, next_run_at = ? WHERE name = ?`,
-      completedAt,
-      nextRunAt,
-      taskName,
-    )
-
-    // Trim history to last 500 entries
-    this.sql.exec(
-      `DELETE FROM cron_history WHERE id NOT IN (SELECT id FROM cron_history ORDER BY id DESC LIMIT 500)`,
-    )
+    this.recordRun(taskName, taskRow, completedAt)
 
     // Broadcast update to monitors
     this.broadcastStatus()
     return { taskName, startedAt, completedAt, success, durationMs, error }
+  }
+
+  /** Set `last_run_at` to `at` and `next_run_at` to the task's next slot after it. */
+  private recordRun(taskName: string, taskRow: TaskSchedule, at: string): void {
+    this.sql.exec(
+      `UPDATE cron_tasks SET last_run_at = ?, next_run_at = ? WHERE name = ?`,
+      at,
+      computeNextRunAt(taskRow, new Date(at)),
+      taskName,
+    )
+  }
+
+  /** Close runs opened at or before `startedBy` that never finished, as failed. */
+  private closeInterruptedRuns(startedBy: number): void {
+    const closed = this.sql
+      .exec(
+        `UPDATE cron_history SET completed_at = ?, error = ?
+         WHERE completed_at IS NULL AND started_at <= ? RETURNING task_name`,
+        new Date().toISOString(),
+        'interrupted (the run never finished)',
+        new Date(startedBy).toISOString(),
+      )
+      .toArray() as { task_name: string }[]
+    for (const run of closed) console.error(`[cron] ${run.task_name} interrupted`)
+  }
+
+  /** Keep the last 500 history rows. */
+  private trimHistory(): void {
+    this.sql.exec(
+      `DELETE FROM cron_history WHERE id NOT IN (SELECT id FROM cron_history ORDER BY id DESC LIMIT 500)`,
+    )
   }
 
   // ==========================================================================
@@ -433,42 +500,10 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
   // ==========================================================================
 
   private scheduleNextAlarm(): void {
-    const now = Date.now()
-    let earliestMs = Infinity
-
-    const tasks = this.sql
-      .exec(
-        `SELECT interval_minutes, schedule, timezone, next_run_at FROM cron_tasks WHERE paused = 0`,
-      )
-      .toArray()
-
-    for (const row of tasks) {
-      const t = row as {
-        interval_minutes: number | null
-        schedule: string | null
-        timezone: string | null
-        next_run_at: string | null
-      }
-      let nextMs: number | null = null
-      if (t.next_run_at) {
-        nextMs = new Date(t.next_run_at).getTime()
-      } else if (t.interval_minutes) {
-        // Cold-start interval task — run on the next alarm.
-        nextMs = now
-      } else if (t.schedule && t.timezone) {
-        // Cold-start cron task — find the next minute boundary that matches.
-        const next = nextCronFire(t.schedule, t.timezone, new Date(now))
-        if (next) nextMs = next.getTime()
-      }
-      if (nextMs != null && nextMs < earliestMs) {
-        earliestMs = nextMs
-      }
-    }
-
-    if (earliestMs < Infinity) {
-      const alarmTime = Math.max(earliestMs, now + 1000) // At least 1s from now
-      this.state.storage.setAlarm(alarmTime)
-    }
+    const { next } = this.sql
+      .exec(`SELECT MIN(next_run_at) AS next FROM cron_tasks WHERE paused = 0`)
+      .toArray()[0] as { next: string | null }
+    if (next) this.state.storage.setAlarm(Math.max(Date.parse(next), Date.now() + 1000)) // At least 1s from now
   }
 
   // ==========================================================================
@@ -495,7 +530,10 @@ export abstract class CronRoom<E = Record<string, unknown>> extends BaseRoom<E> 
 
   private getRecentHistory(limit: number): CronExecution[] {
     return this.sql
-      .exec(`SELECT * FROM cron_history ORDER BY id DESC LIMIT ?`, limit)
+      .exec(
+        `SELECT * FROM cron_history WHERE completed_at IS NOT NULL ORDER BY id DESC LIMIT ?`,
+        limit,
+      )
       .toArray()
       .map((row) => {
         const r = row as Record<string, unknown>
@@ -605,10 +643,7 @@ export function armCronRoom(
  * Compute the next ISO timestamp the given task should run at, using
  * `from` as the reference moment.
  */
-function computeNextRunAt(
-  task: { interval_minutes: number | null; schedule: string | null; timezone: string | null },
-  from: Date,
-): string | null {
+function computeNextRunAt(task: TaskSchedule, from: Date): string | null {
   if (task.interval_minutes) {
     return new Date(from.getTime() + task.interval_minutes * 60 * 1000).toISOString()
   }

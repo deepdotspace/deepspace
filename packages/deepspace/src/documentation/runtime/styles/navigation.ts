@@ -50,6 +50,8 @@ export const DOCUMENTATION_NAVIGATION_CSS = String.raw`
 .documentation-sidebar-footer > nav { display: flex; flex-wrap: wrap; gap: 8px 13px; }
 .documentation-sidebar-footer a, .documentation-sidebar-footer > span { color: var(--documentation-faint); font-size: 12px; text-decoration: none; }
 .documentation-sidebar-footer a:hover { color: var(--documentation-text); }
+.documentation-language-links { display: flex; flex-wrap: wrap; gap: 8px 13px; }
+.documentation-language-links a[aria-current] { color: var(--documentation-text); font-weight: 600; }
 .documentation-theme-controls { display: inline-flex; width: max-content; gap: 2px; padding: 2px; border: 1px solid var(--documentation-border); border-radius: 9px; background: var(--documentation-surface); box-shadow: var(--documentation-shadow-sm); }
 .documentation-theme-controls button { display: grid; place-items: center; width: 28px; height: 25px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--documentation-faint); cursor: pointer; }
 .documentation-theme-controls button:hover { color: var(--documentation-text); }

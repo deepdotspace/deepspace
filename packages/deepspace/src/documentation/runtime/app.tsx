@@ -37,6 +37,7 @@ export function DocumentationApp({
     ? null
     : data.config.assistant.access
   const assistantEnabled = assistantAccess !== null
+  const locale = data.localization?.locales.find((candidate) => candidate.code === data.localization?.locale)
   const appClassName = [
     'documentation-app',
     assistantEnabled ? 'has-assistant' : '',
@@ -112,9 +113,11 @@ export function DocumentationApp({
       <SearchCommand
         assistantEnabled={assistantEnabled}
         basePath={data.basePath}
+        indexPath={locale?.prefix ? `/${locale.prefix}/search.json` : '/search.json'}
         name={data.config.name}
         onAssistantOpen={openAssistant}
         onClose={() => setSearchOpen(false)}
+        segmentLocale={locale?.code}
         onNavigate={onNavigate}
         open={searchOpen}
       />

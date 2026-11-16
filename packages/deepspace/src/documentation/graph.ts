@@ -2,15 +2,18 @@ import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { basename, dirname, extname, join, posix, relative, resolve, sep } from 'node:path'
 import { loadDocumentationConfig, type LoadedDocumentationConfig } from './config'
-import { parseMarkdown, slugify, stripFirstMarkdownH1 } from './markdown'
+import { localizedRoute } from './locales'
+import { mapOutsideCode, parseMarkdown, slugify, stripCodeForValidation, stripFirstMarkdownH1 } from './markdown'
 import { parseMdx } from './mdx'
 import { operationMarkdown, parseOpenApi } from './openapi'
-import { normalizeRoute, routeFromRelativePath } from './routing'
+import { mapLinkTargets, normalizeRoute, routeFromRelativePath } from './routing'
 import {
   DocumentationError,
+  type DocumentationAlternateLocale,
   type DocumentationConfig,
   type DocumentationDiagnostic,
   type DocumentationGraph,
+  type DocumentationLocalesConfig,
   type DocumentationNavigationItem,
   type DocumentationNavigationNode,
   type DocumentationPage,
@@ -37,7 +40,8 @@ export function validateDocumentation(appDir: string): DocumentationValidationRe
     )
   }
 
-  const pages = sourceFiles.map((sourcePath) => pageFromSource(loaded, sourcePath))
+  const { defaultSources, translationSources } = partitionSources(loaded, sourceFiles)
+  const pages = defaultSources.map((sourcePath) => pageFromSource(loaded, sourcePath))
   const openApiHashes: string[] = []
   const openApiGroups: DocumentationNavigationNode[] = []
   for (const openapiConfig of loaded.config.openapi) {
@@ -72,12 +76,24 @@ export function validateDocumentation(appDir: string): DocumentationValidationRe
   }
 
   assertUniqueRoutes(pages)
-  const byRoute = new Map(pages.map((page) => [page.route, page]))
+  const locales = loaded.config.locales
+  if (locales) assertLocalePrefixesFree(pages, locales)
+  const defaultByRoute = new Map(pages.map((page) => [page.route, page]))
   const navigation = loaded.config.navigation
-    ? normalizeNavigation(loaded.config.navigation, byRoute, loaded.config)
+    ? normalizeNavigation(loaded.config.navigation, defaultByRoute, loaded.config)
     : automaticNavigation(pages.filter((page) => page.kind === 'page'))
   navigation.push(...openApiGroups)
   assertNavigationCoverage(navigation, pages, loaded.config)
+
+  const translations = locales
+    ? translatePages(loaded, locales, pages, translationSources, warnings)
+    : []
+  if (translations.length > 0 && locales) assignAlternates(pages, translations, locales)
+  const localizedNavigation = locales
+    ? localizeNavigations(navigation, locales, translations)
+    : undefined
+  pages.push(...translations)
+  const byRoute = new Map(pages.map((page) => [page.route, page]))
   validatePageLinks(pages, byRoute, loaded.config.redirects)
   validateRedirectTargets(loaded.config, byRoute)
 
@@ -92,6 +108,7 @@ export function validateDocumentation(appDir: string): DocumentationValidationRe
     config: loaded.config,
     pages: pages.sort((a, b) => a.route.localeCompare(b.route)),
     navigation,
+    ...(localizedNavigation ? { localizedNavigation } : {}),
     sourceHash: hash.digest('hex'),
   }
   return {
@@ -104,19 +121,45 @@ export function validateDocumentation(appDir: string): DocumentationValidationRe
   }
 }
 
-function pageFromSource(loaded: LoadedDocumentationConfig, sourcePath: string): DocumentationPage {
+interface TranslationContext {
+  locale: DocumentationAlternateLocale
+  counterpart: DocumentationPage
+  translatedRoutes: ReadonlySet<string>
+  /** Collected so one build reports every missing hash at once. */
+  missingHashes: DocumentationDiagnostic[]
+  warnings: DocumentationDiagnostic[]
+}
+
+function pageFromSource(
+  loaded: LoadedDocumentationConfig,
+  sourcePath: string,
+  translation?: TranslationContext,
+): DocumentationPage {
   const source = readFileSync(sourcePath, 'utf8')
   const relativePath = relative(loaded.sourceDir, sourcePath).split(sep).join('/')
-  const rewritten = rewriteLocalReferences(source, relativePath, loaded.sourceDir, sourcePath)
+  // A translation resolves references from its default-locale page's location,
+  // so links copied verbatim keep working, then moves each route link into its
+  // own locale when that page is translated.
+  const resolved = rewriteLocalReferences(
+    source,
+    translation?.counterpart.relativePath ?? relativePath,
+    loaded.sourceDir,
+    sourcePath,
+  )
+  const rewritten = translation ? localizeRouteReferences(resolved, translation) : resolved
   const sourceFormat = extname(sourcePath).toLowerCase() === '.mdx' ? 'mdx' : 'markdown'
   const authored = sourceFormat === 'mdx'
     ? parseMdx(rewritten, sourcePath)
     : parseMarkdown(rewritten, sourcePath)
-  const route = authored.frontmatter.slug
-    ? normalizeRoute(authored.frontmatter.slug)
-    : routeFromRelativePath(relativePath)
+  if (translation) assertTranslationFrontmatter(authored.frontmatter, sourcePath)
+  const route = translation
+    ? localizedRoute(translation.locale.prefix, translation.counterpart.route)
+    : authored.frontmatter.slug
+      ? normalizeRoute(authored.frontmatter.slug)
+      : routeFromRelativePath(relativePath)
   const title = authored.frontmatter.title
     ?? authored.headings.find((heading) => heading.depth === 1)?.text
+    ?? translation?.counterpart.title
     ?? titleFromFile(relativePath)
   const normalizedSource = stripFirstMarkdownH1(rewritten)
   const parsed = sourceFormat === 'mdx'
@@ -128,16 +171,264 @@ function pageFromSource(loaded: LoadedDocumentationConfig, sourcePath: string): 
     route,
     title,
     description: parsed.frontmatter.description,
-    hidden: parsed.frontmatter.hidden === true,
-    noindex: loaded.config.seo.noindex === true || parsed.frontmatter.noindex === true,
+    hidden: translation ? translation.counterpart.hidden : parsed.frontmatter.hidden === true,
+    noindex: translation
+      ? translation.counterpart.noindex
+      : loaded.config.seo.noindex === true || parsed.frontmatter.noindex === true,
     markdown: parsed.markdown,
     html: parsed.html,
     text: parsed.text,
     headings: parsed.headings,
     sourceFormat,
     kind: 'page',
+    ...(sourceFormat === 'mdx' ? { mdxSource: normalizedSource } : {}),
+    ...(translation
+      ? {
+          locale: translation.locale.code,
+          translation: {
+            sourceRoute: translation.counterpart.route,
+            stale: checkSourceHash(authored.frontmatter.sourceHash, relativePath, sourcePath, translation),
+          },
+        }
+      : {}),
   }
 }
+
+/**
+ * The value a translation records in `sourceHash`: a prefix of the source
+ * file's SHA-256, with line endings and a BOM normalized so checkouts agree.
+ */
+export function translationSourceHash(sourcePath: string): string {
+  const source = readFileSync(sourcePath, 'utf8').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n')
+  return createHash('sha256').update(source).digest('hex').slice(0, 16)
+}
+
+/** Returns whether the translation is stale; a missing hash is collected as an error. */
+function checkSourceHash(
+  recorded: string | undefined,
+  relativePath: string,
+  sourcePath: string,
+  translation: TranslationContext,
+): boolean {
+  const current = translationSourceHash(translation.counterpart.sourcePath)
+  if (!recorded) {
+    translation.missingHashes.push({
+      code: 'translation_source_hash_missing',
+      message: `${relativePath}: add sourceHash: "${current}" (translated from ${translation.counterpart.relativePath})`,
+      file: sourcePath,
+    })
+    return false
+  }
+  if (recorded === current) return false
+  translation.warnings.push({
+    code: 'translation_stale',
+    message: `${relativePath} was translated from an earlier ${translation.counterpart.relativePath}; ` +
+      `update the translation, then set sourceHash: "${current}"`,
+    file: sourcePath,
+  })
+  return true
+}
+
+function assertTranslationFrontmatter(
+  frontmatter: ReturnType<typeof parseMarkdown>['frontmatter'],
+  sourcePath: string,
+): void {
+  const inherited = (['slug', 'hidden', 'noindex'] as const).filter((key) => frontmatter[key] !== undefined)
+  if (inherited.length === 0) return
+  throw new DocumentationError(
+    `Translations inherit ${inherited.join(', ')} from their default-locale page`,
+    'documentation_translation_invalid',
+    inherited.map((key) => ({
+      code: 'translation_frontmatter_inherited',
+      message: `Remove ${key} from the translation; set it on the default-locale page`,
+      file: sourcePath,
+    })),
+  )
+}
+
+interface TranslationSource {
+  locale: DocumentationAlternateLocale
+  sourcePath: string
+  /** Path inside the locale folder, which mirrors the default-locale tree. */
+  localRelativePath: string
+}
+
+/** Files under a configured locale folder are translations; everything else is default-locale. */
+function partitionSources(
+  loaded: LoadedDocumentationConfig,
+  sourceFiles: string[],
+): { defaultSources: string[]; translationSources: TranslationSource[] } {
+  const localesByPrefix = new Map(
+    loaded.config.locales?.alternates.map((locale) => [locale.prefix, locale]) ?? [],
+  )
+  const defaultSources: string[] = []
+  const translationSources: TranslationSource[] = []
+  for (const sourcePath of sourceFiles) {
+    const [first = '', ...rest] = relative(loaded.sourceDir, sourcePath).split(sep)
+    const locale = rest.length > 0 ? localesByPrefix.get(first) : undefined
+    if (locale) translationSources.push({ locale, sourcePath, localRelativePath: rest.join('/') })
+    else defaultSources.push(sourcePath)
+  }
+  return { defaultSources, translationSources }
+}
+
+function translatePages(
+  loaded: LoadedDocumentationConfig,
+  locales: DocumentationLocalesConfig,
+  defaultPages: DocumentationPage[],
+  sources: TranslationSource[],
+  warnings: DocumentationDiagnostic[],
+): DocumentationPage[] {
+  const byStem = new Map(
+    defaultPages
+      .filter((page) => page.kind === 'page')
+      .map((page) => [withoutSourceExtension(page.relativePath), page]),
+  )
+  const paired = sources.map((source) => ({
+    ...source,
+    counterpart: byStem.get(withoutSourceExtension(source.localRelativePath)),
+  }))
+  const orphans = paired.filter((source) => !source.counterpart)
+  if (orphans.length > 0) {
+    throw new DocumentationError(
+      `${orphans.length} translation(s) have no default-locale page at the same path`,
+      'documentation_translation_invalid',
+      orphans.map((source) => ({
+        code: 'translation_orphan',
+        message: `${source.locale.prefix}/${source.localRelativePath} needs ${source.localRelativePath}`,
+        file: source.sourcePath,
+      })),
+    )
+  }
+  const translatedRoutes = new Map(locales.alternates.map((locale) => [locale.prefix, new Set<string>()]))
+  for (const source of paired) translatedRoutes.get(source.locale.prefix)?.add(source.counterpart!.route)
+  const missingHashes: DocumentationDiagnostic[] = []
+  const pages = paired.map((source) =>
+    pageFromSource(loaded, source.sourcePath, {
+      locale: source.locale,
+      counterpart: source.counterpart!,
+      translatedRoutes: translatedRoutes.get(source.locale.prefix)!,
+      missingHashes,
+      warnings,
+    }),
+  )
+  // `es/guide.md` and `es/guide.mdx` would both translate `guide`.
+  assertUniqueRoutes(pages)
+  if (missingHashes.length > 0) {
+    throw new DocumentationError(
+      `${missingHashes.length} translation(s) do not record the source they were translated from`,
+      'documentation_translation_invalid',
+      missingHashes,
+    )
+  }
+  return pages
+}
+
+function withoutSourceExtension(path: string): string {
+  return path.replace(/\.(?:md|mdx)$/i, '')
+}
+
+/** Give every member of a translation cluster the same ordered alternate set. */
+function assignAlternates(
+  defaultPages: DocumentationPage[],
+  translations: DocumentationPage[],
+  locales: DocumentationLocalesConfig,
+): void {
+  const order = new Map(locales.alternates.map((locale, index) => [locale.code, index]))
+  const bySource = new Map<string, DocumentationPage[]>()
+  for (const page of translations) {
+    const sourceRoute = page.translation!.sourceRoute
+    bySource.set(sourceRoute, [...(bySource.get(sourceRoute) ?? []), page])
+  }
+  for (const page of defaultPages) {
+    const versions = bySource.get(page.route)
+    if (!versions) continue
+    versions.sort((left, right) => order.get(left.locale!)! - order.get(right.locale!)!)
+    const alternates = [
+      { locale: locales.default.code, route: page.route },
+      ...versions.map((version) => ({ locale: version.locale!, route: version.route })),
+    ]
+    for (const member of [page, ...versions]) member.alternates = alternates
+  }
+}
+
+/** Default-locale routes may not claim a locale prefix, whatever their slug. */
+function assertLocalePrefixesFree(pages: DocumentationPage[], locales: DocumentationLocalesConfig): void {
+  const prefixes = new Set(locales.alternates.map((locale) => locale.prefix))
+  const collisions = pages.filter((page) => prefixes.has((page.route.split('/')[1] ?? '').toLowerCase()))
+  if (collisions.length === 0) return
+  throw new DocumentationError(
+    `${collisions.length} default-locale page(s) use a locale route prefix`,
+    'documentation_route_reserved',
+    collisions.map((page) => ({
+      code: 'locale_prefix_route',
+      message: `${page.route} starts with a locale prefix; translations live in lowercase locale folders`,
+      file: page.sourcePath,
+    })),
+  )
+}
+
+/**
+ * Each locale's navigation is the default navigation filtered to the pages that
+ * exist in that locale, so documentation.json stays the one navigation authority.
+ */
+function localizeNavigations(
+  navigation: DocumentationNavigationNode[],
+  locales: DocumentationLocalesConfig,
+  translations: DocumentationPage[],
+): Record<string, DocumentationNavigationNode[]> {
+  const missingLabels: DocumentationDiagnostic[] = []
+  const localized = Object.fromEntries(
+    locales.alternates.map((locale) => {
+      const bySource = new Map(
+        translations
+          .filter((page) => page.locale === locale.code)
+          .map((page) => [page.translation!.sourceRoute, page]),
+      )
+      // A locale with no translations yet has no pages to show a sidebar on.
+      if (bySource.size === 0) return [locale.code, []]
+      const filter = (nodes: DocumentationNavigationNode[]): DocumentationNavigationNode[] =>
+        nodes.flatMap((node): DocumentationNavigationNode[] => {
+          if (node.kind === 'page') {
+            const page = bySource.get(node.route)
+            return page ? [{ kind: 'page', route: page.route, label: page.title }] : []
+          }
+          if (node.kind === 'group') {
+            const items = filter(node.items)
+            // Keep any group with something left in it, including link-only groups.
+            return items.length > 0 ? [{ ...node, items }] : []
+          }
+          const page = node.href.startsWith('/') ? bySource.get(node.href) : undefined
+          return [{ ...node, href: page?.route ?? node.href }]
+        })
+      const label = (value: string): string => {
+        const translated = locale.navigationLabels[value]
+        if (translated) return translated
+        missingLabels.push({
+          code: 'translation_navigation_label_missing',
+          message: `locales: add navigationLabels["${value}"] for ${locale.code}`,
+        })
+        return value
+      }
+      const relabel = (nodes: DocumentationNavigationNode[]): DocumentationNavigationNode[] =>
+        nodes.map((node) => {
+          if (node.kind === 'page') return node
+          if (node.kind === 'group') return { ...node, label: label(node.label), items: relabel(node.items) }
+          return { ...node, label: label(node.label) }
+        })
+      return [locale.code, relabel(filter(navigation))]
+    }),
+  )
+  if (missingLabels.length > 0) {
+    throw new DocumentationError(
+      `${missingLabels.length} translated navigation label(s) are missing`,
+      'documentation_translation_invalid',
+      missingLabels,
+    )
+  }
+  return localized
+}
+
 
 function collectContentFiles(sourceDir: string): string[] {
   const files: string[] = []
@@ -248,26 +539,60 @@ function validatePageLinks(
   redirects: Record<string, string>,
 ): void {
   const diagnostics: DocumentationDiagnostic[] = []
+  const sectionIds = new Map<DocumentationPage, Set<string>>()
   for (const page of pages) {
     if (page.kind !== 'page') continue
     const pattern = /(!?)\[[^\]]*\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g
+    const prose = page.locale ? stripCodeForValidation(page.markdown) : ''
     for (const match of page.markdown.matchAll(pattern)) {
       const isImage = match[1] === '!'
       const href = match[2]
+      const line = (): number => page.markdown.slice(0, match.index).split('\n').length
+      // A translation's headings get their own ids, so a section link copied
+      // from the source can name a section its target no longer has. Code
+      // samples stay as written, so links inside them are not checked.
+      const checkSection = (target: DocumentationPage, fragment: string): void => {
+        if (!page.locale || !fragment || prose[match.index] !== page.markdown[match.index]) return
+        let ids = sectionIds.get(target)
+        if (!ids) {
+          ids = new Set([
+            ...target.headings.map((heading) => heading.id),
+            ...[...target.html.matchAll(/\bid="([^"]+)"/g)].map((id) => id[1]!),
+          ])
+          sectionIds.set(target, ids)
+        }
+        const id = safeDecode(fragment)
+        if (ids.has(id)) return
+        const sections = target.headings.map((heading) => `#${heading.id}`).join(', ') || 'none'
+        diagnostics.push({
+          code: 'translation_anchor_missing',
+          message: `${href}: no section #${id} on ${target.route} (translated headings get their own ids). Sections: ${sections}`,
+          file: page.sourcePath,
+          line: line(),
+        })
+      }
       if (isImage || href.startsWith('/media/')) continue
-      if (/^(?:https?:|mailto:|#|data:)/i.test(href)) continue
+      if (href.startsWith('#')) {
+        checkSection(page, href.slice(1))
+        continue
+      }
+      if (/^(?:https?:|mailto:|data:)/i.test(href)) continue
       const routePart = href.split('#')[0].split('?')[0]
       if (!routePart) continue
+      // A translation's relative links left after rewriting sit in code samples;
+      // check them from the default-locale page's location, as the source is.
       const target = routePart.startsWith('/')
         ? normalizeRoute(routePart)
-        : normalizeRoute(posix.join(dirname(page.route), routePart))
+        : normalizeRoute(posix.join(dirname(page.translation?.sourceRoute ?? page.route), routePart))
       const normalized = navigationReferenceToRoute(target)
-      if (!byRoute.has(normalized) && !redirects[normalized]) {
+      const targetPage = byRoute.get(normalized)
+      if (targetPage) checkSection(targetPage, href.split('#')[1] ?? '')
+      else if (!redirects[normalized]) {
         diagnostics.push({
           code: 'broken_internal_link',
           message: `${href} resolves to ${normalized}`,
           file: page.sourcePath,
-          line: page.markdown.slice(0, match.index).split('\n').length,
+          line: line(),
         })
       }
     }
@@ -279,6 +604,46 @@ function validatePageLinks(
       diagnostics,
     )
   }
+}
+
+/**
+ * Point a translation's route links, outside code samples, at the same-locale
+ * page when one exists. Relative links that name no source file, such as a
+ * redirect or an API reference page, first become absolute from the
+ * default-locale page's route, where the reader would have resolved them.
+ */
+function localizeRouteReferences(
+  source: string,
+  { locale: { prefix }, counterpart, translatedRoutes }: TranslationContext,
+): string {
+  const route = (value: string, from: string): { route: string; suffix: string } | null => {
+    const boundary = value.search(/[?#]/)
+    const path = boundary < 0 ? value : value.slice(0, boundary)
+    if (!path) return null
+    try {
+      return { route: normalizeRoute(posix.join(from, path)), suffix: boundary < 0 ? '' : value.slice(boundary) }
+    } catch {
+      return null
+    }
+  }
+  const absolute = (value: string): string => {
+    const resolved = route(value, dirname(counterpart.route))
+    return resolved ? `${resolved.route}${resolved.suffix}` : value
+  }
+  const localize = (value: string): string => {
+    const resolved = route(value, '/')
+    return resolved && translatedRoutes.has(resolved.route)
+      ? `${localizedRoute(prefix, resolved.route)}${resolved.suffix}`
+      : value
+  }
+  return mapOutsideCode(source, (text) =>
+    mapLinkTargets(text, (value, kind) => {
+      if (value.startsWith('/')) return localize(value)
+      // Relative definitions and `src` stay as written: the definition pattern
+      // also matches prose such as footnotes, and `src` holds media, not routes.
+      if (kind === 'definition' || kind === 'src') return value
+      return localize(absolute(value))
+    }))
 }
 
 export function rewriteLocalReferences(
@@ -354,6 +719,14 @@ function validateRedirectTargets(config: DocumentationConfig, byRoute: Map<strin
         [{ code: 'redirect_missing_target', message: `${from} -> ${to}` }],
       )
     }
+  }
+}
+
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
   }
 }
 

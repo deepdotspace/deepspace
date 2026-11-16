@@ -47,20 +47,36 @@ export function documentationPublicPath(basePath: string, path: string): string 
 export function publicDocumentationReferences(source: string, basePath: string): string {
   const base = normalizeDocumentationBasePath(basePath)
   if (!base) return source
-  const publicPath = (value: string): string =>
-    value === base || value.startsWith(`${base}/`) ? value : `${base}${value}`
+  return mapLinkTargets(source, (value) =>
+    !value.startsWith('/') || value === base || value.startsWith(`${base}/`) ? value : `${base}${value}`)
+}
+
+/** Where a link target sits: a Markdown link, a link reference definition, or an attribute. */
+export type DocumentationLinkTargetKind = 'link' | 'definition' | 'href' | 'src'
+
+/**
+ * Apply `map` to every link target in authored source: Markdown links, link
+ * reference definitions, and `href`/`src` attributes. Targets with a scheme,
+ * fragment-only, protocol-relative, and `<…>` targets are never passed to it.
+ */
+export function mapLinkTargets(
+  source: string,
+  map: (value: string, kind: DocumentationLinkTargetKind) => string,
+): string {
+  const target = String.raw`(?![a-zA-Z][a-zA-Z0-9+.-]*:|[#<]|\/\/)`
   return source
     .replace(
-      /(\]\()(\/(?!\/)[^)\s]*)/g,
-      (_match, prefix: string, value: string) => `${prefix}${publicPath(value)}`,
+      new RegExp(String.raw`(\]\()(${target}[^)\s]+)`, 'g'),
+      (_match, prefix: string, value: string) => `${prefix}${map(value, 'link')}`,
     )
     .replace(
-      /^(\s*\[[^\]]+\]:\s*)(\/(?!\/)\S*)/gm,
-      (_match, prefix: string, value: string) => `${prefix}${publicPath(value)}`,
+      new RegExp(String.raw`^(\s*\[[^\]]+\]:\s*)(${target}\S+)`, 'gm'),
+      (_match, prefix: string, value: string) => `${prefix}${map(value, 'definition')}`,
     )
     .replace(
-      /(\b(?:href|src)=["'])(\/(?!\/)[^"']*)/g,
-      (_match, prefix: string, value: string) => `${prefix}${publicPath(value)}`,
+      new RegExp(String.raw`(\b(href|src)=["'])(${target}[^"']+)`, 'g'),
+      (_match, prefix: string, attribute: 'href' | 'src', value: string) =>
+        `${prefix}${map(value, attribute)}`,
     )
 }
 

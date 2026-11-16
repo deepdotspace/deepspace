@@ -6,12 +6,15 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { rewriteLocalReferences } from './graph'
-import { stripFirstMarkdownH1 } from './markdown'
 import { mdxCompileOptions } from './mdx'
 import { documentationPublicPath, publicDocumentationReferences } from './routing'
 import { errorMessage } from './text'
-import { DocumentationError, type DocumentationRuntimeData, type DocumentationValidationResult } from './types'
+import {
+  DocumentationError,
+  type DocumentationPage,
+  type DocumentationRuntimeData,
+  type DocumentationValidationResult,
+} from './types'
 
 export interface CustomDocumentationRuntime {
   browserAssets: Array<{ path: string; content: string }>
@@ -33,25 +36,26 @@ export function buildCustomDocumentationRuntime(
   basePath: string,
 ): CustomDocumentationRuntime | null {
   const sitePath = resolve(validation.appDir, 'documentation.tsx')
-  const mdxPages = validation.graph.pages.filter((page) => page.sourceFormat === 'mdx')
+  const mdxPages = validation.graph.pages.filter(
+    (page): page is DocumentationPage & { mdxSource: string } => page.mdxSource !== undefined,
+  )
   if (!existsSync(sitePath) && mdxPages.length === 0) return null
 
   const temporaryDir = mkdtempSync(join(tmpdir(), 'deepspace-documentation-runtime-'))
   try {
+    // The graph already resolved each page's references, translations included.
+    // A translation's imports, like its links, resolve from its default-locale page.
+    const sourcePathByRoute = new Map(validation.graph.pages.map((page) => [page.route, page.sourcePath]))
     const compiledPages = mdxPages.map((page, index) => {
-      const source = readFileSync(page.sourcePath, 'utf8')
-      const rewritten = rewriteLocalReferences(
-        source,
-        page.relativePath,
-        validation.sourceDir,
-        page.sourcePath,
-      )
+      const importBase = page.translation
+        ? sourcePathByRoute.get(page.translation.sourceRoute) ?? page.sourcePath
+        : page.sourcePath
       const compiled = compileSync(
-        publicDocumentationReferences(stripFirstMarkdownH1(rewritten), basePath),
+        publicDocumentationReferences(page.mdxSource, basePath),
         mdxCompileOptions(),
       )
       const path = join(temporaryDir, `page-${index}.mjs`)
-      writeFileSync(path, resolveCompiledImports(String(compiled), page.sourcePath, validation.appDir))
+      writeFileSync(path, resolveCompiledImports(String(compiled), importBase, validation.appDir))
       return { path, route: page.route }
     })
 
