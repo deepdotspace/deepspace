@@ -106,6 +106,14 @@ describe('composioTools', () => {
     ).rejects.toThrow(/execute-tool failed: Composio API error 401/)
   })
 
+  it('callComposio refuses an endpoint that is not a plain identifier', async () => {
+    mock(() => jsonResponse({ success: true, data: {} }))
+    await expect(
+      callComposio(env, '../../users/me', {}, { asUser: 'alice' }),
+    ).rejects.toThrow(/plain identifier/)
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
   it('builds a ToolSet keyed by slug from list-tools, with auth + scope', async () => {
     mock((url) =>
       url.includes('/list-tools') ? jsonResponse(oneTool) : jsonResponse({ success: true, data: {} }),

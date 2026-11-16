@@ -710,6 +710,46 @@ describe('generated worker route owners', () => {
     }
   })
 
+  it('refuses integration names and endpoints that decode to another api-worker route', async () => {
+    const app = new Hono<TestContext>()
+    registerAuthAndIntegrationRoutes(app)
+    const apiFetch = vi.fn(async () => Response.json({ success: true, data: {} }))
+    const token = await signTestJwt('browser-user')
+    const routeEnv = env({
+      API_WORKER: { fetch: apiFetch } as unknown as Fetcher,
+      APP_OWNER_JWT: 'owner-jwt',
+      APP_IDENTITY_TOKEN: 'identity-token',
+      DEEPSPACE_APP_ID: 'app_test',
+      AUTH_JWT_PUBLIC_KEY: TEST_JWT_PUBLIC_KEY,
+      AUTH_JWT_ISSUER: TEST_JWT_ISSUER,
+    })
+    for (const path of [
+      '..%2F..%2Fapi%2Fusers/me',
+      '..%5C..%5Capi%5Cusers/me',
+      'openai/..%2F..%2F..%2Fapi%2Fusers%2Fme',
+      'constructor/x',
+      '__proto__/x',
+    ]) {
+      const res = await app.request(
+        `https://app.test/api/integrations/${path}`,
+        { method: 'GET', headers: { Authorization: `Bearer ${token}` } },
+        routeEnv,
+      )
+      if (path.startsWith('constructor')) {
+        // A plain identifier reaches the api-worker's own 2-segment route,
+        // billed as an unlisted name rather than as Object's config.
+        expect(res.status).toBe(200)
+        expect(apiFetch).toHaveBeenLastCalledWith(
+          'https://api-worker/api/integrations/constructor/x',
+          expect.anything(),
+        )
+        continue
+      }
+      expect(res.status, path).toBe(404)
+    }
+    expect(apiFetch).toHaveBeenCalledTimes(1)
+  })
+
   it('requires owner/admin auth after production debug routes are enabled', async () => {
     const app = new Hono<TestContext>()
     registerAuthAndIntegrationRoutes(app)
@@ -1107,6 +1147,76 @@ describe('generated worker route owners', () => {
           }),
         }),
       )
+    } finally {
+      delete templateActions[actionName]
+    }
+  })
+
+  it('never runs an inherited property as an action, so env secrets stay out of the response', async () => {
+    const actions = new Hono<TestContext>()
+    registerActionRoutes(actions, async () => ({
+      userId: 'any-signed-in-user',
+      claims: { sub: 'any-signed-in-user' },
+    }))
+    const routeEnv = env({
+      APP_OWNER_JWT: 'owner-jwt-secret',
+      APP_IDENTITY_TOKEN: 'identity-token-secret',
+      DEEPSPACE_APP_ID: 'app_test',
+      RECORD_ROOMS: {
+        idFromName: (name: string) => name,
+        get: () => ({ fetch: vi.fn() }),
+      } as unknown as DurableObjectNamespace,
+    })
+    for (const name of [
+      ...Object.getOwnPropertyNames(Object.prototype),
+      '%63onstructor',
+    ]) {
+      const response = await actions.request(
+        `https://app.test/api/actions/${name}`,
+        {
+          method: 'POST',
+          headers: { Authorization: 'Bearer caller-jwt', 'Content-Type': 'application/json' },
+          body: '{}',
+        },
+        routeEnv,
+      )
+      expect(response.status, name).toBe(404)
+      expect(await response.text()).not.toContain('secret')
+    }
+  })
+
+  it('refuses an action integration call that is not two plain identifiers', async () => {
+    const actionName = '__traversal_test__'
+    templateActions[actionName] = async ({ tools }) => tools.integration('../../api/users/me', {})
+    const apiFetch = vi.fn(async () => Response.json({ success: true, data: {} }))
+    const actions = new Hono<TestContext>()
+    registerActionRoutes(actions, async () => ({
+      userId: 'verified-user',
+      claims: { sub: 'verified-user' },
+    }))
+    try {
+      const response = await actions.request(
+        `https://app.test/api/actions/${actionName}`,
+        {
+          method: 'POST',
+          headers: { Authorization: 'Bearer caller-jwt', 'Content-Type': 'application/json' },
+          body: '{}',
+        },
+        env({
+          API_WORKER: { fetch: apiFetch } as unknown as Fetcher,
+          APP_OWNER_JWT: 'owner-jwt',
+          DEEPSPACE_APP_ID: 'app_test',
+          RECORD_ROOMS: {
+            idFromName: (name: string) => name,
+            get: () => ({ fetch: vi.fn() }),
+          } as unknown as DurableObjectNamespace,
+        }),
+      )
+      expect(await response.json()).toMatchObject({
+        success: false,
+        code: 'invalid_integration_endpoint',
+      })
+      expect(apiFetch).not.toHaveBeenCalled()
     } finally {
       delete templateActions[actionName]
     }

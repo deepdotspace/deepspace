@@ -130,4 +130,20 @@ describe('buildCronContext().integrations.call', () => {
       /openai\/chat-completion failed/,
     )
   })
+
+  it('refuses an endpoint that is not two plain identifiers, before sending the owner token', async () => {
+    const ctx = buildCronContext(
+      {
+        RECORD_ROOMS: FAKE_RECORD_ROOMS,
+        API_WORKER_URL: 'https://api.example.com',
+        APP_OWNER_JWT: 'owner-jwt-value',
+      },
+      'owner-user-id',
+    )
+
+    for (const endpoint of ['../../api/users/me', 'openai', 'openai/chat/x', 'a\\..\\b/c', '%2e%2e/x']) {
+      await expect(ctx.integrations.call(endpoint, {})).rejects.toThrow(/plain identifiers/)
+    }
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
 })

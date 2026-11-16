@@ -28,7 +28,12 @@
  */
 
 import type { Hono } from 'hono'
-import { apiWorkerFetch, normalizeApiError } from 'deepspace/worker'
+import {
+  apiWorkerFetch,
+  lookupOwn,
+  normalizeApiError,
+  splitIntegrationEndpoint,
+} from 'deepspace/worker'
 import type { ActionResult, ActionTools, VerifyResult } from 'deepspace/worker'
 import { actions } from '../actions/index.js'
 import { integrations } from '../integrations.js'
@@ -53,7 +58,9 @@ export function registerActionRoutes(app: Hono<AppContext>, resolveAuth: Resolve
     // The name is a decoded path segment, so it is quoted, never interpolated raw.
     console.info(`[action] ${JSON.stringify(c.req.param('name'))} caller=${auth.userId}`)
     const name = c.req.param('name')
-    const action = actions[name]
+    // Own keys only: `actions[name]` also finds `constructor` (Object), which
+    // returns the handler argument, env secrets included, as the response.
+    const action = lookupOwn(actions, name)
     if (!action) return c.json({ error: 'Action not found' }, 404)
     const params = await c.req.json<Record<string, unknown>>()
     const tools = createActionTools(c.env, auth.userId, callerJwt)
@@ -86,8 +93,18 @@ function createActionTools(env: Env, userId: string, callerJwt: string): ActionT
   }
 
   async function callIntegration<T>(endpoint: string, data?: unknown): Promise<ActionResult<T>> {
-    const integrationName = endpoint.split('/')[0]
-    const billingMode = integrations[integrationName]?.billing ?? 'developer'
+    // "name/endpoint", both plain identifiers: anything else could reach
+    // another api-worker route carrying the owner's token.
+    const target = splitIntegrationEndpoint(endpoint)
+    if (!target) {
+      return {
+        success: false,
+        code: 'invalid_integration_endpoint',
+        error: `Integration endpoint ${JSON.stringify(endpoint)} must be "<integration>/<endpoint>"`,
+      }
+    }
+    const integrationName = target.name
+    const billingMode = lookupOwn(integrations, integrationName)?.billing ?? 'developer'
 
     // The api-worker bills the JWT subject: owner for developer mode, caller
     // for user mode. It does not accept a client-supplied billing override.
@@ -106,7 +123,7 @@ function createActionTools(env: Env, userId: string, callerJwt: string): ActionT
       headers['x-app-id'] = env.DEEPSPACE_APP_ID
     }
 
-    const res = await apiWorkerFetch(env, `/api/integrations/${endpoint}`, {
+    const res = await apiWorkerFetch(env, target.path, {
       method: 'POST',
       headers,
       body: JSON.stringify(data ?? {}),

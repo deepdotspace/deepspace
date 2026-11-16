@@ -19,6 +19,7 @@ export async function verifyAgentToken(
       ...config,
       issuer: agentTokenIssuer(config.issuer),
       audience: targetOrigin,
+      acceptScope: (scope) => scope === AGENT_TOKEN_SCOPE,
     },
     token,
   )

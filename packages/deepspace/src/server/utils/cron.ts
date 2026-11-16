@@ -11,6 +11,7 @@
  */
 
 import { apiWorkerFetch, type ApiWorkerEnv } from './proxies'
+import { splitIntegrationEndpoint } from './integration-path'
 
 /** Context passed to cron handler functions */
 export interface CronContext {
@@ -106,16 +107,22 @@ export function buildCronContext(
 
   const integrations: CronContext['integrations'] = {
     async call(endpoint, params = {}) {
+      // "name/endpoint" as the catalog writes it (e.g. "openai/chat-completion"),
+      // both plain identifiers: anything else could reach another api-worker
+      // route carrying the owner's token.
+      const parts = splitIntegrationEndpoint(endpoint)
+      if (!parts) {
+        throw new Error(
+          `Integration endpoint ${JSON.stringify(endpoint)} must be "<integration>/<endpoint>" with plain identifiers.`,
+        )
+      }
       if (!env.APP_OWNER_JWT) {
         throw new Error(
           'integrations.call requires env.APP_OWNER_JWT. Deployed apps receive ' +
             'this automatically; in dev, `deepspace dev start` writes it into .dev.vars.',
         )
       }
-      // The api-worker's /api/integrations route is path-shaped as
-      // /:name/:endpoint. Pass the same "name/endpoint" string the
-      // catalog uses (e.g. "openai/chat-completion").
-      const response = await apiWorkerFetch(env, `/api/integrations/${endpoint}`, {
+      const response = await apiWorkerFetch(env, parts.path, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

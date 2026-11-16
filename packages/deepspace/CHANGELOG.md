@@ -1,5 +1,13 @@
 # deepspace
 
+## 0.44.2
+
+### Patch Changes
+
+- Security: close two holes in the scaffold's routes that any signed-in DeepSpace user could reach, and stop accepting an app's owner token as a sign-in. The scaffold's action route looked actions up with `actions[name]`, so `POST /api/actions/constructor` ran `Object` and returned the handler argument, including `env` with `APP_OWNER_JWT`, `APP_IDENTITY_TOKEN` and every app secret. The integrations proxy built its api-worker path from decoded route params, so `/api/integrations/..%2F..%2Fapi%2Fusers/me` reached other api-worker routes with the owner's token. New apps look actions and integration configs up by own key (`lookupOwn`) and forward only plain identifiers (`integrationPath`, `splitIntegrationEndpoint`, `SAFE_PATH_SEGMENT`), all exported from `deepspace/worker`. Existing apps: `deepspace app update` lists the change (migration `2026-11-route-param-lookups`); the platform also refuses both request patterns, and any request presenting an app token, in front of every deployed app, so apps are covered before they update. Cron's `integrations.call` and `callComposio` refuse an endpoint that is not plain identifiers.
+
+  `verifyJwt` now refuses a token that carries a `scope` claim unless the new `acceptScope` option accepts it. Sign-in sessions never carry a scope; an app's `APP_OWNER_JWT` carries `app:<appId>`, so app routes built on `verifyJwt` (the scaffold's `resolveAuth`, realtime routes, files reads) no longer treat it as the owner signed in. Pass `acceptScope: isAppTokenScope` only on a route that is meant to take app server credentials. `verifyAgentToken` is unchanged for callers.
+
 ## 0.44.1
 
 ### Patch Changes

@@ -12,7 +12,9 @@ import {
   apiWorkerFetch,
   authWorkerFetch,
   BROWSER_PROXY_ROUTES,
+  integrationPath,
   isPlatformReservedPath,
+  lookupOwn,
   platformWorkerFetch,
   resolveAppRole,
   resolveSessionReadAuth,
@@ -230,7 +232,12 @@ export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
 
   app.all('/api/integrations/:name/:endpoint', async (c) => {
     const integrationName = c.req.param('name')
-    const config = integrations[integrationName]
+    // Params arrive decoded, so `..%2F..%2Fapi%2Fusers` would otherwise
+    // reach another api-worker route with the owner's token. Plain
+    // identifiers only, and own keys only for the config.
+    const target = integrationPath(integrationName, c.req.param('endpoint'))
+    if (!target) return c.json({ error: 'Unknown integration' }, 404)
+    const config = lookupOwn(integrations, integrationName)
     const billingMode = config?.billing ?? 'developer'
 
     // Sign-in is required unless the app opts this integration into anonymous
@@ -241,7 +248,6 @@ export function registerAuthAndIntegrationRoutes(app: Hono<AppContext>): void {
       return c.json({ error: 'Sign in required for this integration' }, 401)
     }
 
-    const target = `/api/integrations/${integrationName}/${c.req.param('endpoint')}`
     const headers: Record<string, string> = {
       'Content-Type': c.req.header('Content-Type') ?? 'application/json',
     }

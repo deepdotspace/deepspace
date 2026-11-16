@@ -46,6 +46,13 @@ export const PUBLIC_PAGE_SEO_MIGRATION_ID = '2026-10-public-page-seo'
  *  connection on the owner's account. Scaffolds now list it as 'user'. */
 export const COMPOSIO_USER_BILLING_MIGRATION_ID = '2026-11-composio-user-billing'
 
+/** The action route looked actions up with plain indexing, so `constructor`
+ *  returned the handler argument (env secrets included), and the integration
+ *  proxy built its api-worker path from decoded params, so `..%2F` reached
+ *  other routes with the owner's token. Both now take own keys and plain
+ *  identifiers only. */
+export const ROUTE_PARAM_LOOKUPS_MIGRATION_ID = '2026-11-route-param-lookups'
+
 export type AppMigrationIdsValidation =
   | { valid: true; ids: string[] }
   | { valid: false; reason: string }

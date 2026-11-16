@@ -12,6 +12,7 @@ import {
   FILES_SESSION_COOKIE_READS_MIGRATION_ID,
   INTEGRATIONS_SIGN_IN_MIGRATION_ID,
   PUBLIC_PAGE_SEO_MIGRATION_ID,
+  ROUTE_PARAM_LOOKUPS_MIGRATION_ID,
   SECURE_ROOM_BOUNDARIES_MIGRATION_ID,
   WORKER_OWNED_NOT_FOUND_MIGRATION_ID,
   validateAppMigrationIds,
@@ -108,6 +109,13 @@ export const APP_MIGRATION_GUIDANCE: readonly AppMigrationGuidance[] = [
     files: ['src/integrations.ts', 'src/server/action-routes.ts, when server actions call Composio'],
     guidance:
       "Only for apps that call Composio through /api/integrations or a server action's `tools.integration`. Add `composio: { billing: 'user' }` next to `google` in src/integrations.ts. Without it the proxy forwards the owner's token, so every user connects and acts on the owner's account; users who already connected must reconnect afterwards, and their old connections stay filed under the owner. If server actions call Composio, also have `callIntegration` in src/server/action-routes.ts send `x-app-identity-token: env.APP_IDENTITY_TOKEN` and `x-app-id: env.DEEPSPACE_APP_ID` on Composio calls when the token is set, as the /api/integrations proxy does; without them an action looks for the user's connection in a different namespace and reports it as not connected. Clean up the old connections from the app's server code, since the CLI looks in a different namespace: call `callComposio(env, 'list-connections', {}, { authToken: env.APP_OWNER_JWT })`, then `callComposio(env, 'disconnect', { connectedAccountId }, { authToken: env.APP_OWNER_JWT })` for every connection it returns. The list does not say who made each connection, so the owner's own are removed too; the owner reconnects afterwards. Server code that acts for a user in the background uses `callComposio(env, endpoint, params, { asUser })` from 'deepspace/worker'.",
+  },
+  {
+    id: ROUTE_PARAM_LOOKUPS_MIGRATION_ID,
+    description: 'Look up actions and integrations by own key and plain identifier only',
+    files: ['src/server/action-routes.ts', 'src/server/http-routes.ts', 'any other route that puts a URL parameter into a lookup or an api-worker path'],
+    guidance:
+      "Apply promptly; both holes are reachable by any signed-in user. In action-routes.ts, replace `actions[name]` with `lookupOwn(actions, name)` from 'deepspace/worker': plain indexing resolves `constructor`, which returns the handler argument, env secrets included, as the response. In the same file's `callIntegration`, replace the `endpoint.split('/')` and `/api/integrations/${endpoint}` path with `const target = splitIntegrationEndpoint(endpoint)` (null unless it is exactly two plain identifiers; return a failed ActionResult with code 'invalid_integration_endpoint' when null), read billing with `lookupOwn(integrations, target.name)`, and fetch `target.path`. In http-routes.ts, in /api/integrations/:name/:endpoint, build the target with `integrationPath(name, endpoint)` from 'deepspace/worker' and return 404 when it is null, before resolving auth; read the config with `lookupOwn(integrations, name)`. Params arrive decoded, so without this `..%2F..%2Fapi%2Fusers/me` reaches another api-worker route with the owner's token. Check any other route that puts a URL parameter into an api-worker path with `SAFE_PATH_SEGMENT`. The platform now blocks both patterns in front of every deployed app, but the app's own code should not depend on that.",
   },
 ]
 

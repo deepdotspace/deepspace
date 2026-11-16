@@ -21,6 +21,14 @@ export interface JwtVerifierConfig {
   authorizedParties?: string[]
   /** Clock skew tolerance in milliseconds (default: 5000) */
   clockSkewMs?: number
+  /**
+   * Machine credentials carry a `scope` claim (`app:<appId>` on an app's
+   * APP_OWNER_JWT, `agent` on agent credentials); sign-in sessions never do.
+   * A scoped token is refused unless this returns true for its scope, so a
+   * route that does not opt in cannot be called with an app's server
+   * credential as if it were the owner signed in.
+   */
+  acceptScope?: (scope: string) => boolean
 }
 
 export interface JwtClaims {

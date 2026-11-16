@@ -92,6 +92,15 @@ export async function verifyJwt(
       throw new Error('JWT verification succeeded but subject claim is missing')
     }
 
+    // Sessions carry no scope; a machine credential is accepted only where
+    // the caller opted in (see JwtVerifierConfig.acceptScope).
+    if (
+      claims.scope !== undefined &&
+      (typeof claims.scope !== 'string' || !config.acceptScope?.(claims.scope))
+    ) {
+      throw new Error(`Token scope ${JSON.stringify(claims.scope)} is not accepted here`)
+    }
+
     // Check authorized parties if configured
     const authorizedParties = normalizeArray(config.authorizedParties)
     if (authorizedParties) {
@@ -116,4 +125,13 @@ export async function verifyJwt(
       debug: decodeJwtPayload(token),
     }
   }
+}
+
+/**
+ * `acceptScope` for app tokens (`app:<appId>`): an app's APP_OWNER_JWT and an
+ * agent's app runtime token. Only routes that serve app server code (billed
+ * integration calls, the AI proxy) should accept them.
+ */
+export function isAppTokenScope(scope: string): boolean {
+  return scope.startsWith('app:')
 }

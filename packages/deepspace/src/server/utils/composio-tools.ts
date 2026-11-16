@@ -35,6 +35,7 @@
 import { tool, jsonSchema, type ToolSet } from 'ai'
 import { apiWorkerFetch, type ApiWorkerEnv } from './proxies'
 import { appendAppIdentity, type AppIdentityEnv } from './app-identity'
+import { integrationPath } from './integration-path'
 
 export interface ComposioEnv extends ApiWorkerEnv, AppIdentityEnv {
   /** Bills `asUser` calls to the app owner. Injected at deploy time. */
@@ -100,7 +101,10 @@ async function requestComposio(
   params: Record<string, unknown>,
   caller: ComposioCaller,
 ): Promise<{ ok: boolean; success: boolean; data: unknown; detail: string }> {
-  const res = await apiWorkerFetch(env, `/api/integrations/composio/${endpoint}`, {
+  // A plain identifier only: `../..` would carry the owner's token elsewhere.
+  const path = integrationPath('composio', endpoint)
+  if (!path) throw new Error(`Composio endpoint ${JSON.stringify(endpoint)} must be a plain identifier.`)
+  const res = await apiWorkerFetch(env, path, {
     method: 'POST',
     headers: composioHeaders(env, caller),
     body: JSON.stringify(params),
