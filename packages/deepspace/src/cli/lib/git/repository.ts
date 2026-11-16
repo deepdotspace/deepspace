@@ -252,3 +252,21 @@ export function ensureLocalExclude(cwd: string, pattern: string): void {
     // Best-effort: a failed exclude makes status noisy but does not break the worktree.
   }
 }
+
+/**
+ * Keep a path the CLI generates inside a project (`.dev.vars`, `.deepspace/`)
+ * out of its Git status. Scaffolds ignore these in `.gitignore`; a raw,
+ * recovered or hand-built project may not, and then deploy's dirty-worktree
+ * refusal tells the caller to commit them, live tokens included. Only an
+ * unignored path in a Git checkout gains a rule, in the repo-local
+ * `.git/info/exclude`: editing `.gitignore` would itself dirty the worktree.
+ */
+export function keepLocalPathIgnored(cwd: string, path: string): void {
+  try {
+    // 0: already ignored. 1: a checkout that does not ignore it. 128: not Git.
+    if (runGit(cwd, ['check-ignore', '-q', '--', path], { allowFail: true }).status === 1)
+      ensureLocalExclude(cwd, path)
+  } catch {
+    // Best-effort: without Git there is no history for the path to leak into.
+  }
+}

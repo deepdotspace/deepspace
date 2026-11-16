@@ -931,6 +931,185 @@ describe('shared agent transports', () => {
       )
     }
   })
+  it('reports a refused SDK tool result as a tool error on every transport', async () => {
+    // The built-in record tools return the SDK ToolResult. A refused write
+    // used to arrive as `ok: true` over HTTP and `isError: false` over MCP.
+    const { env } = makeEnv()
+    const outcomes: unknown[] = [
+      { success: false, error: "Field 'text' must be text of at most 280 characters" },
+      { success: true, data: { recordId: 'r1' } },
+    ]
+    const app = makeApp(env, {
+      buildTools: () => ({
+        records_create: tool({
+          inputSchema: z.object({}),
+          execute: async () => outcomes.shift(),
+        }),
+      }),
+    })
+    const refused = await app.request(
+      base + '/tools/records_create',
+      { method: 'POST', body: JSON.stringify({ input: {} }) },
+      env,
+    )
+    expect(refused.status).toBe(422)
+    expect(await refused.json()).toEqual({
+      ok: false,
+      code: 'tool_failed',
+      error: "The tool reported a failure. Field 'text' must be text of at most 280 characters",
+    })
+    const mcp = (await (
+      await app.request(base + '/mcp', rpc('tools/call', { name: 'records_create' }), env)
+    ).json()) as {
+      result: { isError: boolean; structuredContent?: unknown; content: Array<{ text: string }> }
+    }
+    expect(mcp.result.isError).toBe(false)
+    expect(mcp.result.structuredContent).toEqual({ success: true, data: { recordId: 'r1' } })
+    outcomes.push({ success: false, error: 'UPDATE DENIED: role=viewer, collection=items' })
+    const denied = (await (
+      await app.request(base + '/mcp', rpc('tools/call', { name: 'records_create' }), env)
+    ).json()) as {
+      result: { isError: boolean; structuredContent?: unknown; content: Array<{ text: string }> }
+    }
+    expect(denied.result.isError).toBe(true)
+    expect(denied.result.structuredContent).toBeUndefined()
+    expect(JSON.parse(denied.result.content[0].text)).toMatchObject({
+      ok: false,
+      code: 'tool_failed',
+    })
+  })
+  it('holds a validator-less jsonSchema tool to the schema it publishes', async () => {
+    const { env } = makeEnv()
+    const execute = vi.fn(async (input: unknown) => input)
+    const app = makeApp(env, {
+      buildTools: () => ({
+        add: tool({
+          inputSchema: jsonSchema<{ text: string }>({
+            type: 'object',
+            properties: { text: { type: 'string', minLength: 1, maxLength: 5 } },
+            required: ['text'],
+            additionalProperties: false,
+          }),
+          execute,
+        }),
+      }),
+    })
+    const call = async (input: unknown) => {
+      const response = await app.request(
+        base + '/tools/add',
+        { method: 'POST', body: JSON.stringify({ input }) },
+        env,
+      )
+      return { status: response.status, body: (await response.json()) as { error?: string } }
+    }
+    expect((await call({ text: 'ok' })).status).toBe(200)
+    const undeclared = await call({ text: 'ok', nope: 1 })
+    expect(undeclared.status).toBe(400)
+    expect(undeclared.body.error).toContain('nope')
+    expect((await call({})).status).toBe(400)
+    expect((await call({ text: 'too long' })).status).toBe(400)
+    expect(execute).toHaveBeenCalledTimes(1)
+  })
+  it('passes a jsonSchema tool the input it was sent, with formats as annotations', async () => {
+    const { env } = makeEnv()
+    const execute = vi.fn(async (input: unknown) => input)
+    const app = makeApp(env, {
+      buildTools: () => ({
+        schedule: tool({
+          inputSchema: jsonSchema<{ due: string; format?: string; note?: string | null }>({
+            type: 'object',
+            properties: {
+              due: { type: 'string', format: 'date-time' },
+              // A field named `format` is still declared and type-checked.
+              format: { type: 'string' },
+              note: {
+                anyOf: [{ type: 'string', format: 'email' }, { type: 'null' }],
+                default: null,
+              },
+            },
+            required: ['due'],
+            additionalProperties: false,
+          }),
+          execute,
+        }),
+      }),
+    })
+    const call = async (input: unknown) =>
+      (
+        await app.request(
+          base + '/tools/schedule',
+          { method: 'POST', body: JSON.stringify({ input }) },
+          env,
+        )
+      ).status
+    expect(await call({ due: '2026-10-28T09:00:00-04:00', note: 'a@b' })).toBe(200)
+    expect(await call({ due: '2026-10-28T09:00:00Z' })).toBe(200)
+    expect(execute).toHaveBeenNthCalledWith(2, { due: '2026-10-28T09:00:00Z' }, expect.anything())
+    expect(await call({ due: '2026-10-28', format: 7 })).toBe(400)
+    expect(execute).toHaveBeenCalledTimes(2)
+  })
+  it('refuses an undeclared field beside a root anyOf, which Zod leaves open', async () => {
+    // The raw starter's items_update shape: text, done, or both.
+    const { env } = makeEnv()
+    const execute = vi.fn(async (input: unknown) => input)
+    const app = makeApp(env, {
+      buildTools: () => ({
+        update: tool({
+          inputSchema: jsonSchema<{ id: string; text?: string; done?: 0 | 1 }>({
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              text: { type: 'string' },
+              done: { type: 'integer', enum: [0, 1] },
+            },
+            required: ['id'],
+            anyOf: [{ required: ['text'] }, { required: ['done'] }],
+            additionalProperties: false,
+          }),
+          execute,
+        }),
+      }),
+    })
+    const call = async (input: unknown) => {
+      const response = await app.request(
+        base + '/tools/update',
+        { method: 'POST', body: JSON.stringify({ input }) },
+        env,
+      )
+      return { status: response.status, body: (await response.json()) as { error?: string } }
+    }
+    const typo = await call({ id: 'n1', done: 1, txt: 'typo field' })
+    expect(typo.status).toBe(400)
+    expect(typo.body.error).toContain('txt')
+    expect((await call({ id: 'n1', done: 1 })).status).toBe(200)
+    expect(execute).toHaveBeenCalledOnce()
+    expect(execute).toHaveBeenCalledWith({ id: 'n1', done: 1 }, expect.anything())
+  })
+  it('refuses an undeclared field of a closed schema that omits type: object', async () => {
+    const { env } = makeEnv()
+    const execute = vi.fn(async (input: unknown) => input)
+    const app = makeApp(env, {
+      buildTools: () => ({
+        untyped: tool({
+          inputSchema: jsonSchema<{ a?: string }>({
+            properties: { a: { type: 'string' } },
+            additionalProperties: false,
+          }),
+          execute,
+        }),
+      }),
+    })
+    const response = await app.request(
+      base + '/tools/untyped',
+      { method: 'POST', body: JSON.stringify({ input: { a: 'x', b: 1 } }) },
+      env,
+    )
+    expect(response.status).toBe(400)
+    expect(((await response.json()) as { error: string }).error).toContain(
+      'Unknown input field(s): b ',
+    )
+    expect(execute).not.toHaveBeenCalled()
+  })
   it.each([401, 403, 503] as const)(
     'keeps all discovery and invocation behind the same %i gate',
     async (status) => {

@@ -1,6 +1,7 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { appStateDir } from './app-state'
 
 /**
  * A preload used only by a local test server.
@@ -61,8 +62,7 @@ if (loaded && !loaded[marker]) {
  * rewritten when missing or different.
  */
 export function writeNodeOutboundHook(appDir: string): string {
-  const stateDir = join(appDir, '.deepspace')
-  mkdirSync(stateDir, { recursive: true })
+  const stateDir = appStateDir(appDir)
   const hookPath = join(stateDir, 'node-outbound-hook.mjs')
   if (!existsSync(hookPath) || readFileSync(hookPath, 'utf8') !== HOOK_SOURCE) {
     writeFileSync(hookPath, HOOK_SOURCE, { encoding: 'utf8', mode: 0o600 })

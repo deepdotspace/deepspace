@@ -22,8 +22,9 @@
  * still prints.
  */
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { appStateDir } from '../../lib/app-state'
 import { Refusal } from '../../lib/command'
 import { processAlive } from '../../lib/install-status'
 
@@ -43,7 +44,8 @@ export function deployLockPath(appDir: string): string {
 /** Take the lock or refuse `deploy_in_progress`; returns the release function. */
 export function acquireDeployLock(appDir: string): () => void {
   const path = deployLockPath(appDir)
-  mkdirSync(dirname(path), { recursive: true })
+  // Taken before deploy's dirty-worktree check, so the lock must never count.
+  appStateDir(appDir)
   const record: DeployLockRecord = {
     pid: process.pid,
     startedAt: new Date().toISOString(),

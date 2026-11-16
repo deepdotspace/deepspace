@@ -40,6 +40,7 @@ import { join, relative, resolve, sep } from 'node:path'
 import { sync as spawnSync } from 'cross-spawn'
 import { ensureToken, loginAction } from '../auth'
 import { findAppDir } from '../lib/app-context'
+import { appStateDir } from '../lib/app-state'
 import { resolveWorktreePort } from '../lib/launch-config'
 import { DEPLOY_URL } from '../env'
 import { writeDevVars } from '../lib/dev-vars'
@@ -522,7 +523,7 @@ function runPlaywright(
   // that does not contain its parent config tree, so the default global path
   // fails before the worker starts. Keep this ephemeral state inside the
   // already ignored app workspace and make the parent explicit.
-  const deepspaceStatePath = join(appDir, '.deepspace')
+  const deepspaceStatePath = appStateDir(appDir)
   const wranglerRegistryPath = join(deepspaceStatePath, 'wrangler-registry')
   const xdgConfigPath = join(deepspaceStatePath, 'config')
   mkdirSync(xdgConfigPath, { recursive: true })

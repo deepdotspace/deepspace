@@ -36,10 +36,8 @@ import { Refusal } from './command'
  * hand has no sentinels and is ready on resolution alone.
  */
 import {
-  appendFileSync,
   closeSync,
   existsSync,
-  mkdirSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -50,6 +48,7 @@ import {
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { sync as spawnSync } from 'cross-spawn'
+import { appStateDir } from './app-state'
 import { repoToplevel } from './git/repository'
 import { detectPackageManager } from './package-manager'
 
@@ -200,8 +199,8 @@ function healMissingInstall(appDir: string): void {
       }
     }
   }
-  mkdirSync(sentinelDir, { recursive: true })
-  ensureSentinelsIgnored(appDir)
+  // The sentinels must not trip deploy's dirty-worktree refusal or push warnings.
+  appStateDir(appDir)
   rmSync(errPath, { force: true })
   rmSync(join(sentinelDir, 'install.done'), { force: true })
   // Older versions wrote an install.pid; clear the leftover so nothing on
@@ -258,33 +257,6 @@ function sentinelAgeMs(path: string): number {
     return Date.now() - statSync(path).mtimeMs
   } catch {
     return Number.POSITIVE_INFINITY
-  }
-}
-
-/**
- * Keep the heal's own sentinels out of the user's working tree. Scaffolds
- * ship `.deepspace` in .gitignore; a hand-built or GitHub-sourced app may
- * not, and then the sentinels the heal writes would trip deploy's
- * dirty-worktree refusal, push's uncommitted warning, and the release's
- * dirty flag — all self-inflicted. `.git/info/exclude` is the repo-LOCAL
- * ignore file (never committed, never the user's .gitignore), which makes it
- * the one place this tool may write an ignore rule.
- */
-function ensureSentinelsIgnored(appDir: string): void {
-  try {
-    const check = spawnSync('git', ['-C', appDir, 'check-ignore', '-q', '.deepspace'], {
-      stdio: 'ignore',
-    })
-    if (check.status === 0 || check.error) return // already ignored, or no git
-    const excludePath = spawnSync('git', ['-C', appDir, 'rev-parse', '--git-path', 'info/exclude'], {
-      encoding: 'utf-8',
-    })
-    if (excludePath.status !== 0) return
-    const target = resolve(appDir, excludePath.stdout.trim())
-    mkdirSync(dirname(target), { recursive: true })
-    appendFileSync(target, '\n# deepspace CLI state (added by first-use install)\n.deepspace/\n')
-  } catch {
-    // Best-effort: an unwritable .git must never block the install.
   }
 }
 

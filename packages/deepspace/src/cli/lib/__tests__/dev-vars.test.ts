@@ -2,6 +2,7 @@
  * `.dev.vars` is generated whole. Nothing is read back; nothing survives.
  */
 
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -113,5 +114,45 @@ describe('writeDevVars', () => {
     })
     expect(existsSync(join(dir, '.dev.vars'))).toBe(true)
     expect(existsSync(join(dir, '.dev.vars.staging'))).toBe(false)
+  })
+
+  describe('keeps the generated credentials out of Git', () => {
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', args, { cwd, encoding: 'utf-8' }).trim()
+    const exclude = (cwd: string) => readFileSync(join(cwd, '.git', 'info', 'exclude'), 'utf-8')
+
+    it('excludes the file locally when the checkout does not ignore it', async () => {
+      // A recovered raw project has no .gitignore. Deploy writes .dev.vars and
+      // then refuses a dirty worktree, telling the caller to commit it.
+      dir = mkdtempSync(join(tmpdir(), 'ds-devvars-'))
+      git(dir, 'init', '-q')
+      await writeDevVars(dir, 'user-1', 'caller-jwt', undefined, { appId: APP_ID })
+      expect(git(dir, 'status', '--porcelain')).toBe('')
+      expect(exclude(dir).split('\n')).toContain('.dev.vars')
+      // Rewrites do not append the rule again.
+      await writeDevVars(dir, 'user-1', 'caller-jwt', undefined, { appId: APP_ID })
+      expect(
+        exclude(dir)
+          .split('\n')
+          .filter((line) => line === '.dev.vars'),
+      ).toHaveLength(1)
+    })
+
+    it('leaves a checkout that already ignores the file untouched', async () => {
+      dir = mkdtempSync(join(tmpdir(), 'ds-devvars-'))
+      git(dir, 'init', '-q')
+      writeFileSync(join(dir, '.gitignore'), '.dev.vars\n')
+      const before = exclude(dir)
+      await writeDevVars(dir, 'user-1', 'caller-jwt', undefined, { appId: APP_ID })
+      expect(exclude(dir)).toBe(before)
+      expect(git(dir, 'status', '--porcelain')).toBe('?? .gitignore')
+    })
+
+    it('still writes the file outside a Git checkout', async () => {
+      dir = mkdtempSync(join(tmpdir(), 'ds-devvars-'))
+      await writeDevVars(dir, 'user-1', 'caller-jwt', undefined, { appId: APP_ID })
+      expect(existsSync(join(dir, '.dev.vars'))).toBe(true)
+      expect(existsSync(join(dir, '.git'))).toBe(false)
+    })
   })
 })

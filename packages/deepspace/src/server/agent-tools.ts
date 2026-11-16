@@ -8,6 +8,7 @@
 
 import { asSchema, type ToolSet } from 'ai'
 import type { Hono } from 'hono'
+import { z } from 'zod/v4'
 import {
   hasValidOrigin,
   mcpError,
@@ -121,7 +122,7 @@ function rawJsonResponse(body: string, status = 200): Response {
 }
 
 function errorResponse(
-  status: 400 | 401 | 403 | 404 | 413 | 500 | 503,
+  status: 400 | 401 | 403 | 404 | 413 | 422 | 500 | 503,
   code:
     | 'unauthenticated'
     | 'forbidden'
@@ -132,6 +133,7 @@ function errorResponse(
     | 'payload_too_large'
     | 'tool_configuration_error'
     | 'tool_execution_failed'
+    | 'tool_failed'
     | 'invalid_tool_result'
     | 'tool_result_too_large',
   /** Appended to the base sentence — the stated cause an exit-1 caller is
@@ -153,6 +155,7 @@ function errorResponse(
     payload_too_large: 'The request body is too large.',
     tool_configuration_error: 'Assistant tools are not configured correctly.',
     tool_execution_failed: 'The tool could not be executed.',
+    tool_failed: 'The tool reported a failure.',
     invalid_tool_result: 'The tool returned an invalid result.',
     tool_result_too_large: 'The tool returned a result that is too large.',
   } as const
@@ -211,6 +214,77 @@ function droppedTopLevelKeys(
     return []
   }
   return Object.keys(input).filter((key) => !Object.hasOwn(validated, key))
+}
+
+type InputValidation = (
+  value: unknown,
+) => PromiseLike<{ success: true; value: unknown } | { success: false; error: unknown }>
+
+/** `jsonSchema()` tools (the raw starter's, for example) publish a contract but
+ *  carry no validator, so undeclared or missing fields reached `execute`
+ *  unchecked. Enforce that same published JSON Schema with Zod's converter.
+ *  A schema Zod cannot convert keeps the previous unchecked behavior rather
+ *  than refusing every call to a working tool. The check only accepts or
+ *  refuses: `execute` gets the caller's input, as the in-app assistant passes
+ *  it, never Zod's copy with schema `default`s filled in. Zod loses a closed
+ *  root (`additionalProperties: false`) beside `anyOf`/`oneOf`/`allOf`, so
+ *  undeclared top-level keys are refused by name here. */
+function publishedSchemaValidation(schema: { jsonSchema: unknown }): InputValidation | undefined {
+  let root: unknown
+  let converted: z.ZodType
+  try {
+    root = schema.jsonSchema
+    converted = z.fromJSONSchema(withoutFormats(root) as Parameters<typeof z.fromJSONSchema>[0])
+  } catch {
+    return undefined
+  }
+  const published = objectValue(root)
+  const declared =
+    published?.additionalProperties === false && !published.patternProperties
+      ? Object.keys(objectValue(published.properties) ?? {})
+      : undefined
+  return async (value) => {
+    const parsed = converted.safeParse(value)
+    if (!parsed.success) return { success: false, error: parsed.error }
+    const unknown = declared
+      ? Object.keys(objectValue(value) ?? {}).filter((key) => !declared.includes(key))
+      : []
+    return unknown.length > 0
+      ? {
+          success: false,
+          error: new Error(
+            `Unknown input field(s): ${unknown.join(', ')} — the tool's inputSchema lists the accepted fields.`,
+          ),
+        }
+      : { success: true, value }
+  }
+}
+
+/** JSON Schema `format` is an annotation unless a schema opts into assertion,
+ *  and Zod's stand-ins are narrower than the formats they name: its
+ *  `date-time` refuses an RFC 3339 offset such as `-04:00`. */
+function withoutFormats(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(withoutFormats)
+  if (!node || typeof node !== 'object') return node
+  return Object.fromEntries(
+    Object.entries(node)
+      .filter(([key, value]) => !(key === 'format' && typeof value === 'string'))
+      .map(([key, value]) => [key, withoutFormats(value)]),
+  )
+}
+
+/** The SDK's own `ToolResult` failure (`{ success: false, error }`): how the
+ *  built-in record tools report a refused write, unknown collection, or
+ *  missing record. Integration results add a human `message` to a coded
+ *  `error`; keep both. */
+function failedToolResult(output: unknown): string | undefined {
+  const result = objectValue(output)
+  if (result?.success !== false || typeof result.error !== 'string') return undefined
+  const detail =
+    typeof result.message === 'string' && result.message && result.message !== result.error
+      ? `${result.error}: ${result.message}`
+      : result.error
+  return detail.length > 1000 ? `${detail.slice(0, 1000)}…` : detail
 }
 
 function parseToolRequestBody(text: string): AgentToolRequestBody | null | undefined {
@@ -385,7 +459,7 @@ async function invokeTool(
     return errorResponse(500, 'tool_configuration_error')
   }
   try {
-    const validation = schema.validate
+    const validation = schema.validate ?? publishedSchemaValidation(schema)
     if (validation) {
       const result = await validation(input)
       if (!result.success) {
@@ -429,6 +503,11 @@ async function invokeTool(
     return errorResponse(500, 'tool_execution_failed')
   }
   if (isAsyncIterable(output)) return errorResponse(500, 'invalid_tool_result')
+
+  // Returned as an `ok: true` result, a refused write read as success to HTTP
+  // callers, `agent invoke`, WebMCP and MCP (`isError: false`).
+  const failure = failedToolResult(output)
+  if (failure !== undefined) return errorResponse(422, 'tool_failed', failure)
 
   try {
     if (tool.outputSchema) {

@@ -14,6 +14,7 @@ import { DEEPSPACE_ENV, DEPLOY_URL } from '../env'
 import { decodeJwtPayload } from '../../shared/jwt'
 import { apiFetch } from './api'
 import { APP_ID_PLACEHOLDER, readAppId, writeAppId } from './app-identity'
+import { appStateDir } from './app-state'
 import { runGit } from './git/process'
 import { ensureGitIdentity } from './vc-remote'
 import { parse as parseToml } from 'smol-toml'
@@ -273,8 +274,7 @@ export async function ensureAppRegistered(
  *  a release fn, or null when another process holds it. Stale locks (an
  *  interrupted mint) expire by age so a crash cannot wedge registration. */
 function acquireMintLock(appDir: string): (() => void) | null {
-  const lockDir = join(appDir, '.deepspace', 'register.lock')
-  mkdirSync(join(appDir, '.deepspace'), { recursive: true })
+  const lockDir = join(appStateDir(appDir), 'register.lock')
   try {
     mkdirSync(lockDir)
   } catch {

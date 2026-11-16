@@ -1,5 +1,11 @@
 # deepspace
 
+## 0.44.1
+
+### Patch Changes
+
+- The CLI keeps the files it generates inside a project, `.dev.vars` and the `.deepspace/` state directory (including the deploy lock), out of Git when the project does not already ignore them. A cloned raw app now deploys instead of refusing `dirty_worktree` and asking to commit its credentials. App agent tools now report a refused SDK tool result (`{ success: false, error }`) as an error: HTTP 422 `tool_failed`, MCP `isError: true`, and an error from `agent invoke` and WebMCP. Tools defined with `jsonSchema()` and no validator are checked against the schema they publish, with `format` read as an annotation, and their `execute` receives the input exactly as sent.
+
 ## 0.44.0
 
 ### Minor Changes

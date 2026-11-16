@@ -21,6 +21,7 @@ import { readAppId } from './app-identity'
 import { appTargetMissingError } from './app-target'
 import { fetchAppIdentityToken, fetchPublicKey, mintAppOwnerJwt } from './app-tokens'
 import { Refusal } from './cli-errors'
+import { keepLocalPathIgnored } from './git/repository'
 import { writeSecretFileSync } from './secure-file'
 import { devVarsPathFor } from './wrangler-env'
 
@@ -111,4 +112,6 @@ export async function writeDevVars(
     devVarsPath,
     [HEADER, '', sdkVars, ...(cache ? ['', cache] : []), ''].join('\n'),
   )
+  // Live tokens: never offered to Git as a change.
+  keepLocalPathIgnored(appDir, '.dev.vars')
 }
